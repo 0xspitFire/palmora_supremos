@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+wallets.enc
+wallets.json
+killswitch
+logs/
+coverage/
+.kilo/
+
+# Local planning docs (contain sensitive references; kept out of the repo)
+NFT_MINT_BOT_CONTEXT_BRIEFING.md
+PRODUCT_SPEC.md
+Product_Design_Agent
+Product_Manager_Agent
+Repo_Analyze
