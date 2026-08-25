@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@mint-bot/engine": "workspace:*",
+    "viem": "^2.27.0",
     "yargs": "^17.7.0"
   },
   "devDependencies": {

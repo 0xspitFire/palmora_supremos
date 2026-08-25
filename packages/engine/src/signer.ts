@@ -21,7 +21,6 @@ import {
   type Address,
   type Hex,
   parseTransaction,
-  serializeTransaction,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { Signer as ISigner, WalletInfo } from './types.js';
@@ -33,7 +32,6 @@ import type { Signer as ISigner, WalletInfo } from './types.js';
 const ALGORITHM = 'aes-256-gcm';
 const SALT_LENGTH = 32;
 const IV_LENGTH = 12;
-const AUTH_TAG_LENGTH = 16;
 const SCRYPT_KEY_LENGTH = 32;
 const SCRYPT_OPTIONS = { N: 2 ** 18, r: 8, p: 1, maxmem: 256 * 1024 * 1024 };
 
