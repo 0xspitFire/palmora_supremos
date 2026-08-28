@@ -21,7 +21,6 @@ import type {
   SupportedChainId,
 } from './types.js';
 import { SeaDropV1PublicStrategy } from './strategies/seadrop-v1-public.js';
-import { SEADROP_V1_ADDRESS } from './chains.js';
 
 /** Registry of available strategies. */
 const STRATEGY_REGISTRY: Record<string, MintStrategy> = {

@@ -38,6 +38,9 @@ importers:
       '@mint-bot/engine':
         specifier: workspace:*
         version: link:../engine
+      viem:
+        specifier: ^2.27.0
+        version: 2.55.19(typescript@5.9.3)
       yargs:
         specifier: ^17.7.0
         version: 17.7.3
