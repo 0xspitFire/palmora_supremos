@@ -16,14 +16,10 @@
  */
 
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
-import {
-  type Address,
-  type Hex,
-  parseTransaction,
-} from 'viem';
+import { readFile, rename, writeFile } from 'node:fs/promises';
+import { type Address, type Hex, parseTransaction, serializeTransaction } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import type { Signer as ISigner, WalletInfo } from './types.js';
+import type { Signer as ISigner, WalletInfo, TransactionIntent } from './types.js';
 
 // ─────────────────────────────────────────────────────────────
 // Encryption Constants
@@ -118,7 +114,9 @@ export async function generateAndEncryptWallets(
     wallets: walletInfos.map((w) => ({ index: w.index, address: w.address })),
   };
 
-  await writeFile(outputPath, JSON.stringify(encryptedFile, null, 2), 'utf8');
+  const temporaryPath = `${outputPath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(encryptedFile, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await rename(temporaryPath, outputPath);
 
   // Zeroize sensitive material
   kek.fill(0);
@@ -151,6 +149,22 @@ export class LocalEncryptedSigner implements ISigner {
     if (encryptedFile.version !== 1) {
       throw new Error(`Unsupported wallet file version: ${encryptedFile.version}`);
     }
+    if (!Array.isArray(encryptedFile.wallets) || encryptedFile.wallets.length < 1 || encryptedFile.wallets.length > 50) {
+      throw new Error('Invalid wallet file wallet list');
+    }
+    for (const field of ['salt', 'iv', 'authTag', 'ciphertext'] as const) {
+      if (!/^[0-9a-f]+$/i.test(encryptedFile[field])) throw new Error(`Invalid wallet file ${field}`);
+    }
+    if (encryptedFile.iv.length !== IV_LENGTH * 2 || encryptedFile.authTag.length !== 32 || encryptedFile.salt.length !== SALT_LENGTH * 2) {
+      throw new Error('Invalid wallet file encryption metadata');
+    }
+    if (encryptedFile.ciphertext.length === 0 || encryptedFile.ciphertext.length > 2_000_000) {
+      throw new Error('Invalid wallet file ciphertext size');
+    }
+    const indices = new Set(encryptedFile.wallets.map((wallet) => wallet.index));
+    if (indices.size !== encryptedFile.wallets.length || encryptedFile.wallets.some((wallet) => !/^0x[0-9a-f]{40}$/i.test(wallet.address))) {
+      throw new Error('Invalid wallet file wallet metadata');
+    }
 
     // Derive KEK from passphrase
     const salt = Buffer.from(encryptedFile.salt, 'hex');
@@ -170,8 +184,14 @@ export class LocalEncryptedSigner implements ISigner {
     const privateKeys = JSON.parse(decrypted.toString('utf8')) as Hex[];
 
     // Build wallet objects
+    if (!Array.isArray(privateKeys) || privateKeys.length !== encryptedFile.wallets.length || privateKeys.some((pk) => !/^0x[0-9a-f]{64}$/i.test(pk))) {
+      throw new Error('Invalid wallet file key material');
+    }
     signer.wallets = privateKeys.map((pk, index) => {
       const account = privateKeyToAccount(pk);
+      if (account.address.toLowerCase() !== encryptedFile.wallets[index]!.address.toLowerCase()) {
+        throw new Error(`Wallet metadata mismatch at index ${index}`);
+      }
       return {
         index,
         address: account.address,
@@ -194,7 +214,7 @@ export class LocalEncryptedSigner implements ISigner {
     }));
   }
 
-  async signTransaction(walletIndex: number, serializedUnsignedTx: Hex): Promise<Hex> {
+  async signTransaction(walletIndex: number, intent: TransactionIntent): Promise<Hex> {
     this.ensureNotZeroized();
 
     const wallet = this.wallets[walletIndex];
@@ -202,24 +222,17 @@ export class LocalEncryptedSigner implements ISigner {
       throw new Error(`Wallet index ${walletIndex} not found. Available: 0-${this.wallets.length - 1}`);
     }
 
-    // Parse the unsigned transaction, sign it, and return the serialized signed version
+    if (intent.from.toLowerCase() !== wallet.address.toLowerCase()) {
+      throw new Error(`Transaction intent signer mismatch for wallet ${walletIndex}`);
+    }
+    const serializedUnsignedTx = serializeTransaction({
+      type: 'eip1559', chainId: intent.chainId, nonce: intent.nonce, to: intent.to,
+      value: intent.value, data: intent.data, gas: intent.gasLimit,
+      maxFeePerGas: intent.maxFeePerGas, maxPriorityFeePerGas: intent.maxPriorityFeePerGas,
+    });
     const tx = parseTransaction(serializedUnsignedTx);
     const signature = await wallet.account.signTransaction(tx);
     return signature;
-  }
-
-  /**
-   * Get the viem Account object for direct use with walletClient.
-   * Prefer signTransaction() for better encapsulation, but this is
-   * needed for some viem patterns (e.g., walletClient.sendTransaction).
-   */
-  getAccount(walletIndex: number): ReturnType<typeof privateKeyToAccount> {
-    this.ensureNotZeroized();
-    const wallet = this.wallets[walletIndex];
-    if (!wallet) {
-      throw new Error(`Wallet index ${walletIndex} not found`);
-    }
-    return wallet.account;
   }
 
   zeroize(): void {

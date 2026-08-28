@@ -20,14 +20,13 @@
  */
 
 import { type Hex, type Hash, keccak256, toHex } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-import type { Broadcaster, BroadcastResult, BroadcastOptions } from '../types.js';
+import type { Broadcaster, BroadcastResult, BroadcastOptions, FlashbotsAuthSigner } from '../types.js';
 
 export interface FlashbotsConfig {
   /** Flashbots relay URL. Default: https://relay.flashbots.net */
   relayUrl?: string;
-  /** Private key for Flashbots API authentication (NOT a wallet key). */
-  authSignerPrivateKey: Hex;
+  /** Dedicated auth signer. Raw private keys must never enter this config. */
+  authSigner: FlashbotsAuthSigner;
   /** Number of consecutive blocks to target. Default: 3 */
   blockRange?: number;
 }
@@ -35,12 +34,12 @@ export interface FlashbotsConfig {
 export class FlashbotsBroadcaster implements Broadcaster {
   readonly name = 'flashbots';
   private readonly relayUrl: string;
-  private readonly authSigner: ReturnType<typeof privateKeyToAccount>;
+  private readonly authSigner: FlashbotsAuthSigner;
   private readonly blockRange: number;
 
   constructor(config: FlashbotsConfig) {
     this.relayUrl = config.relayUrl ?? 'https://relay.flashbots.net';
-    this.authSigner = privateKeyToAccount(config.authSignerPrivateKey);
+    this.authSigner = config.authSigner;
     this.blockRange = config.blockRange ?? 3;
   }
 
@@ -57,14 +56,15 @@ export class FlashbotsBroadcaster implements Broadcaster {
       const startTime = performance.now();
 
       try {
-        const txHash = await this.sendBundle(signedTxs, targetBlock);
+        const submitted = await this.sendBundle(signedTxs, targetBlock);
         const latencyMs = performance.now() - startTime;
 
         results.push({
-          txHash,
+          txHash: submitted.txHash,
           endpoint: this.relayUrl,
           latencyMs,
           success: true,
+          providerReference: submitted.bundleHash,
         });
       } catch (err) {
         const latencyMs = performance.now() - startTime;
@@ -86,7 +86,7 @@ export class FlashbotsBroadcaster implements Broadcaster {
    *
    * Uses the eth_sendBundle JSON-RPC method with Flashbots signature authentication.
    */
-  private async sendBundle(signedTxs: Hex[], targetBlock: bigint): Promise<Hash> {
+  private async sendBundle(signedTxs: Hex[], targetBlock: bigint): Promise<{ txHash: Hash; bundleHash: Hash }> {
     const params = {
       txs: signedTxs,
       blockNumber: toHex(targetBlock),
@@ -101,9 +101,7 @@ export class FlashbotsBroadcaster implements Broadcaster {
 
     // Sign the request body for Flashbots authentication
     const bodyHash = keccak256(toHex(body));
-    const signature = await this.authSigner.signMessage({
-      message: { raw: bodyHash },
-    });
+    const signature = await this.authSigner.signMessage(bodyHash);
 
     const authHeader = `${this.authSigner.address}:${signature}`;
 
@@ -129,6 +127,6 @@ export class FlashbotsBroadcaster implements Broadcaster {
       throw new Error('Flashbots relay returned no bundle hash');
     }
 
-    return data.result.bundleHash;
+    return { txHash: keccak256(signedTxs[0]!), bundleHash: data.result.bundleHash };
   }
 }

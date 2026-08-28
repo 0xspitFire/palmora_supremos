@@ -18,6 +18,7 @@ import type { Broadcaster, ChainConfig, BroadcastMode } from '../types.js';
 import { PublicMempoolBroadcaster } from './public-mempool.js';
 import { BlastBroadcaster } from './blast.js';
 import { SequencerDirectBroadcaster } from './sequencer-direct.js';
+import { FlashbotsBroadcaster, type FlashbotsConfig } from './flashbots.js';
 
 /**
  * Create the appropriate broadcaster for a chain + broadcast mode.
@@ -30,7 +31,11 @@ export function createBroadcaster(
   chain: ChainConfig,
   mode: BroadcastMode,
   rpcEndpoints: readonly string[],
+  options?: { flashbots?: FlashbotsConfig },
 ): Broadcaster {
+  if (!chain.executionEnabled) {
+    throw new Error(`Execution is disabled for unverified chain ${chain.name} (${chain.chainId})`);
+  }
   const allEndpoints = [...new Set([...chain.rpcEndpoints, ...rpcEndpoints])];
 
   switch (mode) {
@@ -53,11 +58,8 @@ export function createBroadcaster(
       return new SequencerDirectBroadcaster(chain.sequencerUrl, allEndpoints);
 
     case 'flashbots':
-      // Flashbots requires auth config — must be created directly via FlashbotsBroadcaster
-      throw new Error(
-        'Use FlashbotsBroadcaster directly with auth config. ' +
-        'The factory does not handle Flashbots — use mode: "auto" for L1.'
-      );
+      if (!options?.flashbots) throw new Error('Flashbots mode requires a dedicated auth signer');
+      return new FlashbotsBroadcaster(options.flashbots);
 
     case 'auto':
     default:
@@ -68,7 +70,9 @@ export function createBroadcaster(
         }
         return new BlastBroadcaster(allEndpoints);
       }
-      // L1: blast (Flashbots is handled as a separate bundle submission)
-      return new BlastBroadcaster(allEndpoints);
+      if (!options?.flashbots) {
+        throw new Error('Ethereum auto mode requires Flashbots authentication; select public mode explicitly for an approved fallback');
+      }
+      return new FlashbotsBroadcaster(options.flashbots);
   }
 }

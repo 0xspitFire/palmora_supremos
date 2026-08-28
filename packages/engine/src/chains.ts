@@ -8,7 +8,22 @@
  * Adds Robinhood Chain (4663) and structured config for broadcast routing.
  */
 
-import type { ChainConfig, SupportedChainId } from './types.js';
+/** Shared single-stage finality: block confirmation is settlement. */
+const ETHEREUM_FINALITY: FinalityPolicy = {
+  stages: ['confirmed'],
+  settlementStage: 'confirmed',
+  notes: 'Mainnet: inclusive block confirmation is settlement; no staged acknowledgment.',
+};
+
+/** Robinhood/Base L2 staged finality: sequencer soft-confirm → posted → L1 finality. */
+const L2_STAGED_FINALITY: FinalityPolicy = {
+  stages: ['soft', 'posted', 'ethereum_final'],
+  settlementStage: 'posted',
+  notes: 'Operational status uses soft confirmation; settlement requires the batch posted to the L1 inbox.',
+};
+
+import type { ChainConfig, FinalityPolicy, SupportedChainId } from './types.js';
+import { resolveChainEndpoints, readSecret, type SecretName } from './secrets.js';
 
 /**
  * SeaDrop v1 singleton address — same across all EVM chains.
@@ -36,12 +51,12 @@ const CHAINS: Record<SupportedChainId, ChainConfig> = {
     name: 'Ethereum',
     blockTimeMs: 12_000,
     confirmationDepth: 2,
-    rpcEndpoints: [
-      'https://eth.llamarpc.com',
-      'https://rpc.ankr.com/eth',
-    ],
+    rpcEndpoints: [],
     flashbotsRelayUrl: 'https://relay.flashbots.net',
     isL2: false,
+    verificationStatus: 'verified',
+    finalityPolicy: ETHEREUM_FINALITY,
+    executionEnabled: true,
   },
 
   // ── Base (Coinbase L2) ────────────────────────────────────
@@ -50,31 +65,101 @@ const CHAINS: Record<SupportedChainId, ChainConfig> = {
     name: 'Base',
     blockTimeMs: 2_000,
     confirmationDepth: 1,
-    rpcEndpoints: [
-      'https://mainnet.base.org',
-      'https://base.llamarpc.com',
-    ],
-    sequencerUrl: 'https://mainnet-sequencer.base.org',
+    rpcEndpoints: [],
     isL2: true,
+    verificationStatus: 'unverified',
+    finalityPolicy: L2_STAGED_FINALITY,
+    // Phase 1 policy currently permits Ethereum only. Base remains inspectable
+    // until its sequencer configuration and confirmation policy are approved.
+    executionEnabled: false,
   },
 
-  // ── Robinhood Chain ───────────────────────────────────────
-  // WARNING: Under-documented chain. Parameters below are best-effort
-  // and MUST be validated during the Week 1 characterization spike.
-  // If sequencer behavior, gas model, or block time differ from expectations,
-  // defer Robinhood support to Phase 1.1.
-  4663: {
+// ── Robinhood Chain ───────────────────────────────────────
+  // Characterization evidence (2026-08-26). Chain identity, endpoint identity,
+  // FCFS ordering, EIP-1559 semantics, three-stage finality, absence of private
+  // orderflow, and a live SeaDrop-v1 public-drop mint are recorded below. LIVE
+  // EXECUTION is still DISABLED pending the fork + negative-case SeaDrop suite.
+4663: {
     chainId: 4663,
     name: 'Robinhood',
-    blockTimeMs: 2_000,  // TODO: Verify during spike
+    blockTimeMs: 2_000,
     confirmationDepth: 1,
-    rpcEndpoints: [
-      // TODO: Add Robinhood Chain RPC endpoints after spike
-    ],
-    sequencerUrl: undefined,  // TODO: Determine during spike
+    rpcEndpoints: [],
+    sequencerUrl: 'https://sequencer.mainnet.chain.robinhood.com',
+    sequencerFeedUrl: 'wss://feed.mainnet.chain.robinhood.com',
+    explorerUrl: 'https://robinhoodchain.blockscout.com',
     isL2: true,
+    verificationStatus: 'unverified',
+    finalityPolicy: L2_STAGED_FINALITY,
+    characterization: {
+      status: 'unverified',
+      acceptedBy: 'Junayd (Product Owner)',
+      acceptedAt: '2026-08-26T00:00:00.000Z',
+      reportRef: './Robinhood Technical Report',
+      liveMintEvidenceRef: 'tx 0xf24e0c85f6f4fa71d012b6ffbfbc871b901fb1e949635799d1821716013d891e',
+      liveMintTxHash: '0xf24e0c85f6f4fa71d012b6ffbfbc871b901fb1e949635799d1821716013d891e',
+      notes: 'Verified live: chainId 0x1237 (4663); SeaDrop singleton 0x00005EA00Ac477B1030CE78506496e8C2dE24bf5 deployed; NFT 0x45ce024f314a2f74c63a8a51743677df97a8d99e; mintPublic qty 1, amount 0.00009 ETH, fee bps 1000, token 3477 ownerOf=test wallet; EIP-1559 gasUsed 121501, block 0x2c92c19; receipt status 0x1. External failed-hash evidence for other wallets is documentation-only and is not used as fleet fixtures. Execution still blocked pending fork + negative-case suite.',
+    },
+executionEnabled: false,
   },
 };
+
+/** Approved secret-reference names for each chain's RPC endpoint set. */
+const CHAIN_ENV_REFS: Record<SupportedChainId, readonly SecretName[]> = {
+  1: [
+    'ETHEREUM_RPC_URL',
+    'ETHEREUM_RPC_FBACK',
+    'ETHEREUM_RPC_FBACK_II',
+  ],
+  8453: [
+    'BASE_RPC_URL',
+    'BASE_RPC_FBACK',
+    'BASE_RPC_FBACK_II',
+  ],
+  4663: [
+    'ROBINHOOD_RPC_URL',
+    'ROBINHOOD_RPC_FBACK',
+    'ROBINHOOD_ARCHIVE_RPC',
+  ],
+};
+
+/**
+ * Resolve a chain config with endpoints and sequencer populated from the
+ * project-local secret store by approved reference name. Values are resolved
+ * at runtime and never logged. Execution stays blocked for chains with
+ * `executionEnabled: false`, regardless of endpoint availability.
+ */
+export async function resolveChainConfigFromSecrets(
+  chainId: SupportedChainId,
+  scope: 'mainnet' | 'testnet' = 'mainnet',
+  root: string = 'Rets',
+): Promise<ChainConfig> {
+  const base = getChainConfig(chainId);
+  const refs = CHAIN_ENV_REFS[chainId];
+  const endpoints = await resolveChainEndpoints(refs, scope, root);
+
+  let sequencerUrl: string | undefined = base.sequencerUrl;
+  if (chainId === 8453) {
+    try {
+      const configured = await readSecret('BASE_SEQUENCER_URL', scope, root);
+      sequencerUrl = configured || undefined;
+    } catch {
+      sequencerUrl = undefined;
+    }
+  }
+
+  return { ...base, rpcEndpoints: endpoints, sequencerUrl };
+}
+
+/** Resolve a chain config by name, with secret-backed endpoints. */
+export async function resolveChainByNameFromSecrets(
+  name: string,
+  scope: 'mainnet' | 'testnet' = 'mainnet',
+  root: string = 'Rets',
+): Promise<ChainConfig> {
+  const base = getChainByName(name);
+  return resolveChainConfigFromSecrets(base.chainId, scope, root);
+}
 
 /** Get chain config by ID. Throws if chain is not supported. */
 export function getChainConfig(chainId: SupportedChainId): ChainConfig {
