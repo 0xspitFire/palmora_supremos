@@ -26,7 +26,6 @@ interface BlastPayload {
 export class BlastBroadcaster implements Broadcaster {
   readonly name = 'blast';
   private readonly endpoints: readonly string[];
-  private warmAgent: unknown = null; // HTTP agent for keep-alive (set during warmup)
 
   constructor(endpoints: readonly string[]) {
     if (endpoints.length === 0) {

@@ -62,8 +62,8 @@ const ERC721_ABI = parseAbi([
 
 interface SeaDropPublicDrop {
   mintPrice: bigint;
-  startTime: bigint;
-  endTime: bigint;
+  startTime: number;
+  endTime: number;
   maxTotalMintableByWallet: number;
   feeBps: number;
   restrictFeeRecipients: boolean;
@@ -87,10 +87,10 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
       abi: SEADROP_ABI,
       functionName: 'getPublicDrop',
       args: [nftContract],
-    }) as SeaDropPublicDrop;
+    }) as unknown as SeaDropPublicDrop;
 
     // Null guard — if mintPrice is 0 and times are 0, drop likely doesn't exist
-    if (publicDrop.startTime === 0n && publicDrop.endTime === 0n && publicDrop.mintPrice === 0n) {
+    if (publicDrop.startTime === 0 && publicDrop.endTime === 0 && publicDrop.mintPrice === 0n) {
       throw new Error(
         `No public drop found for ${nftContract} on SeaDrop v1. ` +
         `The contract may not use SeaDrop, or the drop hasn't been configured yet.`
@@ -132,8 +132,8 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
       maxTotalMintableByWallet: publicDrop.maxTotalMintableByWallet,
       maxTokenSupply,
       totalMinted,
-      startTime: Number(publicDrop.startTime),
-      endTime: Number(publicDrop.endTime),
+       startTime: publicDrop.startTime,
+       endTime: publicDrop.endTime,
       feePayer: feeRecipient,
       strategyName: this.name,
       chainId,

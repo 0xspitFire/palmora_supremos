@@ -22,11 +22,8 @@
 
 import {
   type Address,
-  type Hex,
-  type PublicClient,
-  type WalletClient,
+  type Chain,
   createPublicClient,
-  createWalletClient,
   http,
   formatEther,
   parseGwei,
@@ -58,7 +55,7 @@ import { createLogger, childLogger } from './logger.js';
 // Viem chain mapping
 // ─────────────────────────────────────────────────────────────
 
-function getViemChain(chainId: SupportedChainId) {
+function getViemChain(chainId: SupportedChainId): Chain {
   switch (chainId) {
     case 1: return mainnet;
     case 8453: return base;
@@ -69,7 +66,7 @@ function getViemChain(chainId: SupportedChainId) {
         name: 'Robinhood',
         nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
         rpcUrls: { default: { http: [] } },
-      } as const;
+      };
     default:
       throw new Error(`No viem chain for chainId ${chainId}`);
   }
@@ -256,7 +253,6 @@ export class MintEngine {
       const walletResults = await this.executeFleet(
         fundedWallets.map((w) => w.index),
         signer,
-        publicClient,
         strategy,
         drop,
         broadcaster,
@@ -321,7 +317,6 @@ export class MintEngine {
   private async executeFleet(
     walletIndices: number[],
     signer: LocalEncryptedSigner,
-    publicClient: PublicClient,
     strategy: ReturnType<typeof getStrategy>,
     drop: DropConfig,
     broadcaster: Broadcaster,

@@ -13,6 +13,10 @@
     "lint": "eslint packages/",
     "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json && tsc --noEmit -p packages/database/tsconfig.json"
   },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
   "engines": {
     "node": ">=20.0.0"
   },
