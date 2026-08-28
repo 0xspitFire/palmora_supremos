@@ -11,10 +11,15 @@
     "test:watch": "vitest",
     "test:fork": "vitest run --config vitest.fork.config.ts",
     "lint": "eslint packages/",
-    "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json"
+    "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json && tsc --noEmit -p packages/backend/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json"
   },
   "engines": {
     "node": ">=20.0.0"
   },
-  "packageManager": "pnpm@9.15.4"
+  "packageManager": "pnpm@9.15.4",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
 }

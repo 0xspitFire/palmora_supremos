@@ -11,6 +11,7 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
+    "@mint-bot/backend": "workspace:*",
     "@mint-bot/engine": "workspace:*",
     "yargs": "^17.7.0"
   },
