@@ -7,7 +7,7 @@
   "scripts": {
     "build": "corepack pnpm -r --if-present run build",
     "dev": "pnpm --filter @mint-bot/cli dev",
-    "test": "corepack pnpm -r --if-present run test",
+    "test": "vitest run",
     "test:watch": "vitest",
     "test:fork": "vitest run --config vitest.fork.config.ts",
     "ops:health": "node scripts/healthcheck.mjs",
