@@ -10,7 +10,7 @@
  * - L2 single-sequencer submission (wrapped by SequencerDirectBroadcaster)
  */
 
-import type { Hex, Hash } from 'viem';
+import { keccak256, type Hex, type Hash } from 'viem';
 import type { Broadcaster, BroadcastResult, BroadcastOptions } from '../types.js';
 
 export class PublicMempoolBroadcaster implements Broadcaster {
@@ -39,7 +39,7 @@ export class PublicMempoolBroadcaster implements Broadcaster {
           }),
         });
 
-        const data = await response.json() as { result?: Hash; error?: { message: string } };
+        const data = await response.json() as { result?: Hash; error?: { message: string; code?: number } };
         const latencyMs = performance.now() - startTime;
 
         if (data.result) {
@@ -48,6 +48,13 @@ export class PublicMempoolBroadcaster implements Broadcaster {
             endpoint: this.rpcUrl,
             latencyMs,
             success: true,
+          });
+        } else if (data.error?.message.toLowerCase().includes('already known')) {
+          // The node accepted the transaction earlier; its deterministic hash is
+          // still observable and can be reconciled by (from, nonce) downstream.
+          results.push({
+            txHash: keccak256(signedTx), endpoint: this.rpcUrl, latencyMs, success: true,
+            error: 'already known',
           });
         } else {
           results.push({

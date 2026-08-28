@@ -23,6 +23,7 @@
 import {
   type Address,
   type Chain,
+  type PublicClient,
   createPublicClient,
   http,
   formatEther,
@@ -40,16 +41,34 @@ import type {
   DropConfig,
   Broadcaster,
   SupportedChainId,
+  SpendReservationProvider,
+  SimulationEvidence,
+  TransactionIntent,
 } from './types.js';
 import { MintError, MintErrorType } from './types.js';
-import { getChainByName, getChainConfig } from './chains.js';
+import { getChainConfig, resolveChainByNameFromSecrets } from './chains.js';
+import { validateFeeBudget } from './fee-guard.js';
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
 import { NonceManagerImpl } from './nonce-manager.js';
 import { ReceiptWatcherImpl } from './receipt-watcher.js';
 import { LocalEncryptedSigner } from './signer.js';
 import { createBroadcaster } from './broadcasters/index.js';
+import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
 import { KillSwitch, SpendTracker } from './safety.js';
 import { createLogger, childLogger } from './logger.js';
+
+class AdmissionGate {
+  private tail: Promise<void> = Promise.resolve();
+
+  async enter(): Promise<() => void> {
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => { release = resolve; });
+    const previous = this.tail;
+    this.tail = previous.then(() => turn);
+    await previous;
+    return release;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────
 // Viem chain mapping
@@ -81,8 +100,9 @@ export class MintEngine {
   private readonly logger: pino.Logger;
   private readonly killSwitch: KillSwitch;
   private readonly spendTracker: SpendTracker;
+  private readonly reservationProvider?: SpendReservationProvider;
 
-  constructor(config: MintJobConfig) {
+  constructor(config: MintJobConfig, options?: { reservationProvider?: SpendReservationProvider }) {
     this.config = config;
     this.logger = createLogger(config.observability.logLevel, config.observability.logFile);
     this.killSwitch = new KillSwitch(config.safety.killSwitchFile, this.logger);
@@ -91,6 +111,7 @@ export class MintEngine {
       config.safety.dailySpendCapEth,
       this.logger,
     );
+    this.reservationProvider = options?.reservationProvider;
   }
 
   /**
@@ -117,24 +138,37 @@ export class MintEngine {
     let signer: LocalEncryptedSigner | null = null;
 
     try {
-      // ── 1. Resolve chain ────────────────────────────────────
-      const chainConfig = getChainByName(this.config.target.chain);
+// ── 1. Resolve chain ────────────────────────────────────
+      const scope = this.config.broadcast.secretScope ?? 'mainnet';
+      const secretRoot = this.config.broadcast.secretRoot ?? 'Rets';
+      const chainConfig = await resolveChainByNameFromSecrets(this.config.target.chain, scope, secretRoot);
       const chainId = chainConfig.chainId;
       engineLog.info({ chain: chainConfig.name, chainId }, 'Chain resolved');
+if (!chainConfig.executionEnabled) {
+        throw new MintError(MintErrorType.RPC_ERROR, `Execution is disabled for ${chainConfig.name} by the Phase 1 chain policy`);
+      }
+      if (chainConfig.verificationStatus !== 'verified') {
+        throw new MintError(MintErrorType.RPC_ERROR, `Execution is blocked for ${chainConfig.name}: chain verification status is "${chainConfig.verificationStatus}"`);
+      }
 
       // ── 2. Create RPC client ────────────────────────────────
       const rpcUrl = this.config.broadcast.rpcEndpoints[0] ?? chainConfig.rpcEndpoints[0];
       if (!rpcUrl) {
-        throw new MintError(MintErrorType.RPC_ERROR, 'No RPC endpoint configured');
+        throw new MintError(MintErrorType.RPC_ERROR, `No RPC endpoint configured for ${chainConfig.name}; configure the approved secret reference before execution`);
       }
 
       const viemChain = getViemChain(chainId);
       const publicClient = createPublicClient({
         chain: viemChain,
         transport: http(rpcUrl),
-      });
+      }) as PublicClient;
 
-      engineLog.info({ rpcUrl }, 'RPC client created');
+      const observedChainId = await publicClient.getChainId();
+      if (observedChainId !== chainId) {
+        throw new MintError(MintErrorType.RPC_ERROR, `RPC chain mismatch: expected ${chainId}, observed ${observedChainId}`);
+      }
+
+      engineLog.info({ endpointConfigured: true }, 'RPC client created');
 
       // ── 3. Read + validate drop ─────────────────────────────
       this.checkKill();
@@ -182,12 +216,40 @@ export class MintEngine {
 
       // Check funding
       const mintCostPerWallet = drop.mintPrice * BigInt(this.config.target.quantity);
-      const gasLimitEstimate = await strategy.estimateGas(
-        publicClient, drop, wallets[0]!.address, this.config.target.quantity,
-      );
-      const paddedGasLimit = BigInt(Math.ceil(Number(gasLimitEstimate) * this.config.fees.gasLimitPadding));
+      const gasLimits = new Map<number, bigint>();
+      const simulations = new Map<number, SimulationEvidence>();
+      for (const wallet of wallets) {
+        const estimate = await strategy.estimateGas(publicClient, drop, wallet.address, this.config.target.quantity);
+        const padded = BigInt(Math.ceil(Number(estimate) * this.config.fees.gasLimitPadding));
+        gasLimits.set(wallet.index, padded);
+        const simulation = await simulateMint(
+          publicClient, strategy, drop, wallet.address,
+          this.config.target.quantity, mintCostPerWallet, wallet.index,
+        );
+        simulations.set(wallet.index, { ...simulation, gasEstimate: estimate });
+        if (!this.config.safety.dryRun && !simulation.success) {
+          engineLog.warn({ event: 'wallet_simulation_failed', walletIndex: wallet.index, error: simulation.error }, 'Wallet simulation failed — skipping');
+        }
+      }
+const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
+      const paddedGasLimit = gasLimitEstimate;
       const maxGasCostPerWallet = paddedGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString());
       const totalCostPerWallet = mintCostPerWallet + maxGasCostPerWallet;
+
+      // Free-mint budget guard. The priority fee alone is NOT the total cost:
+      // type-2 L2 execution charges gas + (base+priority) and an L1 data fee.
+      const budgetVerdict = validateFeeBudget({
+        valueWei: mintCostPerWallet,
+        maxFeePerGasWei: parseGwei(this.config.fees.maxFeePerGasGwei.toString()),
+        gasLimit: paddedGasLimit,
+        // Robinhood/Base charge an L1 data fee. When undeclared, require the
+        // operator to have supplied a bound via the config that covers it.
+        l1DataFeeAllowanceWei: chainConfig.isL2 ? BigInt(Math.ceil(Number(paddedGasLimit) / 16)) : 0n,
+      });
+      if (!budgetVerdict.ok) {
+        throw new MintError(MintErrorType.INVALID_CONFIG, `Fee budget refuses to arm: ${budgetVerdict.reason}`);
+      }
+      engineLog.info({ feeBudgetOk: true, worstCaseTotalEth: formatEther(budgetVerdict.worstCaseTotalWei) }, 'Fee budget validated');
 
       engineLog.info({
         event: 'cost_estimate',
@@ -199,8 +261,11 @@ export class MintEngine {
 
       const fundedWallets: typeof wallets = [];
       for (const wallet of wallets) {
+        if (!this.config.safety.dryRun && !simulations.get(wallet.index)?.success) continue;
+        const walletGasLimit = gasLimits.get(wallet.index) ?? paddedGasLimit;
+        const walletMaxCost = mintCostPerWallet + walletGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString());
         const balance = await publicClient.getBalance({ address: wallet.address });
-        if (balance >= totalCostPerWallet) {
+        if (balance >= walletMaxCost) {
           fundedWallets.push(wallet);
         } else {
           engineLog.warn({
@@ -208,7 +273,7 @@ export class MintEngine {
             walletIndex: wallet.index,
             address: wallet.address,
             balance: formatEther(balance),
-            required: formatEther(totalCostPerWallet),
+            required: formatEther(walletMaxCost),
           }, `Wallet ${wallet.index} underfunded — skipping`);
         }
       }
@@ -220,23 +285,27 @@ export class MintEngine {
       engineLog.info({ fundedCount: fundedWallets.length, total: wallets.length },
         `${fundedWallets.length}/${wallets.length} wallets funded`);
 
-      // Pre-send simulation (T-minus gate — NOT on hot path)
-      if (!this.config.safety.dryRun) {
-        const simResult = await simulateMint(
-          publicClient, strategy, drop, fundedWallets[0]!.address,
-          this.config.target.quantity, mintCostPerWallet,
-        );
-        if (!simResult.success) {
-          throw new MintError(MintErrorType.SIMULATION_FAILED, simResult.error ?? 'Simulation failed');
-        }
-        engineLog.info({ event: 'simulation_passed' }, 'Pre-send simulation passed ✓');
-      }
+      engineLog.info({ event: 'simulation_passed', walletCount: simulations.size }, 'Per-wallet setup simulation complete');
 
-      // ── 6. Create broadcaster ───────────────────────────────
+// ── 6. Create broadcaster ───────────────────────────────
+      let flashbotsAuth = this.config.broadcast.flashbotsAuthSigner;
+      if (
+        !flashbotsAuth &&
+        !chainConfig.isL2 &&
+        (this.config.broadcast.mode === 'auto' || this.config.broadcast.mode === 'flashbots') &&
+        scope === 'mainnet'
+      ) {
+        // Resolve the dedicated relay-auth signer from the approved key-path
+        // reference. Raw keys must never enter configuration or logs.
+        flashbotsAuth = await buildFlashbotsAuthSigner('FLASHBOTS_KEY_PATH', scope, secretRoot);
+      }
       const broadcaster = createBroadcaster(
         chainConfig,
         this.config.broadcast.mode,
         this.config.broadcast.rpcEndpoints,
+        flashbotsAuth
+          ? { flashbots: { authSigner: flashbotsAuth, relayUrl: chainConfig.flashbotsRelayUrl } }
+          : undefined,
       );
 
       // Warmup connections
@@ -251,15 +320,18 @@ export class MintEngine {
         '🚀 Fleet mint starting');
 
       const walletResults = await this.executeFleet(
+        jobId,
         fundedWallets.map((w) => w.index),
         signer,
+        publicClient,
         strategy,
         drop,
         broadcaster,
         nonceManager,
         receiptWatcher,
         chainConfig.chainId,
-        paddedGasLimit,
+        gasLimits,
+        simulations,
         engineLog,
       );
 
@@ -315,22 +387,30 @@ export class MintEngine {
    * Checks kill switch and spend cap between each wallet's completion.
    */
   private async executeFleet(
+    runId: string,
     walletIndices: number[],
     signer: LocalEncryptedSigner,
+    publicClient: PublicClient,
     strategy: ReturnType<typeof getStrategy>,
     drop: DropConfig,
     broadcaster: Broadcaster,
     nonceManager: NonceManagerImpl,
     receiptWatcher: ReceiptWatcherImpl,
     chainId: SupportedChainId,
-    gasLimit: bigint,
+    gasLimits: Map<number, bigint>,
+    simulations: Map<number, SimulationEvidence>,
     parentLog: pino.Logger,
   ): Promise<WalletMintResult[]> {
+    const admissionGate = new AdmissionGate();
     // Concurrent execution with Promise.allSettled (per-wallet isolation)
     const promises = walletIndices.map(async (walletIndex): Promise<WalletMintResult> => {
       const walletLog = childLogger(parentLog, 'WalletMint', { walletIndex });
       const startTime = Date.now();
-      const walletAddress = signer.getAccount(walletIndex).address;
+      const walletInfo = (await signer.listWallets()).find((wallet) => wallet.index === walletIndex);
+      if (!walletInfo) throw new Error(`Wallet index ${walletIndex} not found`);
+      const walletAddress = walletInfo.address;
+      let reservation: import('./types.js').SpendReservation | undefined;
+      let releaseAdmission: (() => void) | undefined;
 
       try {
         // Check kill switch
@@ -342,11 +422,16 @@ export class MintEngine {
         }
 
         // Check spend cap
-        if (this.spendTracker.isCapExceeded()) {
+        if (!this.reservationProvider && this.spendTracker.isCapExceeded()) {
           return {
             walletIndex, address: walletAddress, status: 'skipped',
             error: 'Spend cap exceeded', durationMs: Date.now() - startTime,
           };
+        }
+
+        const simulation = simulations.get(walletIndex);
+        if (!this.config.safety.dryRun && !simulation?.success) {
+          return { walletIndex, address: walletAddress, status: 'skipped', error: simulation?.error ?? 'Simulation unavailable', simulation, durationMs: Date.now() - startTime };
         }
 
         // Build calldata
@@ -359,6 +444,7 @@ export class MintEngine {
         }, `Building tx (nonce: ${nonce})`);
 
         // Build EIP-1559 transaction
+        const gasLimit = gasLimits.get(walletIndex) ?? 0n;
         const tx: TransactionSerializableEIP1559 = {
           type: 'eip1559',
           chainId,
@@ -381,21 +467,46 @@ export class MintEngine {
             gasLimit: gasLimit.toString(),
           }, '🏜️ DRY RUN — tx built but not sent');
 
-          nonceManager.consumeNonce(walletAddress);
           return {
-            walletIndex, address: walletAddress, status: 'success',
+            walletIndex, address: walletAddress, status: 'prepared', simulation,
             durationMs: Date.now() - startTime,
           };
         }
 
-        // Sign transaction
-        const account = signer.getAccount(walletIndex);
-        const signedTx = await account.signTransaction(tx);
+        const executionId = `${runId}:wallet:${walletIndex}`;
+        const transactionIntentId = `${executionId}:intent`;
+        const intent: TransactionIntent = { chainId, from: walletAddress, to: tx.to!, value, data: calldata, nonce, gasLimit, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas!, runId, policyRef: 'phase-1' };
+        // Serialize the irreversible admission boundary. A kill arriving while
+        // another wallet is being signed cannot let this wallet pass unnoticed.
+        releaseAdmission = await admissionGate.enter();
+        if (this.killSwitch.isKilled()) throw new MintError(MintErrorType.KILLED, 'Kill switch triggered before signing', walletIndex);
+        reservation = this.reservationProvider
+          ? await this.reservationProvider.reserve({
+            idempotencyKey: `${transactionIntentId}:reservation`,
+            chainId,
+            walletIndex,
+            address: walletAddress,
+            valueWei: value,
+            maxGasCostWei: gasLimit * tx.maxFeePerGas!,
+            campaignId: `contract:${this.config.target.contract.toLowerCase()}`,
+            runId,
+            executionId,
+            transactionIntentId,
+          })
+          : undefined;
+        const signedTx = await signer.signTransaction(walletIndex, intent);
 
         walletLog.info({ event: 'tx_signed' }, 'Transaction signed');
 
         // Broadcast
-        const broadcastResults = await broadcaster.broadcast([signedTx]);
+        if (this.killSwitch.isKilled()) {
+          throw new MintError(MintErrorType.KILLED, 'Kill switch triggered before broadcast', walletIndex);
+        }
+        const broadcastResults = await broadcaster.broadcast([signedTx], broadcaster.name === 'flashbots'
+          ? { targetBlock: (await publicClient.getBlockNumber()) + 1n, maxBumps: this.config.safety.maxReplacementBumps }
+          : { maxBumps: this.config.safety.maxReplacementBumps });
+        releaseAdmission();
+        releaseAdmission = undefined;
         const successResult = broadcastResults.find((r) => r.success);
 
         if (!successResult) {
@@ -424,7 +535,8 @@ export class MintEngine {
         }, `Tx confirmed: ${receipt.status} in block ${receipt.blockNumber}`);
 
         // Record spend
-        this.spendTracker.recordSpend(receipt.gasUsed, receipt.effectiveGasPrice, value);
+        if (!this.reservationProvider) this.spendTracker.recordSpend(receipt.gasUsed, receipt.effectiveGasPrice, value);
+        await reservation?.settle(value, receipt.gasUsed * receipt.effectiveGasPrice);
 
         const totalCost = receipt.gasUsed * receipt.effectiveGasPrice + value;
 
@@ -438,9 +550,12 @@ export class MintEngine {
           totalCostWei: totalCost,
           durationMs: Date.now() - startTime,
           error: receipt.status === 'reverted' ? 'Transaction reverted on-chain' : undefined,
+          simulation,
         };
 
       } catch (err) {
+        releaseAdmission?.();
+        await reservation?.release();
         const error = err instanceof MintError ? err : new MintError(
           MintErrorType.UNKNOWN,
           err instanceof Error ? err.message : String(err),
@@ -455,6 +570,7 @@ export class MintEngine {
           address: walletAddress,
           status: 'failed',
           error: error.message,
+          simulation: simulations.get(walletIndex),
           durationMs: Date.now() - startTime,
         };
       }
