@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,6 +36,7 @@ jobs:
           ROBINHOOD_L2_GAS_RESERVE_WEI: "1"
           ROBINHOOD_L1_DATA_FEE_WEI: "1"
           ROBINHOOD_L1_DATA_GAS_RESERVE_WEI: "1"
+      - run: pnpm ops:negative-cases
       - run: pnpm typecheck
       - run: pnpm test -- --reporter=dot
       - run: pnpm build
@@ -69,3 +71,24 @@ jobs:
       - run: pnpm test:fork
         env:
           ANVIL_RPC_URL: http://127.0.0.1:8545
+
+  archive-fork-replay:
+    if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.0.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm ops:fork-replay
+        env:
+          ARCHIVE_FORK_SOURCE: Rets/MINT_BOT_SECRETS.env:ANVIL_FORK_RPC

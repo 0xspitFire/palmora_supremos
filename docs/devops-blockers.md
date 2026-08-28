@@ -17,6 +17,10 @@ secret-store contents.
 - [x] Backup and restore checks require checksums and an engaged kill switch.
 - [x] Log redaction covers private material, credentials, passphrases, calldata,
       raw transactions, and authorization values.
+- [x] Deterministic negative-case harness rejects paid mints, value-cap
+      violations, and insufficient independent L2/L1 reserves.
+- [x] Archive replay entrypoint fails closed without an injected archive
+      endpoint or an actual `*.fork.test.ts` fixture.
 
 ## Robinhood evidence gates still required
 
