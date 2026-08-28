@@ -3,6 +3,12 @@ dist/
 *.log
 .env
 .env.*
+.env/
+**/.env/
+MINT_BOT_SECRETS
+TEST_BOT
+Rets/
+**/Rets/
 wallets.enc
 wallets.json
 killswitch
