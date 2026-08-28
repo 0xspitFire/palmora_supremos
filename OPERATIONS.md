@@ -10,7 +10,10 @@ Provide `SECRET_STORE_PATH`, `RPC_SECRET_NAMES`, `STORE_PATH`, and
 `KILL_SWITCH_PATH` through the host secret mechanism or service manager. The
 secret store path must point to `Rets/MINT_BOT_SECRETS.env` or
 `Rets/TEST_BOT.env`. Archive-backed fork tests use the `ANVIL_FORK_RPC` key by
-reference only.
+reference only. The approved keystore directory is `./Rets/wallets`; its
+Product Owner passphrase must be requested through a hidden interactive prompt
+by the host launcher when needed. Do not expose it as an environment variable,
+argument, log field, backup artifact, or CI secret.
 Never put keys, mnemonics, provider credentials,
 or passphrases in environment files committed to the repository, command-line
 arguments, logs, or backups.
@@ -49,9 +52,14 @@ RPC outage, Telegram outage, partial fleet failure, and reorgs.
 
 Robinhood characterization uses `SEQUENCER_URL` and `FEED_URL`, defaulting to
 the documented mainnet endpoints. Set `CHECK_ROBINHOOD=true` only for probes;
-this never enables execution. Free mints must satisfy `L2 execution fee + L1
-data fee <= 2 * priority fee component` for the mint period. Paid Robinhood
-mints remain blocked.
+this never enables execution. FREE mint value exposure is capped at
+`2 * configured priority fee component`; L2 execution gas and L1 data gas are
+reserved separately as independent worst-case exposures. The
+FREE mint value exposure must be `<= 2 * configured priority fee component`;
+the L2 gas reserve and L1 data-gas reserve are not summed into that value cap.
+The priority-fee component may be zero, provided the FREE mint value exposure
+is also zero and both independent gas reserves cover their estimates. Paid
+Robinhood mints remain blocked pending an explicit value/exposure policy.
 
 Official Robinhood endpoints are chain ID `4663` (`0x1237`), sequencer
 `https://sequencer.mainnet.chain.robinhood.com`, and feed

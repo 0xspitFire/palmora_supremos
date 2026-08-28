@@ -97,9 +97,9 @@ checks.feed = process.env.CHECK_ROBINHOOD === 'true'
   : { status: 'unknown', reason: 'Robinhood checks disabled until characterization is accepted' };
 
 checks.archiveFork = process.env.CHECK_FORK === 'true'
-  ? (secretStore?.has(archiveSecretName)
+  ? (secretStore && secretStorePath.replaceAll('\\', '/').endsWith('Rets/MINT_BOT_SECRETS.env') && secretStore.has(archiveSecretName)
       ? { status: 'ok', reference: archiveSecretName }
-      : { status: 'failed', reason: `missing archive reference ${archiveSecretName}` })
+      : { status: 'failed', reason: `archive reference ${archiveSecretName} must be read from Rets/MINT_BOT_SECRETS.env` })
   : { status: 'unknown', reason: 'archive fork check disabled' };
 
 if (storePath) {

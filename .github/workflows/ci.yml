@@ -27,6 +27,14 @@ jobs:
       - run: pnpm lint
       - run: pnpm ops:secret-boundary
       - run: pnpm ops:policy
+        env:
+          ROBINHOOD_MINT_TYPE: FREE
+          ROBINHOOD_PRIORITY_FEE_WEI: "0"
+          ROBINHOOD_FREE_MINT_VALUE_WEI: "0"
+          ROBINHOOD_L2_EXECUTION_FEE_WEI: "1"
+          ROBINHOOD_L2_GAS_RESERVE_WEI: "1"
+          ROBINHOOD_L1_DATA_FEE_WEI: "1"
+          ROBINHOOD_L1_DATA_GAS_RESERVE_WEI: "1"
       - run: pnpm typecheck
       - run: pnpm test -- --reporter=dot
       - run: pnpm build
@@ -54,15 +62,10 @@ jobs:
       - name: Start local Anvil
         shell: bash
         run: |
-          if [ -n "$ANVIL_FORK_RPC" ]; then
-            anvil --fork-url "$ANVIL_FORK_RPC" --chain-id 31337 --block-time 1 --host 127.0.0.1 > "$RUNNER_TEMP/anvil.log" 2>&1 &
-          else
-            anvil --chain-id 31337 --block-time 1 --host 127.0.0.1 > "$RUNNER_TEMP/anvil.log" 2>&1 &
-          fi
+          anvil --chain-id 31337 --block-time 1 --host 127.0.0.1 > "$RUNNER_TEMP/anvil.log" 2>&1 &
           for i in {1..30}; do curl --silent --fail -X POST http://127.0.0.1:8545 -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' && exit 0; sleep 1; done
           cat "$RUNNER_TEMP/anvil.log"
           exit 1
       - run: pnpm test:fork
         env:
           ANVIL_RPC_URL: http://127.0.0.1:8545
-          ANVIL_FORK_RPC: ${{ secrets.ANVIL_FORK_RPC }}

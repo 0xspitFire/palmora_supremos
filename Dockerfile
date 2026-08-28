@@ -11,7 +11,9 @@ RUN pnpm prune --prod
 FROM node:20.19.1-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
-RUN groupadd --system mintbot && useradd --system --gid mintbot mintbot
+RUN apt-get update && apt-get install --no-install-recommends --yes sqlite3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system mintbot && useradd --system --gid mintbot mintbot
 COPY --from=build --chown=mintbot:mintbot /app/package.json /app/pnpm-workspace.yaml /app/
 COPY --from=build --chown=mintbot:mintbot /app/node_modules /app/node_modules
 COPY --from=build --chown=mintbot:mintbot /app/packages /app/packages
