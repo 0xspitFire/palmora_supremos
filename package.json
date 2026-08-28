@@ -5,12 +5,15 @@
   "description": "Headless NFT public-mint execution engine",
   "type": "module",
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "corepack pnpm -r --if-present run build",
     "dev": "pnpm --filter @mint-bot/cli dev",
-    "test": "vitest run",
+    "test": "corepack pnpm -r --if-present run test",
     "test:watch": "vitest",
     "test:fork": "vitest run --config vitest.fork.config.ts",
-    "lint": "eslint packages/",
+    "ops:health": "node scripts/healthcheck.mjs",
+    "ops:policy": "node scripts/validate-policy.mjs",
+    "ops:secret-boundary": "node scripts/check-secret-boundary.mjs",
+    "lint": "node scripts/lint.mjs",
     "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json && tsc --noEmit -p packages/backend/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json && tsc --noEmit -p packages/database/tsconfig.json"
   },
   "engines": {

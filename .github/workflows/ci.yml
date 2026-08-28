@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm ops:secret-boundary
+      - run: pnpm ops:policy
+      - run: pnpm typecheck
+      - run: pnpm test -- --reporter=dot
+      - run: pnpm build
+      - name: Check for leaked secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  anvil:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.0.0
+      - run: pnpm install --frozen-lockfile
+      - name: Start local Anvil
+        shell: bash
+        run: |
+          if [ -n "$ANVIL_FORK_RPC" ]; then
+            anvil --fork-url "$ANVIL_FORK_RPC" --chain-id 31337 --block-time 1 --host 127.0.0.1 > "$RUNNER_TEMP/anvil.log" 2>&1 &
+          else
+            anvil --chain-id 31337 --block-time 1 --host 127.0.0.1 > "$RUNNER_TEMP/anvil.log" 2>&1 &
+          fi
+          for i in {1..30}; do curl --silent --fail -X POST http://127.0.0.1:8545 -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' && exit 0; sleep 1; done
+          cat "$RUNNER_TEMP/anvil.log"
+          exit 1
+      - run: pnpm test:fork
+        env:
+          ANVIL_RPC_URL: http://127.0.0.1:8545
+          ANVIL_FORK_RPC: ${{ secrets.ANVIL_FORK_RPC }}

@@ -7,7 +7,7 @@
     "mint-bot": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node node_modules/typescript/bin/tsc",
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
