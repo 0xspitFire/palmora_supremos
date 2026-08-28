@@ -8,6 +8,21 @@ importers:
 
   .:
     devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)(tsx@4.23.12)
+
+  packages/backend:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -17,6 +32,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@mint-bot/backend':
+        specifier: workspace:*
+        version: link:../backend
       '@mint-bot/engine':
         specifier: workspace:*
         version: link:../engine

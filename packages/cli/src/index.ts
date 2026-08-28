@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
