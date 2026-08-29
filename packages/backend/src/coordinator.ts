@@ -45,6 +45,7 @@ export class ExecutionCoordinator {
       if (initial.runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED');
       if (!initial.runtime.dependencies.engine || !initial.runtime.dependencies.chain || !initial.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
       this.assertLiveStoreReady();
+      if (!initial.runtime.operational || initial.runtime.operational.expiresAt <= new Date().toISOString() || !initial.runtime.operational.secretStoreReference || !initial.runtime.operational.storePath || !initial.runtime.operational.signerReady || initial.runtime.operational.killSwitchEngaged || !initial.runtime.operational.notificationReady || initial.runtime.operational.chainVerification !== 'verified') throw new Error('RUNTIME_READINESS_REQUIRED');
       simulationIds = this.evidence.assertLiveEvidence(canonicalInput);
       if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
       if (!campaign.chainVerification.evidenceId || !campaign.chainVerification.checkedAt || campaign.chainVerification.sourceBlock === undefined) throw new Error('CHAIN_VERIFICATION_EVIDENCE_REQUIRED');
@@ -82,6 +83,7 @@ export class ExecutionCoordinator {
     if (current.runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED');
     if (!current.runtime.dependencies.engine || !current.runtime.dependencies.chain || !current.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
     this.assertLiveStoreReady();
+    if (!current.runtime.operational || current.runtime.operational.expiresAt <= new Date().toISOString() || !current.runtime.operational.secretStoreReference || !current.runtime.operational.storePath || !current.runtime.operational.signerReady || current.runtime.operational.killSwitchEngaged || !current.runtime.operational.notificationReady || current.runtime.operational.chainVerification !== 'verified') throw new Error('RUNTIME_READINESS_REQUIRED');
     this.evidence.assertLiveEvidence({ campaign, wallets: intent.wallets, simulationIds: intent.simulationIds, evidenceAt: intent.evidenceAt });
     if (wallets.length !== intent.wallets.length || wallets.some(wallet => !intent.wallets.some(armed => armed.toLowerCase() === wallet.toLowerCase()))) throw new Error('EXECUTION_FLEET_MISMATCH');
     const totalFee = campaign.feePolicy.totalFeeBudgetWei;
