@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateFeeBudget, assertPriorityFeeIsNotBudget, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget } from './fee-guard.js';
+import { FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, validateFeeBudget, assertPriorityFeeIsNotBudget, validateFreeMintReserve, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget } from './fee-guard.js';
 
 describe('validateFeeBudget', () => {
   it('accepts a budget that covers gas + value as worst-case total', () => {
@@ -91,5 +91,15 @@ describe('validateFreeMintSpend', () => {
   it('keeps paid gas and replacement caps dimensionally separate', () => {
     expect(validatePaidGasExposure({ gasLimit: 100n, configuredPriorityFeeWei: 10n, actualPriorityComponentWei: 1500n, l1DataGasReservationWei: 25n })).toMatchObject({ allowed: true, priorityGasCapWei: 1500n });
     expect(replacementPriorityBudget(10n)).toBe(20n);
+  });
+});
+
+describe('validateFreeMintReserve', () => {
+  it('enforces the exact per-wallet and active-period caps', () => {
+    expect(FREE_MINT_PER_WALLET_RESERVE_CAP_WEI).toBe(200_000_000_000_000n);
+    expect(FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI).toBe(2_000_000_000_000_000n);
+    expect(validateFreeMintReserve({ perWalletReserveWei: FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, activePeriodReserveWei: FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI }).allowed).toBe(true);
+    expect(validateFreeMintReserve({ perWalletReserveWei: FREE_MINT_PER_WALLET_RESERVE_CAP_WEI + 1n, activePeriodReserveWei: 0n }).allowed).toBe(false);
+    expect(validateFreeMintReserve({ perWalletReserveWei: 0n, activePeriodReserveWei: FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI + 1n }).allowed).toBe(false);
   });
 });

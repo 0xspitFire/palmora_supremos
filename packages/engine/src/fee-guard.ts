@@ -50,6 +50,34 @@ export type FreeMintSpendVerdict =
   | { status: 'exceeded'; priorityComponentCapWei: bigint; actualPriorityComponentWei: bigint }
   | { status: 'invalid'; reason: 'negative-exposure' };
 
+export const FREE_MINT_PER_WALLET_RESERVE_CAP_WEI = 200_000_000_000_000n; // 0.0002 ETH
+export const FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI = 2_000_000_000_000_000n; // 0.002 ETH
+
+export type FreeMintReserveVerdict =
+  | { allowed: true; perWalletCapWei: bigint; activePeriodCapWei: bigint }
+  | { allowed: false; reason: string };
+
+/** Validate independent gas reservations against the final FREE-mint caps. */
+export function validateFreeMintReserve(input: {
+  perWalletReserveWei: bigint;
+  activePeriodReserveWei: bigint;
+}): FreeMintReserveVerdict {
+  if (input.perWalletReserveWei < 0n || input.activePeriodReserveWei < 0n) {
+    return { allowed: false, reason: 'FREE-mint reservation cannot be negative' };
+  }
+  if (input.perWalletReserveWei > FREE_MINT_PER_WALLET_RESERVE_CAP_WEI) {
+    return { allowed: false, reason: 'FREE-mint per-wallet reserve exceeds 0.0002 ETH' };
+  }
+  if (input.activePeriodReserveWei > FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI) {
+    return { allowed: false, reason: 'FREE-mint active-period reserve exceeds 0.002 ETH' };
+  }
+  return {
+    allowed: true,
+    perWalletCapWei: FREE_MINT_PER_WALLET_RESERVE_CAP_WEI,
+    activePeriodCapWei: FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI,
+  };
+}
+
 /**
  * Enforce the Product Owner's FREE-mint policy for one mint period. The 2x rule
  * applies only to the configured priority-fee component. L2 execution gas and

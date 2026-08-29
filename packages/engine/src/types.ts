@@ -350,6 +350,7 @@ export interface MintReceipt {
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
   readonly confirmations: number;
+  readonly finalityStage: FinalityStage;
 }
 
 export interface ReceiptWatcher {

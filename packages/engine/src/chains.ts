@@ -18,8 +18,8 @@ const ETHEREUM_FINALITY: FinalityPolicy = {
 /** Robinhood/Base L2 staged finality: sequencer soft-confirm → posted → L1 finality. */
 const L2_STAGED_FINALITY: FinalityPolicy = {
   stages: ['soft', 'posted', 'ethereum_final'],
-  settlementStage: 'posted',
-  notes: 'Operational status uses soft confirmation; settlement requires the batch posted to the L1 inbox.',
+  settlementStage: 'ethereum_final',
+  notes: 'Operational status retains soft and posted; product success requires Ethereum finality.',
 };
 
 import type { ChainConfig, FinalityPolicy, SupportedChainId } from './types.js';

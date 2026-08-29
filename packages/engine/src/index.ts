@@ -69,7 +69,7 @@ export { ReceiptWatcherImpl } from './receipt-watcher.js';
 
 // Safety
 export { KillSwitch, SpendTracker } from './safety.js';
-export { validateFeeBudget, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget, assertPriorityFeeIsNotBudget } from './fee-guard.js';
+export { validateFeeBudget, validateFreeMintSpend, validateFreeMintReserve, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget, assertPriorityFeeIsNotBudget, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI } from './fee-guard.js';
 export { ROBINHOOD_SEADROP_POSITIVE_FIXTURE, ROBINHOOD_EXTERNAL_FAILED_HASHES_ARE_FLEET_EVIDENCE } from './robinhood-evidence.js';
 export { evaluateRobinhoodVerification, applyRobinhoodVerification } from './robinhood-gate.js';
 export { correlateSequencerObservation } from './sequencer-correlation.js';

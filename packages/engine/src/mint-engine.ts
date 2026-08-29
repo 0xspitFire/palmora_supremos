@@ -48,7 +48,7 @@ import type {
 } from './types.js';
 import { MintError, MintErrorType } from './types.js';
 import { getChainConfig, resolveChainByNameFromSecrets } from './chains.js';
-import { replacementPriorityBudget, validateFeeBudget, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
+import { FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, replacementPriorityBudget, validateFeeBudget, validateFreeMintReserve, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
 import { NonceManagerImpl } from './nonce-manager.js';
 import { ReceiptWatcherImpl } from './receipt-watcher.js';
@@ -213,6 +213,7 @@ if (!chainConfig.executionEnabled) {
       const nonceManager = new NonceManagerImpl(publicClient);
       const receiptWatcher = new ReceiptWatcherImpl(publicClient, {
         maxWaitMs: chainConfig.isL2 ? 30_000 : 120_000,
+        finalityPolicy: chainConfig.finalityPolicy,
       });
 
       // Check funding
@@ -309,21 +310,40 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
       const fundedWallets: typeof wallets = [];
       const runMintValueCapWei = parseEther((this.config.safety.paidRunMintValueCapEth ?? 0.3).toString());
       let admittedMintValueWei = 0n;
+      let admittedFreeReserveWei = 0n;
+      const freeReserveByWallet = new Map<number, bigint>();
+      const freeReserveErrorByWallet = new Map<number, string>();
+      if (mintCostPerWallet === 0n) {
+        for (const wallet of wallets) {
+          const gasLimit = gasLimits.get(wallet.index) ?? 0n;
+          const l1DataGas = chainConfig.isL2 ? BigInt(Math.ceil(Number(gasLimit) / 16)) : 0n;
+          const reserve = gasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString()) + l1DataGas;
+          const reserveVerdict = validateFreeMintReserve({ perWalletReserveWei: reserve, activePeriodReserveWei: reserve });
+          if (!reserveVerdict.allowed) freeReserveErrorByWallet.set(wallet.index, reserveVerdict.reason);
+          else freeReserveByWallet.set(wallet.index, reserve);
+        }
+      }
       for (const wallet of wallets) {
         if (!this.config.safety.dryRun && !simulations.get(wallet.index)?.success) {
           preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: simulations.get(wallet.index)?.error ?? 'Simulation unavailable', simulation: simulations.get(wallet.index), durationMs: 0 });
           continue;
         }
         const walletGasLimit = gasLimits.get(wallet.index) ?? paddedGasLimit;
-        const walletMaxCost = mintCostPerWallet + walletGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString());
+        const walletMaxCost = mintCostPerWallet + walletGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString()) + (mintCostPerWallet === 0n && chainConfig.isL2 ? BigInt(Math.ceil(Number(walletGasLimit) / 16)) : 0n);
         const balance = await publicClient.getBalance({ address: wallet.address });
-        if (balance < walletMaxCost) {
+        const freeReserve = freeReserveByWallet.get(wallet.index) ?? 0n;
+        if (freeReserveErrorByWallet.has(wallet.index)) {
+          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: freeReserveErrorByWallet.get(wallet.index), simulation: simulations.get(wallet.index), durationMs: 0 });
+        } else if (mintCostPerWallet === 0n && admittedFreeReserveWei + freeReserve > FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI) {
+          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: 'FREE-mint active-period reserve cap reached; wallet capacity is not transferable', simulation: simulations.get(wallet.index), durationMs: 0 });
+        } else if (balance < walletMaxCost) {
           preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `Insufficient funds: required ${formatEther(walletMaxCost)} ETH`, simulation: simulations.get(wallet.index), durationMs: 0 });
         } else if (mintCostPerWallet > 0n && admittedMintValueWei + mintCostPerWallet > runMintValueCapWei) {
           preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `Run mint-value cap reached (${formatEther(runMintValueCapWei)} ETH); wallet capacity is not transferable`, simulation: simulations.get(wallet.index), durationMs: 0 });
         } else {
           fundedWallets.push(wallet);
           admittedMintValueWei += mintCostPerWallet;
+          admittedFreeReserveWei += freeReserve;
         }
       }
 
