@@ -73,7 +73,9 @@ secret manager and never written to logs, artifacts, or workflow files.
 
 The archive replay launcher passes the archive reference only to Anvil. Vitest
 receives only `ANVIL_RPC_URL=http://127.0.0.1:8545`; fork tests must never read
-`ANVIL_FORK_RPC` directly. The CI fork gate must be followed by replay coverage for failed, reverted,
+`ANVIL_FORK_RPC` directly. The genuine Robinhood fixture verifies local Anvil
+chain `31337`, historical block state, and public SeaDrop singleton code. The
+CI fork gate must be followed by replay coverage for failed, reverted,
 replacement, reorg, restart, kill-switch, and reconciliation scenarios. A
 vanilla Anvil run is only a fallback smoke test and is not evidence of archive
 fork compatibility.
