@@ -71,7 +71,9 @@ Official Robinhood endpoints are chain ID `4663` (`0x1237`), sequencer
 through the `ANVIL_FORK_RPC` secret reference; the value is injected by the
 secret manager and never written to logs, artifacts, or workflow files.
 
-The CI fork gate must be followed by replay coverage for failed, reverted,
+The archive replay launcher passes the archive reference only to Anvil. Vitest
+receives only `ANVIL_RPC_URL=http://127.0.0.1:8545`; fork tests must never read
+`ANVIL_FORK_RPC` directly. The CI fork gate must be followed by replay coverage for failed, reverted,
 replacement, reorg, restart, kill-switch, and reconciliation scenarios. A
 vanilla Anvil run is only a fallback smoke test and is not evidence of archive
 fork compatibility.
