@@ -60,6 +60,10 @@ the L2 gas reserve and L1 data-gas reserve are not summed into that value cap.
 The priority-fee component may be zero, provided the FREE mint value exposure
 is also zero and both independent gas reserves cover their estimates. Paid
 Robinhood mints remain blocked pending an explicit value/exposure policy.
+The approved FREE reserve caps are `0.0002 ETH` per wallet and `0.002 ETH` per
+active mint period. These caps include the independent L2 and L1 gas reserves
+but exclude paid-mint value. Encrypted backups retain for exactly 30 days under
+`BACKUP_RETENTION_DAYS`.
 
 Official Robinhood endpoints are chain ID `4663` (`0x1237`), sequencer
 `https://sequencer.mainnet.chain.robinhood.com`, and feed
@@ -71,6 +75,8 @@ The CI fork gate must be followed by replay coverage for failed, reverted,
 replacement, reorg, restart, kill-switch, and reconciliation scenarios. A
 vanilla Anvil run is only a fallback smoke test and is not evidence of archive
 fork compatibility.
+Product success requires Ethereum finality; Robinhood soft and posted states
+must remain retained as intermediate reconciliation states.
 
 ## Logs and retention
 
