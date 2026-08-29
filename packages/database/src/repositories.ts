@@ -131,6 +131,7 @@ export interface FeePolicyRecord {
   freeMintPriorityFeeComponentWei?: bigint;
   freeMintPriorityFeeMultiplier?: number;
   paidMintsEnabled?: boolean;
+  zeroPriorityFeePolicy?: 'requires_po_resolution' | 'blocked' | 'allowed';
   active: boolean;
   createdAt: string;
 }
@@ -171,6 +172,8 @@ export class DurableRepository {
   public recordChainVerification(record: ChainVerificationRecord): void {
     const profile = this.db.prepare('SELECT chain_id FROM chain_profile WHERE id = ?').get(record.chainProfileId) as { chain_id: number } | undefined;
     if (!profile || profile.chain_id !== record.chainId) throw new Error('chain verification identity mismatch');
+    if (record.chainId === 4663 && record.sequencerEndpointReference !== 'https://sequencer.mainnet.chain.robinhood.com') throw new Error('Robinhood sequencer reference is not the approved endpoint');
+    if (record.chainId === 4663 && !record.archiveEndpointReference?.startsWith('Rets/MINT_BOT_SECRETS.env')) throw new Error('Robinhood archive endpoint must remain a Rets/MINT_BOT_SECRETS.env reference');
     this.db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, sea_drop_test_tx_hash, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.status, record.chainId, record.sequencerEndpointReference ?? null, record.archiveEndpointReference ?? null, record.feedEndpointReference ?? null, record.seaDropTestTxHash ?? null, JSON.stringify(record.evidence ?? {}), record.checkedAt, record.approvedBy ?? null, record.approvedAt ?? null);
   }
 
@@ -182,7 +185,7 @@ export class DurableRepository {
     if (record.maxTotalFeeWei < 0n || record.freeMintTotalFeeCapWei < 0n) throw new Error('fee caps must be non-negative');
     const multiplier = record.freeMintPriorityFeeMultiplier ?? 2;
     if (!Number.isInteger(multiplier) || multiplier < 0 || multiplier > 2) throw new Error('free-mint priority fee multiplier must be between 0 and 2');
-    this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.version, record.priorityFeeSemantics, record.maxTotalFeeWei.toString(), record.freeMintTotalFeeCapWei.toString(), (record.freeMintPriorityFeeComponentWei ?? 0n).toString(), multiplier, record.paidMintsEnabled ? 1 : 0, record.active ? 1 : 0, record.createdAt);
+    this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.version, record.priorityFeeSemantics, record.maxTotalFeeWei.toString(), record.freeMintTotalFeeCapWei.toString(), (record.freeMintPriorityFeeComponentWei ?? 0n).toString(), multiplier, record.paidMintsEnabled ? 1 : 0, record.active ? 1 : 0, record.createdAt, record.zeroPriorityFeePolicy ?? 'requires_po_resolution');
   }
 
   public canExecuteChain(chainProfileId: string): boolean {

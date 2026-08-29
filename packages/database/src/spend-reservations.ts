@@ -67,9 +67,11 @@ export class SpendReservations {
       if (existing) return existing.status;
       const policy = this.db.prepare('SELECT daily_cap_wei AS cap FROM spend_policy WHERE id = ? AND wallet_id = ? AND active = 1').get(request.policyId, request.walletId) as { cap: string } | undefined;
       if (!policy) throw new Error('active spend policy not found');
-      const feePolicy = this.db.prepare('SELECT free_mint_priority_fee_component_wei AS component, free_mint_priority_fee_multiplier AS multiplier, paid_mints_enabled AS paid FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(request.chainProfileId) as { component: string; multiplier: number; paid: number } | undefined;
+      const feePolicy = this.db.prepare('SELECT free_mint_priority_fee_component_wei AS component, free_mint_priority_fee_multiplier AS multiplier, paid_mints_enabled AS paid, zero_priority_fee_policy AS zeroPolicy FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(request.chainProfileId) as { component: string; multiplier: number; paid: number; zeroPolicy: 'requires_po_resolution' | 'blocked' | 'allowed' } | undefined;
       if (!feePolicy) throw new Error('active fee policy not found');
       if (!request.freeMint && feePolicy.paid !== 1) throw new Error('paid-mint policy is not approved');
+      if (request.freeMint && feePolicy.zeroPolicy === 'requires_po_resolution') throw new Error('zero-priority-fee policy requires PO resolution');
+      if (request.freeMint && feePolicy.zeroPolicy === 'blocked') throw new Error('zero-priority-fee policy is blocked');
       if (request.freeMint && request.priorityFeeComponentWei > BigInt(feePolicy.component) * BigInt(feePolicy.multiplier)) throw new Error('priority fee component exceeds free-mint policy');
       const exposure = request.mintValueWei + request.l2ExecutionGasWei + request.l1DataGasWei;
       const rows = this.db.prepare("SELECT mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, amount_wei FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(request.walletId, usageDate) as Array<{ mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; amount_wei: string }>;
