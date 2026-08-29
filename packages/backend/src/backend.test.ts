@@ -12,6 +12,7 @@ import { ExecutionCoordinator } from './coordinator.js';
 import { ReadModelService } from './read-model.js';
 import { normalizeTotalFeeBudget } from './fees.js';
 import { resolveWalletPath } from './keystore-path.js';
+import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from './policy.js';
 import { EvidenceService, campaignInputDigest } from './evidence.js';
 import { HealthService } from './health.js';
 import type { Campaign, ChainEvidenceRecord, EngineAdapter } from './types.js';
@@ -141,6 +142,12 @@ describe('backend Phase 1 blockers', () => {
 
   it('reports fail-closed readiness for the scaffold store', () => {
     const health = new HealthService(new DurableStore()).check(); expect(health.ready).toBe(false); expect(health.blockingReasons).toContain('DURABLE_STORE_REQUIRED'); expect(health.blockingReasons).toContain('STARTUP_RECONCILIATION_REQUIRED');
+  });
+
+  it('enforces the final Robinhood FREE reserve caps', async () => {
+    const app = new BackendApplication(new DurableStore(), undefined as never);
+    await expect(app.createCampaign({ chainId: 4663, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, maxRunWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI + 1n, dailyCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI + 1n, gasCeilingWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI + 1n, broadcastMode: 'sequencer', chainVerification: verification('unverified'), feePolicy })).rejects.toThrow('ROBINHOOD_PER_WALLET_CAP_EXCEEDED');
+    await expect(app.createCampaign({ chainId: 4663, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, maxRunWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, dailyCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI + 1n, gasCeilingWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI, broadcastMode: 'sequencer', chainVerification: verification('unverified'), feePolicy })).rejects.toThrow('ROBINHOOD_ACTIVE_PERIOD_CAP_EXCEEDED');
   });
 
   it('requires explicit execution enablement from the evidence authority', async () => {

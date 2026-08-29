@@ -20,4 +20,5 @@ export { EvidenceService, campaignInputDigest, liveRequestDigest } from './evide
 export type { EvidenceApproval, EvidenceAuthority } from './evidence.js';
 export { HealthService } from './health.js';
 export type { HealthReport } from './health.js';
+export { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI, ROBINHOOD_PAID_MINTS_ENABLED, WEI_PER_ETH } from './policy.js';
 export { DeploymentReadinessService } from './deployment-readiness.js';

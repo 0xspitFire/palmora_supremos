@@ -2,6 +2,7 @@
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { createCliRuntime } from './runtime.js';
+import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 
 const unavailableEngine = {
   prepare: async () => { throw new Error('ENGINE_ADAPTER_REQUIRED'); },
@@ -10,6 +11,7 @@ const unavailableEngine = {
 };
 
 const root = process.cwd();
+const blocked = (error: unknown) => JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false, policy: { robinhoodFreePerWalletCapWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI.toString(), robinhoodFreeActivePeriodCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI.toString(), robinhoodPaidMintsEnabled: false } });
 const cli = yargs(hideBin(process.argv)).strict().demandCommand(1).command('health', 'Read backend health', {}, async () => {
   const runtime = await createCliRuntime(root, unavailableEngine);
   const response = await runtime.application.command('health');
@@ -30,7 +32,7 @@ const cli = yargs(hideBin(process.argv)).strict().demandCommand(1).command('heal
   try { await runtime.application.command('dry-run'); } catch (error) { process.stdout.write(`${JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false })}\n`); }
 }).command('arm', 'Arm a campaign through Backend admission', {}, async () => {
   const runtime = await createCliRuntime(root, unavailableEngine);
-  try { await runtime.application.command('arm'); } catch (error) { process.stdout.write(`${JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false })}\n`); }
+  try { await runtime.application.command('arm'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
 }).command('execute', 'Execute an admitted run through Backend admission', {}, async () => {
   const runtime = await createCliRuntime(root, unavailableEngine);
   try { await runtime.application.command('execute'); } catch (error) { process.stdout.write(`${JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false })}\n`); }

@@ -3,6 +3,7 @@ import type { Campaign, ChainVerification, CommandName, FeePolicy, ValidatedCamp
 import type { BackendStore } from './store.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { HealthService } from './health.js';
+import { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI } from './policy.js';
 
 export interface CommandResponse<T> { id: string; state: string; nextAction: string; createdAt: string; retryable: boolean; blockingReason?: string; data?: T; }
 export interface CampaignInput { chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; }
@@ -47,6 +48,8 @@ export class BackendApplication {
     if (input.feePolicy.totalFeeBudgetWei !== totalFeeBudget) throw new Error('TOTAL_FEE_BUDGET_MISMATCH');
     if (totalFeeBudget > freeCap) throw new Error('FREE_TOTAL_SPEND_CAP_EXCEEDED');
     if (totalFeeBudget > input.gasCeilingWei) throw new Error('GAS_CEILING_EXCEEDED');
+    if (input.chainId === 4663) assertRobinhoodFreePolicy(input.gasCeilingWei, input.dailyCapWei, totalFeeBudget);
+    if (input.chainId === 4663 && input.dailyCapWei > ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI) throw new Error('ROBINHOOD_ACTIVE_PERIOD_CAP_EXCEEDED');
     const now = new Date().toISOString(); const campaign: Campaign = { id: `cmp_${randomUUID()}`, state: 'Draft', chainId: input.chainId, contract: input.contract, strategy: input.strategy, quantity: input.quantity, dryRun: input.dryRun ?? true, spendPolicy: { maxRunWei: input.maxRunWei, dailyCapWei: input.dailyCapWei, gasCeilingWei: input.gasCeilingWei }, chainVerification: input.chainVerification, mintPriceWei: input.mintPriceWei ?? 0n, feePolicy: input.feePolicy, ...(input.broadcastMode ? { broadcastMode: input.broadcastMode } : {}), createdAt: now, updatedAt: now };
     await this.store.transaction(state => { state.campaigns.push(campaign); }); return campaign;
   }
