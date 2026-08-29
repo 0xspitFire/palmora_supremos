@@ -32,3 +32,12 @@ export function migrate(db: SqliteDatabase): void {
     applyMigration();
   }
 }
+
+export async function backupDatabase(db: SqliteDatabase, destination: string): Promise<void> {
+  await db.backup(destination);
+}
+
+export function pruneRawObservations(db: SqliteDatabase, olderThan: Date): number {
+  const result = db.prepare('DELETE FROM raw_observation WHERE observed_at < ?').run(olderThan.toISOString());
+  return result.changes;
+}
