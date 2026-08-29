@@ -22,7 +22,7 @@ describe('database migrations and spend reservations', () => {
   it('applies migrations idempotently and enables integrity pragmas', () => {
     const db = fixture();
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 7 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 8 });
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(db.pragma('journal_mode', { simple: true })).toBe('memory');
     expect(() => db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('other', 'chain', '0xABC', 'kms://other', '2026-01-01T00:00:00.000Z')").run()).toThrow();
@@ -74,11 +74,13 @@ describe('database migrations and spend reservations', () => {
       const db = new Database(workerData.filename);
       db.pragma('busy_timeout = 5000');
       try {
-        db.transaction(() => {
+        db.exec('BEGIN IMMEDIATE');
+        try {
           const row = db.prepare("SELECT COALESCE(SUM(CAST(amount_wei AS INTEGER)), 0) AS used FROM spend_reservation WHERE wallet_id = 'wallet' AND usage_date = '2026-01-01' AND status = 'reserved'").get();
           if (row.used + 60 > 100) throw new Error('cap');
           db.prepare("INSERT INTO spend_reservation (id, wallet_id, idempotency_key, policy_id, amount_wei, usage_date, status, created_at) VALUES (?, 'wallet', ?, 'policy', '60', '2026-01-01', 'reserved', '2026-01-01T00:00:00.000Z')").run(workerData.id, workerData.id);
-        })();
+          db.exec('COMMIT');
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
         parentPort.postMessage('reserved');
       } catch (error) { parentPort.postMessage(error.message === 'cap' ? 'capped' : 'error'); }
       db.close();
@@ -194,8 +196,44 @@ describe('database migrations and spend reservations', () => {
     await backupDatabase(source, destination);
     const restored = openDatabase(destination);
     expect(restored.prepare('SELECT COUNT(*) AS count FROM audit_event').get()).toEqual({ count: 1 });
+    const repository = new DurableRepository(restored);
+    repository.saveBackupPolicy({ id: 'backup-policy', approvalOwner: 'product-owner', approvedAt: '2026-01-01T00:00:00.000Z' });
+    expect(restored.prepare('SELECT retention_days, encryption_required FROM backup_policy WHERE id = ?').get('backup-policy')).toEqual({ retention_days: 30, encryption_required: 1 });
     restored.close();
     source.close();
     rmSync(directory, { recursive: true, force: true });
+  });
+
+  it('enforces Product Owner FREE wallet and active-period caps', () => {
+    const db = fixture();
+    db.prepare("UPDATE spend_policy SET daily_cap_wei = '2000000000000000' WHERE id = 'policy'").run();
+    db.prepare("INSERT INTO contract (id, chain_profile_id, address, kind) VALUES ('contract-policy', 'chain', '0xdef', 'nft')").run();
+    db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-policy', 'contract-policy', 'Policy')").run();
+    db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-policy', 'collection-policy', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-policy', 'drop-policy', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES ('fee-policy', 'chain', 'v1', 'fee_only', '2000000000000000', '2000000000000000', '1', 2, 0, 1, '2026-01-01T00:00:00.000Z', 'allowed')").run();
+    const policy = db.prepare('SELECT free_mint_wallet_cap_wei, free_mint_period_cap_wei FROM spend_policy WHERE id = ?').get('policy');
+    expect(policy).toEqual({ free_mint_wallet_cap_wei: '200000000000000', free_mint_period_cap_wei: '2000000000000000' });
+    const reservations = new SpendReservations(db);
+    const request = { walletId: 'wallet', chainProfileId: 'chain', campaignId: 'campaign-policy', mintPeriodId: 'period-1', policyId: 'policy', freeMint: true, mintValueWei: 0n, l2ExecutionGasWei: 200000000000000n, l1DataGasWei: 0n, priorityFeeComponentWei: 0n, at: new Date('2026-01-01T00:00:00.000Z') };
+    expect(reservations.reserveExecution({ ...request, id: 'policy-1', idempotencyKey: 'policy-1' })).toBe('reserved');
+    expect(() => reservations.reserveExecution({ ...request, id: 'policy-2', idempotencyKey: 'policy-2', l2ExecutionGasWei: 1n })).toThrow(SpendCapExceededError);
+    db.close();
+  });
+
+  it('counts only Ethereum-final receipts as successful', () => {
+    const db = fixture();
+    db.prepare("INSERT INTO contract (id, chain_profile_id, address, kind) VALUES ('contract-final', 'chain', '0xdef', 'nft')").run();
+    db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-final', 'contract-final', 'Finality')").run();
+    db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-final', 'collection-final', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-final', 'drop-final', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    const repository = new DurableRepository(db);
+    repository.saveIntent({ id: 'intent-final', campaignId: 'campaign-final', walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', createdAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordAttempt({ id: 'attempt-final', transactionIntentId: 'intent-final', endpoint: 'sequencer', responseClass: 'accepted', txHash: '0xfinal', attemptedAt: '2026-01-01T00:00:01.000Z' });
+    repository.recordReceipt({ id: 'receipt-soft', transactionAttemptId: 'attempt-final', txHash: '0xfinal', status: 'confirmed', confirmations: 1, finalityStage: 'soft', observedAt: '2026-01-01T00:00:02.000Z' });
+    expect(repository.isFinalSuccess('chain', 'receipt-soft')).toBe(false);
+    repository.recordReceipt({ id: 'receipt-final', transactionAttemptId: 'attempt-final', txHash: '0xfinal', status: 'confirmed', confirmations: 10, finalityStage: 'ethereum_final', observedAt: '2026-01-01T00:00:03.000Z' });
+    expect(repository.isFinalSuccess('chain', 'receipt-final')).toBe(true);
+    db.close();
   });
 });

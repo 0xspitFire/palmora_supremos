@@ -136,6 +136,13 @@ export interface FeePolicyRecord {
   createdAt: string;
 }
 
+export interface BackupPolicyRecord {
+  id: string;
+  retentionDays?: number;
+  approvalOwner: string;
+  approvedAt: string;
+}
+
 const json = (value: unknown): string | null => value === undefined ? null : JSON.stringify(value);
 
 export class DurableRepository {
@@ -204,6 +211,17 @@ export class DurableRepository {
 
   public recordDocumentationFixture(id: string, chainProfileId: string, txHash: string, fixtureType: 'external_wallet_failed' | 'positive_reference', notes: string, recordedAt: string): void {
     this.db.prepare('INSERT INTO documentation_fixture (id, chain_profile_id, tx_hash, fixture_type, notes, recorded_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, chainProfileId, txHash, fixtureType, notes, recordedAt);
+  }
+
+  public saveBackupPolicy(record: BackupPolicyRecord): void {
+    const retentionDays = record.retentionDays ?? 30;
+    if (!Number.isInteger(retentionDays) || retentionDays <= 0) throw new Error('backup retention must be positive');
+    this.db.prepare('INSERT INTO backup_policy (id, retention_days, encryption_required, approval_owner, approved_at, active) VALUES (?, ?, 1, ?, ?, 1)').run(record.id, retentionDays, record.approvalOwner, record.approvedAt);
+  }
+
+  public isFinalSuccess(chainProfileId: string, receiptId: string): boolean {
+    const row = this.db.prepare("SELECT r.finality_stage AS stage, c.success_finality_stage AS required FROM transaction_receipt r JOIN transaction_attempt a ON a.id = r.transaction_attempt_id JOIN transaction_intent i ON i.id = a.transaction_intent_id JOIN wallet w ON w.id = i.wallet_id JOIN chain_profile c ON c.id = w.chain_profile_id WHERE r.id = ? AND c.id = ?").get(receiptId, chainProfileId) as { stage: string; required: string } | undefined;
+    return row !== undefined && row.stage === row.required;
   }
 
   public saveExecutionBundle(execution: ExecutionRecord, intent: TransactionIntentRecord, lifecycle: LifecycleEventRecord, audit: AuditEventRecord): void {
