@@ -16,6 +16,7 @@ import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI
 import { EvidenceService, campaignInputDigest } from './evidence.js';
 import { HealthService } from './health.js';
 import { RuntimeReadinessService } from './runtime-readiness.js';
+import { validateOpsHealthEnvironment } from './ops-health-harness.js';
 import type { Campaign, ChainEvidenceRecord, EngineAdapter } from './types.js';
 
 class ReadyStore extends DurableStore { override capabilities() { return { durable: true, atomicAcrossProcesses: true }; } }
@@ -152,6 +153,14 @@ describe('backend Phase 1 blockers', () => {
     await probes.record(operational);
     const health = new HealthService(store, () => new Date('2026-08-29T00:00:00.000Z')).check();
     expect(health.operational?.storePath).toBe('state.sqlite'); expect(health.operational?.secretStoreReference).toBe('TEST_BOT');
+  });
+
+  it('fails closed without ops references and accepts only complete non-production metadata', () => {
+    const now = new Date('2026-08-29T00:00:00.000Z');
+    const missing = validateOpsHealthEnvironment({}, now);
+    expect(missing.valid).toBe(false); expect(missing.blockingReasons).toContain('SECRET_STORE_REFERENCE_REQUIRED');
+    const configured = validateOpsHealthEnvironment({ mode: 'non-production', secretStoreReference: 'TEST_BOT', storePath: 'state.sqlite', signerReady: 'true', killSwitchEngaged: 'false', notificationReady: 'true', chainVerification: 'verified', lastReconciliationAt: '2026-08-28T23:59:00.000Z', probeTtlMs: '120000', engineReady: 'true', chainReady: 'true', backupReady: 'true', atomicStoreReady: 'true' }, now);
+    expect(configured.valid).toBe(true); expect(configured.probe?.secretStoreReference).toBe('TEST_BOT');
   });
 
   it('enforces the final Robinhood FREE reserve caps', async () => {

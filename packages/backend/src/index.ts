@@ -23,3 +23,5 @@ export type { HealthReport } from './health.js';
 export { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI, ROBINHOOD_PAID_MINTS_ENABLED, WEI_PER_ETH } from './policy.js';
 export { DeploymentReadinessService } from './deployment-readiness.js';
 export { RuntimeReadinessService } from './runtime-readiness.js';
+export { validateOpsHealthEnvironment } from './ops-health-harness.js';
+export type { OpsHealthEnvironment, OpsHealthValidation } from './ops-health-harness.js';

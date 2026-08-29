@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:fork": "vitest run --config vitest.fork.config.ts",
+    "ops:health": "pnpm --filter @mint-bot/backend build && node scripts/ops-health.mjs",
     "lint": "eslint packages/",
     "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json && tsc --noEmit -p packages/backend/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json"
   },
