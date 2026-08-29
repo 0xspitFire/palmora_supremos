@@ -12,7 +12,7 @@ export default defineConfig({
   test: {
     include: ['packages/**/src/**/*.fork.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
-    passWithNoTests: true,
+    passWithNoTests: false,
     testTimeout: 120_000,  // Fork tests can be slow
     hookTimeout: 60_000,
   },

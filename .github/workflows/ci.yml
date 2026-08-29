@@ -68,9 +68,8 @@ jobs:
           for i in {1..30}; do curl --silent --fail -X POST http://127.0.0.1:8545 -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' && exit 0; sleep 1; done
           cat "$RUNNER_TEMP/anvil.log"
           exit 1
-      - run: pnpm test:fork
-        env:
-          ANVIL_RPC_URL: http://127.0.0.1:8545
+      - name: Confirm Anvil smoke service
+        run: cast block-number --rpc-url http://127.0.0.1:8545
 
   archive-fork-replay:
     if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'

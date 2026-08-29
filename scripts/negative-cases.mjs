@@ -50,3 +50,16 @@ const health = await new Promise((resolve) => {
 });
 if (health !== 1) throw new Error('Healthcheck must fail closed without host configuration');
 console.log('healthcheck without host configuration: blocked as expected');
+
+async function expectFailure(script, label) {
+  const code = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL(`./${script}`, import.meta.url))], { env: cleanEnvironment, stdio: ['ignore', 'ignore', 'ignore'] });
+    child.once('error', () => resolve(1));
+    child.once('exit', (exitCode) => resolve(exitCode ?? 1));
+  });
+  if (code === 0) throw new Error(`${label} must fail closed without configuration`);
+  console.log(`${label} without configuration: blocked as expected`);
+}
+
+await expectFailure('backup.mjs', 'backup');
+await expectFailure('restore-check.mjs', 'restore');
