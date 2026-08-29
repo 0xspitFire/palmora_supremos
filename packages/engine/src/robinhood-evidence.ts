@@ -8,6 +8,7 @@ export const ROBINHOOD_SEADROP_POSITIVE_FIXTURE = {
   wallet: '0x81c104DcB898416FD4f81eAd091DbA5b8f46F37A' as Address,
   tokenId: 3477n,
   quantity: 1,
+  blockNumber: 0x2c92c19n,
   receiptStatus: 'success' as const,
   source: 'Product Owner supplied live transaction evidence' as const,
   provenance: 'Approved wallet -> SeaDrop v1 public mint -> Robinhood 4663 receipt' as const,

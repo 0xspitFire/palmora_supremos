@@ -45,12 +45,7 @@ beforeAll(async () => {
     } catch (error) {
       throw new Error(`archive reference unavailable: ${error instanceof Error ? error.message : 'read failed'}`);
     }
-    try {
-      const forkUrl = await readSecret('ANVIL_FORK_RPC', 'mainnet', secretRoot);
-      fork = await makeRpc(forkUrl);
-    } catch (error) {
-      throw new Error(`Anvil fork reference unavailable: ${error instanceof Error ? error.message : 'read failed'}`);
-    }
+    fork = await makeRpc(process.env.ROBINHOOD_FORK_RPC ?? 'http://127.0.0.1:8545');
     let client: string;
     try {
       client = await fork('web3_clientVersion') as string;
@@ -72,7 +67,7 @@ function requireSetup(): void {
 describe('Robinhood archive-backed fork replay', () => {
   it('replays the historical positive SeaDrop transaction and receipt', async () => {
     requireSetup();
-    const historicalBlock = '0x2c92c19';
+    const historicalBlock = `0x${ROBINHOOD_SEADROP_POSITIVE_FIXTURE.blockNumber.toString(16)}`;
     const block = await archive('eth_getBlockByNumber', [historicalBlock, false]);
     expect(block).not.toBeNull();
     const receipt = await fork('eth_getTransactionReceipt', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);

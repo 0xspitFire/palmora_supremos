@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:fork": "pnpm --filter @mint-bot/engine exec vitest run --config vitest.fork.config.ts",
+    "ops:fork-replay": "node scripts/ops-fork-replay.mjs",
     "lint": "eslint packages/",
     "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json"
   },
