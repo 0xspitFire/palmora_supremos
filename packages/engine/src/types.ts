@@ -226,7 +226,46 @@ export interface SpendReservationProvider {
     readonly runId: string;
     readonly executionId: string;
     readonly transactionIntentId: string;
+    readonly mintValueWei: bigint;
+    readonly l2ExecutionGasWei: bigint;
+    readonly l1DataGasWei: bigint;
+    readonly priorityFeeComponentWei: bigint;
+    /** Inclusive original-plus-replacement priority component budget. */
+    readonly replacementBudgetWei: bigint;
+    readonly freeMint: boolean;
+    readonly policySnapshot: unknown;
   }): Promise<SpendReservation>;
+}
+
+/** Database-aligned component reservation request for a single execution. */
+export interface ExecutionReservationRequest {
+  readonly id: string;
+  readonly walletId: string;
+  readonly chainProfileId: string;
+  readonly campaignId: string;
+  readonly idempotencyKey: string;
+  readonly policyId: string;
+  readonly mintValueWei: bigint;
+  readonly l2ExecutionGasWei: bigint;
+  readonly l1DataGasWei: bigint;
+  readonly priorityFeeComponentWei: bigint;
+  readonly freeMint: boolean;
+  readonly policySnapshot?: unknown;
+  readonly at?: Date;
+}
+
+export type ExecutionReservationStatus = 'reserved' | 'settled' | 'released' | 'expired';
+
+/** Database SpendReservations port. Implemented by the database package. */
+export interface SpendReservationsPort {
+  reserveExecution(request: ExecutionReservationRequest): ExecutionReservationStatus;
+  settleExecution(
+    id: string,
+    actualMintValueWei: bigint,
+    actualL2ExecutionGasWei: bigint,
+    actualL1DataGasWei: bigint,
+    at?: Date,
+  ): void;
 }
 
 export interface SimulationEvidence {
@@ -311,6 +350,7 @@ export interface MintReceipt {
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
   readonly confirmations: number;
+  readonly finalityStage: FinalityStage;
 }
 
 export interface ReceiptWatcher {
@@ -383,6 +423,10 @@ export interface MintJobConfig {
     readonly maxReplacementBumps: number;
     readonly dryRun: boolean;
     readonly killSwitchFile: string;
+    /** Paid quantity default is 15; UI may raise/lower it, contract limit still applies. */
+    readonly paidMaxQuantityPerWallet?: number;
+    /** Adjustable paid mint-value cap per run; defaults to 0.3 ETH. */
+    readonly paidRunMintValueCapEth?: number;
   };
 readonly broadcast: {
     readonly mode: BroadcastMode;
