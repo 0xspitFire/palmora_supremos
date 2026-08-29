@@ -13,6 +13,16 @@ import {
   getAllChains,
 } from '@mint-bot/engine';
 import type { MintJobConfig } from '@mint-bot/engine';
+import { createCliRuntime } from './runtime.js';
+import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
+
+const unavailableEngine = {
+  prepare: async () => { throw new Error('ENGINE_ADAPTER_REQUIRED'); },
+  execute: async () => { throw new Error('ENGINE_ADAPTER_REQUIRED'); },
+  reconcile: async () => ({ result: 'unknown' as const, attempts: [], receipts: [] }),
+};
+const runtimeRoot = process.cwd();
+const blocked = (error: unknown) => JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false, policy: { robinhoodFreePerWalletCapWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI.toString(), robinhoodFreeActivePeriodCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI.toString(), robinhoodPaidMintsEnabled: false } });
 
 const DEFAULT_WALLET_FILE = join(homedir(), '.mint-bot', 'wallets.json');
 const DEFAULT_KILL_FILE = join(homedir(), '.mint-bot', 'killswitch');
@@ -139,6 +149,27 @@ const cli = yargs(hideBin(process.argv))
         console.log(JSON.stringify({ ...result, startedAt: result.startedAt.toISOString(), completedAt: result.completedAt.toISOString(), totalGasSpentWei: result.totalGasSpentWei.toString(), totalMintCostWei: result.totalMintCostWei.toString() }, null, 2));
       } catch (error) { printError(error); }
     })
+  .command('reconcile', 'Reconcile persisted in-flight runs before admission', {}, async () => {
+    const runtime = await createCliRuntime(runtimeRoot, unavailableEngine);
+    const response = await runtime.application.command('reconcile');
+    process.stdout.write(`${JSON.stringify(response)}\n`);
+  })
+  .command('validate', 'Validate a campaign through the configured engine adapter', {}, async () => {
+    const runtime = await createCliRuntime(runtimeRoot, unavailableEngine);
+    try { await runtime.application.command('validate'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+  })
+  .command('dry-run', 'Prepare a non-broadcast dry run', {}, async () => {
+    const runtime = await createCliRuntime(runtimeRoot, unavailableEngine);
+    try { await runtime.application.command('dry-run'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+  })
+  .command('arm', 'Arm a campaign through Backend admission', {}, async () => {
+    const runtime = await createCliRuntime(runtimeRoot, unavailableEngine);
+    try { await runtime.application.command('arm'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+  })
+  .command('execute', 'Execute an admitted run through Backend admission', {}, async () => {
+    const runtime = await createCliRuntime(runtimeRoot, unavailableEngine);
+    try { await runtime.application.command('execute'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+  })
   .fail((message, error) => {
     console.error(error?.message ?? message);
     process.exitCode = 1;

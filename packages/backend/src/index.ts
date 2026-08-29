@@ -1,5 +1,6 @@
 export * from './types.js';
 export { DurableStore } from './store.js';
+export type { BackendStore } from './store.js';
 export { SpendLedger } from './spend-ledger.js';
 export { ReadinessService } from './readiness.js';
 export { NotificationDispatcher } from './notifications.js';
@@ -15,3 +16,9 @@ export type { RunReadModel } from './read-model.js';
 export { normalizeTotalFeeBudget } from './fees.js';
 export type { FeeBudgetInput } from './fees.js';
 export { resolveWalletPath } from './keystore-path.js';
+export { EvidenceService, campaignInputDigest, liveRequestDigest } from './evidence.js';
+export type { EvidenceApproval, EvidenceAuthority } from './evidence.js';
+export { HealthService } from './health.js';
+export type { HealthReport } from './health.js';
+export { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI, ROBINHOOD_PAID_MINTS_ENABLED, WEI_PER_ETH } from './policy.js';
+export { DeploymentReadinessService } from './deployment-readiness.js';

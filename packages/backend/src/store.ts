@@ -1,16 +1,18 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { BackendState, EventRecord } from './types.js';
+import type { BackendState, EventRecord, StoreCapabilities } from './types.js';
 
-const emptyState = (): BackendState => ({ campaigns: [], runs: [], intents: [], attempts: [], receipts: [], reconciliations: [], reservations: [], events: [], killed: false });
-export class DurableStore {
+const emptyState = (): BackendState => ({ schemaVersion: 1, campaigns: [], runs: [], intents: [], attempts: [], receipts: [], reconciliations: [], reservations: [], events: [], notificationOutbox: [], chainEvidence: [], simulations: [], runtime: { startupState: 'Cold', blockingReasons: ['RECONCILIATION_REQUIRED'], dependencies: { engine: false, chain: false, backup: false, notifications: false } }, killed: false });
+export interface BackendStore { open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
+export class DurableStore implements BackendStore {
   private state: BackendState = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();
   private transactionQueue: Promise<void> = Promise.resolve();
   constructor(private readonly file?: string) {}
+  capabilities(): StoreCapabilities { return { durable: this.file !== undefined, atomicAcrossProcesses: false }; }
   async open(): Promise<void> {
     if (!this.file) return;
-    try { const loaded = JSON.parse(await readFile(this.file, 'utf8'), (_, value) => typeof value === 'string' && /^\d+n$/.test(value) ? BigInt(value.slice(0, -1)) : value) as Partial<BackendState>; this.state = { ...emptyState(), ...loaded, intents: loaded.intents ?? [], attempts: loaded.attempts ?? [], receipts: loaded.receipts ?? [], reconciliations: loaded.reconciliations ?? [] }; }
+    try { const loaded = JSON.parse(await readFile(this.file, 'utf8'), (_, value) => typeof value === 'string' && /^\d+n$/.test(value) ? BigInt(value.slice(0, -1)) : value) as Partial<BackendState>; if (loaded.schemaVersion !== undefined && loaded.schemaVersion !== 1) throw new Error('UNSUPPORTED_STORE_SCHEMA'); const defaultRuntime = emptyState().runtime; this.state = { ...emptyState(), ...loaded, schemaVersion: 1, intents: loaded.intents ?? [], attempts: loaded.attempts ?? [], receipts: loaded.receipts ?? [], reconciliations: loaded.reconciliations ?? [], notificationOutbox: loaded.notificationOutbox ?? [], chainEvidence: loaded.chainEvidence ?? [], simulations: loaded.simulations ?? [], runtime: loaded.runtime ? { ...defaultRuntime, ...loaded.runtime, dependencies: { ...defaultRuntime.dependencies, ...loaded.runtime.dependencies } } : defaultRuntime }; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   snapshot(): BackendState { return structuredClone(this.state); }
@@ -18,10 +20,10 @@ export class DurableStore {
   async transaction<T>(mutate: (state: BackendState) => T): Promise<T> {
     let result!: T;
     const operation = this.transactionQueue.then(async () => {
-      const next = this.snapshot();
+      const previous = this.snapshot(); const next = structuredClone(previous);
       result = mutate(next);
       this.state = next;
-      await this.commit();
+      try { await this.commit(); } catch (error) { this.state = previous; throw error; }
     });
     this.transactionQueue = operation.then(() => undefined, () => undefined);
     await operation;
@@ -33,5 +35,5 @@ export class DurableStore {
     this.writeQueue = this.writeQueue.then(async () => { await mkdir(dirname(this.file!), { recursive: true }); const tmp = `${this.file}.tmp`; await writeFile(tmp, serialized, 'utf8'); await rename(tmp, this.file!); });
     await this.writeQueue;
   }
-  appendEvent(event: EventRecord): void { this.state.events.push(event); }
+  appendEvent(event: EventRecord): Promise<void> { return this.transaction(state => { state.events.push(event); }); }
 }
