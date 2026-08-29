@@ -45,7 +45,7 @@ beforeAll(async () => {
     } catch (error) {
       throw new Error(`archive reference unavailable: ${error instanceof Error ? error.message : 'read failed'}`);
     }
-    fork = await makeRpc(process.env.ROBINHOOD_FORK_RPC ?? 'http://127.0.0.1:8545');
+    fork = await makeRpc('http://127.0.0.1:8545');
     let client: string;
     try {
       client = await fork('web3_clientVersion') as string;
