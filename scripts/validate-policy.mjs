@@ -7,6 +7,10 @@ const robinhoodMintPriceWei = BigInt(process.env.ROBINHOOD_MINT_PRICE_WEI ?? '0'
 const robinhoodPriorityFeeWei = BigInt(process.env.ROBINHOOD_PRIORITY_FEE_WEI ?? '0');
 const robinhoodL2FeeWei = BigInt(process.env.ROBINHOOD_L2_EXECUTION_FEE_WEI ?? '0');
 const robinhoodL1FeeWei = BigInt(process.env.ROBINHOOD_L1_DATA_FEE_WEI ?? '0');
+const robinhoodFreeValueWei = BigInt(process.env.ROBINHOOD_FREE_MINT_VALUE_WEI ?? '0');
+const robinhoodL2ReserveWei = BigInt(process.env.ROBINHOOD_L2_GAS_RESERVE_WEI ?? '0');
+const robinhoodL1ReserveWei = BigInt(process.env.ROBINHOOD_L1_DATA_GAS_RESERVE_WEI ?? '0');
+const freeMint = process.env.ROBINHOOD_MINT_TYPE === 'FREE';
 
 const errors = [];
 if (executionChain !== 'ethereum') errors.push('Phase 1 execution chain must be ethereum');
@@ -15,11 +19,14 @@ if (robinhoodVerified) errors.push('Robinhood must remain unverified in Phase 1'
 if (liveSpendWei !== 0n) errors.push('Live spend cap must remain zero until Product Owner numeric caps are approved');
 if (robinhoodLive) errors.push('Robinhood live execution requires accepted characterization and reconciliation gates');
 if (robinhoodMintPriceWei > 0n) errors.push('Paid Robinhood mints are blocked pending Product Owner policy');
-if (robinhoodPriorityFeeWei > 0n && robinhoodL2FeeWei + robinhoodL1FeeWei > robinhoodPriorityFeeWei * 2n) {
-  errors.push('Robinhood free-mint total cost exceeds 2x configured priority-fee component');
+if (freeMint && robinhoodFreeValueWei > robinhoodPriorityFeeWei * 2n) {
+  errors.push('FREE mint value exposure exceeds 2x configured priority-fee component');
 }
-if (robinhoodPriorityFeeWei === 0n && (robinhoodL2FeeWei > 0n || robinhoodL1FeeWei > 0n)) {
-  errors.push('Robinhood cost policy requires a configured priority-fee component');
+if (freeMint && robinhoodL2FeeWei > robinhoodL2ReserveWei) {
+  errors.push('FREE mint L2 execution gas exceeds its independent worst-case reserve');
+}
+if (freeMint && robinhoodL1FeeWei > robinhoodL1ReserveWei) {
+  errors.push('FREE mint L1 data gas exceeds its independent worst-case reserve');
 }
 
 if (errors.length) {

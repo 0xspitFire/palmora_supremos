@@ -29,8 +29,10 @@ source, CI artifacts, logs, or this register.
    on the five external-wallet failures.
 3. Run an archive-backed Anvil fork fixture using `ANVIL_FORK_RPC` by secret
    reference only.
-4. Confirm free-mint total cost as L2 execution fee plus L1 data fee, capped at
-   two times the configured priority-fee component for the mint period.
+4. Confirm FREE mint value exposure is capped at two times the configured
+   priority-fee component. Reserve L2 execution gas and L1 data gas separately
+   as independent worst-case exposures; do not aggregate them into the value
+   cap. A zero priority fee is valid when value exposure is zero.
 5. Keep paid mints blocked until a separate Product Owner policy is accepted.
 6. Complete restart, replacement, reorg, kill-switch, backup/restore, and
    durable reconciliation drills before any live arm operation.
