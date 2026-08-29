@@ -9,6 +9,8 @@ export const ROBINHOOD_SEADROP_POSITIVE_FIXTURE = {
   tokenId: 3477n,
   quantity: 1,
   receiptStatus: 'success' as const,
+  source: 'Product Owner supplied live transaction evidence' as const,
+  provenance: 'Approved wallet -> SeaDrop v1 public mint -> Robinhood 4663 receipt' as const,
 } as const;
 
 /** External failed transaction hashes are documentation/revert references only. */

@@ -38,29 +38,96 @@ export type FeeBudgetVerdict =
   | { ok: true; worstCaseTotalWei: bigint }
   | { ok: false; reason: string };
 
-/** Product policy for FREE mints. A zero priority fee is intentionally unresolved. */
+/** Product policy for FREE mints. Zero priority is valid, but permits no priority component spend. */
 export type FreeMintSpendVerdict =
-  | { status: 'ok'; maxSpendWei: bigint }
-  | { status: 'exceeded'; maxSpendWei: bigint; actualSpendWei: bigint }
-  | { status: 'ambiguous'; reason: 'zero-priority-fee' };
+  | {
+      status: 'ok';
+      priorityComponentCapWei: bigint;
+      l2ExecutionGasReservationWei: bigint;
+      l1DataGasReservationWei: bigint;
+      totalIndependentReservationWei: bigint;
+    }
+  | { status: 'exceeded'; priorityComponentCapWei: bigint; actualPriorityComponentWei: bigint }
+  | { status: 'invalid'; reason: 'negative-exposure' };
 
 /**
- * Enforce the Product Owner's FREE-mint policy for one mint period:
- * total spend must not exceed 2x the priority gas fee. Because 2x zero is not
- * an operationally meaningful allowance, zero priority fee remains an explicit
- * Product Owner decision instead of being silently interpreted as zero budget.
+ * Enforce the Product Owner's FREE-mint policy for one mint period. The 2x rule
+ * applies only to the configured priority-fee component. L2 execution gas and
+ * L1 data gas are independent worst-case reservations and are never collapsed
+ * into that 2x allowance. A zero priority fee is valid and yields a zero cap.
  */
 export function validateFreeMintSpend(input: {
-  priorityFeeWei: bigint;
-  actualSpendWei: bigint;
+  configuredPriorityFeeWei: bigint;
+  actualPriorityComponentWei: bigint;
+  l2ExecutionGasReservationWei: bigint;
+  l1DataGasReservationWei: bigint;
 }): FreeMintSpendVerdict {
-  if (input.priorityFeeWei <= 0n) {
-    return { status: 'ambiguous', reason: 'zero-priority-fee' };
+  if (
+    input.configuredPriorityFeeWei < 0n ||
+    input.actualPriorityComponentWei < 0n ||
+    input.l2ExecutionGasReservationWei < 0n ||
+    input.l1DataGasReservationWei < 0n
+  ) {
+    return { status: 'invalid', reason: 'negative-exposure' };
   }
-  const maxSpendWei = input.priorityFeeWei * 2n;
-  return input.actualSpendWei <= maxSpendWei
-    ? { status: 'ok', maxSpendWei }
-    : { status: 'exceeded', maxSpendWei, actualSpendWei: input.actualSpendWei };
+  const priorityComponentCapWei = input.configuredPriorityFeeWei * 2n;
+  if (input.actualPriorityComponentWei > priorityComponentCapWei) {
+    return { status: 'exceeded', priorityComponentCapWei, actualPriorityComponentWei: input.actualPriorityComponentWei };
+  }
+  return {
+    status: 'ok',
+    priorityComponentCapWei,
+    l2ExecutionGasReservationWei: input.l2ExecutionGasReservationWei,
+    l1DataGasReservationWei: input.l1DataGasReservationWei,
+    totalIndependentReservationWei:
+      priorityComponentCapWei + input.l2ExecutionGasReservationWei + input.l1DataGasReservationWei,
+  };
+}
+
+/** Paid mints remain blocked until the Product Owner approves value/exposure limits. */
+export function paidMintExecutionBlock(valueWei: bigint): { allowed: true } | { allowed: false; reason: string } {
+  return valueWei > 0n
+    ? { allowed: false, reason: 'Paid-mint execution is blocked pending explicit value/exposure policy' }
+    : { allowed: true };
+}
+
+/** Paid-mint quantity defaults to 15 per wallet, subject to the contract's own limit. */
+export function validatePaidQuantity(input: {
+  requestedQuantity: number;
+  contractWalletLimit: number;
+  configuredWalletLimit?: number;
+}): { allowed: true; quantity: number } | { allowed: false; reason: string } {
+  const configured = input.configuredWalletLimit ?? 15;
+  if (!Number.isInteger(configured) || configured < 1) {
+    return { allowed: false, reason: 'Paid per-wallet quantity setting must be a positive integer' };
+  }
+  const effectiveLimit = Math.min(configured, input.contractWalletLimit);
+  if (!Number.isInteger(input.requestedQuantity) || input.requestedQuantity < 1 || input.requestedQuantity > effectiveLimit) {
+    return { allowed: false, reason: `Requested quantity exceeds the effective per-wallet limit of ${effectiveLimit}` };
+  }
+  return { allowed: true, quantity: input.requestedQuantity };
+}
+
+/** Paid gas exposure uses the priority component as requested; L1 data is separate. */
+export function validatePaidGasExposure(input: {
+  gasLimit: bigint;
+  configuredPriorityFeeWei: bigint;
+  actualPriorityComponentWei: bigint;
+  l1DataGasReservationWei: bigint;
+}): { allowed: true; priorityGasCapWei: bigint; l1DataGasReservationWei: bigint } | { allowed: false; reason: string } {
+  if ([input.gasLimit, input.configuredPriorityFeeWei, input.actualPriorityComponentWei, input.l1DataGasReservationWei].some((value) => value < 0n)) {
+    return { allowed: false, reason: 'Negative paid gas exposure is invalid' };
+  }
+  const priorityGasCapWei = input.gasLimit * input.configuredPriorityFeeWei * 3n / 2n;
+  if (input.actualPriorityComponentWei > priorityGasCapWei) {
+    return { allowed: false, reason: 'Paid gas exposure exceeds 1.5x the configured priority component' };
+  }
+  return { allowed: true, priorityGasCapWei, l1DataGasReservationWei: input.l1DataGasReservationWei };
+}
+
+/** Replacement budget is inclusive of the original priority component. */
+export function replacementPriorityBudget(configuredPriorityComponentWei: bigint): bigint {
+  return configuredPriorityComponentWei < 0n ? 0n : configuredPriorityComponentWei * 2n;
 }
 
 /**

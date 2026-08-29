@@ -9,7 +9,7 @@
     "dev": "pnpm --filter @mint-bot/cli dev",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:fork": "vitest run --config vitest.fork.config.ts",
+    "test:fork": "pnpm --filter @mint-bot/engine exec vitest run --config vitest.fork.config.ts",
     "lint": "eslint packages/",
     "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json"
   },

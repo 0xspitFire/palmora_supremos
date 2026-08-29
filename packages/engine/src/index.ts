@@ -28,6 +28,9 @@ export type {
   TransactionIntent,
   SpendReservation,
   SpendReservationProvider,
+  ExecutionReservationRequest,
+  ExecutionReservationStatus,
+  SpendReservationsPort,
   SimulationEvidence,
   FlashbotsAuthSigner,
 } from './types.js';
@@ -66,8 +69,14 @@ export { ReceiptWatcherImpl } from './receipt-watcher.js';
 
 // Safety
 export { KillSwitch, SpendTracker } from './safety.js';
-export { validateFeeBudget, validateFreeMintSpend, assertPriorityFeeIsNotBudget } from './fee-guard.js';
+export { validateFeeBudget, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget, assertPriorityFeeIsNotBudget } from './fee-guard.js';
 export { ROBINHOOD_SEADROP_POSITIVE_FIXTURE, ROBINHOOD_EXTERNAL_FAILED_HASHES_ARE_FLEET_EVIDENCE } from './robinhood-evidence.js';
+export { evaluateRobinhoodVerification, applyRobinhoodVerification } from './robinhood-gate.js';
+export { correlateSequencerObservation } from './sequencer-correlation.js';
+export { reconcileTransaction } from './reconciliation.js';
+export type { RobinhoodGateEvidence, RobinhoodGateResult } from './robinhood-gate.js';
+export type { SequencerObservation, RpcObservation, SequencerCorrelation } from './sequencer-correlation.js';
+export type { ReconciliationInput, ReconciliationAction } from './reconciliation.js';
 
 // Logger
 export { createLogger, childLogger } from './logger.js';
