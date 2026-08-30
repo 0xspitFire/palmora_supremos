@@ -22,6 +22,7 @@
 
 import {
   type Address,
+  type Hash,
   type Chain,
   type PublicClient,
   createPublicClient,
@@ -52,6 +53,8 @@ import { FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, replacementPriorityBudget, val
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
 import { NonceManagerImpl } from './nonce-manager.js';
 import { ReceiptWatcherImpl } from './receipt-watcher.js';
+import { EthereumFinalityObserver } from './finality-observer.js';
+import type { FinalityObserver } from './finality-observer.js';
 import { LocalEncryptedSigner } from './signer.js';
 import { createBroadcaster } from './broadcasters/index.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
@@ -102,8 +105,9 @@ export class MintEngine {
   private readonly killSwitch: KillSwitch;
   private readonly spendTracker: SpendTracker;
   private readonly reservationProvider?: SpendReservationProvider;
+  private readonly finalityObserver?: FinalityObserver;
 
-  constructor(config: MintJobConfig, options?: { reservationProvider?: SpendReservationProvider }) {
+  constructor(config: MintJobConfig, options?: { reservationProvider?: SpendReservationProvider; finalityObserver?: FinalityObserver }) {
     this.config = config;
     this.logger = createLogger(config.observability.logLevel, config.observability.logFile);
     this.killSwitch = new KillSwitch(config.safety.killSwitchFile, this.logger);
@@ -113,6 +117,7 @@ export class MintEngine {
       this.logger,
     );
     this.reservationProvider = options?.reservationProvider;
+    this.finalityObserver = options?.finalityObserver;
   }
 
   /**
@@ -211,9 +216,17 @@ if (!chainConfig.executionEnabled) {
       // ── 5. Preflight checks ─────────────────────────────────
       this.checkKill();
       const nonceManager = new NonceManagerImpl(publicClient);
+      const finalityObserver = this.finalityObserver ?? (chainConfig.chainId === 1
+        ? new EthereumFinalityObserver({
+          chainId: 1,
+          currentBlockNumber: () => publicClient.getBlockNumber(),
+          receiptBlockHash: async (hash: Hash) => (await publicClient.getTransactionReceipt({ hash })).blockHash,
+        }, chainConfig.confirmationDepth)
+        : undefined);
       const receiptWatcher = new ReceiptWatcherImpl(publicClient, {
         maxWaitMs: chainConfig.isL2 ? 30_000 : 120_000,
         finalityPolicy: chainConfig.finalityPolicy,
+        ...(finalityObserver ? { finalityObserver } : {}),
       });
 
       // Check funding
@@ -476,11 +489,13 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
     const promises = walletIndices.map(async (walletIndex): Promise<WalletMintResult> => {
       const walletLog = childLogger(parentLog, 'WalletMint', { walletIndex });
       const startTime = Date.now();
+      let builtNonce: number | undefined;
       const walletInfo = (await signer.listWallets()).find((wallet) => wallet.index === walletIndex);
       if (!walletInfo) throw new Error(`Wallet index ${walletIndex} not found`);
       const walletAddress = walletInfo.address;
       let reservation: import('./types.js').SpendReservation | undefined;
       let releaseAdmission: (() => void) | undefined;
+      let submittedHash: import('viem').Hash | undefined;
 
       try {
         // Check kill switch
@@ -507,6 +522,7 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
         // Build calldata
         const calldata = strategy.buildCalldata(drop, walletAddress, this.config.target.quantity);
         const nonce = await nonceManager.getNonce(walletAddress);
+        builtNonce = nonce;
         const value = drop.mintPrice * BigInt(this.config.target.quantity);
 
         walletLog.info({
@@ -600,6 +616,7 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           event: 'tx_broadcast', txHash: successResult.txHash,
           endpoint: successResult.endpoint, latencyMs: successResult.latencyMs,
         }, `Tx broadcast: ${successResult.txHash}`);
+        submittedHash = successResult.txHash;
 
         nonceManager.consumeNonce(walletAddress);
 
@@ -627,6 +644,10 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           address: walletAddress,
           status: receipt.status === 'success' ? 'success' : 'failed',
           txHash: receipt.txHash,
+          nonce,
+          blockNumber: receipt.blockNumber,
+          blockHash: receipt.blockHash,
+          finalityStage: receipt.finalityStage,
           gasUsed: receipt.gasUsed,
           effectiveGasPrice: receipt.effectiveGasPrice,
           totalCostWei: totalCost,
@@ -637,7 +658,10 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
 
       } catch (err) {
         releaseAdmission?.();
-        await reservation?.release();
+        // A submitted transaction may still be mined after a timeout or RPC
+        // error. Keep its reservation for reconciliation; release only work
+        // that never crossed the broadcast boundary.
+        if (!submittedHash) await reservation?.release();
         const error = err instanceof MintError ? err : new MintError(
           MintErrorType.UNKNOWN,
           err instanceof Error ? err.message : String(err),
@@ -650,7 +674,9 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
         return {
           walletIndex,
           address: walletAddress,
-          status: 'failed',
+          status: submittedHash ? 'timeout' : 'failed',
+          ...(submittedHash ? { txHash: submittedHash } : {}),
+          nonce: builtNonce,
           error: error.message,
           simulation: simulations.get(walletIndex),
           durationMs: Date.now() - startTime,

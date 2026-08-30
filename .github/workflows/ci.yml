@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, phase1-integration]
   pull_request:
   workflow_dispatch:
 
@@ -44,8 +44,8 @@ jobs:
       - run: pnpm ops:negative-cases
       - run: pnpm ops:recovery-drill
       - run: pnpm typecheck
-      - run: pnpm test -- --reporter=dot
       - run: pnpm build
+      - run: pnpm test -- --reporter=dot
       - name: Check for leaked secrets
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -95,5 +95,3 @@ jobs:
           version: v1.0.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm ops:fork-replay
-        env:
-          ARCHIVE_FORK_SOURCE: Rets/MINT_BOT_SECRETS.env:ANVIL_FORK_RPC

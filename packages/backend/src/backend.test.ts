@@ -159,8 +159,8 @@ describe('backend Phase 1 blockers', () => {
     const now = new Date('2026-08-29T00:00:00.000Z');
     const missing = validateOpsHealthEnvironment({}, now);
     expect(missing.valid).toBe(false); expect(missing.blockingReasons).toContain('SECRET_STORE_REFERENCE_REQUIRED');
-    const configured = validateOpsHealthEnvironment({ mode: 'non-production', secretStoreReference: 'TEST_BOT', storePath: 'state.sqlite', signerReady: 'true', killSwitchEngaged: 'false', notificationReady: 'true', chainVerification: 'verified', lastReconciliationAt: '2026-08-28T23:59:00.000Z', probeTtlMs: '120000', engineReady: 'true', chainReady: 'true', backupReady: 'true', atomicStoreReady: 'true' }, now);
-    expect(configured.valid).toBe(true); expect(configured.probe?.secretStoreReference).toBe('TEST_BOT');
+    const configured = validateOpsHealthEnvironment({ mode: 'phase1', secretStoreReference: 'TEST_BOT', storePath: 'state.sqlite', probeTtlMs: '120000' }, now);
+    expect(configured.valid).toBe(true); expect(configured.references?.secretStoreReference).toBe('TEST_BOT');
   });
 
   it('enforces the final Robinhood FREE reserve caps', async () => {

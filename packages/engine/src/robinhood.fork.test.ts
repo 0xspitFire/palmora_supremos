@@ -65,7 +65,7 @@ function requireSetup(): void {
   if (setupError) throw new Error(`Archive-backed Robinhood fork unavailable: ${setupError.message}`);
 }
 
-describe('Robinhood archive-backed fork replay', () => {
+describe.skipIf(process.env.MINT_BOT_FORK_REPLAY !== 'true')('Robinhood archive-backed fork replay', () => {
   it('replays the historical positive SeaDrop transaction and receipt', async () => {
     requireSetup();
     const historicalBlock = `0x${ROBINHOOD_SEADROP_POSITIVE_FIXTURE.blockNumber.toString(16)}`;

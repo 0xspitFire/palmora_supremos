@@ -7,3 +7,5 @@ export { ReadModels } from './read-models.js';
 export type { ActiveExecutionRow, ChainVerificationRow, OpportunityEvidenceRow, PendingReconciliationRow, ReadinessRow } from './read-models.js';
 export { SqliteBackendStore } from './backend-store.js';
 export type { BackendStore } from './backend-store.js';
+export { BackendStateRepository } from './backend-state.js';
+export type { SqliteDatabase } from './database.js';

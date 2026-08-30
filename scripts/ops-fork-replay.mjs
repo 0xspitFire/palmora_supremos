@@ -60,7 +60,7 @@ async function waitForRpc(url) {
 
 function run(command, args, cwd) {
   return new Promise((resolveCode) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit', windowsHide: true });
+    const child = spawn(command, args, { cwd, stdio: 'inherit', windowsHide: true, env: { ...process.env, MINT_BOT_FORK_REPLAY: 'true', ANVIL_RPC_URL: 'http://127.0.0.1:8545' } });
     child.on('error', () => resolveCode(1));
     child.on('exit', (code) => resolveCode(code ?? 1));
   });

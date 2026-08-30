@@ -87,6 +87,7 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
               txHash,
               status: receipt.status === 'success' ? 'success' : 'reverted',
               blockNumber: receipt.blockNumber,
+              blockHash: receipt.blockHash,
               gasUsed: receipt.gasUsed,
               effectiveGasPrice: receipt.effectiveGasPrice,
               confirmations,

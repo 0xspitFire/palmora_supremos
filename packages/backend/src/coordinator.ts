@@ -108,7 +108,7 @@ export class ExecutionCoordinator {
     }
     let result;
     try {
-      result = await this.engine.execute({ runId, intentId: run.intentId, campaign, reservationIds: reservations.map(item => item.id) });
+      result = await this.engine.execute({ runId, intentId: run.intentId, campaign, wallets: intent.wallets, reservationIds: reservations.map(item => item.id) });
     } catch (error) {
       await this.store.transaction(latest => { latest.events.push(this.event('execution_outcome_unknown', runId, { reason: 'ENGINE_ERROR' })); });
       throw error;

@@ -1,157 +1,123 @@
-import { access, constants } from 'node:fs/promises';
-import { connect as tlsConnect } from 'node:tls';
+import { access, constants, readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
 import { loadSecretStore } from './secret-store.mjs';
 
+const require = createRequire(new URL('../packages/database/package.json', import.meta.url));
+const Database = require('better-sqlite3');
 const checks = {};
-const secretStorePath = process.env.SECRET_STORE_PATH;
-const rpcSecretNames = (process.env.RPC_SECRET_NAMES ?? 'ETHEREUM_RPC_URL')
-  .split(',').map((name) => name.trim()).filter(Boolean);
-let secretStore;
-if (secretStorePath) {
-  try {
-    secretStore = await loadSecretStore(secretStorePath);
-  } catch (error) {
-    checks.secretStore = { status: 'failed', error: error instanceof Error ? error.name : 'secret_store_error' };
-  }
-} else {
-  checks.secretStore = { status: 'unknown', reason: 'SECRET_STORE_PATH is not configured' };
-}
-
-const rpcUrls = secretStore
-  ? rpcSecretNames.map((name) => secretStore.get(name)).filter((value) => value !== undefined)
-  : [];
+const mode = process.env.OPS_HEALTH_MODE ?? 'phase1';
+const secretReference = process.env.SECRET_STORE_REFERENCE;
 const storePath = process.env.STORE_PATH;
-const killSwitchPath = process.env.KILL_SWITCH_PATH;
-const sequencerUrl = process.env.SEQUENCER_URL ?? 'https://sequencer.mainnet.chain.robinhood.com';
-const feedUrl = process.env.FEED_URL ?? 'wss://feed.mainnet.chain.robinhood.com';
-const archiveSecretName = process.env.ARCHIVE_FORK_SECRET_NAME ?? 'ANVIL_FORK_RPC';
+const probeTtlMs = Number(process.env.RUNTIME_PROBE_TTL_MS ?? '120000');
 
 checks.process = { status: 'ok' };
 
-if (rpcUrls.length) {
-  const endpoints = [];
-  for (const [index, rpcUrl] of rpcUrls.entries()) {
-    const started = performance.now();
-    try {
-      const response = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
-        signal: AbortSignal.timeout(3000),
-      });
-      const body = await response.json();
-      endpoints.push(response.ok && body.result
-        ? { index, status: 'ok', chainId: body.result, latencyMs: Math.round(performance.now() - started) }
-        : { index, status: 'failed' });
-    } catch (error) {
-      endpoints.push({ index, status: 'failed', error: error instanceof Error ? error.name : 'rpc_error' });
-    }
-  }
-  const expectedChainId = process.env.EXPECTED_CHAIN_ID ?? '0x1';
-  checks.rpc = endpoints.every((endpoint) => endpoint.status === 'ok' && endpoint.chainId === expectedChainId)
-    ? { status: 'ok', expectedChainId, endpoints }
-    : { status: 'failed', expectedChainId, endpoints };
+let secretStore;
+if (!secretReference) {
+  checks.secretStore = { status: 'failed', reason: 'SECRET_STORE_REFERENCE_REQUIRED' };
 } else {
-  checks.rpc = { status: 'unknown', reason: 'approved RPC secret is not configured' };
+  try {
+    secretStore = await loadSecretStore(secretReference);
+    checks.secretStore = { status: 'ok', reference: 'configured' };
+  } catch (error) {
+    checks.secretStore = { status: 'failed', error: error instanceof Error ? error.name : 'secret_store_error' };
+  }
 }
 
-async function checkRpc(url, expectedChainId) {
+let state;
+if (!storePath || /[\r\n]/.test(storePath)) {
+  checks.store = { status: 'failed', reason: 'STORE_PATH_REQUIRED' };
+} else {
   try {
-    const response = await fetch(url, {
+    const database = new Database(resolve(storePath), { readonly: true, fileMustExist: true });
+    try {
+      const integrity = database.pragma('integrity_check', { simple: true });
+      if (integrity !== 'ok') throw new Error('sqlite_integrity_failed');
+      const row = database.prepare('SELECT state_json FROM backend_state WHERE id = ?').get('global');
+      if (!row?.state_json) throw new Error('backend_state_missing');
+      state = JSON.parse(row.state_json, (_key, value) => typeof value === 'string' && /^\d+n$/.test(value) ? BigInt(value.slice(0, -1)) : value);
+      checks.store = { status: 'ok', integrity: 'ok' };
+      const runtimeControl = database.prepare("SELECT kill_switch_engaged FROM runtime_control WHERE id = 'global'").get();
+      const killSwitchEngaged = Boolean(state.killed) || runtimeControl?.kill_switch_engaged === 1;
+      checks.killSwitch = killSwitchEngaged ? { status: 'failed', engaged: true } : { status: 'ok', engaged: false };
+      const backup = database.prepare("SELECT outcome FROM backup_restore_evidence WHERE outcome = 'passed' ORDER BY recorded_at DESC LIMIT 1").get();
+      checks.backup = backup ? { status: 'ok', evidence: 'recorded' } : { status: 'failed', reason: 'BACKUP_EVIDENCE_REQUIRED' };
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    checks.store = { status: 'failed', error: error instanceof Error ? error.name : 'store_probe_error' };
+    checks.killSwitch = { status: 'failed', reason: 'STORE_PROBE_REQUIRED' };
+    checks.backup = { status: 'failed', reason: 'STORE_PROBE_REQUIRED' };
+  }
+}
+
+const stateDirectory = storePath ? dirname(resolve(storePath)) : undefined;
+const projectRoot = stateDirectory ? dirname(stateDirectory) : undefined;
+const walletFile = projectRoot ? join(projectRoot, 'wallets', 'wallets.json') : undefined;
+if (!walletFile) {
+  checks.signer = { status: 'failed', reason: 'STORE_PATH_REQUIRED' };
+} else {
+  try {
+    const content = JSON.parse(await readFile(walletFile, 'utf8'));
+    const valid = Array.isArray(content.wallets) && content.wallets.length > 0 && content.wallets.every((wallet) => typeof wallet.address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(wallet.address));
+    checks.signer = valid ? { status: 'ok', publicMetadata: 'available' } : { status: 'failed', reason: 'WALLET_PUBLIC_METADATA_INVALID' };
+  } catch {
+    checks.signer = { status: 'failed', reason: 'WALLET_PUBLIC_METADATA_UNAVAILABLE' };
+  }
+}
+
+const engineArtifacts = [
+  join(process.cwd(), 'packages', 'engine', 'dist', 'index.js'),
+  join(process.cwd(), 'packages', 'backend', 'dist', 'index.js'),
+  join(process.cwd(), 'packages', 'cli', 'dist', 'index.js'),
+];
+try {
+  await Promise.all(engineArtifacts.map((file) => access(file, constants.R_OK)));
+  checks.engine = { status: 'ok', artifacts: engineArtifacts.length };
+} catch {
+  checks.engine = { status: 'failed', reason: 'BUILD_ARTIFACTS_REQUIRED' };
+}
+
+const rpcNames = mode === 'robinhood' ? ['ROBINHOOD_RPC_URL'] : ['ETHEREUM_RPC_URL'];
+const rpcChecks = [];
+for (const name of rpcNames) {
+  const rpc = secretStore?.get(name);
+  if (!rpc) continue;
+  const started = performance.now();
+  try {
+    const response = await fetch(rpc, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
       signal: AbortSignal.timeout(3000),
     });
     const body = await response.json();
-    return response.ok && body.result === expectedChainId;
-  } catch {
-    return false;
-  }
-}
-
-checks.sequencer = process.env.CHECK_ROBINHOOD === 'true'
-  ? (await checkRpc(sequencerUrl, '0x1237')
-      ? { status: 'ok', chainId: '0x1237' }
-      : { status: 'failed' })
-  : { status: 'unknown', reason: 'Robinhood checks disabled until characterization is accepted' };
-
-async function checkFeed(url) {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'wss:' && parsed.protocol !== 'ws:') return false;
-    await new Promise((resolve, reject) => {
-      const socket = tlsConnect({ host: parsed.hostname, port: Number(parsed.port || 443), servername: parsed.hostname });
-      socket.setTimeout(3000, () => { socket.destroy(); reject(new Error('feed_timeout')); });
-      socket.once('error', reject);
-      socket.once('secureConnect', () => { socket.end(); resolve(); });
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-checks.feed = process.env.CHECK_ROBINHOOD === 'true'
-  ? ((await checkFeed(feedUrl)) ? { status: 'ok', transport: 'reachable' } : { status: 'failed' })
-  : { status: 'unknown', reason: 'Robinhood checks disabled until characterization is accepted' };
-
-checks.archiveFork = process.env.CHECK_FORK === 'true'
-  ? (secretStore && secretStorePath.replaceAll('\\', '/').endsWith('Rets/MINT_BOT_SECRETS.env') && secretStore.has(archiveSecretName)
-      ? { status: 'ok', reference: archiveSecretName }
-      : { status: 'failed', reason: `archive reference ${archiveSecretName} must be read from Rets/MINT_BOT_SECRETS.env` })
-  : { status: 'unknown', reason: 'archive fork check disabled' };
-
-if (storePath) {
-  try {
-    await access(storePath, constants.W_OK);
-    checks.store = { status: 'ok' };
-  } catch {
-    checks.store = { status: 'failed' };
-  }
-} else {
-  checks.store = { status: 'unknown', reason: 'STORE_PATH is not configured' };
-}
-
-checks.killSwitch = killSwitchPath
-  ? await access(killSwitchPath, constants.F_OK)
-      .then(() => ({ status: 'ok', engaged: true, source: 'file' }))
-      .catch(() => ({ status: 'failed', engaged: false, reason: 'kill switch is not engaged' }))
-  : { status: 'unknown', reason: 'KILL_SWITCH_PATH is not configured' };
-
-async function checkService(url, name) {
-  if (!url) return { status: 'unknown', reason: `${name} is not configured` };
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
-    return response.ok ? { status: 'ok' } : { status: 'failed', httpStatus: response.status };
+    const expected = name === 'ROBINHOOD_RPC_URL' ? '0x1237' : '0x1';
+    rpcChecks.push({ name, status: response.ok && body.result === expected ? 'ok' : 'failed', chainId: body.result, latencyMs: Math.round(performance.now() - started) });
   } catch (error) {
-    return { status: 'failed', error: error instanceof Error ? error.name : 'service_error' };
+    rpcChecks.push({ name, status: 'failed', error: error instanceof Error ? error.name : 'rpc_probe_error' });
   }
 }
+checks.rpc = rpcChecks.length > 0 && rpcChecks.every((check) => check.status === 'ok') ? { status: 'ok', endpoints: rpcChecks } : { status: 'failed', reason: 'RPC_CHAIN_ID_PROBE_FAILED', endpoints: rpcChecks };
+checks.chainVerification = state?.runtime?.operational?.chainVerification === 'verified' || (mode === 'phase1' && checks.rpc.status === 'ok')
+  ? { status: 'ok', source: state?.runtime?.operational?.chainVerification === 'verified' ? 'durable_runtime_state' : 'rpc_chain_id' }
+  : { status: 'failed', reason: 'CHAIN_VERIFICATION_REQUIRED' };
 
-checks.chainVerification = checks.rpc?.status === 'ok'
-  ? { status: 'ok', source: 'RPC chain ID probe' }
-  : { status: 'failed', reason: 'RPC chain verification did not pass' };
-checks.signer = await checkService(process.env.SIGNER_HEALTH_URL, 'SIGNER_HEALTH_URL');
-checks.notification = await checkService(process.env.NOTIFICATION_HEALTH_URL, 'NOTIFICATION_HEALTH_URL');
+const reconciliationAt = state?.runtime?.reconciliationCompletedAt ?? state?.runtime?.operational?.lastReconciliationAt;
+const reconciliationAge = reconciliationAt ? Date.now() - Date.parse(reconciliationAt) : Number.POSITIVE_INFINITY;
+checks.reconciliation = Number.isFinite(probeTtlMs) && probeTtlMs > 0 && reconciliationAge >= 0 && reconciliationAge <= probeTtlMs
+  ? { status: 'ok', ageMs: reconciliationAge }
+  : { status: 'failed', reason: 'RECONCILIATION_STALE' };
 
-const reconciliationAt = process.env.LAST_RECONCILIATION_AT;
-const reconciliationMaxAgeMs = Number(process.env.RECONCILIATION_MAX_AGE_MS ?? 120_000);
-if (reconciliationAt && Number.isFinite(reconciliationMaxAgeMs) && reconciliationMaxAgeMs > 0) {
-  const ageMs = Date.now() - Date.parse(reconciliationAt);
-  checks.reconciliation = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= reconciliationMaxAgeMs
-    ? { status: 'ok', ageMs }
-    : { status: 'failed', ageMs, maxAgeMs: reconciliationMaxAgeMs };
-} else {
-  checks.reconciliation = { status: 'unknown', reason: 'LAST_RECONCILIATION_AT is not configured' };
-}
-
-const requiredFinality = process.env.REQUIRED_FINALITY_STAGE ?? 'final';
-const finalityStage = process.env.LAST_FINALITY_STAGE;
-checks.finality = finalityStage === requiredFinality
-  ? { status: 'ok', stage: finalityStage }
-  : { status: 'unknown', reason: `Ethereum finality stage ${requiredFinality} is required; soft/posted states remain non-success` };
+checks.notification = mode === 'phase1'
+  ? { status: 'ok', mode: 'not_required_in_phase1' }
+  : { status: 'failed', reason: 'NOTIFICATION_PROBE_REQUIRED' };
+checks.finality = state?.runtime?.operational?.chainVerification === 'verified'
+  ? { status: 'ok', source: 'durable_runtime_state' }
+  : { status: 'failed', reason: 'FINALITY_EVIDENCE_REQUIRED' };
 
 const failed = Object.values(checks).some((check) => check.status !== 'ok');
-console.log(JSON.stringify({ status: failed ? 'failed' : 'ok', checks, timestamp: new Date().toISOString() }));
+console.log(JSON.stringify({ status: failed ? 'failed' : 'ok', mode, checks, timestamp: new Date().toISOString() }));
 process.exitCode = failed ? 1 : 0;

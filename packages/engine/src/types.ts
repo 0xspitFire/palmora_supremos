@@ -347,6 +347,7 @@ export interface MintReceipt {
   readonly txHash: Hash;
   readonly status: 'success' | 'reverted';
   readonly blockNumber: bigint;
+  readonly blockHash: Hash;
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
   readonly confirmations: number;
@@ -368,6 +369,10 @@ export interface WalletMintResult {
   readonly address: Address;
   readonly status: 'success' | 'prepared' | 'failed' | 'timeout' | 'skipped' | 'killed';
   readonly txHash?: Hash;
+  readonly nonce?: number;
+  readonly blockNumber?: bigint;
+  readonly blockHash?: Hash;
+  readonly finalityStage?: FinalityStage;
   readonly gasUsed?: bigint;
   readonly effectiveGasPrice?: bigint;
   readonly totalCostWei?: bigint;
