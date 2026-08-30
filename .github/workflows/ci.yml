@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm ops:secret-boundary
+      - run: pnpm ops:policy
+        env:
+          ROBINHOOD_MINT_TYPE: FREE
+          ROBINHOOD_PRIORITY_FEE_WEI: "0"
+          ROBINHOOD_FREE_MINT_VALUE_WEI: "0"
+          ROBINHOOD_L2_EXECUTION_FEE_WEI: "1"
+          ROBINHOOD_L2_GAS_RESERVE_WEI: "1"
+          ROBINHOOD_L1_DATA_FEE_WEI: "1"
+          ROBINHOOD_L1_DATA_GAS_RESERVE_WEI: "1"
+      - run: pnpm ops:negative-cases
+      - run: pnpm typecheck
+      - run: pnpm test -- --reporter=dot
+      - run: pnpm build
+      - name: Check for leaked secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  anvil:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.0.0
+      - run: pnpm install --frozen-lockfile
+      - name: Start local Anvil
+        shell: bash
+        run: |
+          anvil --chain-id 31337 --block-time 1 --host 127.0.0.1 > "$RUNNER_TEMP/anvil.log" 2>&1 &
+          for i in {1..30}; do curl --silent --fail -X POST http://127.0.0.1:8545 -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' && exit 0; sleep 1; done
+          cat "$RUNNER_TEMP/anvil.log"
+          exit 1
+      - name: Confirm Anvil smoke service
+        run: cast block-number --rpc-url http://127.0.0.1:8545
+
+  archive-fork-replay:
+    if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.0.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm ops:fork-replay
+        env:
+          ARCHIVE_FORK_SOURCE: Rets/MINT_BOT_SECRETS.env:ANVIL_FORK_RPC

@@ -14,13 +14,28 @@ import type { Address, Hex, PublicClient, Hash } from 'viem';
 /** Supported chain identifiers. */
 export type SupportedChainId = 1 | 8453 | 4663;
 
-/** Broadcast strategy — determines how transactions are submitted to the network. */
-export type BroadcastMode =
-  | 'auto'           // L1 → Flashbots primary, L2 → sequencer + blast
-  | 'public'         // Single RPC public mempool
-  | 'blast'          // Multi-endpoint parallel blast
-  | 'flashbots'      // Flashbots relay bundle (L1 only)
-  | 'sequencer';     // Direct-to-sequencer (L2 only)
+/**
+ * Chain verification state. `verified` is a precondition for live execution;
+ * `unverified` chains may be inspected but never executed.
+ */
+export type ChainVerificationStatus = 'unverified' | 'verified' | 'disabled';
+
+/** Recorded characterization evidence for a chain (owner acceptance + provenance). */
+export interface ChainCharacterization {
+  readonly status: ChainVerificationStatus;
+  /** Human/owner who accepted the characterization. */
+  readonly acceptedBy?: string;
+  /** Acceptance date (ISO). */
+  readonly acceptedAt?: string;
+  /** Reference to the characterization report/evidence. */
+  readonly reportRef?: string;
+  /** Reference to the recorded live SeaDrop-v1 public-drop test, if any. */
+  readonly liveMintEvidenceRef?: string;
+  /** Tx hash of the accepted live public-drop mint, if any. */
+  readonly liveMintTxHash?: string;
+  /** Free-form notes describing what was verified (no secrets). */
+  readonly notes?: string;
+}
 
 /** Chain configuration entry. */
 export interface ChainConfig {
@@ -30,9 +45,50 @@ export interface ChainConfig {
   readonly confirmationDepth: number;
   readonly rpcEndpoints: readonly string[];
   readonly sequencerUrl?: string;
+  readonly sequencerFeedUrl?: string;
+  readonly explorerUrl?: string;
   readonly flashbotsRelayUrl?: string;
   readonly isL2: boolean;
+  readonly verificationStatus: ChainVerificationStatus;
+  readonly characterization?: ChainCharacterization;
+  readonly finalityPolicy: FinalityPolicy;
+  /** False until chain characterization and live-drop validation are accepted. */
+  readonly executionEnabled: boolean;
 }
+
+/**
+ * Chain-specific finality model. Ethereum is single-stage (block confirmation);
+ * Optimistic/Arbitrum L2s (Robinhood, Base) have staged finality.
+ */
+export type FinalityStage =
+  | 'confirmed'              // inclusive mainnet block confirmation
+  | 'soft'                   // Sequencer accepted + soft-confirmed
+  | 'posted'                 // Batch posted to L1 inbox
+  | 'ethereum_final';        // L1 reached Ethereum finality
+
+export interface FinalityPolicy {
+  /**
+   * Ordered list of finality stages for the chain, from earliest observation to
+   * strongest. `confirmed` always ends the list for operational accounting.
+   */
+  readonly stages: readonly FinalityStage[];
+  /**
+   * For L2s, the minimum stage required to consider spend "settled". Robinhood
+   * treats `posted` as settlement for high-value accounting, but confirmation
+   * is `confirmed` for ordinary operational status.
+   */
+  readonly settlementStage: FinalityStage;
+  /** Human note on how to interpret staged acknowledgment (no secrets). */
+  readonly notes?: string;
+}
+
+/** Broadcast strategy — determines how transactions are submitted to the network. */
+export type BroadcastMode =
+  | 'auto'           // L1 → Flashbots primary, L2 → sequencer + blast
+  | 'public'         // Single RPC public mempool
+  | 'blast'          // Multi-endpoint parallel blast
+  | 'flashbots'      // Flashbots relay bundle (L1 only)
+  | 'sequencer';     // Direct-to-sequencer (L2 only)
 
 // ─────────────────────────────────────────────────────────────
 // Drop & Mint Strategy
@@ -103,6 +159,7 @@ export interface BroadcastResult {
   readonly latencyMs: number;
   readonly success: boolean;
   readonly error?: string;
+  readonly providerReference?: string;
 }
 
 /**
@@ -131,6 +188,105 @@ export interface BroadcastOptions {
   maxBumps?: number;
 }
 
+/** Immutable unsigned transaction intent. No signer or private key is retained. */
+export interface TransactionIntent {
+  readonly chainId: SupportedChainId;
+  readonly from: Address;
+  readonly to: Address;
+  readonly value: bigint;
+  readonly data: Hex;
+  readonly nonce: number;
+  readonly gasLimit: bigint;
+  readonly maxFeePerGas: bigint;
+  readonly maxPriorityFeePerGas: bigint;
+  readonly campaignId?: string;
+  readonly runId?: string;
+  readonly policyRef?: string;
+  readonly evidenceRef?: string;
+}
+
+export interface SpendReservation {
+  readonly reservationId: string;
+  readonly walletIndex: number;
+  readonly maxValueWei: bigint;
+  readonly maxGasCostWei: bigint;
+  settle(actualValueWei: bigint, actualGasCostWei: bigint): Promise<void>;
+  release(): Promise<void>;
+}
+
+export interface SpendReservationProvider {
+  reserve(input: {
+    readonly idempotencyKey: string;
+    readonly chainId: SupportedChainId;
+    walletIndex: number;
+    address: Address;
+    valueWei: bigint;
+    maxGasCostWei: bigint;
+    readonly campaignId: string;
+    readonly runId: string;
+    readonly executionId: string;
+    readonly transactionIntentId: string;
+    readonly mintValueWei: bigint;
+    readonly l2ExecutionGasWei: bigint;
+    readonly l1DataGasWei: bigint;
+    readonly priorityFeeComponentWei: bigint;
+    /** Inclusive original-plus-replacement priority component budget. */
+    readonly replacementBudgetWei: bigint;
+    readonly freeMint: boolean;
+    readonly policySnapshot: unknown;
+  }): Promise<SpendReservation>;
+}
+
+/** Database-aligned component reservation request for a single execution. */
+export interface ExecutionReservationRequest {
+  readonly id: string;
+  readonly walletId: string;
+  readonly chainProfileId: string;
+  readonly campaignId: string;
+  readonly idempotencyKey: string;
+  readonly policyId: string;
+  readonly mintValueWei: bigint;
+  readonly l2ExecutionGasWei: bigint;
+  readonly l1DataGasWei: bigint;
+  readonly priorityFeeComponentWei: bigint;
+  readonly freeMint: boolean;
+  readonly policySnapshot?: unknown;
+  readonly at?: Date;
+}
+
+export type ExecutionReservationStatus = 'reserved' | 'settled' | 'released' | 'expired';
+
+/** Database SpendReservations port. Implemented by the database package. */
+export interface SpendReservationsPort {
+  reserveExecution(request: ExecutionReservationRequest): ExecutionReservationStatus;
+  settleExecution(
+    id: string,
+    actualMintValueWei: bigint,
+    actualL2ExecutionGasWei: bigint,
+    actualL1DataGasWei: bigint,
+    at?: Date,
+  ): void;
+}
+
+export interface SimulationEvidence {
+  readonly walletIndex: number;
+  readonly address: Address;
+  readonly sourceBlock: bigint;
+  readonly checkedAt: Date;
+  readonly gasEstimate?: bigint;
+  readonly success: boolean;
+  readonly revertType?: string;
+  readonly error?: string;
+  /** Relay/provider reference, such as a Flashbots bundle hash. */
+  readonly providerReference?: string;
+}
+
+/** Dedicated relay-auth signer. It must not be a funded minting wallet. */
+export interface FlashbotsAuthSigner {
+  readonly address: Address;
+  signMessage(message: Hex): Promise<Hex>;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Signer
 // ─────────────────────────────────────────────────────────────
@@ -154,8 +310,8 @@ export interface Signer {
   /** List all available wallets (addresses only). */
   listWallets(): Promise<WalletInfo[]>;
 
-  /** Sign a transaction hash and return the serialized signed transaction. */
-  signTransaction(walletIndex: number, serializedUnsignedTx: Hex): Promise<Hex>;
+  /** Sign an immutable transaction intent after validating its wallet boundary. */
+  signTransaction(walletIndex: number, intent: TransactionIntent): Promise<Hex>;
 
   /** Securely wipe all key material from memory. */
   zeroize(): void;
@@ -194,6 +350,7 @@ export interface MintReceipt {
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
   readonly confirmations: number;
+  readonly finalityStage: FinalityStage;
 }
 
 export interface ReceiptWatcher {
@@ -209,13 +366,14 @@ export interface ReceiptWatcher {
 export interface WalletMintResult {
   readonly walletIndex: number;
   readonly address: Address;
-  readonly status: 'success' | 'failed' | 'timeout' | 'skipped' | 'killed';
+  readonly status: 'success' | 'prepared' | 'failed' | 'timeout' | 'skipped' | 'killed';
   readonly txHash?: Hash;
   readonly gasUsed?: bigint;
   readonly effectiveGasPrice?: bigint;
   readonly totalCostWei?: bigint;
   readonly error?: string;
   readonly durationMs: number;
+  readonly simulation?: SimulationEvidence;
 }
 
 /** Overall mint job result. */
@@ -265,11 +423,20 @@ export interface MintJobConfig {
     readonly maxReplacementBumps: number;
     readonly dryRun: boolean;
     readonly killSwitchFile: string;
+    /** Paid quantity default is 15; UI may raise/lower it, contract limit still applies. */
+    readonly paidMaxQuantityPerWallet?: number;
+    /** Adjustable paid mint-value cap per run; defaults to 0.3 ETH. */
+    readonly paidRunMintValueCapEth?: number;
   };
-  readonly broadcast: {
+readonly broadcast: {
     readonly mode: BroadcastMode;
     readonly rpcEndpoints: readonly string[];
     readonly blastParallel: boolean;
+    readonly flashbotsAuthSigner?: FlashbotsAuthSigner;
+    /** Secret store scope; defaults to 'mainnet'. */
+    readonly secretScope?: 'mainnet' | 'testnet';
+    /** Secret store root; defaults to the project-local 'Rets' folder. */
+    readonly secretRoot?: string;
   };
   readonly observability: {
     readonly logLevel: 'debug' | 'info' | 'warn' | 'error';
@@ -294,6 +461,7 @@ export enum MintErrorType {
   SPEND_CAP_EXCEEDED = 'SPEND_CAP_EXCEEDED',
   DROP_NOT_ACTIVE = 'DROP_NOT_ACTIVE',
   SIMULATION_FAILED = 'SIMULATION_FAILED',
+  INVALID_CONFIG = 'INVALID_CONFIG',
   UNKNOWN = 'UNKNOWN',
 }
 
