@@ -9,10 +9,18 @@ killswitch
 logs/
 coverage/
 .kilo/
+Rets/
 
 # Local planning docs (contain sensitive references; kept out of the repo)
 NFT_MINT_BOT_CONTEXT_BRIEFING.md
 PRODUCT_SPEC.md
+!PRODUCT_SPEC.md
 Product_Design_Agent
 Product_Manager_Agent
 Repo_Analyze
+Rets
+
+# Agent instruction artifacts are local orchestration inputs, not product source.
+Agent Instructions/
+AGENTS_INS.md
+Engineers_Agent

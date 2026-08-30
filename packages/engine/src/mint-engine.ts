@@ -122,6 +122,16 @@ export class MintEngine {
       const chainId = chainConfig.chainId;
       engineLog.info({ chain: chainConfig.name, chainId }, 'Chain resolved');
 
+      // Robinhood requires staged finality and integrated operational gates that
+      // are not available in this standalone engine path. Fail closed rather
+      // than reporting a receipt as product success before Ethereum finality.
+      if (chainId === 4663) {
+        throw new MintError(
+          MintErrorType.CHAIN_NOT_VERIFIED,
+          'Robinhood execution is blocked until integrated verification, durable reservations, reconciliation, and Ethereum-final settlement are available',
+        );
+      }
+
       // ── 2. Create RPC client ────────────────────────────────
       const rpcUrl = this.config.broadcast.rpcEndpoints[0] ?? chainConfig.rpcEndpoints[0];
       if (!rpcUrl) {
