@@ -119,16 +119,21 @@ checks.killSwitch = killSwitchPath
       .catch(() => ({ status: 'failed', engaged: false, reason: 'kill switch is not engaged' }))
   : { status: 'unknown', reason: 'KILL_SWITCH_PATH is not configured' };
 
-function configuredBoolean(name) {
-  const value = process.env[name];
-  if (value === 'true') return { status: 'ok', value: true };
-  if (value === 'false') return { status: 'failed', value: false };
-  return { status: 'unknown', reason: `${name} is not configured` };
+async function checkService(url, name) {
+  if (!url) return { status: 'unknown', reason: `${name} is not configured` };
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    return response.ok ? { status: 'ok' } : { status: 'failed', httpStatus: response.status };
+  } catch (error) {
+    return { status: 'failed', error: error instanceof Error ? error.name : 'service_error' };
+  }
 }
 
-checks.chainVerification = configuredBoolean('CHAIN_VERIFIED');
-checks.signer = configuredBoolean('SIGNER_READY');
-checks.notification = configuredBoolean('NOTIFICATION_READY');
+checks.chainVerification = checks.rpc?.status === 'ok'
+  ? { status: 'ok', source: 'RPC chain ID probe' }
+  : { status: 'failed', reason: 'RPC chain verification did not pass' };
+checks.signer = await checkService(process.env.SIGNER_HEALTH_URL, 'SIGNER_HEALTH_URL');
+checks.notification = await checkService(process.env.NOTIFICATION_HEALTH_URL, 'NOTIFICATION_HEALTH_URL');
 
 const reconciliationAt = process.env.LAST_RECONCILIATION_AT;
 const reconciliationMaxAgeMs = Number(process.env.RECONCILIATION_MAX_AGE_MS ?? 120_000);

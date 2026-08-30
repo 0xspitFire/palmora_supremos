@@ -82,6 +82,11 @@ fork compatibility.
 Product success requires Ethereum finality; Robinhood soft and posted states
 must remain retained as intermediate reconciliation states.
 
+Runtime readiness uses `SIGNER_HEALTH_URL` and `NOTIFICATION_HEALTH_URL` service
+probes rather than operator readiness booleans. Chain verification comes from
+the RPC chain-ID probe. `pnpm ops:recovery-drill` executes an isolated SQLite
+backup/restore drill with the kill switch engaged and 30-day retention.
+
 ## Logs and retention
 
 Use structured JSON logs with run, campaign, wallet, execution, and transaction
