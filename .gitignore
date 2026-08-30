@@ -18,7 +18,6 @@ PRODUCT_SPEC.md
 Product_Design_Agent
 Product_Manager_Agent
 Repo_Analyze
-Rets
 
 # Agent instruction artifacts are local orchestration inputs, not product source.
 Agent Instructions/
