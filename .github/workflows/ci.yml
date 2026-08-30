@@ -36,6 +36,8 @@ jobs:
           ROBINHOOD_L2_GAS_RESERVE_WEI: "1"
           ROBINHOOD_L1_DATA_FEE_WEI: "1"
           ROBINHOOD_L1_DATA_GAS_RESERVE_WEI: "1"
+          ROBINHOOD_FREE_WALLET_CAP_WEI: "200000000000000"
+          ROBINHOOD_FREE_PERIOD_CAP_WEI: "2000000000000000"
       - run: pnpm ops:negative-cases
       - run: pnpm typecheck
       - run: pnpm test -- --reporter=dot

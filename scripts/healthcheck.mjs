@@ -141,6 +141,12 @@ if (reconciliationAt && Number.isFinite(reconciliationMaxAgeMs) && reconciliatio
   checks.reconciliation = { status: 'unknown', reason: 'LAST_RECONCILIATION_AT is not configured' };
 }
 
+const requiredFinality = process.env.REQUIRED_FINALITY_STAGE ?? 'final';
+const finalityStage = process.env.LAST_FINALITY_STAGE;
+checks.finality = finalityStage === requiredFinality
+  ? { status: 'ok', stage: finalityStage }
+  : { status: 'unknown', reason: `Ethereum finality stage ${requiredFinality} is required; soft/posted states remain non-success` };
+
 const failed = Object.values(checks).some((check) => check.status !== 'ok');
 console.log(JSON.stringify({ status: failed ? 'failed' : 'ok', checks, timestamp: new Date().toISOString() }));
 process.exitCode = failed ? 1 : 0;

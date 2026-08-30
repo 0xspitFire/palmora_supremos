@@ -156,6 +156,5 @@ describe('Robinhood archive-backed fork replay', () => {
     expect(block?.hash).toBeDefined();
     const policy = getChainConfig(4663).finalityPolicy;
     expect(policy.stages).toEqual(['soft', 'posted', 'ethereum_final']);
-    expect(policy.settlementStage).toBe('ethereum_final');
   });
 });

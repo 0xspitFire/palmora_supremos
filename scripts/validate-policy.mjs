@@ -10,6 +10,8 @@ const robinhoodL1FeeWei = BigInt(process.env.ROBINHOOD_L1_DATA_FEE_WEI ?? '0');
 const robinhoodFreeValueWei = BigInt(process.env.ROBINHOOD_FREE_MINT_VALUE_WEI ?? '0');
 const robinhoodL2ReserveWei = BigInt(process.env.ROBINHOOD_L2_GAS_RESERVE_WEI ?? '0');
 const robinhoodL1ReserveWei = BigInt(process.env.ROBINHOOD_L1_DATA_GAS_RESERVE_WEI ?? '0');
+const robinhoodWalletCapWei = BigInt(process.env.ROBINHOOD_FREE_WALLET_CAP_WEI ?? '200000000000000');
+const robinhoodPeriodCapWei = BigInt(process.env.ROBINHOOD_FREE_PERIOD_CAP_WEI ?? '2000000000000000');
 const freeMint = process.env.ROBINHOOD_MINT_TYPE === 'FREE';
 
 const errors = [];
@@ -27,6 +29,13 @@ if (freeMint && robinhoodL2FeeWei > robinhoodL2ReserveWei) {
 }
 if (freeMint && robinhoodL1FeeWei > robinhoodL1ReserveWei) {
   errors.push('FREE mint L1 data gas exceeds its independent worst-case reserve');
+}
+const freeReservedExposureWei = robinhoodFreeValueWei + robinhoodL2ReserveWei + robinhoodL1ReserveWei;
+if (freeMint && freeReservedExposureWei > robinhoodWalletCapWei) {
+  errors.push('FREE mint reserved exposure exceeds the per-wallet cap');
+}
+if (freeMint && freeReservedExposureWei > robinhoodPeriodCapWei) {
+  errors.push('FREE mint reserved exposure exceeds the active mint-period cap');
 }
 
 if (errors.length) {
