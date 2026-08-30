@@ -73,8 +73,12 @@ references and are not fleet evidence.
 - Archive-fork replay is blocked by unavailable Anvil and approved archive RPC
   infrastructure in this environment. The six genuine Robinhood scenarios are
   not marked passed or skipped.
-- Docker build/runtime proof is blocked because Docker is not installed on the
-  current host; the Dockerfile and compose healthcheck remain in CI scope.
+- Docker build/runtime proof passes in remote CI: the production image builds and
+  the no-configuration container health probe fails closed. Docker is not
+  installed on the local Windows host, so no local Docker command was run.
+- The required Ethereum three-wallet SeaDrop fork test and strict runner are
+  present, but remain pending approved archive access and fixture configuration;
+  the default deterministic suite records this as an external skip.
 - Remote branch protection is an authenticated repository-admin operation. The
   branch and workflow can be pushed, but protection is not represented as code
   and must be verified remotely after push.
