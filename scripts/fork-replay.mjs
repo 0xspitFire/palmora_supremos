@@ -2,10 +2,10 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 
-const forkRpc = process.env.ANVIL_FORK_RPC;
+const forkRpc = process.env.ROBINHOOD_ARCHIVE_RPC;
 const sourceReference = process.env.ARCHIVE_FORK_SOURCE ?? '';
-if (!forkRpc) throw new Error('ANVIL_FORK_RPC must be injected by the approved secret manager');
-if (sourceReference !== 'Rets/MINT_BOT_SECRETS.env:ANVIL_FORK_RPC') throw new Error('Archive fork source must be Rets/MINT_BOT_SECRETS.env:ANVIL_FORK_RPC');
+if (!forkRpc) throw new Error('ROBINHOOD_ARCHIVE_RPC must be injected by the approved secret manager');
+if (sourceReference !== 'Rets/MINT_BOT_SECRETS.env:ROBINHOOD_ARCHIVE_RPC') throw new Error('Archive fork source must be Rets/MINT_BOT_SECRETS.env:ROBINHOOD_ARCHIVE_RPC');
 
 async function hasForkTests(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -35,7 +35,7 @@ try {
   if (!ready) throw new Error('Anvil did not become ready for archive replay');
   const runner = process.platform === 'win32' ? 'corepack.cmd' : 'corepack';
   const testEnvironment = { ...process.env, ANVIL_RPC_URL: 'http://127.0.0.1:8545' };
-  delete testEnvironment.ANVIL_FORK_RPC;
+  delete testEnvironment.ROBINHOOD_ARCHIVE_RPC;
   delete testEnvironment.ARCHIVE_FORK_SOURCE;
   await new Promise((resolve, reject) => {
     const child = spawn(runner, ['pnpm', 'exec', 'vitest', 'run', '--config', 'vitest.fork.config.ts'], { stdio: 'inherit', env: testEnvironment });

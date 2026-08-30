@@ -10,7 +10,7 @@ fixture, or substitute for the accepted characterization gate.
 - Feed: `wss://feed.mainnet.chain.robinhood.com`.
 - Execution: disabled until characterization, safety, reconciliation, and
   Product Owner acceptance gates pass.
-- Archive RPC: referenced only by the `ANVIL_FORK_RPC` key in the read-only
+- Archive RPC: referenced only by the `ROBINHOOD_ARCHIVE_RPC` key in the read-only
   `Rets/MINT_BOT_SECRETS.env` store. The endpoint value is never recorded here.
 
 ## Failed hashes
@@ -27,7 +27,7 @@ source, CI artifacts, logs, or this register.
 1. Verify chain ID `4663` through the configured RPC and sequencer endpoints.
 2. Verify feed reachability and decode/reconciliation behavior without relying
    on the five external-wallet failures.
-3. Run an archive-backed Anvil fork fixture using `ANVIL_FORK_RPC` by secret
+3. Run an archive-backed Anvil fork fixture using `ROBINHOOD_ARCHIVE_RPC` by secret
    reference only.
 4. Confirm FREE mint value exposure is capped at two times the configured
    priority-fee component. Reserve L2 execution gas and L1 data gas separately

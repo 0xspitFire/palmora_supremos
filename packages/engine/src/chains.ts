@@ -119,7 +119,6 @@ const CHAIN_ENV_REFS: Record<SupportedChainId, readonly SecretName[]> = {
   4663: [
     'ROBINHOOD_RPC_URL',
     'ROBINHOOD_RPC_FBACK',
-    'ROBINHOOD_ARCHIVE_RPC',
   ],
 };
 

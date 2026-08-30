@@ -454,7 +454,7 @@ The engineers branch contains no tracked `packages/web` or other web source. Thi
 The Frontend audit adds no Phase 1 blocker. The following shared evidence gates remain deployment blockers for every future operator surface, including CLI and any later web UI:
 
 - Robinhood chain/sequencer/feed characterization;
-- archive-backed fork evidence through the approved `ANVIL_FORK_RPC` reference in `Rets/MINT_BOT_SECRETS.env`;
+- archive-backed fork evidence through the approved `ROBINHOOD_ARCHIVE_RPC` reference in `Rets/MINT_BOT_SECRETS.env`;
 - per-wallet simulation and readiness evidence;
 - FREE-mint value/priority policy plus independent L2 and L1 gas reservations;
 - durable intent, attempt, receipt, replacement, restart, reorg, and kill-switch recovery evidence;

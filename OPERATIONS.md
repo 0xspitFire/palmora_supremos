@@ -9,7 +9,7 @@ execution.
 Provide `SECRET_STORE_PATH`, `RPC_SECRET_NAMES`, `STORE_PATH`, and
 `KILL_SWITCH_PATH` through the host secret mechanism or service manager. The
 secret store path must point to `Rets/MINT_BOT_SECRETS.env` or
-`Rets/TEST_BOT.env`. Archive-backed fork tests use the `ANVIL_FORK_RPC` key by
+`Rets/TEST_BOT.env`. Archive-backed fork tests use the `ROBINHOOD_ARCHIVE_RPC` key by
 reference only. The approved keystore directory is `./Rets/wallets`; its
 Product Owner passphrase must be requested through a hidden interactive prompt
 by the host launcher when needed. Do not expose it as an environment variable,
@@ -68,12 +68,12 @@ but exclude paid-mint value. Encrypted backups retain for exactly 30 days under
 Official Robinhood endpoints are chain ID `4663` (`0x1237`), sequencer
 `https://sequencer.mainnet.chain.robinhood.com`, and feed
 `wss://feed.mainnet.chain.robinhood.com`. CI may use the archive endpoint only
-through the `ANVIL_FORK_RPC` secret reference; the value is injected by the
+through the `ROBINHOOD_ARCHIVE_RPC` secret reference; the value is injected by the
 secret manager and never written to logs, artifacts, or workflow files.
 
 The archive replay launcher passes the archive reference only to Anvil. Vitest
 receives only `ANVIL_RPC_URL=http://127.0.0.1:8545`; fork tests must never read
-`ANVIL_FORK_RPC` directly. The genuine Robinhood fixture verifies local Anvil
+`ROBINHOOD_ARCHIVE_RPC` directly. The genuine Robinhood fixture verifies local Anvil
 chain `31337`, historical block state, and public SeaDrop singleton code. The
 CI fork gate must be followed by replay coverage for failed, reverted,
 replacement, reorg, restart, kill-switch, and reconciliation scenarios. A

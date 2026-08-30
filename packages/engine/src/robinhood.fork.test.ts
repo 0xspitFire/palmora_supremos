@@ -53,7 +53,7 @@ beforeAll(async () => {
     } catch {
       throw new Error('Anvil fork endpoint unreachable');
     }
-    if (!client.toLowerCase().includes('anvil')) throw new Error('ANVIL_FORK_RPC is not an Anvil endpoint');
+    if (!client.toLowerCase().includes('anvil')) throw new Error('ROBINHOOD_ARCHIVE_RPC is not an Anvil endpoint');
     const chainId = await fork('eth_chainId');
     if (chainId !== '0x1237') throw new Error(`Fork chain mismatch: expected 4663, observed ${chainId}`);
   } catch (error) {
