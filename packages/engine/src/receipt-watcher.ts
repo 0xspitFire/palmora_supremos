@@ -12,6 +12,7 @@
 
 import type { Hash, PublicClient } from 'viem';
 import type { FinalityPolicy, FinalityStage, MintReceipt, ReceiptWatcher as IReceiptWatcher } from './types.js';
+import type { FinalityObserver } from './finality-observer.js';
 
 export interface ReceiptWatcherOptions {
   /** Initial poll interval in ms. Default: 500 */
@@ -25,7 +26,7 @@ export interface ReceiptWatcherOptions {
   /** Chain-specific finality. L2 success requires the settlement stage. */
   finalityPolicy?: FinalityPolicy;
   /** Observer that advances staged L2 finality; absent means only soft is known. */
-  finalityObserver?: (txHash: Hash, blockNumber: bigint) => Promise<FinalityStage>;
+  finalityObserver?: FinalityObserver | ((txHash: Hash, blockNumber: bigint) => Promise<FinalityStage>);
 }
 
 type ResolvedReceiptWatcherOptions =
@@ -67,12 +68,17 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
           const confirmations = Number(currentBlock - receipt.blockNumber) + 1;
 
           if (confirmations >= confirmationDepth) {
-            const finalityStage = this.options.finalityObserver
-              ? await this.options.finalityObserver(txHash, receipt.blockNumber)
-              : this.options.finalityPolicy.stages.includes('soft')
+            const observation = this.options.finalityObserver
+              ? 'observe' in this.options.finalityObserver
+                ? await this.options.finalityObserver.observe({ txHash, txBlockNumber: receipt.blockNumber })
+                : { stage: await this.options.finalityObserver(txHash, receipt.blockNumber), ready: true }
+              : undefined;
+            const finalityStage = observation?.stage ?? (
+              this.options.finalityPolicy.stages.includes('soft')
                 ? this.options.finalityPolicy.stages[0]!
-                : this.options.finalityPolicy.settlementStage;
-            if (finalityStage !== this.options.finalityPolicy.settlementStage) {
+                : this.options.finalityPolicy.settlementStage
+            );
+            if ((observation && !observation.ready) || finalityStage !== this.options.finalityPolicy.settlementStage) {
               pollInterval = this.options.initialPollMs;
               await sleep(pollInterval);
               continue;
