@@ -15,6 +15,8 @@ import { resolveWalletPath } from './keystore-path.js';
 import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from './policy.js';
 import { EvidenceService, campaignInputDigest } from './evidence.js';
 import { HealthService } from './health.js';
+import { RuntimeReadinessService } from './runtime-readiness.js';
+import { validateOpsHealthEnvironment } from './ops-health-harness.js';
 import type { Campaign, ChainEvidenceRecord, EngineAdapter } from './types.js';
 
 class ReadyStore extends DurableStore { override capabilities() { return { durable: true, atomicAcrossProcesses: true }; } }
@@ -23,6 +25,7 @@ const emptyResult = { executionIds: [], attempts: [], receipts: [], state: 'Prep
 const unknownUpdate = { result: 'unknown' as const, attempts: [], receipts: [] };
 const engine = (overrides: Partial<EngineAdapter> = {}): EngineAdapter => ({ prepare: async () => emptyResult, execute: async () => emptyResult, reconcile: async () => unknownUpdate, ...overrides });
 const feePolicy = { kind: 'free' as const, configuredPriorityFeeWei: 20n, freeTotalSpendCapWei: 40n, l2ExecutionGasBudgetWei: 10n, l1DataGasBudgetWei: 4n, totalFeeBudgetWei: 34n };
+const operational = { secretStoreReference: 'TEST_BOT', storePath: 'state.sqlite', signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified' as const, lastReconciliationAt: '2026-08-28T00:00:00.000Z', observedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z' };
 const verification = (status: 'unverified' | 'verified' = 'verified') => ({ chainId: 4663 as const, status, seaDropCompatible: status === 'verified', evidenceId: 'evidence-1', checkedAt: '2026-08-28T00:00:00.000Z', sourceBlock: 1n, endpointReference: 'ROBINHOOD_RPC_REFERENCE' });
 const submittedEvidence = (overrides: Partial<ChainEvidenceRecord> = {}): ChainEvidenceRecord => ({ id: 'evidence-1', chainId: 4663, status: 'pending', executionEnabled: false, seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, negativeCases: { revert: true, sold_out: true, price_drift: true, insufficient_funds: true, quantity_limit: true, stale_phase: true, fee_recipient: true, kill: true, cap: true }, reconciliationPassed: true, finalityPassed: true, endpointIdentity: 'ROBINHOOD_RPC_REFERENCE', strategyVersion: 'seadrop-v1-public@1', checkedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', sourceBlock: 1n, sourceBlockHash: '0xblock', ...overrides });
 async function installAcceptedEvidence(store: DurableStore, overrides: Partial<ChainEvidenceRecord> = {}): Promise<EvidenceService> { const service = new EvidenceService(store, () => new Date(), { verify: (_record, approval) => approval.verifierId === 'engineering-lead' && approval.proof === 'approval-proof' }); await service.recordChainEvidence(submittedEvidence(overrides)); await service.acceptChainEvidence('evidence-1', { verifierId: 'engineering-lead', proof: 'approval-proof', acceptedAt: '2026-08-28T00:01:00.000Z' }); return service; }
@@ -35,7 +38,7 @@ async function readyLiveInput(store: DurableStore) {
   const campaign = await createRobinhoodCampaign(store);
   const evidence = await installAcceptedEvidence(store);
   await evidence.recordSimulation({ id: 'sim-1', campaignId: campaign.id, wallet: 'wallet-1', inputDigest: campaignInputDigest(campaign), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', gasEstimate: 10n, worstCaseFeeWei: 34n });
-  await store.transaction(state => { state.runtime = { startupState: 'Ready', reconciliationCompletedAt: new Date().toISOString(), blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+  await store.transaction(state => { state.runtime = { startupState: 'Ready', reconciliationCompletedAt: new Date().toISOString(), blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational }; });
   return { campaign, wallets: ['wallet-1'], simulationIds: ['sim-1'], evidenceAt: '2026-08-28T00:00:00.000Z' };
 }
 
@@ -89,12 +92,12 @@ describe('backend Phase 1 blockers', () => {
   });
 
   it('rejects incomplete Robinhood negative evidence', async () => {
-    const store = new ReadyStore(); const campaign = await createRobinhoodCampaign(store); const evidence = await installAcceptedEvidence(store, { negativeCases: { ...submittedEvidence().negativeCases, sold_out: false } }); await evidence.recordSimulation({ id: 'sim-1', campaignId: campaign.id, wallet: 'wallet-1', inputDigest: campaignInputDigest(campaign), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 20n }); await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+    const store = new ReadyStore(); const campaign = await createRobinhoodCampaign(store); const evidence = await installAcceptedEvidence(store, { negativeCases: { ...submittedEvidence().negativeCases, sold_out: false } }); await evidence.recordSimulation({ id: 'sim-1', campaignId: campaign.id, wallet: 'wallet-1', inputDigest: campaignInputDigest(campaign), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 20n }); await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational }; });
     await expect(new ExecutionCoordinator(store, engine()).arm({ campaign, wallets: ['wallet-1'], simulationIds: ['sim-1'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('ROBINHOOD_NEGATIVE_EVIDENCE_INCOMPLETE');
   });
 
   it('rejects missing, duplicate, and stale per-wallet simulation evidence', async () => {
-    const store = new ReadyStore(); const campaign = await createRobinhoodCampaign(store); const evidence = await installAcceptedEvidence(store); await evidence.recordSimulation({ id: 'stale', campaignId: campaign.id, wallet: 'wallet-1', inputDigest: campaignInputDigest(campaign), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2020-01-01T00:00:00.000Z', expiresAt: '2020-01-02T00:00:00.000Z', worstCaseFeeWei: 20n }); await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; }); const coordinator = new ExecutionCoordinator(store, engine());
+    const store = new ReadyStore(); const campaign = await createRobinhoodCampaign(store); const evidence = await installAcceptedEvidence(store); await evidence.recordSimulation({ id: 'stale', campaignId: campaign.id, wallet: 'wallet-1', inputDigest: campaignInputDigest(campaign), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2020-01-01T00:00:00.000Z', expiresAt: '2020-01-02T00:00:00.000Z', worstCaseFeeWei: 20n }); await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational }; }); const coordinator = new ExecutionCoordinator(store, engine());
     await expect(coordinator.arm({ campaign, wallets: ['wallet-1'], simulationIds: ['missing'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('WALLET_SIMULATION_NOT_FOUND');
     await expect(coordinator.arm({ campaign, wallets: ['wallet-1'], simulationIds: ['stale'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('WALLET_SIMULATION_STALE');
     await expect(coordinator.arm({ campaign, wallets: ['wallet-1', 'WALLET-1'], simulationIds: ['stale', 'stale'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('DUPLICATE_WALLET');
@@ -103,7 +106,7 @@ describe('backend Phase 1 blockers', () => {
   it('blocks live arm until startup reconciliation and authoritative store readiness', async () => {
     const store = new DurableStore(); const campaign = await createRobinhoodCampaign(store);
     await expect(new ExecutionCoordinator(store, engine()).arm({ campaign, wallets: ['wallet'], simulationIds: ['sim'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('STARTUP_RECONCILIATION_REQUIRED');
-    await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+    await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational }; });
     await expect(new ExecutionCoordinator(store, engine()).arm({ campaign, wallets: ['wallet'], simulationIds: ['sim'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('DURABLE_STORE_REQUIRED');
   });
 
@@ -144,6 +147,22 @@ describe('backend Phase 1 blockers', () => {
     const health = new HealthService(new DurableStore()).check(); expect(health.ready).toBe(false); expect(health.blockingReasons).toContain('DURABLE_STORE_REQUIRED'); expect(health.blockingReasons).toContain('STARTUP_RECONCILIATION_REQUIRED');
   });
 
+  it('requires complete non-secret runtime probe metadata', async () => {
+    const store = new DurableStore(); const probes = new RuntimeReadinessService(store, () => new Date('2026-08-29T00:00:00.000Z'));
+    await expect(probes.record({ ...operational, secretStoreReference: '' })).rejects.toThrow('RUNTIME_PROBE_INCOMPLETE');
+    await probes.record(operational);
+    const health = new HealthService(store, () => new Date('2026-08-29T00:00:00.000Z')).check();
+    expect(health.operational?.storePath).toBe('state.sqlite'); expect(health.operational?.secretStoreReference).toBe('TEST_BOT');
+  });
+
+  it('fails closed without ops references and accepts only complete non-production metadata', () => {
+    const now = new Date('2026-08-29T00:00:00.000Z');
+    const missing = validateOpsHealthEnvironment({}, now);
+    expect(missing.valid).toBe(false); expect(missing.blockingReasons).toContain('SECRET_STORE_REFERENCE_REQUIRED');
+    const configured = validateOpsHealthEnvironment({ mode: 'non-production', secretStoreReference: 'TEST_BOT', storePath: 'state.sqlite', signerReady: 'true', killSwitchEngaged: 'false', notificationReady: 'true', chainVerification: 'verified', lastReconciliationAt: '2026-08-28T23:59:00.000Z', probeTtlMs: '120000', engineReady: 'true', chainReady: 'true', backupReady: 'true', atomicStoreReady: 'true' }, now);
+    expect(configured.valid).toBe(true); expect(configured.probe?.secretStoreReference).toBe('TEST_BOT');
+  });
+
   it('enforces the final Robinhood FREE reserve caps', async () => {
     const app = new BackendApplication(new DurableStore(), undefined as never);
     await expect(app.createCampaign({ chainId: 4663, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, maxRunWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI + 1n, dailyCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI + 1n, gasCeilingWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI + 1n, broadcastMode: 'sequencer', chainVerification: verification('unverified'), feePolicy })).rejects.toThrow('ROBINHOOD_PER_WALLET_CAP_EXCEEDED');
@@ -151,7 +170,7 @@ describe('backend Phase 1 blockers', () => {
   });
 
   it('requires explicit execution enablement from the evidence authority', async () => {
-    const store = new ReadyStore(); const campaign = await createRobinhoodCampaign(store); const evidence = new EvidenceService(store); await evidence.recordChainEvidence(submittedEvidence()); await evidence.recordSimulation({ id: 'sim-1', campaignId: campaign.id, wallet: 'wallet-1', inputDigest: campaignInputDigest(campaign), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 20n }); await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+    const store = new ReadyStore(); const campaign = await createRobinhoodCampaign(store); const evidence = new EvidenceService(store); await evidence.recordChainEvidence(submittedEvidence()); await evidence.recordSimulation({ id: 'sim-1', campaignId: campaign.id, wallet: 'wallet-1', inputDigest: campaignInputDigest(campaign), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 20n }); await store.transaction(state => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational }; });
     await expect(new ExecutionCoordinator(store, engine()).arm({ campaign, wallets: ['wallet-1'], simulationIds: ['sim-1'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
   });
 

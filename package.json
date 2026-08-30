@@ -19,7 +19,8 @@
     "ops:negative-cases": "node scripts/negative-cases.mjs",
     "ops:fork-replay": "node scripts/fork-replay.mjs",
     "lint": "node scripts/lint.mjs",
-    "typecheck": "corepack pnpm --filter @mint-bot/engine exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/backend exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/cli exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/database exec tsc --noEmit -p tsconfig.json"
+    "typecheck": "corepack pnpm --filter @mint-bot/engine exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/backend exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/cli exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/database exec tsc --noEmit -p tsconfig.json",
+    "ops:health:harness": "pnpm --filter @mint-bot/backend build && node scripts/ops-health.mjs"
   },
   "engines": {
     "node": ">=20.0.0"
