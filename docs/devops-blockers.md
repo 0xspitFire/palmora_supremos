@@ -38,8 +38,12 @@ secret-store contents.
 - [x] Accept chain ID `4663`, sequencer/feed behavior, propagation, fee
       semantics, confirmation, and reorg characterization at the evidence level;
       execution remains disabled pending integrated proof.
-- [ ] Run the archive-backed fork fixture using only the `ROBINHOOD_ARCHIVE_RPC`
-      reference from `Rets/MINT_BOT_SECRETS.env`; never copy the endpoint value.
+- [x] Run the six archive-backed Robinhood scenarios using only the
+      `ROBINHOOD_ARCHIVE_RPC` reference from `Rets/MINT_BOT_SECRETS.env`; all six
+      pass against the user-started local Anvil fork. Never copy the endpoint
+      value.
+- [ ] Run the strict archive launcher on the approved unattended/self-hosted CI
+      runner and retain its release evidence.
 - [x] Record a successful SeaDrop v1 public-drop test from an approved test
       wallet with provenance and reconciliation evidence at the evidence level.
 - [x] Demonstrate FREE mint value exposure `<= 2x` the configured priority-fee
@@ -70,9 +74,9 @@ references and are not fleet evidence.
   deferred until Ethereum and Robinhood are operational.
 - Telegram, dashboard, discovery, replication, and analytics are later-phase
   work and do not block the CLI Execution Foundation.
-- Archive-fork replay is blocked by unavailable Anvil and approved archive RPC
-  infrastructure in this environment. The six genuine Robinhood scenarios are
-  not marked passed or skipped.
+- The six Robinhood archive-fork scenarios pass against the currently running
+  local Anvil fork. The unattended strict launcher still requires an approved
+  runner with the archive reference and must be retained as release evidence.
 - Docker build/runtime proof passes in remote CI: the production image builds and
   the no-configuration container health probe fails closed. Docker is not
   installed on the local Windows host, so no local Docker command was run.
