@@ -66,6 +66,8 @@ export { NonceManagerImpl } from './nonce-manager.js';
 
 // Receipt watcher
 export { ReceiptWatcherImpl } from './receipt-watcher.js';
+export { EthereumFinalityObserver, RobinhoodFinalityObserver } from './finality-observer.js';
+export type { FinalityObserver, FinalityObservation, FinalitySources, RobinhoodFinalitySources } from './finality-observer.js';
 
 // Safety
 export { KillSwitch, SpendTracker } from './safety.js';
