@@ -143,6 +143,19 @@ export interface BackupPolicyRecord {
   approvedAt: string;
 }
 
+export interface BackupRestoreEvidenceRecord {
+  id: string;
+  storeReference: string;
+  backupReference: string;
+  sha256: string;
+  schemaVersion: number;
+  operation: 'backup' | 'restore' | 'verification';
+  outcome: 'passed' | 'failed';
+  killSwitchEngaged: boolean;
+  evidence?: unknown;
+  recordedAt: string;
+}
+
 const json = (value: unknown): string | null => value === undefined ? null : JSON.stringify(value);
 
 export class DurableRepository {
@@ -217,6 +230,10 @@ export class DurableRepository {
     const retentionDays = record.retentionDays ?? 30;
     if (!Number.isInteger(retentionDays) || retentionDays <= 0) throw new Error('backup retention must be positive');
     this.db.prepare('INSERT INTO backup_policy (id, retention_days, encryption_required, approval_owner, approved_at, active) VALUES (?, ?, 1, ?, ?, 1)').run(record.id, retentionDays, record.approvalOwner, record.approvedAt);
+  }
+
+  public recordBackupRestoreEvidence(record: BackupRestoreEvidenceRecord): void {
+    this.db.prepare('INSERT INTO backup_restore_evidence (id, store_reference, backup_reference, sha256, schema_version, operation, outcome, kill_switch_engaged, evidence_json, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.storeReference, record.backupReference, record.sha256, record.schemaVersion, record.operation, record.outcome, record.killSwitchEngaged ? 1 : 0, JSON.stringify(record.evidence ?? {}), record.recordedAt);
   }
 
   public isFinalSuccess(chainProfileId: string, receiptId: string): boolean {

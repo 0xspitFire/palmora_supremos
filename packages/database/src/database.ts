@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +36,23 @@ export function migrate(db: SqliteDatabase): void {
 
 export async function backupDatabase(db: SqliteDatabase, destination: string): Promise<void> {
   await db.backup(destination);
+}
+
+export interface BackupVerification {
+  sha256: string;
+  schemaVersion: number;
+}
+
+export function verifyBackup(destination: string): BackupVerification {
+  const checksum = createHash('sha256').update(readFileSync(destination)).digest('hex');
+  const backup = new Database(destination, { readonly: true });
+  try {
+    const row = backup.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null };
+    if (row.version === null) throw new Error('backup has no schema migration version');
+    return { sha256: checksum, schemaVersion: row.version };
+  } finally {
+    backup.close();
+  }
 }
 
 export function pruneRawObservations(db: SqliteDatabase, olderThan: Date): number {

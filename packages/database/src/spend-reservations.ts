@@ -48,10 +48,20 @@ export class SpendReservations {
     }
   }
 
+  public setKillSwitch(engaged: boolean, changedBy: string, at = new Date()): void {
+    this.db.prepare("UPDATE runtime_control SET kill_switch_engaged = ?, changed_by = ?, changed_at = ? WHERE id = 'global'").run(engaged ? 1 : 0, changedBy, at.toISOString());
+  }
+
+  public isKillSwitchEngaged(): boolean {
+    const row = this.db.prepare("SELECT kill_switch_engaged FROM runtime_control WHERE id = 'global'").get() as { kill_switch_engaged: number };
+    return row.kill_switch_engaged === 1;
+  }
+
   public reserve(request: ReservationRequest): ReservationStatus {
     const at = request.at ?? new Date();
     const usageDate = at.toISOString().slice(0, 10);
     const reserve = () => this.immediate((): ReservationStatus => {
+      if (this.isKillSwitchEngaged()) throw new Error('kill switch engaged');
       const existing = this.db.prepare('SELECT status FROM spend_reservation WHERE idempotency_key = ?').get(request.idempotencyKey) as { status: ReservationStatus } | undefined;
       if (existing) return existing.status;
       const policy = this.db.prepare('SELECT daily_cap_wei AS cap FROM spend_policy WHERE id = ? AND wallet_id = ? AND active = 1').get(request.policyId, request.walletId) as { cap: string } | undefined;
@@ -76,6 +86,7 @@ export class SpendReservations {
     const at = request.at ?? new Date();
     const usageDate = at.toISOString().slice(0, 10);
     const reserve = () => this.immediate((): ReservationStatus => {
+      if (this.isKillSwitchEngaged()) throw new Error('kill switch engaged');
       const existing = this.db.prepare('SELECT status FROM spend_reservation WHERE idempotency_key = ?').get(request.idempotencyKey) as { status: ReservationStatus } | undefined;
       if (existing) return existing.status;
       const policy = this.db.prepare('SELECT daily_cap_wei AS cap FROM spend_policy WHERE id = ? AND wallet_id = ? AND active = 1').get(request.policyId, request.walletId) as { cap: string } | undefined;

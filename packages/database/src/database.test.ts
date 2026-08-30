@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { backupDatabase, migrate, openDatabase, pruneRawObservations } from './database.js';
+import { backupDatabase, migrate, openDatabase, pruneRawObservations, verifyBackup } from './database.js';
 import { DurableRepository } from './repositories.js';
 import { ReadModels } from './read-models.js';
 import { SpendCapExceededError, SpendReservations } from './spend-reservations.js';
@@ -22,7 +22,7 @@ describe('database migrations and spend reservations', () => {
   it('applies migrations idempotently and enables integrity pragmas', () => {
     const db = fixture();
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 8 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 9 });
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(db.pragma('journal_mode', { simple: true })).toBe('memory');
     expect(() => db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('other', 'chain', '0xABC', 'kms://other', '2026-01-01T00:00:00.000Z')").run()).toThrow();
@@ -190,15 +190,18 @@ describe('database migrations and spend reservations', () => {
 
   it('backs up and restores the durable schema without secrets', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'mint-backup-'));
-    const source = openDatabase();
+    const source = fixture();
     source.prepare("INSERT INTO audit_event (id, entity_type, entity_id, actor, reason, occurred_at) VALUES ('backup-audit', 'run', 'r1', 'system', 'backup test', '2026-01-01T00:00:00.000Z')").run();
     const destination = join(directory, 'state.sqlite');
     await backupDatabase(source, destination);
+    const verification = verifyBackup(destination);
+    expect(verification.schemaVersion).toBe(9);
     const restored = openDatabase(destination);
     expect(restored.prepare('SELECT COUNT(*) AS count FROM audit_event').get()).toEqual({ count: 1 });
     const repository = new DurableRepository(restored);
     repository.saveBackupPolicy({ id: 'backup-policy', approvalOwner: 'product-owner', approvedAt: '2026-01-01T00:00:00.000Z' });
     expect(restored.prepare('SELECT retention_days, encryption_required FROM backup_policy WHERE id = ?').get('backup-policy')).toEqual({ retention_days: 30, encryption_required: 1 });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: 'temporary-store', backupReference: 'temporary-backup', sha256: verification.sha256, schemaVersion: verification.schemaVersion, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' });
     restored.close();
     source.close();
     rmSync(directory, { recursive: true, force: true });
@@ -235,5 +238,31 @@ describe('database migrations and spend reservations', () => {
     repository.recordReceipt({ id: 'receipt-final', transactionAttemptId: 'attempt-final', txHash: '0xfinal', status: 'confirmed', confirmations: 10, finalityStage: 'ethereum_final', observedAt: '2026-01-01T00:00:03.000Z' });
     expect(repository.isFinalSuccess('chain', 'receipt-final')).toBe(true);
     db.close();
+  });
+
+  it('recovers reservations, intents, and audit while kill switch remains engaged', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mint-recovery-'));
+    const source = fixture();
+    source.prepare("INSERT INTO contract (id, chain_profile_id, address, kind) VALUES ('contract-recovery', 'chain', '0xdef', 'nft')").run();
+    source.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-recovery', 'contract-recovery', 'Recovery')").run();
+    source.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-recovery', 'collection-recovery', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
+    source.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-recovery', 'drop-recovery', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    source.prepare("INSERT INTO transaction_intent (id, campaign_id, wallet_id, intent_class, to_address, value_wei, calldata, created_at) VALUES ('intent-recovery', 'campaign-recovery', 'wallet', 'mint', '0xdef', '0', '0x', '2026-01-01T00:00:00.000Z')").run();
+    source.prepare("INSERT INTO spend_reservation (id, wallet_id, idempotency_key, policy_id, amount_wei, usage_date, status, created_at) VALUES ('reservation-recovery', 'wallet', 'recovery-key', 'policy', '10', '2026-01-01', 'reserved', '2026-01-01T00:00:00.000Z')").run();
+    source.prepare("INSERT INTO audit_event (id, entity_type, entity_id, actor, reason, occurred_at) VALUES ('audit-recovery', 'reservation', 'reservation-recovery', 'system', 'recovery test', '2026-01-01T00:00:00.000Z')").run();
+    const reservations = new SpendReservations(source);
+    reservations.setKillSwitch(true, 'recovery-test');
+    const destination = join(directory, 'recovered.sqlite');
+    await backupDatabase(source, destination);
+    const restored = openDatabase(destination);
+    const recoveredReservations = new SpendReservations(restored);
+    expect(recoveredReservations.isKillSwitchEngaged()).toBe(true);
+    expect(restored.prepare("SELECT COUNT(*) AS count FROM spend_reservation WHERE id = 'reservation-recovery'").get()).toEqual({ count: 1 });
+    expect(restored.prepare("SELECT COUNT(*) AS count FROM transaction_intent WHERE id = 'intent-recovery'").get()).toEqual({ count: 1 });
+    expect(restored.prepare("SELECT COUNT(*) AS count FROM audit_event WHERE id = 'audit-recovery'").get()).toEqual({ count: 1 });
+    expect(() => recoveredReservations.reserve({ id: 'blocked-after-recovery', walletId: 'wallet', idempotencyKey: 'blocked-after-recovery', policyId: 'policy', amountWei: 1n, at: new Date('2026-01-01T00:00:00.000Z') })).toThrow('kill switch engaged');
+    restored.close();
+    source.close();
+    rmSync(directory, { recursive: true, force: true });
   });
 });
