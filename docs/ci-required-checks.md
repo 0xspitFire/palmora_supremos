@@ -5,6 +5,7 @@ names from `.github/workflows/ci.yml`:
 
 - `verify`
 - `anvil`
+- `docker`
 
 The manual `archive-fork-replay` job is evidence-gated and should be required
 for a Robinhood release candidate only after an approved self-hosted runner is
