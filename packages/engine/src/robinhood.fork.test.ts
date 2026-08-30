@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { readSecret } from './secrets.js';
 import { ROBINHOOD_SEADROP_POSITIVE_FIXTURE } from './robinhood-evidence.js';
+import { getChainConfig } from './chains.js';
 
 /**
  * Real archive-backed Robinhood replay suite. The fork endpoint must be an
@@ -45,12 +46,7 @@ beforeAll(async () => {
     } catch (error) {
       throw new Error(`archive reference unavailable: ${error instanceof Error ? error.message : 'read failed'}`);
     }
-    try {
-      const forkUrl = await readSecret('ANVIL_FORK_RPC', 'mainnet', secretRoot);
-      fork = await makeRpc(forkUrl);
-    } catch (error) {
-      throw new Error(`Anvil fork reference unavailable: ${error instanceof Error ? error.message : 'read failed'}`);
-    }
+    fork = await makeRpc('http://127.0.0.1:8545');
     let client: string;
     try {
       client = await fork('web3_clientVersion') as string;
@@ -72,11 +68,19 @@ function requireSetup(): void {
 describe('Robinhood archive-backed fork replay', () => {
   it('replays the historical positive SeaDrop transaction and receipt', async () => {
     requireSetup();
-    const historicalBlock = '0x2c92c19';
+    const historicalBlock = `0x${ROBINHOOD_SEADROP_POSITIVE_FIXTURE.blockNumber.toString(16)}`;
     const block = await archive('eth_getBlockByNumber', [historicalBlock, false]);
     expect(block).not.toBeNull();
     const receipt = await fork('eth_getTransactionReceipt', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
+    const tx = await archive('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
     expect(receipt?.status).toBe('0x1');
+    expect(receipt?.transactionHash.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash.toLowerCase());
+    expect(tx?.chainId).toBe('0x1237');
+    expect(tx?.from.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.wallet.toLowerCase());
+    expect(tx?.to.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.seaDropAddress.toLowerCase());
+    expect(BigInt(tx?.value)).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.mintAmountWei);
+    expect(typeof tx?.input).toBe('string');
+    expect(tx?.input.length).toBeGreaterThan(10);
     expect(receipt?.from.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.wallet.toLowerCase());
     expect(receipt?.blockNumber).toBe(historicalBlock);
   });
@@ -85,6 +89,10 @@ describe('Robinhood archive-backed fork replay', () => {
     requireSetup();
     const tx = await archive('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
     expect(tx).not.toBeNull();
+    expect(tx?.chainId).toBe('0x1237');
+    expect(tx?.from.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.wallet.toLowerCase());
+    expect(tx?.to.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.seaDropAddress.toLowerCase());
+    expect(tx?.input.length).toBeGreaterThan(10);
     await expect(archive('eth_call', [{
       from: tx.from,
       to: tx.to,
@@ -97,6 +105,8 @@ describe('Robinhood archive-backed fork replay', () => {
     requireSetup();
     const tx = await archive('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
     expect(tx).not.toBeNull();
+    expect(tx?.chainId).toBe('0x1237');
+    expect(tx?.to.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.seaDropAddress.toLowerCase());
     await expect(archive('eth_call', [{
       from: tx.from,
       to: tx.to,
@@ -144,8 +154,8 @@ describe('Robinhood archive-backed fork replay', () => {
     expect(receipt?.blockNumber).toBeDefined();
     const block = await fork('eth_getBlockByNumber', [receipt.blockNumber, false]);
     expect(block?.hash).toBeDefined();
-    // Soft inclusion is observable here; posted and ethereum_final require the
-    // L1 batch/finality observers owned by reconciliation infrastructure.
-    expect({ stage: 'soft', posted: false, ethereum_final: false }).toEqual({ stage: 'soft', posted: false, ethereum_final: false });
+    const policy = getChainConfig(4663).finalityPolicy;
+    expect(policy.stages).toEqual(['soft', 'posted', 'ethereum_final']);
+    expect(policy.settlementStage).toBe('ethereum_final');
   });
 });
