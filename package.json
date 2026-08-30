@@ -23,7 +23,7 @@
     "ops:ethereum-fork": "node scripts/ethereum-fork-replay.mjs",
     "lint": "node scripts/lint.mjs",
     "typecheck": "corepack pnpm --filter @mint-bot/database build && corepack pnpm --filter @mint-bot/engine build && corepack pnpm --filter @mint-bot/backend build && corepack pnpm --filter @mint-bot/cli build && corepack pnpm --filter @mint-bot/engine exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/backend exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/cli exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/database exec tsc --noEmit -p tsconfig.json",
-    "ops:health:harness": "pnpm --filter @mint-bot/backend build && node scripts/ops-health.mjs",
+    "ops:health:harness": "pnpm typecheck && node scripts/ops-health.mjs",
     "ops:fork-replay:strict": "node scripts/ops-fork-replay.mjs"
   },
   "engines": {

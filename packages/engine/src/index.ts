@@ -55,6 +55,7 @@ export {
   BlastBroadcaster,
   FlashbotsBroadcaster,
   SequencerDirectBroadcaster,
+  FallbackBroadcaster,
   createBroadcaster,
 } from './broadcasters/index.js';
 
