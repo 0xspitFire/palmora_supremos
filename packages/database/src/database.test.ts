@@ -9,6 +9,7 @@ import { backupDatabase, migrate, openDatabase, pruneRawObservations, verifyBack
 import { DurableRepository } from './repositories.js';
 import { ReadModels } from './read-models.js';
 import { SpendCapExceededError, SpendReservations } from './spend-reservations.js';
+import { SqliteBackendStore } from './backend-store.js';
 
 function fixture() {
   const db = openDatabase();
@@ -264,5 +265,24 @@ describe('database migrations and spend reservations', () => {
     restored.close();
     source.close();
     rmSync(directory, { recursive: true, force: true });
+  });
+
+  it('provides a backend store boundary over durable repositories and reservations', () => {
+    const db = fixture();
+    db.prepare("INSERT INTO contract (id, chain_profile_id, address, kind) VALUES ('contract-store', 'chain', '0xdef', 'nft')").run();
+    db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-store', 'contract-store', 'Store')").run();
+    db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-store', 'collection-store', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-store', 'drop-store', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES ('fee-store', 'chain', 'v1', 'fee_only', '1000', '1000', '10', 2, 0, 1, '2026-01-01T00:00:00.000Z', 'allowed')").run();
+    const store = new SqliteBackendStore(db);
+    store.saveIntent({ id: 'intent-store', campaignId: 'campaign-store', walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', createdAt: '2026-01-01T00:00:00.000Z' });
+    store.recordAttempt({ id: 'attempt-store', transactionIntentId: 'intent-store', endpoint: 'sequencer', responseClass: 'accepted', txHash: '0xstore', nonce: 1, attemptedAt: '2026-01-01T00:00:01.000Z' });
+    store.saveExecution({ id: 'execution-store', campaignId: 'campaign-store', walletId: 'wallet', transactionIntentId: 'intent-store', state: 'submitted', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:01.000Z' });
+    expect(store.pendingReconciliation()).toMatchObject([{ executionId: 'execution-store', attemptId: 'attempt-store', txHash: '0xstore', nonce: 1 }]);
+    expect(store.reserveExecution({ id: 'reservation-store', walletId: 'wallet', chainProfileId: 'chain', campaignId: 'campaign-store', mintPeriodId: 'period-store', idempotencyKey: 'store-key', policyId: 'policy', mintValueWei: 0n, l2ExecutionGasWei: 10n, l1DataGasWei: 5n, priorityFeeComponentWei: 0n, freeMint: true, at: new Date('2026-01-01T00:00:00.000Z') })).toBe('reserved');
+    store.setKillSwitch(true, 'backend-test');
+    expect(() => store.reserveExecution({ id: 'blocked-store', walletId: 'wallet', chainProfileId: 'chain', campaignId: 'campaign-store', mintPeriodId: 'period-store', idempotencyKey: 'blocked-key', policyId: 'policy', mintValueWei: 0n, l2ExecutionGasWei: 1n, l1DataGasWei: 0n, priorityFeeComponentWei: 0n, freeMint: true, at: new Date('2026-01-01T00:00:00.000Z') })).toThrow('kill switch engaged');
+    expect(store.isKillSwitchEngaged()).toBe(true);
+    db.close();
   });
 });
