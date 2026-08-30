@@ -14,7 +14,6 @@ import { getChainConfig } from './chains.js';
 
 type Rpc = (method: string, params?: unknown[]) => Promise<any>;
 let fork: Rpc;
-let archive: Rpc;
 let setupError: Error | undefined;
 const secretRoot = process.env.MINT_BOT_SECRETS_ROOT ?? [
   resolve(process.cwd(), 'Rets'),
@@ -39,10 +38,10 @@ async function makeRpc(url: string): Promise<Rpc> {
 beforeAll(async () => {
   try {
     // Values remain in memory only for the RPC call and are never logged.
-    let archiveUrl: string;
     try {
-      archiveUrl = await readSecret('ROBINHOOD_ARCHIVE_RPC', 'mainnet', secretRoot);
-      archive = await makeRpc(archiveUrl);
+      // The strict runner starts local Anvil from this read-only reference.
+      // Assertions intentionally use only local fork state after startup.
+      await readSecret('ROBINHOOD_ARCHIVE_RPC', 'mainnet', secretRoot);
     } catch (error) {
       throw new Error(`archive reference unavailable: ${error instanceof Error ? error.message : 'read failed'}`);
     }
@@ -69,10 +68,10 @@ describe.skipIf(process.env.MINT_BOT_FORK_REPLAY !== 'true')('Robinhood archive-
   it('replays the historical positive SeaDrop transaction and receipt', async () => {
     requireSetup();
     const historicalBlock = `0x${ROBINHOOD_SEADROP_POSITIVE_FIXTURE.blockNumber.toString(16)}`;
-    const block = await archive('eth_getBlockByNumber', [historicalBlock, false]);
+    const block = await fork('eth_getBlockByNumber', [historicalBlock, false]);
     expect(block).not.toBeNull();
     const receipt = await fork('eth_getTransactionReceipt', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
-    const tx = await archive('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
+    const tx = await fork('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
     expect(receipt?.status).toBe('0x1');
     expect(receipt?.transactionHash.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash.toLowerCase());
     expect(tx?.chainId).toBe('0x1237');
@@ -87,13 +86,13 @@ describe.skipIf(process.env.MINT_BOT_FORK_REPLAY !== 'true')('Robinhood archive-
 
   it('replays a failed public-mint call with an invalid value without writing state', async () => {
     requireSetup();
-    const tx = await archive('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
+    const tx = await fork('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
     expect(tx).not.toBeNull();
     expect(tx?.chainId).toBe('0x1237');
     expect(tx?.from.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.wallet.toLowerCase());
     expect(tx?.to.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.seaDropAddress.toLowerCase());
     expect(tx?.input.length).toBeGreaterThan(10);
-    await expect(archive('eth_call', [{
+    await expect(fork('eth_call', [{
       from: tx.from,
       to: tx.to,
       data: tx.input,
@@ -103,11 +102,11 @@ describe.skipIf(process.env.MINT_BOT_FORK_REPLAY !== 'true')('Robinhood archive-
 
   it('replays duplicate submission semantics as a failed call after the positive mint', async () => {
     requireSetup();
-    const tx = await archive('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
+    const tx = await fork('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
     expect(tx).not.toBeNull();
     expect(tx?.chainId).toBe('0x1237');
     expect(tx?.to.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.seaDropAddress.toLowerCase());
-    await expect(archive('eth_call', [{
+    await expect(fork('eth_call', [{
       from: tx.from,
       to: tx.to,
       data: tx.input,
@@ -140,7 +139,15 @@ describe.skipIf(process.env.MINT_BOT_FORK_REPLAY !== 'true')('Robinhood archive-
     const accounts = await fork('eth_accounts') as string[];
     const from = accounts[0];
     const snapshot = await fork('evm_snapshot');
-    const hash = await fork('eth_sendTransaction', [{ from, to: from, value: '0x0', gas: '0x5208' }]);
+    const gasPrice = await fork('eth_gasPrice');
+    // Use a plain recipient. Forked Anvil accounts may carry EIP-7702 code;
+    // sending to that account as the recipient would execute delegated code
+    // and turn this neutral reorg probe into an unrelated contract revert.
+    const recipient = '0x000000000000000000000000000000000000dEaD';
+    const hash = await fork('eth_sendTransaction', [{ from, to: recipient, value: '0x0', gas: '0x5208', gasPrice }]);
+    // The approved Anvil invocation may run with automine disabled; explicitly
+    // mine so the test proves receipt disappearance rather than pending state.
+    await fork('evm_mine');
     const beforeReorg = await fork('eth_getTransactionReceipt', [hash]);
     expect(beforeReorg?.status).toBe('0x1');
     await fork('evm_revert', [snapshot]);
