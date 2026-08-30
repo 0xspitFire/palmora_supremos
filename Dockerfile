@@ -4,9 +4,10 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.json ./
 COPY packages ./packages
+COPY scripts ./scripts
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
-RUN pnpm prune --prod
+RUN CI=1 pnpm prune --prod
 
 FROM node:20.19.1-bookworm-slim
 ENV NODE_ENV=production
