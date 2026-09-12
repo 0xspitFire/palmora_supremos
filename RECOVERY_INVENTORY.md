@@ -14,7 +14,7 @@
 
 | Item | State |
 | --- | --- |
-| Main branch | `853ee41`; synchronized with `origin/main` |
+| Main branch | synchronized with `origin/main`; current tip is the latest recovery-inventory commit |
 | Main repair | `public-mempool.ts` restored from canonical implementation and committed as `84451d0` |
 | Canonical Phase 1 source | `phase1-integration` at `cc6aee2`, merged into `main` through candidate `f72d83a` |
 | Canonical PR | PR #6, merged; isolated candidate resolved its single `packages/engine/src/types.ts` conflict |
@@ -28,7 +28,7 @@
 
 | Source/location | Role | Branch / commit | Classification | Unique work and conflicts | Validation | Cleanup |
 | --- | --- | --- | --- | --- | --- | --- |
-| Project root | Main | `main` / `853ee41` | Integrated Phase 1 baseline, not live-ready | Broadcaster repair, recovery documentation, Backend, Database, hardened engine, CI, and operations stack are now published. Robinhood execution remains gated. | Main install, typecheck, build, lint, secret boundary, policy, negative cases, recovery drill, and 95 tests pass. Seven fork tests skip; strict fork replay fails without Anvil. Clean-checkout is intentionally blocked by preserved untracked recovery artifacts. | Keep. Synchronized with `origin/main`. |
+| Project root | Main | `main` / current `origin/main` tip | Integrated Phase 1 baseline, not live-ready | Broadcaster repair, recovery documentation, Backend, Database, hardened engine, CI, and operations stack are now published. Robinhood execution remains gated. | Main install, typecheck, build, lint, secret boundary, policy, negative cases, recovery drill, and 95 tests pass. Seven fork tests skip; strict fork replay fails without Anvil. Clean-checkout is intentionally blocked by preserved untracked recovery artifacts. | Keep. Synchronized with `origin/main`. |
 | `.kilo/recovered-phase1-integration` (removed) | Integration | `phase1-integration` / `cc6aee2` | Integrated canonical source | Its 118-file Phase 1 delta is included in `main` through merge candidate `f72d83a`; fork/runtime release evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip without Anvil/fixtures. | Worktree removed; branch retained. |
 | `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` (removed) | Integration candidate | `recovery/phase1-main-candidate` / `f72d83a` | Merged into main | Candidate contains `main` plus `phase1-integration`; both `CHAIN_NOT_VERIFIED` and `INVALID_CONFIG` are retained. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip; health and strict fork launcher fail closed without production configuration. | Worktree removed; branch retained. |
 | `.kilo/recovered-backend-engineer` (removed) | Backend | `backend-engineer` / `370d7c0` | Already integrated | Tip is an ancestor of `phase1-integration` and therefore `main`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
@@ -66,7 +66,7 @@ Do not commit the whole archive as product source. Curate unique historical docu
 | `Robinhood Technical Report` | Unique, valuable technical evidence | Preserve and decide a safe tracked documentation filename during integration. It contains public transaction evidence but no secret endpoint value. |
 | `Ref Hashes` | Duplicate subset | The five public failed-transaction references are already explained in `Robinhood Technical Report`; keep until report curation is complete. |
 | `lib/` | Removed duplicate | The untracked root `lib/seadrop` contained 168 files, all byte-identical to files in the complete `seadrop-test/lib/seadrop` submodule, with no root-only content. It was removed after comparison. |
-| `seadrop-test/` | Valuable external fixture source, not integrated | Unborn nested Git repository with a default Foundry `Counter` harness and a complete SeaDrop submodule containing upstream Solidity/Hardhat/Foundry tests. No project-specific W3 fork test is wired to it. Preserve for fixture curation. |
+| `seadrop-test/` | Valuable external fixture source, not integrated | Unborn nested Git repository with a default Foundry `Counter` harness and a complete SeaDrop submodule containing upstream Solidity/Hardhat/Foundry tests. It also contains a sample-only `.env` fixture; no project-specific W3 fork test is wired to it. Preserve for fixture curation and never use sample credentials. |
 | `stale-worktree-archive/` | Recovery backup | Keep until all unique documents are curated and canonical integration is accepted. |
 
 ## Protected recovery commits
