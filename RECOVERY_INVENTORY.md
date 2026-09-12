@@ -14,11 +14,11 @@
 
 | Item | State |
 | --- | --- |
-| Main branch | `f72d83a`; synchronized with `origin/main` |
+| Main branch | `853ee41`; synchronized with `origin/main` |
 | Main repair | `public-mempool.ts` restored from canonical implementation and committed as `84451d0` |
 | Canonical Phase 1 source | `phase1-integration` at `cc6aee2`, merged into `main` through candidate `f72d83a` |
 | Canonical PR | PR #6, merged; isolated candidate resolved its single `packages/engine/src/types.ts` conflict |
-| CTO PR | PR #7, merged from `cto-restored`; `cto-2` remains an exact clean duplicate worktree at `b29fdd0` |
+| CTO PR | PR #7, merged from `cto-restored`; duplicate `cto-2` checkout removed and branch retained |
 | Git integrity | Reachable objects repaired from a fresh GitHub mirror; no reachable object is missing |
 | GitHub | Authenticated as `0xspitFire`; private repository readable; push dry-run succeeds |
 | Runtime | Project-pinned Node `20.19.1` used from an isolated portable runtime; pnpm `9.15.4` |
@@ -28,18 +28,18 @@
 
 | Source/location | Role | Branch / commit | Classification | Unique work and conflicts | Validation | Cleanup |
 | --- | --- | --- | --- | --- | --- | --- |
-| Project root | Main | `main` / `f72d83a` | Integrated Phase 1 baseline, not live-ready | Broadcaster repair, recovery documentation, Backend, Database, hardened engine, CI, and operations stack are now published. Robinhood execution remains gated. | Candidate tracked tree passed install, lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests. Main clean-checkout is intentionally blocked by preserved untracked recovery artifacts. | Keep. Synchronized with `origin/main`. |
-| `.kilo/recovered-phase1-integration` | Integration | `phase1-integration` / `cc6aee2` | Integrated canonical source | Its 118-file Phase 1 delta is included in `main` through merge candidate `f72d83a`; fork/runtime release evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip without Anvil/fixtures. | Worktree removable after preserving branch provenance. |
-| `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` | Integration candidate | `recovery/phase1-main-candidate` / `f72d83a` | Merged into main | Candidate contains `main` plus `phase1-integration`; both `CHAIN_NOT_VERIFIED` and `INVALID_CONFIG` are retained. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip; health and strict fork launcher fail closed without production configuration. | Worktree removable; branch may remain as merge provenance. |
-| `.kilo/recovered-backend-engineer` | Backend | `backend-engineer` / `370d7c0` | Already integrated | Tip is an ancestor of `phase1-integration` and therefore `main`. | Worktree clean; published remotely. | Worktree removable; branch retained. |
-| `.kilo/recovered-blockchain-engineer` | Blockchain | `blockchain-engineer` / `157368e` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `b99ac68`. | Worktree clean; published remotely. | Worktree removable; branch retained. |
-| `.kilo/recovered-database-engineer` | Database | `database-engineer` / `f84bb64` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `c6e1106`. | Worktree clean; published remotely. | Worktree removable; branch retained. |
-| `.kilo/recovered-devops-engineer` | DevOps | `devops-engineer` / `d62bf48` | Integrated with context adaptation | Canonical `2f1558c` carries the same 78-line runtime/recovery change adapted to the integrated stack. | Worktree clean; published remotely. | Worktree removable; branch retained. |
-| `.kilo/recovered-engineers` | Engineering Lead | `engineers` / `b94180d` | Superseded integration line | `b94180d` is patch-equivalent to canonical `f45ccfe`. Report-only `a71d9bc` is not in canonical history, but canonical blocker/status documents supersede it. Previously accidental deletions were restored; worktree is clean. | Published remotely after object refetch. | Worktree removable; branch retained. |
-| `.kilo/recovered-cto` | CTO | `cto-restored` / `b29fdd0` | Already integrated | Tip is an ancestor of canonical Phase 1 and contains `CTO_Brief.md`; PR #7 is merged. | Worktree clean; published remotely. | Worktree removable; branch retained. |
-| `.kilo/worktrees/cto-2` | CTO | `cto-2` / `b29fdd0` | Exact duplicate | Same commit and tree as merged `cto-restored`; Agent Manager associated it with PR #7. | Worktree clean. | Worktree removable; branch retained. |
-| `.kilo/recovered-frontend-engineer` | Frontend | `frontend-engineer` / `43ad380` | Duplicate baseline | Initial commit only; no frontend implementation, consistent with Phase 1 scope. | Worktree clean; published remotely. | Worktree removable; branch retained. |
-| `.kilo/recovered-product-design-spec` | Product Design | `product-design-spec` / `43ad380` | Duplicate baseline | Branch has no design-spec commit. The historical design file survives in the stale archive. | Worktree clean; published remotely. | Worktree removable; branch retained. |
+| Project root | Main | `main` / `853ee41` | Integrated Phase 1 baseline, not live-ready | Broadcaster repair, recovery documentation, Backend, Database, hardened engine, CI, and operations stack are now published. Robinhood execution remains gated. | Main install, typecheck, build, lint, secret boundary, policy, negative cases, recovery drill, and 95 tests pass. Seven fork tests skip; strict fork replay fails without Anvil. Clean-checkout is intentionally blocked by preserved untracked recovery artifacts. | Keep. Synchronized with `origin/main`. |
+| `.kilo/recovered-phase1-integration` (removed) | Integration | `phase1-integration` / `cc6aee2` | Integrated canonical source | Its 118-file Phase 1 delta is included in `main` through merge candidate `f72d83a`; fork/runtime release evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip without Anvil/fixtures. | Worktree removed; branch retained. |
+| `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` (removed) | Integration candidate | `recovery/phase1-main-candidate` / `f72d83a` | Merged into main | Candidate contains `main` plus `phase1-integration`; both `CHAIN_NOT_VERIFIED` and `INVALID_CONFIG` are retained. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip; health and strict fork launcher fail closed without production configuration. | Worktree removed; branch retained. |
+| `.kilo/recovered-backend-engineer` (removed) | Backend | `backend-engineer` / `370d7c0` | Already integrated | Tip is an ancestor of `phase1-integration` and therefore `main`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-blockchain-engineer` (removed) | Blockchain | `blockchain-engineer` / `157368e` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `b99ac68`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-database-engineer` (removed) | Database | `database-engineer` / `f84bb64` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `c6e1106`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-devops-engineer` (removed) | DevOps | `devops-engineer` / `d62bf48` | Integrated with context adaptation | Canonical `2f1558c` carries the same 78-line runtime/recovery change adapted to the integrated stack. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-engineers` (removed) | Engineering Lead | `engineers` / `b94180d` | Superseded integration line | `b94180d` is patch-equivalent to canonical `f45ccfe`. Report-only `a71d9bc` is not in canonical history, but canonical blocker/status documents supersede it. Previously accidental deletions were restored; worktree is clean. | Published remotely after object refetch. | Worktree removed; branch retained. |
+| `.kilo/recovered-cto` (removed) | CTO | `cto-restored` / `b29fdd0` | Already integrated | Tip is an ancestor of canonical Phase 1 and contains `CTO_Brief.md`; PR #7 is merged. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/worktrees/cto-2` (removed) | CTO | `cto-2` / `b29fdd0` | Exact duplicate | Same commit and tree as merged `cto-restored`; Agent Manager associated it with PR #7. | Worktree clean. | Worktree removed; branch retained. |
+| `.kilo/recovered-frontend-engineer` (removed) | Frontend | `frontend-engineer` / `43ad380` | Duplicate baseline | Initial commit only; no frontend implementation, consistent with Phase 1 scope. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-product-design-spec` (removed) | Product Design | `product-design-spec` / `43ad380` | Duplicate baseline | Branch has no design-spec commit. The historical design file survives in the stale archive. | Worktree clean; published remotely. | Worktree removed; branch retained. |
 | Local refs only | Misc. stale branches | `chemical-bittersweet`, `cto`, `lead-engineer`, `recovered-product-design-spec` at `3e44906` | Obsolete duplicates | All point to the former `main` tip and contain no branch-only commit. | No registered worktrees. | Preserve until final branch-retention review; delete only with explicit approval. |
 
 ## Archived stale filesystem snapshots
@@ -66,7 +66,7 @@ Do not commit the whole archive as product source. Curate unique historical docu
 | `Robinhood Technical Report` | Unique, valuable technical evidence | Preserve and decide a safe tracked documentation filename during integration. It contains public transaction evidence but no secret endpoint value. |
 | `Ref Hashes` | Duplicate subset | The five public failed-transaction references are already explained in `Robinhood Technical Report`; keep until report curation is complete. |
 | `lib/` | Removed duplicate | The untracked root `lib/seadrop` contained 168 files, all byte-identical to files in the complete `seadrop-test/lib/seadrop` submodule, with no root-only content. It was removed after comparison. |
-| `seadrop-test/` | Obsolete/uncertain scratch repository | Unborn nested Git repository with default Foundry `Counter` files and damaged/incomplete submodules. No project SeaDrop test implementation was found. Preserve until Product Owner approves deletion. |
+| `seadrop-test/` | Valuable external fixture source, not integrated | Unborn nested Git repository with a default Foundry `Counter` harness and a complete SeaDrop submodule containing upstream Solidity/Hardhat/Foundry tests. No project-specific W3 fork test is wired to it. Preserve for fixture curation. |
 | `stale-worktree-archive/` | Recovery backup | Keep until all unique documents are curated and canonical integration is accepted. |
 
 ## Protected recovery commits
@@ -121,16 +121,25 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 
 ### Current `main`
 
-- The tracked tree is identical to the validated `recovery/phase1-main-candidate` at `f72d83a`.
+- The tracked tree is identical to the validated `recovery/phase1-main-candidate` at `f72d83a`, with only the recovery-inventory update added afterward.
 - `pnpm install --frozen-lockfile`: pass.
-- `pnpm typecheck`, `pnpm build`, and the 95-test unit suite pass in the clean candidate tree.
+- `pnpm typecheck`: pass after forced reconciliation of generated dependencies.
+- `pnpm build`: pass.
+- `pnpm lint`: pass after removing generated `.ignored_*` dependency copies.
+- `pnpm ops:secret-boundary`: pass.
+- `pnpm ops:policy`: pass with CI-equivalent conservative environment values.
+- `pnpm ops:negative-cases`: pass.
+- `pnpm ops:recovery-drill`: pass with `sqlite-backup-restore` and kill switch engaged.
+- `pnpm test -- --reporter=dot`: 95 pass, 7 skip across 12 passed test files and 2 skipped fork files.
 - `pnpm ops:clean-checkout`: intentionally fails in the project root because preserved untracked recovery artifacts remain.
-- Root lint traversal is not a release result while generated dependency trees are present; the clean candidate lint passed.
-- Fork tests remain skipped without Anvil and approved fixtures.
+- `pnpm test:fork`: 7 tests skip because Anvil and approved fixtures are unavailable.
+- `pnpm ops:fork-replay`: fails because the Anvil binary is unavailable.
+- `pnpm ops:health`: fails closed with missing secret-store, store, RPC, chain-verification, reconciliation, and finality configuration.
 
 ## Pending decisions and gates
 
 1. Curate the untracked Robinhood report and historical product-design document.
 2. Decide whether to retain or delete obsolete local branches after a final branch-list review.
-3. Remove the redundant clean worktree checkouts while retaining branches and recovery refs.
-4. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
+3. Curate or explicitly retire the nested `seadrop-test/` fixture repository and the stale-worktree archive.
+4. Install/configure Anvil and approved archive fixtures before treating fork replay as evidence.
+5. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
