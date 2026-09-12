@@ -22,6 +22,7 @@
 | Git integrity | Reachable objects repaired from a fresh GitHub mirror; no reachable object is missing |
 | GitHub | Authenticated as `0xspitFire`; private repository readable; push dry-run succeeds |
 | Runtime | Project-pinned Node `20.19.1` used from an isolated portable runtime; pnpm `9.15.4` |
+| Agent Manager | All stale session records were stopped; orphaned worktree-only metadata remains because the API exposes no record-only delete and `.kilo/agent-manager.json` is not to be edited manually |
 
 ## Surviving worktrees and branches
 
@@ -64,6 +65,7 @@ Do not commit the whole archive as product source. Curate unique historical docu
 | --- | --- | --- |
 | `Robinhood Technical Report` | Unique, valuable technical evidence | Preserve and decide a safe tracked documentation filename during integration. It contains public transaction evidence but no secret endpoint value. |
 | `Ref Hashes` | Duplicate subset | The five public failed-transaction references are already explained in `Robinhood Technical Report`; keep until report curation is complete. |
+| `lib/` | Removed duplicate | The untracked root `lib/seadrop` contained 168 files, all byte-identical to files in the complete `seadrop-test/lib/seadrop` submodule, with no root-only content. It was removed after comparison. |
 | `seadrop-test/` | Obsolete/uncertain scratch repository | Unborn nested Git repository with default Foundry `Counter` files and damaged/incomplete submodules. No project SeaDrop test implementation was found. Preserve until Product Owner approves deletion. |
 | `stale-worktree-archive/` | Recovery backup | Keep until all unique documents are curated and canonical integration is accepted. |
 
