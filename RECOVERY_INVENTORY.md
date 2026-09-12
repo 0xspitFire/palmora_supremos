@@ -14,10 +14,10 @@
 
 | Item | State |
 | --- | --- |
-| Main branch | `84451d0`; one local commit ahead of `origin/main` |
+| Main branch | `64a0068`; two local commits ahead of `origin/main` (`84451d0`, `64a0068`) |
 | Main repair | `public-mempool.ts` restored from canonical implementation and committed as `84451d0` |
 | Canonical Phase 1 source | `phase1-integration` at `cc6aee2`, clean and equal to `origin/phase1-integration` |
-| Canonical PR | PR #6, open, merge state `DIRTY`; one content conflict currently previews in `packages/engine/src/types.ts` |
+| Canonical PR | PR #6, open, merge state `DIRTY`; isolated candidate resolves its single `packages/engine/src/types.ts` conflict |
 | CTO PR | PR #7, open from `cto-restored`; `cto-2` is an exact clean duplicate worktree at `b29fdd0` |
 | Git integrity | Reachable objects repaired from a fresh GitHub mirror; no reachable object is missing |
 | GitHub | Authenticated as `0xspitFire`; private repository readable; push dry-run succeeds |
@@ -27,8 +27,9 @@
 
 | Source/location | Role | Branch / commit | Classification | Unique work and conflicts | Validation | Cleanup |
 | --- | --- | --- | --- | --- | --- | --- |
-| Project root | Main | `main` / `84451d0` | Current baseline, incomplete | Unique local broadcaster repair. Main lacks the integrated Backend, Database, hardened engine, CI, and operations stack. | Install passes; typecheck/build fail on viem client typing; lint cannot start because ESLint is undeclared; no tracked tests are found. | Keep. Do not push until approved. |
+| Project root | Main | `main` / `64a0068` | Current baseline, incomplete | Broadcaster repair and recovery documentation are local. Main lacks the integrated Backend, Database, hardened engine, CI, and operations stack. | Install passes; typecheck/build fail on viem client typing; lint cannot start because ESLint is undeclared; no tracked tests are found. | Keep. Do not push until approved. |
 | `.kilo/recovered-phase1-integration` | Integration | `phase1-integration` / `cc6aee2` | Canonical recovery source | 118-file Phase 1 delta over main. Conflicts with current main in `packages/engine/src/types.ts`; fork/runtime release evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip without Anvil/fixtures. Runtime health fails closed as intended without production config. | Keep until merged and post-merge validated. |
+| `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` | Integration candidate | `recovery/phase1-main-candidate` / `04ae291` | Ready for Product Owner merge decision | `main` plus `phase1-integration`; retained both `CHAIN_NOT_VERIFIED` and `INVALID_CONFIG` error types. No unresolved conflicts. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip; health and strict fork launcher fail closed without production configuration. | Keep until final merge decision and post-merge validation. |
 | `.kilo/recovered-backend-engineer` | Backend | `backend-engineer` / `370d7c0` | Already integrated | Tip is an ancestor of `phase1-integration`. | Worktree clean; published remotely. | Retain through merge; later removable after ancestry recheck. |
 | `.kilo/recovered-blockchain-engineer` | Blockchain | `blockchain-engineer` / `157368e` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `b99ac68`. | Worktree clean; published remotely. | Retain through merge. |
 | `.kilo/recovered-database-engineer` | Database | `database-engineer` / `f84bb64` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `c6e1106`. | Worktree clean; published remotely. | Retain through merge. |
@@ -100,6 +101,22 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm test:fork`: command exits successfully but all 7 fork tests skip because Anvil and approved fixtures are unavailable. This is not fork evidence.
 - `pnpm ops:health`: expected fail-closed result without production secret-store, store, RPC, verification, reconciliation, and finality configuration.
 
+### Isolated `recovery/phase1-main-candidate`
+
+- `pnpm install --frozen-lockfile`: pass under Node `20.19.1` and pnpm `9.15.4`.
+- `pnpm ops:clean-checkout`: pass before and after validation.
+- `pnpm lint`: pass.
+- `pnpm ops:secret-boundary`: pass.
+- `pnpm ops:policy`: pass with CI-equivalent conservative environment values.
+- `pnpm ops:negative-cases`: pass.
+- `pnpm ops:recovery-drill`: pass using temporary non-production paths.
+- `pnpm typecheck`: pass.
+- `pnpm build`: pass.
+- `pnpm test -- --reporter=dot`: 95 pass, 7 skip across 12 passed test files and 2 skipped fork files.
+- `pnpm test:fork`: 7 tests skip because Anvil and approved fixtures are unavailable. This is not fork evidence.
+- `pnpm ops:fork-replay`: fail closed because the candidate has no copied `Rets/MINT_BOT_SECRETS.env` reference. The secret was intentionally not copied.
+- `pnpm ops:health`: fail closed because production secret-store, store, RPC, verification, reconciliation, and finality configuration is absent.
+
 ### Current `main`
 
 - `pnpm install --frozen-lockfile`: pass.
@@ -111,9 +128,8 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 
 ## Pending decisions and gates
 
-1. Prepare and validate an isolated merge candidate from `main` plus `phase1-integration`; do not merge it into `main` without Product Owner confirmation.
-2. Resolve the `packages/engine/src/types.ts` conflict by preserving current product-policy gates and canonical Phase 1 interfaces.
-3. Curate the untracked Robinhood report and historical product-design document.
-4. Recreate and commit the nine live role skill documents.
-5. Obtain Product Owner approval for the final merge, remote push, PR #7 disposition, and obsolete-fragment cleanup.
-6. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
+1. Obtain Product Owner approval before merging `recovery/phase1-main-candidate` into `main` or pushing it.
+2. Curate the untracked Robinhood report and historical product-design document.
+3. Recreate and commit the nine live role skill documents.
+4. Decide PR #7 disposition and remove only obsolete local branches/worktrees afterward.
+5. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
