@@ -7,10 +7,11 @@
     "mint-bot": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node node_modules/typescript/bin/tsc",
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
+    "@mint-bot/backend": "workspace:*",
     "@mint-bot/engine": "workspace:*",
     "viem": "^2.27.0",
     "yargs": "^17.7.0"

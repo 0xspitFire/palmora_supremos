@@ -19,6 +19,7 @@ import type {
   DropConfig,
   DropValidation,
   SupportedChainId,
+  SimulationEvidence,
 } from './types.js';
 import { SeaDropV1PublicStrategy } from './strategies/seadrop-v1-public.js';
 
@@ -82,12 +83,14 @@ export async function simulateMint(
   minter: Address,
   quantity: number,
   value: bigint,
-): Promise<{ success: boolean; error?: string }> {
+  walletIndex = -1,
+): Promise<SimulationEvidence> {
   const calldata = strategy.buildCalldata(drop, minter, quantity);
 
   // Determine the target address (SeaDrop singleton for SeaDrop strategies)
   const to = drop.extra?.['seaDropAddress'] as Address | undefined ?? drop.nftContract;
 
+  const sourceBlock = await client.getBlockNumber();
   try {
     await client.call({
       account: minter,
@@ -95,12 +98,13 @@ export async function simulateMint(
       data: calldata,
       value,
     });
-    return { success: true };
+    return { walletIndex, address: minter, sourceBlock, checkedAt: new Date(), success: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      success: false,
-      error: `Simulation reverted: ${message}`,
-    };
+    let revertType: string | undefined;
+    if (/insufficient|fund/i.test(message)) revertType = 'insufficient-funds';
+    else if (/sold|supply/i.test(message)) revertType = 'supply';
+    else if (/price|value/i.test(message)) revertType = 'price';
+    return { walletIndex, address: minter, sourceBlock, checkedAt: new Date(), success: false, revertType, error: `Simulation reverted: ${message}` };
   }
 }

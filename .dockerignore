@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+dist
+coverage
+logs
+.env*
+Rets/
+**/Rets/
+wallets.enc
+wallets.json
+killswitch
+*.log
