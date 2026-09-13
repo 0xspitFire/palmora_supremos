@@ -29,7 +29,7 @@ try {
   await Promise.race([waitForRpc(`http://${host}:${port}`), anvilFailure]);
   const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
   if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
-  const result = await run(process.execPath, [vitest, 'run', '--config', 'packages/engine/vitest.fork.config.ts'], root);
+  const result = await run(process.execPath, [vitest, 'run', '--config', 'vitest.fork.config.ts'], root);
   if (result !== 0) process.exitCode = result;
 } finally {
   anvil.kill('SIGTERM');
