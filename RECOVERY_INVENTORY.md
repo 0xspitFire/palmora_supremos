@@ -25,7 +25,7 @@
 | Recovery bundle | `/home/Junayd/W3-rsync-recovery.bundle`; verified complete and imported under `refs/recovery/*` in the native clone |
 | Approved artifact input | `/home/Junayd/W3/recovery-input/`; report hashes match Windows source and stale archive is checksum-equivalent |
 | Windows fallback | `C:\Users\hamid\AGravity\W3` remains intact as a fallback; its `Rets/` secrets were not copied into the active clone |
-| Old rsync copy | `~/W3/MintBot-rsync-preserved` is not a usable checkout and contains copied `Rets/`; keep isolated and do not use for development |
+| Old rsync copy | `~/W3/MintBot-rsync-preserved` is an intentional operational backup, not a usable checkout; it contains `Rets/` including the archive reference and must remain isolated from development |
 | Agent Manager | All previously stale sessions were stopped; ten orphaned worktree-only records remain, plus one newly created idle Blockchain session. No stale physical Git worktrees remain. |
 
 ## Surviving worktrees and branches
@@ -136,8 +136,8 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm ops:recovery-drill`: pass with `sqlite-backup-restore` and kill switch engaged.
 - `pnpm test -- --reporter=dot`: 95 pass, 7 skip across 12 passed test files and 2 skipped fork files.
 - `pnpm ops:clean-checkout`: intentionally fails in the project root because preserved untracked recovery artifacts remain.
-- `pnpm test:fork`: 7 tests skip because Anvil and approved fixtures are unavailable.
-- `pnpm ops:fork-replay`: fails because the active clone intentionally has no `Rets/MINT_BOT_SECRETS.env` reference; Anvil itself is available in WSL.
+- `pnpm test:fork`: 6 Robinhood tests pass; 1 Ethereum test skips because its separate RPC, NFT, fee-recipient, and mint-value variables are not configured.
+- `pnpm ops:fork-replay`: passes with 6 Robinhood tests and 1 Ethereum skip after fix `09d320a` corrected the repository-root Vitest config path. Anvil is available and was not the blocker.
 - `pnpm ops:health`: fails closed with missing secret-store, store, RPC, chain-verification, reconciliation, and finality configuration.
 
 ### Native WSL `~/W3/MintBot`
@@ -155,8 +155,8 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm ops:policy`: pass with conservative CI-equivalent values.
 - `pnpm ops:negative-cases`: pass.
 - `pnpm ops:recovery-drill`: pass.
-- `pnpm test:fork`: seven tests skip because replay configuration is intentionally absent.
-- `pnpm ops:fork-replay`: blocked by missing user-owned secret-store reference, not missing Anvil.
+- `pnpm test:fork`: 6 Robinhood tests pass using the preserved `Rets` reference; 1 Ethereum test skips because separate Ethereum fork variables are not configured.
+- `pnpm ops:fork-replay`: passes with 6 Robinhood tests and 1 Ethereum skip using `MINT_BOT_SECRETS_ROOT` pointed at the intentional preserved operational backup; Anvil is available.
 - `pnpm ops:health`: expected fail-closed result without production configuration.
 - `forge test --root ~/W3/seadrop-test`: 2 passed, 0 failed, 0 skipped.
 
@@ -165,6 +165,6 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 1. Curate the preserved Robinhood report and historical product-design document.
 2. Decide whether to retain or delete remote specialist branches after a final branch-retention review.
 3. Decide whether the separate `~/W3/seadrop-test` fixture should become its own repository or remain local test input.
-4. Provide a user-owned secret-store reference for `ROBINHOOD_ARCHIVE_RPC` without copying credentials into the active clone, then run replay tests against approved fixtures.
+4. Configure the separate Ethereum fork variables and run its one skipped test; retain `ROBINHOOD_ARCHIVE_RPC` behind the intentional preserved operational backup or another approved secret store.
 5. Open Antigravity/VS Code through Remote-WSL and confirm future Agent Manager worktrees are created under the WSL filesystem.
 6. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
