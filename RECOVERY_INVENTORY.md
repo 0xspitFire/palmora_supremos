@@ -14,15 +14,19 @@
 
 | Item | State |
 | --- | --- |
-| Main branch | synchronized with `origin/main`; current tip is the latest recovery-inventory commit |
+| Main branch | native WSL clone at `~/W3/MintBot`, synchronized with `origin/main`; current tip is the latest recovery-inventory commit |
 | Main repair | `public-mempool.ts` restored from canonical implementation and committed as `84451d0` |
 | Canonical Phase 1 source | `phase1-integration` at `cc6aee2`, merged into `main` through candidate `f72d83a` |
 | Canonical PR | PR #6, merged; isolated candidate resolved its single `packages/engine/src/types.ts` conflict |
 | CTO PR | PR #7, merged from `cto-restored`; duplicate `cto-2` checkout removed and branch retained |
 | Git integrity | Reachable objects repaired from a fresh GitHub mirror; no reachable object is missing |
 | GitHub | Authenticated as `0xspitFire`; private repository readable; push dry-run succeeds |
-| Runtime | Project-pinned Node `20.19.1` used from an isolated portable runtime; pnpm `9.15.4` |
-| Agent Manager | All stale session records were stopped; orphaned worktree-only metadata remains because the API exposes no record-only delete and `.kilo/agent-manager.json` is not to be edited manually |
+| Runtime | Native WSL Node `20.19.1`, npm `10.8.2`, pnpm `9.15.4`, Git `2.53.0`, Foundry/Anvil `1.8.1`; `~/.foundry/bin` is on login-shell PATH |
+| Recovery bundle | `/home/Junayd/W3-rsync-recovery.bundle`; verified complete and imported under `refs/recovery/*` in the native clone |
+| Approved artifact input | `/home/Junayd/W3/recovery-input/`; report hashes match Windows source and stale archive is checksum-equivalent |
+| Windows fallback | `C:\Users\hamid\AGravity\W3` remains intact as a fallback; its `Rets/` secrets were not copied into the active clone |
+| Old rsync copy | `~/W3/MintBot-rsync-preserved` is not a usable checkout and contains copied `Rets/`; keep isolated and do not use for development |
+| Agent Manager | All previously stale sessions were stopped; ten orphaned worktree-only records remain, plus one newly created idle Blockchain session. No stale physical Git worktrees remain. |
 
 ## Surviving worktrees and branches
 
@@ -40,7 +44,7 @@
 | `.kilo/worktrees/cto-2` (removed) | CTO | `cto-2` / `b29fdd0` | Exact duplicate | Same commit and tree as merged `cto-restored`; Agent Manager associated it with PR #7. | Worktree clean. | Worktree removed; branch retained. |
 | `.kilo/recovered-frontend-engineer` (removed) | Frontend | `frontend-engineer` / `43ad380` | Duplicate baseline | Initial commit only; no frontend implementation, consistent with Phase 1 scope. | Worktree clean; published remotely. | Worktree removed; branch retained. |
 | `.kilo/recovered-product-design-spec` (removed) | Product Design | `product-design-spec` / `43ad380` | Duplicate baseline | Branch has no design-spec commit. The historical design file survives in the stale archive. | Worktree clean; published remotely. | Worktree removed; branch retained. |
-| Local refs only | Misc. stale branches | `chemical-bittersweet`, `cto`, `lead-engineer`, `recovered-product-design-spec` at `3e44906` | Obsolete duplicates | All point to the former `main` tip and contain no branch-only commit. | No registered worktrees. | Preserve until final branch-retention review; delete only with explicit approval. |
+| Local refs removed | Misc. stale branches | `chemical-bittersweet`, `cto`, `cto-2`, `lead-engineer`, `recovered-product-design-spec`, `recovery/phase1-main-candidate` | Verified obsolete duplicates | All were merged, duplicated, or ancestor commits; useful content is in `main`, remote branches, the bundle, or imported recovery refs. | Deleted with non-forcing `git branch -d` after bundle verification. | Branch refs removed; remote specialist branches and `refs/recovery/*` retained. |
 
 ## Archived stale filesystem snapshots
 
@@ -66,8 +70,8 @@ Do not commit the whole archive as product source. Curate unique historical docu
 | `Robinhood Technical Report` | Unique, valuable technical evidence | Preserve and decide a safe tracked documentation filename during integration. It contains public transaction evidence but no secret endpoint value. |
 | `Ref Hashes` | Duplicate subset | The five public failed-transaction references are already explained in `Robinhood Technical Report`; keep until report curation is complete. |
 | `lib/` | Removed duplicate | The untracked root `lib/seadrop` contained 168 files, all byte-identical to files in the complete `seadrop-test/lib/seadrop` submodule, with no root-only content. It was removed after comparison. |
-| `seadrop-test/` | Valuable external fixture source, not integrated | Unborn nested Git repository with a default Foundry `Counter` harness and a complete SeaDrop submodule containing upstream Solidity/Hardhat/Foundry tests. It also contains a sample-only `.env` fixture; no project-specific W3 fork test is wired to it. Preserve for fixture curation and never use sample credentials. |
-| `stale-worktree-archive/` | Recovery backup | Keep until all unique documents are curated and canonical integration is accepted. |
+| `seadrop-test/` | Separate WSL fixture source, not integrated | `~/W3/seadrop-test` has the copied Counter harness without parent Git metadata and independently cloned `forge-std` and SeaDrop upstream repositories. Its two Foundry tests pass. No project-specific W3 fork test is wired to it. |
+| `stale-worktree-archive/` | Recovery backup | Copied to `~/W3/recovery-input/stale-worktree-archive/` outside the active clone; keep until historical documents are curated. |
 
 ## Protected recovery commits
 
@@ -133,13 +137,34 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm test -- --reporter=dot`: 95 pass, 7 skip across 12 passed test files and 2 skipped fork files.
 - `pnpm ops:clean-checkout`: intentionally fails in the project root because preserved untracked recovery artifacts remain.
 - `pnpm test:fork`: 7 tests skip because Anvil and approved fixtures are unavailable.
-- `pnpm ops:fork-replay`: fails because the Anvil binary is unavailable.
+- `pnpm ops:fork-replay`: fails because the active clone intentionally has no `Rets/MINT_BOT_SECRETS.env` reference; Anvil itself is available in WSL.
 - `pnpm ops:health`: fails closed with missing secret-store, store, RPC, chain-verification, reconciliation, and finality configuration.
+
+### Native WSL `~/W3/MintBot`
+
+- Fresh GitHub clone confirmed at `/home/Junayd/W3/MintBot`; `.git` is independent, non-shallow, and has no copied worktree registrations.
+- `git fetch origin --tags`: pass; all remote specialist branches are visible.
+- `git fsck --full --no-reflogs`: pass with no missing objects.
+- `pnpm install --frozen-lockfile`: pass using native Node `20.19.1` and pnpm `9.15.4`.
+- `pnpm ops:clean-checkout`: pass.
+- `pnpm lint`: pass.
+- `pnpm typecheck`: pass.
+- `pnpm build`: pass.
+- `pnpm test -- --reporter=dot`: 95 pass, 7 skip.
+- `pnpm ops:secret-boundary`: pass; no `Rets/` or secret paths are tracked or present in the active clone.
+- `pnpm ops:policy`: pass with conservative CI-equivalent values.
+- `pnpm ops:negative-cases`: pass.
+- `pnpm ops:recovery-drill`: pass.
+- `pnpm test:fork`: seven tests skip because replay configuration is intentionally absent.
+- `pnpm ops:fork-replay`: blocked by missing user-owned secret-store reference, not missing Anvil.
+- `pnpm ops:health`: expected fail-closed result without production configuration.
+- `forge test --root ~/W3/seadrop-test`: 2 passed, 0 failed, 0 skipped.
 
 ## Pending decisions and gates
 
-1. Curate the untracked Robinhood report and historical product-design document.
-2. Decide whether to retain or delete obsolete local branches after a final branch-list review.
-3. Curate or explicitly retire the nested `seadrop-test/` fixture repository and the stale-worktree archive.
-4. Install/configure Anvil and approved archive fixtures before treating fork replay as evidence.
-5. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
+1. Curate the preserved Robinhood report and historical product-design document.
+2. Decide whether to retain or delete remote specialist branches after a final branch-retention review.
+3. Decide whether the separate `~/W3/seadrop-test` fixture should become its own repository or remain local test input.
+4. Provide a user-owned secret-store reference for `ROBINHOOD_ARCHIVE_RPC` without copying credentials into the active clone, then run replay tests against approved fixtures.
+5. Open Antigravity/VS Code through Remote-WSL and confirm future Agent Manager worktrees are created under the WSL filesystem.
+6. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
