@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { openDatabase, type SqliteDatabase } from '@mint-bot/database';
 import { BackendApplication } from './application.js';
-import { CanonicalStoreBridge, type CanonicalAdmissionInput } from './canonical-store.js';
+import { canonicalReceiptFinalityStage, CanonicalStoreBridge, type CanonicalAdmissionInput } from './canonical-store.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { campaignInputDigest } from './evidence.js';
 import type { AttemptRecord, Campaign, ChainEvidenceRecord, EngineAdapter, FeePolicy, IntentRecord, RunRecord } from './types.js';
@@ -64,6 +64,14 @@ async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: re
 }
 
 describe('CanonicalStoreBridge', () => {
+  it('does not infer Robinhood Ethereum-finality from an L2 confirmation', () => {
+    expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed')).toBe('unknown');
+    expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'soft')).toBe('soft');
+    expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'posted')).toBe('posted');
+    expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'final')).toBe('ethereum_final');
+    expect(canonicalReceiptFinalityStage(ETHEREUM, 'Confirmed')).toBe('ethereum_final');
+  });
+
   it('rejects the JSON backend_state table as a live store', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mint-backend-schema-'));
     const db = openDatabase(join(directory, 'state.sqlite'));
@@ -89,6 +97,13 @@ describe('CanonicalStoreBridge', () => {
     try {
       const campaignValue = await campaign(value, ETHEREUM);
       expect(value.store.snapshot().campaigns.find((item) => item.id === campaignValue.id)?.chainVerification.status).toBe('unverified');
+    } finally { await close(value); }
+  });
+
+  it('rejects receipts whose execution graph has no canonical chain identity', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      await expect(value.store.transaction((state) => { state.receipts.push({ id: 'orphan-receipt', executionId: 'orphan-execution', runId: 'orphan-run', state: 'Confirmed', blockNumber: 1n, blockHash: '0xblock', actualSpendWei: 1n, observedAt: NOW }); })).rejects.toThrow('EXECUTION_CHAIN_REQUIRED');
     } finally { await close(value); }
   });
 

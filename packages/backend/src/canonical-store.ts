@@ -278,7 +278,13 @@ function receiptState(state: string): AttemptRecord['state'] {
   return 'Failed';
 }
 
-function finalityStage(state: string, robinhoodFinality?: AttemptRecord['robinhoodFinality']): DatabaseReceiptRecord['finalityStage'] {
+export function canonicalReceiptFinalityStage(chainId: 1 | 4663, state: string, robinhoodFinality?: AttemptRecord['robinhoodFinality']): DatabaseReceiptRecord['finalityStage'] {
+  if (chainId === ROBINHOOD_CHAIN_ID) {
+    if (robinhoodFinality === 'soft') return 'soft';
+    if (robinhoodFinality === 'posted') return 'posted';
+    if (robinhoodFinality === 'final') return 'ethereum_final';
+    return 'unknown';
+  }
   if (robinhoodFinality === 'soft') return 'soft';
   if (robinhoodFinality === 'posted') return 'posted';
   if (robinhoodFinality === 'final') return 'ethereum_final';
@@ -738,9 +744,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private persistReceipt(receipt: ReceiptRecord, prior: ReceiptRecord | undefined): void {
     if (prior) return;
+    const chain = this.db.prepare('SELECT cp.chain_id FROM execution e JOIN campaign c ON c.id = e.campaign_id JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id WHERE e.id = ?').get(receipt.executionId) as { chain_id: 1 | 4663 } | undefined;
+    if (!chain) throw new Error('EXECUTION_CHAIN_REQUIRED');
     const attempt = this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(receipt.executionId) as { id: string } | undefined;
     if (!attempt || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined) throw new Error('RECEIPT_PERSISTENCE_FACTS_REQUIRED');
-    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'reverted', blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, finalityStage: finalityStage(receipt.state, receipt.robinhoodFinality), finalitySource: receipt.robinhoodFinality ? 'blockchain' : 'ethereum-confirmation', observedAt: receipt.observedAt });
+    const chainId = chain.chain_id;
+    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'reverted', blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, finalityStage: canonicalReceiptFinalityStage(chainId, receipt.state, receipt.robinhoodFinality), finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
     this.transitionExecutionSafe(receipt.executionId, receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'failed', `receipt ${receipt.state}`);
   }
 

@@ -47,6 +47,13 @@ function asFiniteNumber(value: bigint, label: string): number {
   return number;
 }
 
+export function paidRunMintValueCapEth(campaign: Campaign): number {
+  if (campaign.feePolicy.kind !== 'paid') return 0;
+  const cap = asFiniteNumber(campaign.spendPolicy.maxRunWei, 'max_run_spend');
+  if (cap <= 0) throw new Error('PAID_RUN_MINT_VALUE_CAP_REQUIRED');
+  return cap;
+}
+
 async function loadWallets(path: string): Promise<Array<{ index: number; address: Address }>> {
   const parsed = JSON.parse(await readFile(path, 'utf8')) as WalletFile;
   if (!Array.isArray(parsed.wallets) || parsed.wallets.length === 0) throw new Error('WALLET_FILE_EMPTY');
@@ -82,7 +89,7 @@ function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRu
       dryRun,
       killSwitchFile: options.killSwitchFile,
       paidMaxQuantityPerWallet: 15,
-      paidRunMintValueCapEth: 0,
+      paidRunMintValueCapEth: paidRunMintValueCapEth(campaign),
     },
     broadcast: {
       // Dry runs must not require relay credentials. Live Ethereum still
@@ -224,6 +231,7 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
         }
       }
       if (receipts.length === 0) return { result: 'unknown', attempts: updatedAttempts, receipts, reason: 'receipt unavailable; outcome unresolved' };
+      if (intent.campaignSnapshot.chainId === 4663) return { result: 'unknown', attempts: updatedAttempts, receipts, reason: 'Robinhood L2 receipt requires an authoritative Ethereum-final observer' };
       return { result: receipts.every((receipt) => receipt.state === 'Confirmed') ? 'confirmed' : 'failed', attempts: updatedAttempts, receipts };
     },
   };

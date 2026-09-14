@@ -2,7 +2,7 @@ export * from './types.js';
 export { DurableStore } from './store.js';
 export type { BackendStore } from './store.js';
 export { SqliteStateStore } from './sqlite-store.js';
-export { CanonicalStoreBridge, PHASE1_ZERO_ADMISSION_BUFFERS, rebindExecutionResult } from './canonical-store.js';
+export { CanonicalStoreBridge, PHASE1_ZERO_ADMISSION_BUFFERS, canonicalReceiptFinalityStage, rebindExecutionResult } from './canonical-store.js';
 export type { CanonicalAdmissionInput, CanonicalAdmissionResult, CanonicalExecutionStore, PreparedExecution } from './canonical-store.js';
 export { SpendLedger } from './spend-ledger.js';
 export { ReadinessService } from './readiness.js';
