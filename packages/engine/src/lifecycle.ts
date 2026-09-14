@@ -154,6 +154,10 @@ export function canonicalExecutionIdentity(
   return { runId, executionId: executionId || `${runId}:wallet:${walletIndex}`, transactionIntentId };
 }
 
+export function reservationCampaignId(campaignId: string | undefined, contract: Address): string {
+  return campaignId ?? `contract:${contract.toLowerCase()}`;
+}
+
 export type SubmissionDisposition =
   | { state: 'matched'; reason: string }
   | { state: 'ambiguous'; reason: string }
