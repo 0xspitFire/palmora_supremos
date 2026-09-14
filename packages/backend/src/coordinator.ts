@@ -181,7 +181,7 @@ export class ExecutionCoordinator {
       if (!run || !intent) throw new Error('INTENT_NOT_FOUND');
       const update = await this.engine.reconcile(run);
       const executionIds = [...new Set([...update.attempts.map(item => item.executionId), ...update.receipts.map(item => item.executionId)])];
-      this.assertEngineFacts(run.id, intent.campaignSnapshot.chainId, executionIds, update.attempts, update.receipts);
+      this.assertEngineFacts(run.id, intent.campaignSnapshot.chainId, executionIds, update.attempts, update.receipts, true);
       this.assertReconciliationCoherence(run.id, intent.campaignSnapshot.chainId, update.result, snapshot.attempts.filter(item => item.runId === run.id), update.attempts, update.receipts);
       await this.store.transaction(state => {
         const currentRun = state.runs.find(item => item.id === run.id);
@@ -229,6 +229,7 @@ export class ExecutionCoordinator {
   }
 
   private setReservation(reservation: Reservation, status: Reservation['status'], actualAmountWei?: bigint): void {
+    if (reservation.status === 'settled') return;
     if (actualAmountWei !== undefined && (actualAmountWei < 0n || actualAmountWei > reservation.amountWei)) throw new Error('INVALID_SETTLEMENT_AMOUNT');
     if (reservation.status === 'released') throw new Error('INVALID_RESERVATION_TRANSITION');
     reservation.status = status; reservation.updatedAt = new Date().toISOString(); if (actualAmountWei !== undefined) reservation.actualAmountWei = actualAmountWei;
@@ -241,12 +242,12 @@ export class ExecutionCoordinator {
     run.updatedAt = new Date().toISOString();
   }
 
-  private assertEngineFacts(runId: string, chainId: 1 | 4663, executionIds: readonly string[], attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[]): void {
+  private assertEngineFacts(runId: string, chainId: 1 | 4663, executionIds: readonly string[], attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], allowUnfinalizedRobinhood = false): void {
     if (new Set(executionIds).size !== executionIds.length) throw new Error('DUPLICATE_EXECUTION_ID');
     if (attempts.some(item => item.runId !== runId || !executionIds.includes(item.executionId)) || receipts.some(item => item.runId !== runId || !executionIds.includes(item.executionId))) throw new Error('INVALID_ENGINE_EXECUTION_FACTS');
     if (new Set(attempts.map(item => item.id)).size !== attempts.length || new Set(receipts.map(item => item.id)).size !== receipts.length) throw new Error('DUPLICATE_ENGINE_FACT_ID');
     if (receipts.some(receipt => !['Confirmed', 'Reorged', 'Failed'].includes(receipt.state) || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined || receipt.actualSpendWei < 0n)) throw new Error('INVALID_RECEIPT_FACT');
-    if (chainId === 4663 && receipts.some(receipt => !receipt.robinhoodFinality)) throw new Error('ROBINHOOD_FINALITY_REQUIRED');
+    if (chainId === 4663 && !allowUnfinalizedRobinhood && receipts.some(receipt => !receipt.robinhoodFinality)) throw new Error('ROBINHOOD_FINALITY_REQUIRED');
   }
 
   private assertReconciliationCoherence(runId: string, chainId: 1 | 4663, result: string, existingAttempts: readonly AttemptRecord[], attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[]): void {

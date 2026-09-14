@@ -7,6 +7,7 @@ import { BackendApplication } from './application.js';
 import { canonicalReceiptFinalityStage, CanonicalStoreBridge, type CanonicalAdmissionInput } from './canonical-store.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { campaignInputDigest } from './evidence.js';
+import { DurableStore } from './store.js';
 import type { AttemptRecord, Campaign, ChainEvidenceRecord, EngineAdapter, FeePolicy, IntentRecord, RunRecord } from './types.js';
 
 const ETHEREUM = 1 as const;
@@ -56,9 +57,9 @@ async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM | typeof
   return fixtureValue.application.createCampaign(campaignInput(chainId, paid));
 }
 
-async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE]): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
+async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = []): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
   const run: RunRecord = { id: `run-${campaignValue.id}`, intentId: `intent-${campaignValue.id}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
-  const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [], evidenceAt: NOW, createdAt: NOW };
+  const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [...simulationIds], evidenceAt: NOW, createdAt: NOW };
   await fixtureValue.store.transaction((state) => { state.runs.push(run); state.intents.push(intent); });
   return { run, intent, input: { run, intent, campaign: campaignValue, wallets } };
 }
@@ -253,6 +254,50 @@ describe('CanonicalStoreBridge', () => {
       expect(components.l1_data_gas_wei).toBe('4');
       expect(components.priority_fee_component_wei).toBe('20');
     } finally { await close(value); }
+  });
+
+  it('does not overwrite a provider-settled reservation during coordinator post-processing', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM);
+      const prepared = await armed(value, campaignValue, [WALLET_ONE], ['settlement-simulation']);
+      await value.store.transaction((state) => {
+        state.simulations.push({ id: 'settlement-simulation', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(campaignValue), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 34n });
+        state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational: { secretStoreReference: 'TEST_OPERATOR', storePath: 'state.sqlite', signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' } };
+      });
+      const engine: EngineAdapter = {
+        prepare: async () => ({ executionIds: [], attempts: [], receipts: [], state: 'Prepared' }),
+        execute: async ({ reservationIds }) => {
+          await value.store.transaction((state) => { const reservation = state.reservations.find((item) => item.id === reservationIds[0]); if (!reservation) throw new Error('reservation missing'); reservation.status = 'settled'; reservation.actualAmountWei = 17n; });
+          return { executionIds: ['engine-generated'], attempts: [{ id: 'provider-attempt', executionId: 'engine-generated', runId: prepared.run.id, wallet: WALLET_ONE, hash: `0x${'e'.repeat(64)}`, nonce: 3, state: 'Submitted', createdAt: NOW, updatedAt: NOW }], receipts: [{ id: 'provider-receipt', executionId: 'engine-generated', runId: prepared.run.id, state: 'Confirmed', blockNumber: 15n, blockHash: `0x${'f'.repeat(64)}`, actualSpendWei: 5n, observedAt: NOW }], state: 'Confirmed' };
+        },
+        reconcile: async () => ({ result: 'unknown', attempts: [], receipts: [] }),
+      };
+      await new ExecutionCoordinator(value.store, engine).execute(prepared.run.id, [WALLET_ONE]);
+      const snapshot = value.store.snapshot();
+      const reservation = snapshot.reservations.find((item) => item.runId === prepared.run.id);
+      expect(reservation?.status).toBe('settled');
+      expect(reservation?.actualAmountWei).toBe(17n);
+      expect(snapshot.receipts.find((item) => item.id === 'provider-receipt')?.actualSpendWei).toBe(17n);
+    } finally { await close(value); }
+  });
+
+  it('persists an unresolved Robinhood receipt without inventing Ethereum finality', async () => {
+    const store = new DurableStore();
+    const campaignValue: Campaign = { id: 'rh-campaign', state: 'Armed', chainId: ROBINHOOD, contract: CONTRACT, strategy: 'seadrop-v1-public', quantity: 1, dryRun: false, broadcastMode: 'sequencer', spendPolicy: { maxRunWei: 1_000n, dailyCapWei: 1_000n, gasCeilingWei: 100n }, chainVerification: { chainId: ROBINHOOD, status: 'verified', seaDropCompatible: true, sourceBlock: 1n, endpointReference: 'RH_SEQUENCER_REFERENCE' }, mintPriceWei: 0n, feePolicy: { kind: 'free', configuredPriorityFeeWei: 20n, freeTotalSpendCapWei: 40n, l2ExecutionGasBudgetWei: 10n, l1DataGasBudgetWei: 4n, totalFeeBudgetWei: 34n }, createdAt: NOW, updatedAt: NOW };
+    const run: RunRecord = { id: 'rh-run', intentId: 'rh-intent', campaignId: campaignValue.id, mode: 'live', requestDigest: 'rh-request', state: 'Armed', createdAt: NOW, updatedAt: NOW };
+    const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: campaignValue, wallets: [WALLET_ONE], policy: campaignValue.spendPolicy, feePolicy: campaignValue.feePolicy, chainVerification: campaignValue.chainVerification, simulationIds: [], evidenceAt: NOW, createdAt: NOW };
+    const executionId = 'rh-execution';
+    await store.transaction((state) => { state.campaigns.push(campaignValue); state.runs.push(run); state.intents.push(intent); state.attempts.push({ id: 'rh-attempt', executionId, runId: run.id, wallet: WALLET_ONE, hash: `0x${'a'.repeat(64)}`, nonce: 3, state: 'Submitted', createdAt: NOW, updatedAt: NOW }); state.reservations.push({ id: 'rh-reservation', runId: run.id, campaignId: campaignValue.id, chainId: ROBINHOOD, wallet: WALLET_ONE, amountWei: 100n, accountingDate: '2026-09-14', status: 'reserved', createdAt: NOW, updatedAt: NOW }); });
+    const engine: EngineAdapter = {
+      prepare: async () => ({ executionIds: [], attempts: [], receipts: [], state: 'Prepared' }),
+      execute: async () => ({ executionIds: [], attempts: [], receipts: [], state: 'Prepared' }),
+      reconcile: async (currentRun) => ({ result: 'unknown', attempts: [{ id: 'rh-reconciled-attempt', executionId, runId: currentRun.id, wallet: WALLET_ONE, hash: `0x${'a'.repeat(64)}`, nonce: 3, state: 'Confirmed', createdAt: NOW, updatedAt: NOW }], receipts: [{ id: 'rh-reconciled-receipt', executionId, runId: currentRun.id, state: 'Confirmed', blockNumber: 15n, blockHash: `0x${'b'.repeat(64)}`, actualSpendWei: 12n, observedAt: NOW }], reason: 'Robinhood L2 receipt requires an authoritative Ethereum-final observer' }),
+    };
+    await new ExecutionCoordinator(store, engine).reconcile();
+    const receipt = store.snapshot().receipts.find((item) => item.id === 'rh-reconciled-receipt');
+    expect(receipt?.robinhoodFinality).toBeUndefined();
+    expect(store.snapshot().reservations.find((item) => item.runId === run.id)?.status).toBe('reserved');
   });
 
   it('fails closed for unsupported new reservation mutations and persists normalized notification/simulation facts', async () => {

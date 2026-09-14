@@ -347,6 +347,20 @@ function mapFeePolicy(value: unknown, mintPriceWei: bigint, paidMintsEnabled = f
   };
 }
 
+function normalizeCampaignSnapshot(value: unknown): Campaign | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Campaign;
+  const mintPriceWei = asBigInt(source.mintPriceWei);
+  const verification = source.chainVerification;
+  return {
+    ...source,
+    mintPriceWei,
+    spendPolicy: mapSpendPolicy(source.spendPolicy),
+    feePolicy: mapFeePolicy(source.feePolicy, mintPriceWei),
+    ...(verification ? { chainVerification: { ...verification, ...(verification.sourceBlock === undefined ? {} : { sourceBlock: asBigInt(verification.sourceBlock) }) } } : {}),
+  };
+}
+
 function mapChainVerification(row: { chain_id: number; status: string; checked_at: string; evidence_json: string; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; feed_endpoint_reference: string | null } | undefined, fallback: ChainVerification | undefined, asOf = new Date()): ChainVerification {
   const chainId = (row?.chain_id ?? fallback?.chainId) as 1 | 4663;
   const evidence = decode<Record<string, unknown>>(row?.evidence_json);
@@ -560,7 +574,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     for (const row of rows) {
       const snapshot = decode<PolicySnapshot>(row.policy_snapshot_json);
       const intentId = row.request_id ?? snapshot?.intentId ?? row.id.split(':wallet:')[0] ?? row.id;
-      const campaign = snapshot?.campaignSnapshot ?? campaignsById.get(row.campaign_id);
+      const snapshotCampaign = normalizeCampaignSnapshot(snapshot?.campaignSnapshot ?? snapshot?.campaign);
+      const canonicalCampaign = campaignsById.get(row.campaign_id);
+      const campaign = snapshotCampaign && canonicalCampaign ? { ...snapshotCampaign, chainVerification: structuredClone(canonicalCampaign.chainVerification) } : snapshotCampaign ?? canonicalCampaign;
       const runId = row.run_id ?? snapshot?.runId ?? runs.find((run) => run.intentId === intentId)?.id ?? '';
       const run = runsById.get(runId);
       if (!campaign || !run) continue;
@@ -712,6 +728,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private persistReservation(reservation: Reservation, prior: Reservation | undefined): void {
     if (!prior) throw new Error('CANONICAL_RESERVATION_ADMISSION_REQUIRED');
     if (prior.status === reservation.status && prior.actualAmountWei === reservation.actualAmountWei) return;
+    if (prior.status === 'settled') return;
     if (reservation.status === 'settled') {
       const actual = reservation.actualAmountWei ?? reservation.amountWei;
       this.settleReservationTotal(reservation.id, actual);

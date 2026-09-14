@@ -76,3 +76,10 @@ Receive workflows from Product Manager, interaction rules from Product Designer,
 - A kill signal is shared across processes and checked before reservation,
   signing, and each broadcast admission. It marks remaining work `Aborted`
   while preserving already-submitted transaction facts for reconciliation.
+- A provider may settle a reservation before Coordinator projects its receipt;
+  a canonical `settled` row and component total are authoritative and must not
+  be overwritten by a second projection.
+- Typed numeric fields in Database JSON snapshots are normalized at the
+  Backend read boundary; arbitrary JSON is not globally coerced into numbers.
+- A Robinhood L2 receipt without an Ethereum-final observation is persisted as
+  unresolved evidence, never promoted to settlement or inferred finality.
