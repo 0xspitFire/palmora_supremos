@@ -9,7 +9,15 @@ const policyVariables = [
   'ROBINHOOD_FREE_MINT_VALUE_WEI', 'ROBINHOOD_L2_GAS_RESERVE_WEI', 'ROBINHOOD_L1_DATA_GAS_RESERVE_WEI',
   'ROBINHOOD_FREE_WALLET_CAP_WEI', 'ROBINHOOD_FREE_PERIOD_CAP_WEI',
 ];
-const cleanEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !policyVariables.includes(name)));
+const runtimeVariables = [
+  'SECRET_STORE_PATH', 'RPC_SECRET_NAMES', 'STORE_PATH', 'KILL_SWITCH_PATH',
+  'SIGNER_HEALTH_URL', 'NOTIFICATION_HEALTH_URL', 'LAST_RECONCILIATION_AT',
+  'BACKUP_DIR', 'BACKUP_ENCRYPTION_KEY', 'RESTORE_SNAPSHOT', 'MINT_BOT_SECRETS_ROOT',
+  'ROBINHOOD_ARCHIVE_RPC', 'ETHEREUM_FORK_RPC', 'ETHEREUM_FORK_SOURCE',
+];
+const safeEnvironment = new Set(['PATH', 'HOME', 'COREPACK_HOME', 'PNPM_HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI', 'NODE_ENV']);
+const cleanEnvironment = Object.fromEntries(Object.entries(process.env)
+  .filter(([name]) => !policyVariables.includes(name) && !runtimeVariables.includes(name) && safeEnvironment.has(name)));
 
 function run(environment) {
   return new Promise((resolve) => {

@@ -1,12 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
+import { runStrictVitest } from './strict-vitest.mjs';
 
 const root = resolve(process.cwd());
 const secretRoot = process.env.MINT_BOT_SECRETS_ROOT ?? [resolve(root, 'Rets'), resolve(root, '../../../Rets')].find((candidate) => existsSync(resolve(candidate, 'MINT_BOT_SECRETS.env'))) ?? resolve(root, 'Rets');
 const sourceReference = process.env.ETHEREUM_FORK_SOURCE ?? 'Rets/MINT_BOT_SECRETS.env:ETHEREUM_FORK_RPC';
 if (sourceReference !== 'Rets/MINT_BOT_SECRETS.env:ETHEREUM_FORK_RPC') throw new Error('Ethereum archive source must be the approved Rets reference');
-const forkRpc = readReference(resolve(secretRoot, 'MINT_BOT_SECRETS.env'), 'ETHEREUM_FORK_RPC');
+const secretFile = resolve(secretRoot, 'MINT_BOT_SECRETS.env');
+if (!secretFile.replaceAll('\\', '/').endsWith('Rets/MINT_BOT_SECRETS.env')) throw new Error('Ethereum source must be an approved Rets reference');
+const forkRpc = readReference(secretFile, 'ETHEREUM_FORK_RPC');
 const forkBlock = process.env.ETHEREUM_FORK_BLOCK;
 if (!forkBlock || !/^\d+$/.test(forkBlock)) throw new Error('ETHEREUM_FORK_BLOCK is required');
 for (const name of ['ETHEREUM_SEADROP_NFT', 'ETHEREUM_SEADROP_FEE_RECIPIENT', 'ETHEREUM_SEADROP_MINT_VALUE_WEI']) {
@@ -18,10 +21,20 @@ try {
   await waitForRpc('http://127.0.0.1:8546');
   const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
   if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
-  const environment = { ...process.env, MINT_BOT_FORK_REPLAY: 'true', ANVIL_ETHEREUM_RPC_URL: 'http://127.0.0.1:8546' };
-  delete environment.ETHEREUM_FORK_RPC;
-  delete environment.ETHEREUM_FORK_SOURCE;
-  const code = await run(process.execPath, [vitest, 'run', 'packages/engine/src/ethereum.fork.test.ts'], environment);
+  const environment = {
+    MINT_BOT_FORK_REPLAY: 'true',
+    ANVIL_ETHEREUM_RPC_URL: 'http://127.0.0.1:8546',
+    ETHEREUM_SEADROP_NFT: process.env.ETHEREUM_SEADROP_NFT,
+    ETHEREUM_SEADROP_FEE_RECIPIENT: process.env.ETHEREUM_SEADROP_FEE_RECIPIENT,
+    ETHEREUM_SEADROP_MINT_VALUE_WEI: process.env.ETHEREUM_SEADROP_MINT_VALUE_WEI,
+  };
+  const code = await runStrictVitest({
+    root,
+    vitest,
+    config: resolve(root, 'vitest.fork.config.ts'),
+    files: [resolve(root, 'packages/engine/src/ethereum.fork.test.ts')],
+    environment,
+  });
   if (code !== 0) process.exitCode = code;
 } finally {
   anvil.kill('SIGTERM');
@@ -48,12 +61,4 @@ async function waitForRpc(url) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   }
   throw new Error('Ethereum fork Anvil did not become ready');
-}
-
-function run(command, args, env) {
-  return new Promise((resolveCode) => {
-    const child = spawn(command, args, { cwd: root, env, stdio: 'inherit', windowsHide: true });
-    child.on('error', () => resolveCode(1));
-    child.on('exit', (code) => resolveCode(code ?? 1));
-  });
 }
