@@ -58,3 +58,13 @@ Receive entities from Product Manager, architecture from CTO/Lead, and event fac
 - SQLite is the current zero-operations implementation, subject to operational validation.
 - Robinhood `Included` and `Posted to Ethereum` are not terminal success.
 - Database is schema authority; Backend is integrating consumer unless CTO decides otherwise.
+
+## Dated refinements
+
+### 2026-09-14 — Phase 1 closure contract
+
+- Normalized SQLite under `packages/database` is the sole authoritative live store; the legacy JSON state shape is migration/test input only and must not become a second runtime authority.
+- Forward-only migrations `010` through `014` add lifecycle identity, exact all-in reservation components, request-fingerprint idempotency, canonical/append-only protections, recovery read models, and retention/backup evidence without rewriting `001` through `009`.
+- A paid Ethereum reservation accounts atomically for mint value, L2 execution gas, L1 data gas, priority fee, and bounded replacement exposure. Settlement is monotonic and cannot exceed any reserved component or the reserved all-in amount.
+- Chain ID `4663` rejects paid reservations at the database boundary. A zero priority component is accepted only when the explicit fee policy says `allowed`; policy snapshots and settlement components remain auditable.
+- Recovery queries must identify unresolved attempts, orphaned reservations, duplicate `(from, nonce)` identities, stale simulations, and reorg exposure before new work is admitted. Backups require integrity/schema verification and recorded, secret-free evidence.
