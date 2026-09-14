@@ -100,6 +100,7 @@ export {
   selectBroadcastAttempt,
   classifyBroadcastResult,
   canonicalExecutionIdentity,
+  reservationCampaignId,
   reconcileByHashAndNonce,
   lifecycleStateForFinality,
   shouldSettleReceipt,

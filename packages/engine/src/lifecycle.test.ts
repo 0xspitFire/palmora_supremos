@@ -10,6 +10,7 @@ import {
   classifyBroadcastResult,
   lifecycleStateForFinality,
   reconcileByHashAndNonce,
+  reservationCampaignId,
   selectBroadcastAttempt,
   shouldSettleReceipt,
   actualSettlementComponents,
@@ -58,6 +59,8 @@ describe('Gate 3 lifecycle boundaries', () => {
     expect(second).toEqual(first);
     expect(first.executionId).toMatch(/^execution_[0-9a-f]{32}$/);
     expect(first.transactionIntentId).toMatch(/^intent_[0-9a-f]{32}$/);
+    expect(reservationCampaignId('campaign_1', wallet)).toBe('campaign_1');
+    expect(reservationCampaignId(undefined, wallet)).toBe(`contract:${wallet.toLowerCase()}`);
   });
 
   it('enforces timing and simulation freshness at the admission boundary', () => {
