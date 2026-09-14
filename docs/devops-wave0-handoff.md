@@ -69,8 +69,8 @@ part of this evidence.
 | `pnpm ops:secret-boundary` | Pass |
 | `pnpm ops:negative-cases` | Pass; policy, health, backup, and restore negatives fail closed |
 | JavaScript syntax checks | Pass for changed `.mjs` scripts |
-| Vitest | Held; shared project-root merge conflict prevents config startup |
-| Unit/build/typecheck/fork/recovery drills | Held pending Blockchain Gate 3 acceptance; no final release claim |
+| Vitest | Held; startup failed with `Unexpected "<<" in JSON` at `../../../package.json`, resolving to the conflicted `/home/Junayd/W3/MintBot/package.json` before config load |
+| Unit/build/typecheck/fork/recovery drills | Not run because of the root-metadata blocker and pending Blockchain Gate 3 acceptance |
 
 ## Dependencies And Blockers
 
@@ -87,6 +87,9 @@ part of this evidence.
   `docs/branch-protection-evidence.md`.
 - A long-running Backend orchestrator entrypoint is still required before any
   service can be enabled; see `docs/service-evidence.md`.
+- The exact Vitest startup failure is `Unexpected "<<" in JSON` at
+  `../../../package.json`; no attempt was made to repair the resolved
+  `/home/Junayd/W3/MintBot/package.json`.
 - Blockchain Gate 3 handoff and acceptance are required before final
   integration/release validation or eligibility is declared.
 
@@ -95,4 +98,5 @@ part of this evidence.
 No raw secrets were requested, read, copied, logged, committed, or included in
 this handoff. Fork launchers keep archive access at the Anvil boundary and
 pass only local RPC plus non-secret fixture metadata to Vitest. No `main`
-branch edit, merge, reset, or force operation was performed.
+branch edit, merge, reset, or force operation was performed. Integration status:
+**NOT ELIGIBLE** for final integration or release validation.
