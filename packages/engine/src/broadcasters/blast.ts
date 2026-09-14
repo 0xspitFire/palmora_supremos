@@ -13,12 +13,13 @@
  * This is the L2 primary broadcast path where latency-to-sequencer matters.
  */
 
-import type { Hex, Hash } from 'viem';
+import { keccak256, type Hex, type Hash } from 'viem';
 import type { Broadcaster, BroadcastResult, BroadcastOptions } from '../types.js';
 
 /** Pre-computed blast payload for a single endpoint. */
 interface BlastPayload {
   url: string;
+  signedTx: Hex;
   body: string;
   headers: Record<string, string>;
 }
@@ -48,6 +49,7 @@ export class BlastBroadcaster implements Broadcaster {
 
     return this.endpoints.map((url) => ({
       url,
+      signedTx,
       body,
       headers: { 'Content-Type': 'application/json' },
     }));
@@ -116,23 +118,38 @@ export class BlastBroadcaster implements Broadcaster {
             endpoint: payload.url,
             latencyMs,
             success: true,
+            responseClass: 'accepted',
+          };
+        }
+
+        if (/already\s*known/i.test(data.error?.message ?? '')) {
+          return {
+            txHash: keccak256(payload.signedTx),
+            endpoint: payload.url,
+            latencyMs,
+            success: true,
+            error: 'already known',
+            responseClass: 'already_known',
           };
         }
 
         return {
-          txHash: '0x' as Hash,
+          txHash: keccak256(payload.signedTx),
           endpoint: payload.url,
           latencyMs,
           success: false,
           error: data.error?.message ?? 'Unknown error',
+          responseClass: 'rejected',
         };
       } catch (err) {
         return {
-          txHash: '0x' as Hash,
+          txHash: keccak256(payload.signedTx),
           endpoint: payload.url,
           latencyMs: performance.now() - startTime,
           success: false,
           error: err instanceof Error ? err.message : String(err),
+          responseClass: 'ambiguous',
+          ambiguous: true,
         };
       }
     });

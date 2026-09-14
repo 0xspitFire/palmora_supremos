@@ -57,3 +57,13 @@ Receive chain priority/policy from Product Manager and CTO. Give Backend transac
 - Robinhood free-mint policy still requires independent L2 execution and L1 data-fee reservations; paid mints remain blocked.
 - EIP-7702 sponsored execution is deferred and unaudited.
 - Seven canonical fork tests currently skip without approved Anvil fixtures; this is not passing evidence.
+
+## 2026-09-14 Gate 3 refinements
+
+- Live execution requires a normalized durable reservation provider and durable run, campaign, execution, and transaction-intent identity. Dry-run preparation may remain side-effect free and local.
+- Persist the intent before signing and persist a signed/provider attempt before broadcast. Transport failures retain the deterministic transaction hash as ambiguous evidence rather than releasing the reservation.
+- Reconcile by transaction hash and sender nonce. A different hash at the same nonce is a replacement; a missing receipt alone is unresolved until a chain observation proves drop or reorg.
+- Treat Ethereum receipt success as product success only at the configured settlement stage. Robinhood characterization preserves Included/soft and Posted observations without settling until Ethereum finality.
+- Receipt-attempt linkage must use the exact successful endpoint attempt, not the last endpoint response in a multi-provider fanout.
+- Receipt gas settlement separates authoritative total gas, priority component, and L1 data fee. Do not fabricate an L1 fee or count a priority component twice.
+- Kill checks belong at simulation, admission/provider reservation, signing, broadcast, and provider-response boundaries. Signer decryption paths must scrub intermediate buffers and decrypted key references on success and failure.

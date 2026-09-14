@@ -48,6 +48,7 @@ export class PublicMempoolBroadcaster implements Broadcaster {
             endpoint: this.rpcUrl,
             latencyMs,
             success: true,
+            responseClass: 'accepted',
           });
         } else if (data.error?.message.toLowerCase().includes('already known')) {
           // The node accepted the transaction earlier; its deterministic hash is
@@ -55,24 +56,30 @@ export class PublicMempoolBroadcaster implements Broadcaster {
           results.push({
             txHash: keccak256(signedTx), endpoint: this.rpcUrl, latencyMs, success: true,
             error: 'already known',
+            responseClass: 'already_known',
           });
         } else {
           results.push({
-            txHash: '0x' as Hash,
+            txHash: keccak256(signedTx),
             endpoint: this.rpcUrl,
             latencyMs,
             success: false,
             error: data.error?.message ?? 'Unknown RPC error',
+            responseClass: 'rejected',
           });
         }
       } catch (err) {
         const latencyMs = performance.now() - startTime;
         results.push({
-          txHash: '0x' as Hash,
+          // A transport error is ambiguous: the node may have accepted the
+          // raw transaction before the response was lost. Retain its hash.
+          txHash: keccak256(signedTx),
           endpoint: this.rpcUrl,
           latencyMs,
           success: false,
           error: err instanceof Error ? err.message : String(err),
+          responseClass: 'ambiguous',
+          ambiguous: true,
         });
       }
     }

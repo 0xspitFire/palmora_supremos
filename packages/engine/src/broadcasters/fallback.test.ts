@@ -21,4 +21,20 @@ describe('fallback broadcaster', () => {
     expect(calls).toEqual(['primary', 'fallback']);
     expect(results.at(-1)?.success).toBe(true);
   });
+
+  it('retains an ambiguous hash when the fallback throws after primary failure', async () => {
+    const primary = {
+      name: 'flashbots',
+      broadcast: async () => [{ txHash: '0x' as `0x${string}`, endpoint: 'flashbots', latencyMs: 1, success: false, error: 'relay unavailable' }],
+    };
+    const fallback = {
+      name: 'public-mempool',
+      broadcast: async () => { throw new Error('transport closed after send'); },
+    };
+    const results = await new FallbackBroadcaster(primary, fallback).broadcast([signed]);
+    expect(results).toHaveLength(2);
+    expect(results.at(-1)?.ambiguous).toBe(true);
+    expect(results.at(-1)?.txHash).not.toBe('0x');
+    expect(results.at(-1)?.responseClass).toBe('ambiguous');
+  });
 });
