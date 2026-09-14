@@ -7,6 +7,7 @@ import { hideBin } from 'yargs/helpers';
 import { generateAndEncryptWallets } from '@mint-bot/engine';
 import { createCliRuntime } from './runtime.js';
 import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
+import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 
 const runtimeRoot = process.cwd();
@@ -35,6 +36,20 @@ function printError(error: unknown): never {
   throw error;
 }
 
+function json(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? `${item}n` : item, 2);
+}
+
+function persistedCampaign(runtime: Awaited<ReturnType<typeof createCliRuntime>>, campaignId: string): Campaign {
+  const campaign = runtime.store.snapshot().campaigns.find(item => item.id === campaignId);
+  if (!campaign) throw new Error(`CAMPAIGN_NOT_FOUND:${campaignId}`);
+  return campaign;
+}
+
+async function validatedCampaign(runtime: Awaited<ReturnType<typeof createCliRuntime>>, campaignId: string, wallets: readonly string[] = []): Promise<ValidatedCampaign> {
+  return { campaign: persistedCampaign(runtime, campaignId), wallets, simulationIds: [], evidenceAt: new Date().toISOString() };
+}
+
 const cli = yargs(hideBin(process.argv))
   .scriptName('mint-bot')
   .strict()
@@ -61,11 +76,21 @@ const cli = yargs(hideBin(process.argv))
         content.wallets.forEach((wallet) => console.log(`${wallet.index}\t${wallet.address}`));
       } catch (error) { printError(error); }
     })
+  .command('approve', 'Persist explicit campaign approval', (args) => args
+    .option('campaign-id', { type: 'string', demandOption: true })
+    .option('idempotency-key', { type: 'string' }), async (args) => {
+      try {
+        const runtime = await createCliRuntime(runtimeRoot);
+        const validated = await validatedCampaign(runtime, args.campaignId);
+        const response = await runtime.application.command('approve', { validated, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
+        process.stdout.write(`${json(response)}\n`);
+      } catch (error) { printError(error); }
+    })
   .command('health', 'Check backend and operational readiness', {}, async () => {
     try {
       const runtime = await createCliRuntime(runtimeRoot);
       const response = await runtime.application.command('health');
-      process.stdout.write(`${JSON.stringify(response)}\n`);
+      process.stdout.write(`${json(response)}\n`);
     } catch (error) { printError(error); }
   })
   .command('kill', 'Create or remove the global kill-switch file', (args) => args
@@ -120,15 +145,17 @@ const cli = yargs(hideBin(process.argv))
           feePolicy,
         });
         const mode = args.dryRun ? 'dry-run' : 'live';
-        const armed = await runtime.application.command('arm', { validated: { campaign, wallets, evidenceAt: new Date().toISOString() }, mode });
+        const validated = { campaign, wallets, evidenceAt: new Date().toISOString(), simulationIds: [] };
+        if (!args.dryRun) await runtime.application.command('approve', { validated, idempotencyKey: `mint:${campaign.id}` });
+        const armed = await runtime.application.command('arm', { validated, mode });
         const result = await runtime.application.command('execute', { runId: armed.id, wallets });
-        process.stdout.write(`${JSON.stringify(result, (_key, value) => typeof value === 'bigint' ? `${value}n` : value, 2)}\n`);
+        process.stdout.write(`${json(result)}\n`);
       } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
     })
   .command('reconcile', 'Reconcile persisted in-flight runs before admission', {}, async () => {
     const runtime = await createCliRuntime(runtimeRoot);
     const response = await runtime.application.command('reconcile');
-    process.stdout.write(`${JSON.stringify(response)}\n`);
+    process.stdout.write(`${json(response)}\n`);
   })
   .command('validate', 'Validate a campaign through the configured engine adapter', {}, async () => {
     const runtime = await createCliRuntime(runtimeRoot);
@@ -138,13 +165,57 @@ const cli = yargs(hideBin(process.argv))
     const runtime = await createCliRuntime(runtimeRoot);
     try { await runtime.application.command('dry-run'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
   })
-  .command('arm', 'Arm a campaign through Backend admission', {}, async () => {
+  .command('arm', 'Arm a persisted campaign through Backend admission', (args) => args
+    .option('campaign-id', { type: 'string', demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
+    .option('mode', { type: 'string', choices: ['dry-run', 'live'] as const, default: 'dry-run' })
+    .option('idempotency-key', { type: 'string' })
+    .option('approval-id', { type: 'string' }), async (args) => {
     const runtime = await createCliRuntime(runtimeRoot);
-    try { await runtime.application.command('arm'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+    try {
+      const wallets = await publicWallets(walletFile(args.walletFile));
+      const validated = await validatedCampaign(runtime, args.campaignId, wallets);
+      const response = await runtime.application.command('arm', { validated, mode: args.mode, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}), ...(args.approvalId ? { approvalId: args.approvalId } : {}) });
+      process.stdout.write(`${json(response)}\n`);
+    } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
   })
-  .command('execute', 'Execute an admitted run through Backend admission', {}, async () => {
+  .command('run', 'Execute an admitted run through Backend admission', (args) => args
+    .option('run-id', { type: 'string', demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
     const runtime = await createCliRuntime(runtimeRoot);
-    try { await runtime.application.command('execute'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+    try {
+      const wallets = await publicWallets(walletFile(args.walletFile));
+      const response = await runtime.application.command('run', { runId: args.runId, wallets });
+      process.stdout.write(`${json(response)}\n`);
+    } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+  })
+  .command('execute', 'Compatibility alias for run', (args) => args
+    .option('run-id', { type: 'string', demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
+    const runtime = await createCliRuntime(runtimeRoot);
+    try {
+      const wallets = await publicWallets(walletFile(args.walletFile));
+      const response = await runtime.application.command('execute', { runId: args.runId, wallets });
+      process.stdout.write(`${json(response)}\n`);
+    } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+  })
+  .command('summary', 'Read canonical run and accounting facts', (args) => args
+    .option('run-id', { type: 'string' }), async (args) => {
+    const runtime = await createCliRuntime(runtimeRoot);
+    try {
+      const response = await runtime.application.command('summary', args.runId ? { runId: args.runId } : {});
+      process.stdout.write(`${json(response)}\n`);
+    } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+  })
+  .command('fund', 'Report funding requirements without handling keys', (args) => args
+    .option('run-id', { type: 'string' })
+    .option('wallet-file', { type: 'string' }), async (args) => {
+    const runtime = await createCliRuntime(runtimeRoot);
+    try {
+      const wallets = args.walletFile ? await publicWallets(walletFile(args.walletFile)) : undefined;
+      const response = await runtime.application.command('fund', { ...(args.runId ? { runId: args.runId } : {}), ...(wallets ? { wallets } : {}) });
+      process.stdout.write(`${json(response)}\n`);
+    } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
   })
   .fail((message, error) => {
     console.error(error?.message ?? message);

@@ -4,6 +4,7 @@ import type { AttemptRecord, BackendState, Campaign, CampaignState, EngineAdapte
 import { SpendLedger } from './spend-ledger.js';
 import { EvidenceService, liveRequestDigest } from './evidence.js';
 import { assertRobinhoodFreePolicy } from './policy.js';
+import { rebindExecutionResult, type CanonicalExecutionStore } from './canonical-store.js';
 
 export class ExecutionCoordinator {
   readonly ledger: SpendLedger;
@@ -26,8 +27,13 @@ export class ExecutionCoordinator {
     await this.reconcile();
     await this.store.transaction(state => {
       const unresolved = state.runs
-        .filter(run => ['Armed', 'Active'].includes(run.state))
-        .filter(run => state.reconciliations.filter(item => item.runId === run.id).at(-1)?.result === 'unknown');
+        .filter(run => ['Armed', 'Active'].includes(run.state) || (run.state === 'Aborted' && state.attempts.some(attempt => attempt.runId === run.id && attempt.hash)))
+        .filter(run => {
+          const result = state.reconciliations.filter(item => item.runId === run.id).at(-1)?.result;
+          const chainId = state.campaigns.find(campaign => campaign.id === run.campaignId)?.chainId;
+          const terminal = result === 'failed' || result === 'final' || (result === 'confirmed' && chainId === 1);
+          return !terminal;
+        });
       state.runtime = unresolved.length === 0
         ? { ...state.runtime, startupState: 'Ready', reconciliationCompletedAt: new Date().toISOString(), blockingReasons: [] }
         : { ...state.runtime, startupState: 'Blocked', reconciliationCompletedAt: new Date().toISOString(), blockingReasons: ['UNRESOLVED_EXECUTIONS'] };
@@ -50,7 +56,14 @@ export class ExecutionCoordinator {
       if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
       if (!campaign.chainVerification.evidenceId || !campaign.chainVerification.checkedAt || campaign.chainVerification.sourceBlock === undefined) throw new Error('CHAIN_VERIFICATION_EVIDENCE_REQUIRED');
       if (campaign.chainId === 4663 && campaign.broadcastMode !== 'sequencer') throw new Error('ROBINHOOD_SEQUENCER_REQUIRED');
-      if (campaign.feePolicy.kind === 'paid') throw new Error('PAID_MINT_POLICY_REQUIRED');
+      if (campaign.chainId === 4663 && campaign.feePolicy.kind === 'paid') throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
+      if (campaign.chainId === 1 && campaign.feePolicy.kind === 'paid') {
+        if (campaign.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
+        const fee = campaign.feePolicy.totalFeeBudgetWei;
+        if (fee === undefined) throw new Error('PAID_ETHEREUM_CAP_REQUIRED');
+        const allInExposure = campaign.mintPriceWei * BigInt(campaign.quantity) + fee;
+        if (allInExposure > campaign.spendPolicy.maxRunWei || allInExposure > campaign.spendPolicy.dailyCapWei || fee > campaign.spendPolicy.gasCeilingWei) throw new Error('PAID_ETHEREUM_CAP_REQUIRED');
+      }
     }
     const requestDigest = liveRequestDigest(campaign, mode, input.wallets ?? [], simulationIds);
     const existing = idempotencyKey && initial.runs.find(run => run.idempotencyKey === idempotencyKey);
@@ -90,53 +103,77 @@ export class ExecutionCoordinator {
     if (totalFee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
     const reservationAmount = campaign.mintPriceWei * BigInt(campaign.quantity) + totalFee;
     if (campaign.chainId === 4663) assertRobinhoodFreePolicy(campaign.spendPolicy.gasCeilingWei, campaign.spendPolicy.dailyCapWei, reservationAmount);
-    const reservations = await this.ledger.reserveBatch(runId, campaign.id, wallets, reservationAmount, campaign.spendPolicy.maxRunWei, campaign.chainId, campaign.spendPolicy.dailyCapWei, current => {
-      if (current.killed) throw new Error('KILLED');
-      const currentRun = current.runs.find(item => item.id === runId);
-      if (!currentRun || currentRun.state !== 'Armed') throw new Error('RUN_NOT_ARMED');
-      this.transition(currentRun, 'Active');
-      current.events.push(this.event('admission', runId, { reservationCount: wallets.length }));
-    });
-    if (this.store.snapshot().killed) {
-      for (const reservation of reservations) await this.ledger.release(reservation.id);
-      await this.store.transaction(latest => {
-        const active = latest.runs.find(item => item.id === runId);
-        if (active?.state === 'Active') this.transition(active, 'Aborted');
-        latest.events.push(this.event('admission_cancelled', runId, { reason: 'KILLED' }));
+    const canonical = this.canonicalStore();
+    let reservations: Reservation[];
+    let prepared: Awaited<ReturnType<CanonicalExecutionStore['admitExecution']>>['executions'] = [];
+    if (canonical) {
+      const admission = await canonical.admitExecution({ run, intent, campaign, wallets });
+      reservations = admission.reservations;
+      prepared = admission.executions;
+    } else {
+      reservations = await this.ledger.reserveBatch(runId, campaign.id, wallets, reservationAmount, campaign.spendPolicy.maxRunWei, campaign.chainId, campaign.spendPolicy.dailyCapWei, current => {
+        if (current.killed) throw new Error('KILLED');
+        const currentRun = current.runs.find(item => item.id === runId);
+        if (!currentRun || currentRun.state !== 'Armed') throw new Error('RUN_NOT_ARMED');
+        this.transition(currentRun, 'Active');
+        current.events.push(this.event('admission', runId, { reservationCount: wallets.length }));
       });
+    }
+    if (this.store.snapshot().killed) {
+      if (canonical) await canonical.abortRemaining('KILLED');
+      else {
+        for (const reservation of reservations) await this.ledger.release(reservation.id);
+        await this.store.transaction(latest => {
+          const active = latest.runs.find(item => item.id === runId);
+          if (active?.state === 'Active') this.transition(active, 'Aborted');
+          latest.events.push(this.event('admission_cancelled', runId, { reason: 'KILLED' }));
+        });
+      }
       throw new Error('KILLED');
     }
     let result;
     try {
       result = await this.engine.execute({ runId, intentId: run.intentId, campaign, wallets: intent.wallets, reservationIds: reservations.map(item => item.id) });
     } catch (error) {
-      await this.store.transaction(latest => { latest.events.push(this.event('execution_outcome_unknown', runId, { reason: 'ENGINE_ERROR' })); });
+      if (canonical && this.store.snapshot().killed) await canonical.abortRemaining('KILLED');
+      else await this.store.transaction(latest => { latest.events.push(this.event('execution_outcome_unknown', runId, { reason: 'ENGINE_ERROR' })); });
       throw error;
     }
+    result = rebindExecutionResult(result, prepared);
     this.assertEngineFacts(runId, campaign.chainId, result.executionIds, result.attempts, result.receipts);
+    const killedAfterExecution = this.store.snapshot().killed;
     await this.store.transaction(after => {
       after.attempts.push(...result.attempts);
       after.receipts.push(...result.receipts);
       after.events.push(this.event('execution_facts_recorded', runId, { executionCount: result.executionIds.length }));
       const persistedRun = after.runs.find(item => item.id === runId);
-      if (persistedRun && result.state === 'Failed') this.transition(persistedRun, 'Failed');
+      if (persistedRun && killedAfterExecution && persistedRun.state === 'Active') this.transition(persistedRun, 'Aborted');
+      else if (persistedRun && result.state === 'Failed') this.transition(persistedRun, 'Failed');
+      else if (persistedRun && result.state === 'Aborted' && persistedRun.state === 'Active') this.transition(persistedRun, 'Aborted');
       else if (persistedRun && result.state === 'Confirmed' && campaign.chainId === 1) this.transition(persistedRun, 'Completed');
       this.applyAccountingToState(after, campaign, runId, result.attempts, result.receipts);
     });
+    if (canonical && killedAfterExecution) await canonical.abortRemaining('KILLED');
     return result;
   }
 
-  kill(reason: string): Promise<void> {
-    return this.store.transaction(state => {
+  async kill(reason: string): Promise<void> {
+    await this.store.transaction(state => {
       state.killed = true;
       state.killReason = reason;
       state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILLED'])] };
       state.events.push(this.event('kill', undefined, { reason }));
     });
+    const canonical = this.canonicalStore();
+    if (canonical) await canonical.abortRemaining(reason);
+    else await this.store.transaction(state => {
+      for (const run of state.runs.filter(item => ['Armed', 'Active'].includes(item.state))) this.transition(run, 'Aborted');
+    });
   }
 
   async reconcile(): Promise<void> {
-    const candidates = this.store.snapshot().runs.filter(run => ['Armed', 'Active', 'Completed'].includes(run.state));
+    const snapshot = this.store.snapshot();
+    const candidates = snapshot.runs.filter(run => ['Armed', 'Active', 'Completed'].includes(run.state) || (run.state === 'Aborted' && snapshot.attempts.some(attempt => attempt.runId === run.id && attempt.hash)));
     for (const candidate of candidates) {
       const snapshot = this.store.snapshot();
       const run = snapshot.runs.find(item => item.id === candidate.id);
@@ -152,7 +189,9 @@ export class ExecutionCoordinator {
         state.attempts.push(...update.attempts.filter(item => !state.attempts.some(existing => existing.id === item.id)));
         state.receipts.push(...update.receipts.filter(item => !state.receipts.some(existing => existing.id === item.id)));
         state.reconciliations.push({ id: `rec_${randomUUID()}`, runId: run.id, result: update.result, observedAt: new Date().toISOString(), ...(update.reason ? { reason: update.reason } : {}) });
-        if ((update.result === 'confirmed' && intent.campaignSnapshot.chainId === 1) || update.result === 'final') {
+         if (currentRun.state === 'Aborted') {
+           // A kill aborts new admissions but never erases submitted facts.
+         } else if ((update.result === 'confirmed' && intent.campaignSnapshot.chainId === 1) || update.result === 'final') {
           if (currentRun.state === 'Armed') this.transition(currentRun, 'Active');
           if (currentRun.state === 'Active') this.transition(currentRun, 'Completed');
         } else if (update.result === 'soft' || update.result === 'posted') {
@@ -225,6 +264,11 @@ export class ExecutionCoordinator {
 
   private event(type: string, runId: string | undefined, data: Record<string, unknown>): EventRecord {
     return { id: `evt_${randomUUID()}`, ...(runId ? { runId } : {}), type, at: new Date().toISOString(), data };
+  }
+
+  private canonicalStore(): CanonicalExecutionStore | undefined {
+    const candidate = this.store as Partial<CanonicalExecutionStore>;
+    return typeof candidate.admitExecution === 'function' && typeof candidate.abortRemaining === 'function' ? candidate as CanonicalExecutionStore : undefined;
   }
 }
 

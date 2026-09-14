@@ -57,3 +57,22 @@ Receive workflows from Product Manager, interaction rules from Product Designer,
 - In-memory engine behavior is not durable admission or recovery.
 - Robinhood success is only `Ethereum final`.
 - Telegram is for alerts and narrowly confirmed actions, not deep investigation.
+
+## 2026-09-14 refinements
+
+- The live Backend/CLI path must use the normalized SQLite contract as its only
+  durable store. JSON state adapters remain limited to migration and test
+  compatibility and must not be selected by production runtime wiring.
+- The Backend store bridge maps run-level orchestration to Database-owned
+  per-wallet intents, executions, reservations, lifecycle events, and audit
+  facts; it must not recreate chain, receipt, or finality facts owned by
+  Blockchain.
+- Startup remains `Reconciling` until every in-flight submission has an
+  authoritative result or an explicit unresolved block. New live admission is
+  refused while reconciliation or runtime readiness is incomplete.
+- Approval, live arm, execution, summary, funding, health, kill, and reconcile
+  are separate typed commands. Each command is idempotent or requires an
+  idempotency key and returns a canonical state with a safe next action.
+- A kill signal is shared across processes and checked before reservation,
+  signing, and each broadcast admission. It marks remaining work `Aborted`
+  while preserving already-submitted transaction facts for reconciliation.

@@ -174,6 +174,7 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       const byWallet = new Map(reservations.map((reservation) => [reservation.wallet.toLowerCase(), reservation]));
       const provider: SpendReservationProvider = {
         reserve: async (input) => {
+          if (options.getState().killed) throw new Error('KILLED');
           const reservation = byWallet.get(input.address.toLowerCase());
           if (!reservation || reservation.status !== 'reserved') throw new Error('DURABLE_RESERVATION_REQUIRED');
           return {

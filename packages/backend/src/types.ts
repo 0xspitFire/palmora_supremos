@@ -1,11 +1,11 @@
 export type CampaignState = 'Draft' | 'Validating' | 'Ready' | 'Armed' | 'Active' | 'Paused' | 'Completed' | 'Failed' | 'Aborted' | 'Cancelled';
 export type WalletReadiness = 'Unknown' | 'Unfunded' | 'Funded' | 'Eligible' | 'Ready' | 'Executing' | 'Minted' | 'Failed' | 'Skipped';
-export type ExecutionState = 'Prepared' | 'Signed' | 'Submitted' | 'Pending' | 'Confirmed' | 'Reorged' | 'Replaced' | 'Failed';
+export type ExecutionState = 'Prepared' | 'Signed' | 'Submitted' | 'Pending' | 'Confirmed' | 'Reorged' | 'Replaced' | 'Failed' | 'Aborted';
 export type RobinhoodFinality = 'soft' | 'posted' | 'final';
 export type ChainVerificationStatus = 'unverified' | 'characterizing' | 'verified' | 'blocked';
 export type StartupState = 'Cold' | 'Reconciling' | 'Ready' | 'Blocked';
 export type RobinhoodNegativeCase = 'revert' | 'sold_out' | 'price_drift' | 'insufficient_funds' | 'quantity_limit' | 'stale_phase' | 'fee_recipient' | 'kill' | 'cap';
-export type CommandName = 'resolve' | 'validate' | 'prepare' | 'simulate' | 'dry-run' | 'arm' | 'execute' | 'reconcile' | 'health' | 'kill';
+export type CommandName = 'resolve' | 'validate' | 'prepare' | 'simulate' | 'dry-run' | 'approve' | 'arm' | 'run' | 'execute' | 'summary' | 'fund' | 'reconcile' | 'health' | 'kill';
 
 export interface Campaign {
   id: string; state: CampaignState; chainId: 1 | 4663; contract: string; strategy: string;
@@ -18,7 +18,7 @@ export interface Campaign {
 export interface SpendPolicy { maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; }
 export interface FeePolicy { kind: 'free' | 'paid'; configuredPriorityFeeWei: bigint; freeTotalSpendCapWei?: bigint; l2ExecutionGasBudgetWei?: bigint; l1DataGasBudgetWei?: bigint; totalFeeBudgetWei?: bigint; }
 export interface ChainVerification { chainId: 1 | 4663; status: ChainVerificationStatus; seaDropCompatible: boolean; evidenceId?: string; checkedAt?: string; sourceBlock?: bigint; endpointReference: string; }
-export interface ChainEvidenceRecord { id: string; chainId: 1 | 4663; status: 'pending' | 'accepted' | 'rejected'; executionEnabled: boolean; seaDropCompatible: boolean; positiveLivePath: boolean; archiveForkPassed: boolean; negativeCases: Record<RobinhoodNegativeCase, boolean>; reconciliationPassed: boolean; finalityPassed: boolean; endpointIdentity: string; strategyVersion: string; checkedAt: string; expiresAt: string; sourceBlock: bigint; sourceBlockHash: string; acceptedAt?: string; acceptedBy?: string; approvalProof?: string; }
+export interface ChainEvidenceRecord { id: string; chainId: 1 | 4663; status: 'pending' | 'accepted' | 'rejected'; executionEnabled: boolean; seaDropCompatible: boolean; positiveLivePath: boolean; archiveForkPassed: boolean; negativeCases: Record<RobinhoodNegativeCase, boolean>; reconciliationPassed: boolean; finalityPassed: boolean; endpointIdentity: string; archiveEndpointIdentity?: string; strategyVersion: string; checkedAt: string; expiresAt: string; sourceBlock: bigint; sourceBlockHash: string; acceptedAt?: string; acceptedBy?: string; approvalProof?: string; }
 export interface SimulationEvidenceRecord { id: string; campaignId: string; wallet: string; inputDigest: string; success: boolean; sourceBlock: bigint; sourceBlockHash: string; checkedAt: string; expiresAt: string; gasEstimate?: bigint; worstCaseFeeWei: bigint; }
 export interface EventRecord { id: string; runId?: string; type: string; at: string; data: Record<string, unknown>; }
 export interface NotificationOutboxRecord { id: string; sourceEventId: string; runId?: string; type: string; text: string; state: 'pending' | 'delivering' | 'delivered'; attempts: number; createdAt: string; deliveredAt?: string; }
