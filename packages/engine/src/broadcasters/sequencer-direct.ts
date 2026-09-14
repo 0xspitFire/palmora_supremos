@@ -9,7 +9,7 @@
  * optionally combined with blast for redundancy.
  */
 
-import type { Hex, Hash } from 'viem';
+import { keccak256, type Hex, type Hash } from 'viem';
 import type { Broadcaster, BroadcastResult, BroadcastOptions } from '../types.js';
 
 export class SequencerDirectBroadcaster implements Broadcaster {
@@ -47,16 +47,24 @@ export class SequencerDirectBroadcaster implements Broadcaster {
           const latencyMs = performance.now() - startTime;
 
           if (data.result) {
-            return { txHash: data.result, endpoint: url, latencyMs, success: true };
+            return { txHash: data.result, endpoint: url, latencyMs, success: true, responseClass: 'accepted' };
+          }
+          if (/already\s*known/i.test(data.error?.message ?? '')) {
+            return {
+              txHash: keccak256(signedTx), endpoint: url, latencyMs, success: true,
+              error: 'already known', responseClass: 'already_known',
+            };
           }
           return {
-            txHash: '0x' as Hash, endpoint: url, latencyMs, success: false,
+            txHash: keccak256(signedTx), endpoint: url, latencyMs, success: false,
             error: data.error?.message ?? 'Unknown error',
+            responseClass: 'rejected',
           };
         } catch (err) {
           return {
-            txHash: '0x' as Hash, endpoint: url, latencyMs: performance.now() - startTime,
+            txHash: keccak256(signedTx), endpoint: url, latencyMs: performance.now() - startTime,
             success: false, error: err instanceof Error ? err.message : String(err),
+            responseClass: 'ambiguous', ambiguous: true,
           };
         }
       });

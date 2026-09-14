@@ -18,7 +18,12 @@ export type SupportedChainId = 1 | 8453 | 4663;
  * Chain verification state. `verified` is a precondition for live execution;
  * `unverified` chains may be inspected but never executed.
  */
-export type ChainVerificationStatus = 'unverified' | 'verified' | 'disabled';
+export type ChainVerificationStatus =
+  | 'unverified'
+  | 'verified'
+  | 'disabled'
+  | 'characterization_pending'
+  | 'execution_blocked';
 
 /** Recorded characterization evidence for a chain (owner acceptance + provenance). */
 export interface ChainCharacterization {
@@ -61,6 +66,7 @@ export interface ChainConfig {
  * Optimistic/Arbitrum L2s (Robinhood, Base) have staged finality.
  */
 export type FinalityStage =
+  | 'unknown'
   | 'confirmed'              // inclusive mainnet block confirmation
   | 'soft'                   // Sequencer accepted + soft-confirmed
   | 'posted'                 // Batch posted to L1 inbox
@@ -158,9 +164,21 @@ export interface BroadcastResult {
   readonly endpoint: string;
   readonly latencyMs: number;
   readonly success: boolean;
+  /** Provider outcome classification retained for recovery and audit. */
+  readonly responseClass?: BroadcastResponseClass;
+  /** A send may have reached the provider even when its response was lost. */
+  readonly ambiguous?: boolean;
   readonly error?: string;
   readonly providerReference?: string;
 }
+
+export type BroadcastResponseClass =
+  | 'accepted'
+  | 'already_known'
+  | 'rejected'
+  | 'timeout'
+  | 'ambiguous'
+  | 'provider_error';
 
 /**
  * Broadcaster — abstraction for transaction submission.
@@ -210,11 +228,26 @@ export interface SpendReservation {
   readonly walletIndex: number;
   readonly maxValueWei: bigint;
   readonly maxGasCostWei: bigint;
+  /** Only the normalized durable store may authorize live execution. */
+  readonly durable?: true;
+  readonly storeKind?: 'normalized-sqlite';
   settle(actualValueWei: bigint, actualGasCostWei: bigint): Promise<void>;
+  settleComponents?(components: ReservationSettlementComponents): Promise<void>;
   release(): Promise<void>;
 }
 
+export interface ReservationSettlementComponents {
+  readonly actualMintValueWei: bigint;
+  readonly actualL2ExecutionGasWei: bigint;
+  readonly actualL1DataGasWei: bigint;
+  readonly actualPriorityFeeComponentWei?: bigint;
+  readonly actualReplacementBudgetWei?: bigint;
+}
+
 export interface SpendReservationProvider {
+  /** Capability proof supplied by the normalized SQLite reservation adapter. */
+  readonly durable?: true;
+  readonly storeKind?: 'normalized-sqlite';
   reserve(input: {
     readonly idempotencyKey: string;
     readonly chainId: SupportedChainId;
@@ -236,6 +269,91 @@ export interface SpendReservationProvider {
     readonly policySnapshot: unknown;
   }): Promise<SpendReservation>;
 }
+
+/** Stable identity allocated by Backend/Database before a chain side effect. */
+export interface ExecutionIdentity {
+  readonly runId: string;
+  readonly executionId: string;
+  readonly transactionIntentId: string;
+}
+
+export interface LifecycleRunRecord {
+  readonly runId: string;
+  readonly requestId: string;
+  readonly requestFingerprint: string;
+  readonly campaignId: string;
+  readonly state: 'prepared' | 'active' | 'recovering' | 'completed' | 'failed' | 'aborted' | 'cancelled';
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface LifecycleIntentRecord {
+  readonly id: string;
+  readonly executionId: string;
+  readonly intent: TransactionIntent;
+  readonly createdAt: string;
+}
+
+export interface LifecycleAttemptRecord {
+  readonly id: string;
+  readonly executionId: string;
+  readonly transactionIntentId: string;
+  readonly endpoint: string;
+  readonly responseClass: BroadcastResponseClass | 'signed';
+  readonly txHash?: Hash;
+  readonly nonce: number;
+  readonly replacementOfId?: string;
+  readonly redactedError?: string;
+  readonly attemptedAt: string;
+}
+
+export interface LifecycleReceiptRecord {
+  readonly id: string;
+  readonly executionId: string;
+  readonly transactionAttemptId: string;
+  readonly txHash: Hash;
+  readonly status: 'pending' | 'confirmed' | 'reverted' | 'reorged' | 'dropped';
+  readonly blockNumber?: bigint;
+  readonly blockHash?: Hash;
+  readonly confirmations: number;
+  readonly gasUsed?: bigint;
+  readonly effectiveGasPrice?: bigint;
+  readonly l1DataFeeWei?: bigint;
+  readonly priorityFeeComponentWei?: bigint;
+  readonly finalityStage: FinalityStage;
+  readonly finalitySource?: string;
+  readonly observedAt: string;
+}
+
+export interface LifecycleReconciliationRecord {
+  readonly id: string;
+  readonly executionId: string;
+  readonly transactionAttemptId?: string;
+  readonly txHash?: Hash;
+  readonly fromAddress: Address;
+  readonly nonce: number;
+  readonly state: 'unresolved' | 'matched' | 'ambiguous' | 'replaced' | 'dropped' | 'reorged' | 'final';
+  readonly source: string;
+  readonly details?: Record<string, unknown>;
+  readonly checkedAt: string;
+}
+
+/**
+ * Chain-side persistence boundary. Implementations must write to the
+ * normalized durable store before sign/broadcast and must never persist key
+ * material or provider payloads.
+ */
+export interface EngineLifecycleStore {
+  readonly durable: true;
+  readonly storeKind: 'normalized-sqlite';
+  persistRun(record: LifecycleRunRecord): Promise<void>;
+  persistIntent(record: LifecycleIntentRecord): Promise<void>;
+  persistAttempt(record: LifecycleAttemptRecord): Promise<void>;
+  persistReceipt(record: LifecycleReceiptRecord): Promise<void>;
+  persistReconciliation(record: LifecycleReconciliationRecord): Promise<void>;
+}
+
+export type SignerFactory = (passphrase: string) => Promise<Signer>;
 
 /** Database-aligned component reservation request for a single execution. */
 export interface ExecutionReservationRequest {
@@ -350,6 +468,8 @@ export interface MintReceipt {
   readonly blockHash: Hash;
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
+  readonly l1DataFeeWei?: bigint;
+  readonly priorityFeeComponentWei?: bigint;
   readonly confirmations: number;
   readonly finalityStage: FinalityStage;
 }
@@ -375,10 +495,21 @@ export interface WalletMintResult {
   readonly finalityStage?: FinalityStage;
   readonly gasUsed?: bigint;
   readonly effectiveGasPrice?: bigint;
+  /** Explicitly observed L1 data fee; never estimated at settlement. */
+  readonly l1DataFeeWei?: bigint;
+  readonly totalFeeWei?: bigint;
+  /** Mint value + L2 gas + explicitly observed L1 data fee. */
   readonly totalCostWei?: bigint;
   readonly error?: string;
   readonly durationMs: number;
   readonly simulation?: SimulationEvidence;
+  readonly executionId?: string;
+  readonly transactionIntentId?: string;
+  readonly reservationId?: string;
+  readonly attemptIds?: readonly string[];
+  readonly submittedAttemptId?: string;
+  readonly lifecycleState?: 'prepared' | 'submitted' | 'included' | 'posted' | 'ethereum_final' | 'replaced' | 'dropped' | 'reorged' | 'failed' | 'killed';
+  readonly reconciliationState?: 'unresolved' | 'matched' | 'ambiguous' | 'replaced' | 'dropped' | 'reorged' | 'final';
 }
 
 /** Overall mint job result. */
@@ -408,6 +539,7 @@ export interface MintJobConfig {
     readonly contract: Address;
     readonly strategy: string;
     readonly quantity: number;
+    readonly campaignId?: string;
   };
   readonly fleet: {
     readonly walletFile: string;
@@ -416,6 +548,10 @@ export interface MintJobConfig {
   readonly timing: {
     readonly mintStartUnix: number | 'auto';
     readonly armBeforeMs: number;
+    /** Maximum age for a setup simulation at the signing boundary. */
+    readonly simulationFreshnessMs?: number;
+    /** Maximum tolerated local clock offset from the chain clock. */
+    readonly clockSkewToleranceMs?: number;
   };
   readonly fees: {
     readonly maxFeePerGasGwei: number;
@@ -469,6 +605,15 @@ export enum MintErrorType {
   CHAIN_NOT_VERIFIED = 'CHAIN_NOT_VERIFIED',
   INVALID_CONFIG = 'INVALID_CONFIG',
   UNKNOWN = 'UNKNOWN',
+  PAID_ROBINHOOD_BLOCKED = 'PAID_ROBINHOOD_BLOCKED',
+  CHAIN_EXECUTION_DISABLED = 'CHAIN_EXECUTION_DISABLED',
+  DURABLE_RESERVATION_REQUIRED = 'DURABLE_RESERVATION_REQUIRED',
+  AMBIGUOUS_SUBMISSION = 'AMBIGUOUS_SUBMISSION',
+  DROPPED_TRANSACTION = 'DROPPED_TRANSACTION',
+  REORGED_TRANSACTION = 'REORGED_TRANSACTION',
+  STALE_SIMULATION = 'STALE_SIMULATION',
+  TIMING_GATE = 'TIMING_GATE',
+  PROVIDER_UNAVAILABLE = 'PROVIDER_UNAVAILABLE',
 }
 
 /** Structured mint error with classification. */
@@ -489,6 +634,8 @@ export class MintError extends Error {
       MintErrorType.NONCE_TOO_LOW,
       MintErrorType.RPC_ERROR,
       MintErrorType.TIMEOUT,
+      MintErrorType.AMBIGUOUS_SUBMISSION,
+      MintErrorType.DROPPED_TRANSACTION,
     ].includes(this.type);
   }
 }

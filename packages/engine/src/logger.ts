@@ -56,9 +56,6 @@ export function createLogger(
     transport: {
       targets,
     },
-    formatters: {
-      level: (label) => ({ level: label }),
-    },
     timestamp: pino.stdTimeFunctions.isoTime,
   });
 }

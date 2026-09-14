@@ -30,9 +30,11 @@ import {
   formatEther,
   parseEther,
   parseGwei,
+  keccak256,
   serializeTransaction,
   type TransactionSerializableEIP1559,
 } from 'viem';
+import { randomUUID } from 'node:crypto';
 import { mainnet, base } from 'viem/chains';
 import type pino from 'pino';
 
@@ -42,8 +44,14 @@ import type {
   WalletMintResult,
   DropConfig,
   Broadcaster,
+  BroadcastResult,
   SupportedChainId,
   SpendReservationProvider,
+  EngineLifecycleStore,
+  LifecycleReconciliationRecord,
+  Signer,
+  SignerFactory,
+  ExecutionIdentity,
   SimulationEvidence,
   TransactionIntent,
 } from './types.js';
@@ -52,7 +60,7 @@ import { getChainConfig, resolveChainByNameFromSecrets } from './chains.js';
 import { FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, replacementPriorityBudget, validateFeeBudget, validateFreeMintReserve, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
 import { NonceManagerImpl } from './nonce-manager.js';
-import { ReceiptWatcherImpl } from './receipt-watcher.js';
+import { ReceiptReorgedError, ReceiptTimeoutError, ReceiptWatcherImpl } from './receipt-watcher.js';
 import { EthereumFinalityObserver } from './finality-observer.js';
 import type { FinalityObserver } from './finality-observer.js';
 import { LocalEncryptedSigner } from './signer.js';
@@ -60,6 +68,21 @@ import { createBroadcaster } from './broadcasters/index.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
 import { KillSwitch, SpendTracker } from './safety.js';
 import { createLogger, childLogger } from './logger.js';
+import {
+  assertDirectChainExecutionPolicy,
+  assertDurableReservationProvider,
+  assertSimulationFresh,
+  assertTimingWindow,
+  actualSettlementComponents,
+  broadcastAttemptId,
+  canonicalExecutionIdentity,
+  classifyBroadcastResult,
+  lifecycleStateForFinality,
+  reconcileByHashAndNonce,
+  selectBroadcastAttempt,
+  shouldSettleReceipt,
+  LifecycleGateError,
+} from './lifecycle.js';
 
 class AdmissionGate {
   private tail: Promise<void> = Promise.resolve();
@@ -71,6 +94,30 @@ class AdmissionGate {
     this.tail = previous.then(() => turn);
     await previous;
     return release;
+  }
+}
+
+function redactProviderError(message: string): string {
+  return message
+    .replace(/https?:\/\/\S+/gi, '[endpoint]')
+    .replace(/0x[0-9a-f]{40,}/gi, '[hex]')
+    .replace(/(?:private[_-]?key|mnemonic|seed|passphrase|password)\s*[:=]\s*\S+/gi, '[redacted]')
+    .slice(0, 240);
+}
+
+function lifecycleErrorType(code: string): MintErrorType {
+  switch (code) {
+    case 'SIMULATION_FAILED': return MintErrorType.SIMULATION_FAILED;
+    case 'STALE_SIMULATION': return MintErrorType.STALE_SIMULATION;
+    case 'TIMING_GATE': return MintErrorType.TIMING_GATE;
+    case 'DURABLE_RESERVATION_REQUIRED': return MintErrorType.DURABLE_RESERVATION_REQUIRED;
+    case 'DURABLE_LIFECYCLE_STORE_REQUIRED': return MintErrorType.DURABLE_RESERVATION_REQUIRED;
+    case 'PAID_ROBINHOOD_BLOCKED': return MintErrorType.PAID_ROBINHOOD_BLOCKED;
+    case 'CHAIN_4663_EXECUTION_DISABLED': return MintErrorType.CHAIN_EXECUTION_DISABLED;
+    case 'AMBIGUOUS_SUBMISSION': return MintErrorType.AMBIGUOUS_SUBMISSION;
+    case 'INVALID_SIMULATION_FRESHNESS': return MintErrorType.INVALID_CONFIG;
+    case 'INVALID_TIMING_GATE': return MintErrorType.INVALID_CONFIG;
+    default: return MintErrorType.INVALID_CONFIG;
   }
 }
 
@@ -99,25 +146,60 @@ function getViemChain(chainId: SupportedChainId): Chain {
 // MintEngine
 // ─────────────────────────────────────────────────────────────
 
+export interface MintEngineOptions {
+  reservationProvider?: SpendReservationProvider;
+  finalityObserver?: FinalityObserver;
+  signerFactory?: SignerFactory;
+  lifecycleStore?: EngineLifecycleStore;
+  /** Backend's durable run identity. */
+  runId?: string;
+  /** Backend's durable run intent identity. */
+  intentId?: string;
+  requestId?: string;
+  requestFingerprint?: string;
+  /** Override identity allocation when Backend supplies canonical IDs directly. */
+  identityForWallet?: (wallet: { index: number; address: Address }, runId: string) => ExecutionIdentity;
+  now?: () => Date;
+}
+
 export class MintEngine {
   private readonly config: MintJobConfig;
   private readonly logger: pino.Logger;
   private readonly killSwitch: KillSwitch;
-  private readonly spendTracker: SpendTracker;
+  /** Local accounting is a dry-run diagnostic only, never live authorization. */
+  private readonly spendTracker?: SpendTracker;
   private readonly reservationProvider?: SpendReservationProvider;
   private readonly finalityObserver?: FinalityObserver;
+  private readonly signerFactory: SignerFactory;
+  private readonly lifecycleStore?: EngineLifecycleStore;
+  private readonly runId?: string;
+  private readonly intentId?: string;
+  private readonly requestId?: string;
+  private readonly requestFingerprint?: string;
+  private readonly identityForWallet?: MintEngineOptions['identityForWallet'];
+  private readonly now: () => Date;
 
-  constructor(config: MintJobConfig, options?: { reservationProvider?: SpendReservationProvider; finalityObserver?: FinalityObserver }) {
+  constructor(config: MintJobConfig, options?: MintEngineOptions) {
     this.config = config;
     this.logger = createLogger(config.observability.logLevel, config.observability.logFile);
     this.killSwitch = new KillSwitch(config.safety.killSwitchFile, this.logger);
-    this.spendTracker = new SpendTracker(
-      config.safety.maxSpendEth,
-      config.safety.dailySpendCapEth,
-      this.logger,
-    );
+    if (config.safety.dryRun) {
+      this.spendTracker = new SpendTracker(
+        config.safety.maxSpendEth,
+        config.safety.dailySpendCapEth,
+        this.logger,
+      );
+    }
     this.reservationProvider = options?.reservationProvider;
     this.finalityObserver = options?.finalityObserver;
+    this.signerFactory = options?.signerFactory ?? ((passphrase) => LocalEncryptedSigner.fromFile(this.config.fleet.walletFile, passphrase));
+    this.lifecycleStore = options?.lifecycleStore;
+    this.runId = options?.runId;
+    this.intentId = options?.intentId;
+    this.requestId = options?.requestId;
+    this.requestFingerprint = options?.requestFingerprint;
+    this.identityForWallet = options?.identityForWallet;
+    this.now = options?.now ?? (() => new Date());
   }
 
   /**
@@ -133,39 +215,56 @@ export class MintEngine {
    * 7. Execute concurrent fleet mint
    * 8. Collect results
    * 9. Zeroize keys
-   */
+  */
   async execute(passphrase: string): Promise<MintJobResult> {
-    const jobId = `mint-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const jobId = this.runId ?? `mint-${randomUUID()}`;
     const engineLog = childLogger(this.logger, 'MintEngine', { jobId });
-    const startedAt = new Date();
+    const startedAt = this.now();
 
     engineLog.info({ event: 'job_start', config: this.sanitizeConfig() }, 'Mint job starting');
 
-    let signer: LocalEncryptedSigner | null = null;
+    let signer: Signer | null = null;
 
     try {
-// ── 1. Resolve chain ────────────────────────────────────
+      const configuredChainId = this.config.target.chain === 'ethereum' ? 1 : this.config.target.chain === 'base' ? 8453 : 4663;
+      // This runs before any mutable chain registry flag is consulted.
+      assertDirectChainExecutionPolicy(configuredChainId, undefined, this.config.safety.dryRun);
+      assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
+      if (!this.config.safety.dryRun && (!this.lifecycleStore || this.lifecycleStore.durable !== true || this.lifecycleStore.storeKind !== 'normalized-sqlite')) {
+        throw new LifecycleGateError('DURABLE_LIFECYCLE_STORE_REQUIRED', 'admission', 'Live execution requires a normalized durable lifecycle store');
+      }
+      if (!this.config.safety.dryRun && (!this.runId || !this.intentId || !this.config.target.campaignId)) {
+        throw new LifecycleGateError('DURABLE_IDENTITY_REQUIRED', 'admission', 'Live execution requires Backend run, intent, and campaign identities');
+      }
+      if (this.lifecycleStore) {
+        const timestamp = this.now().toISOString();
+        await this.lifecycleStore.persistRun({
+          runId: jobId,
+          requestId: this.requestId ?? jobId,
+          requestFingerprint: this.requestFingerprint ?? `${this.config.target.chain}:${this.config.target.contract.toLowerCase()}:${this.config.target.quantity}`,
+          campaignId: this.config.target.campaignId ?? `contract:${this.config.target.contract.toLowerCase()}`,
+          state: this.config.safety.dryRun ? 'prepared' : 'active',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+      }
+      // ── 1. Resolve chain ────────────────────────────────────
       const scope = this.config.broadcast.secretScope ?? 'mainnet';
       const secretRoot = this.config.broadcast.secretRoot ?? 'Rets';
       const chainConfig = await resolveChainByNameFromSecrets(this.config.target.chain, scope, secretRoot);
       const chainId = chainConfig.chainId;
       engineLog.info({ chain: chainConfig.name, chainId }, 'Chain resolved');
-if (!chainConfig.executionEnabled) {
+      if (!this.config.safety.dryRun && !chainConfig.executionEnabled) {
         throw new MintError(MintErrorType.RPC_ERROR, `Execution is disabled for ${chainConfig.name} by the Phase 1 chain policy`);
       }
-      if (chainConfig.verificationStatus !== 'verified') {
+      if (!this.config.safety.dryRun && chainConfig.verificationStatus !== 'verified') {
         throw new MintError(MintErrorType.RPC_ERROR, `Execution is blocked for ${chainConfig.name}: chain verification status is "${chainConfig.verificationStatus}"`);
       }
 
       // Robinhood requires staged finality and integrated operational gates that
       // are not available in this standalone engine path. Fail closed rather
       // than reporting a receipt as product success before Ethereum finality.
-      if (chainId === 4663) {
-        throw new MintError(
-          MintErrorType.CHAIN_NOT_VERIFIED,
-          'Robinhood execution is blocked until integrated verification, durable reservations, reconciliation, and Ethereum-final settlement are available',
-        );
-      }
+      assertDirectChainExecutionPolicy(chainId, undefined, this.config.safety.dryRun);
 
       // ── 2. Create RPC client ────────────────────────────────
       const rpcUrl = this.config.broadcast.rpcEndpoints[0] ?? chainConfig.rpcEndpoints[0];
@@ -215,10 +314,19 @@ if (!chainConfig.executionEnabled) {
           `Drop validation failed: ${validation.errors.join('; ')}`,
         );
       }
+      const mintCostPerWallet = drop.mintPrice * BigInt(this.config.target.quantity);
+      assertDirectChainExecutionPolicy(chainId, mintCostPerWallet, this.config.safety.dryRun);
+      if (!this.config.safety.dryRun) {
+        assertTimingWindow(
+          drop.startTime,
+          this.now().getTime() / 1000,
+          this.config.timing.armBeforeMs,
+        );
+      }
 
       // ── 4. Load wallets ─────────────────────────────────────
       this.checkKill();
-      signer = await LocalEncryptedSigner.fromFile(this.config.fleet.walletFile, passphrase);
+      signer = await this.signerFactory(passphrase);
       const allWallets = await signer.listWallets();
       const wallets = allWallets.slice(0, this.config.fleet.maxWallets);
       engineLog.info({ walletCount: wallets.length }, 'Wallets loaded');
@@ -240,7 +348,6 @@ if (!chainConfig.executionEnabled) {
       });
 
       // Check funding
-      const mintCostPerWallet = drop.mintPrice * BigInt(this.config.target.quantity);
       if (mintCostPerWallet > 0n) {
         const quantityPolicy = validatePaidQuantity({
           requestedQuantity: this.config.target.quantity,
@@ -261,6 +368,7 @@ if (!chainConfig.executionEnabled) {
       const gasLimits = new Map<number, bigint>();
       const simulations = new Map<number, SimulationEvidence>();
       for (const wallet of wallets) {
+        this.checkKill();
         const estimate = await strategy.estimateGas(publicClient, drop, wallet.address, this.config.target.quantity);
         const padded = BigInt(Math.ceil(Number(estimate) * this.config.fees.gasLimitPadding));
         gasLimits.set(wallet.index, padded);
@@ -268,12 +376,13 @@ if (!chainConfig.executionEnabled) {
           publicClient, strategy, drop, wallet.address,
           this.config.target.quantity, mintCostPerWallet, wallet.index,
         );
+        this.checkKill();
         simulations.set(wallet.index, { ...simulation, gasEstimate: estimate });
         if (!this.config.safety.dryRun && !simulation.success) {
           engineLog.warn({ event: 'wallet_simulation_failed', walletIndex: wallet.index, error: simulation.error }, 'Wallet simulation failed — skipping');
         }
       }
-const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
+      const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
       const paddedGasLimit = gasLimitEstimate;
       const maxGasCostPerWallet = paddedGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString());
       const totalCostPerWallet = mintCostPerWallet + maxGasCostPerWallet;
@@ -379,7 +488,7 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
 
       engineLog.info({ event: 'simulation_passed', walletCount: simulations.size }, 'Per-wallet setup simulation complete');
 
-// ── 6. Create broadcaster ───────────────────────────────
+      // ── 6. Create broadcaster ───────────────────────────────
       let flashbotsAuth = this.config.broadcast.flashbotsAuthSigner;
       if (
         !flashbotsAuth &&
@@ -431,7 +540,7 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
       // ── 8. Collect results ──────────────────────────────────
       const successCount = walletResults.filter((r) => r.status === 'success').length;
       const failCount = walletResults.filter((r) => r.status === 'failed').length;
-      const totalGasSpent = walletResults.reduce((sum, r) => sum + (r.gasUsed ?? 0n) * (r.effectiveGasPrice ?? 0n), 0n);
+      const totalGasSpent = walletResults.reduce((sum, r) => sum + (r.totalFeeWei ?? (r.gasUsed ?? 0n) * (r.effectiveGasPrice ?? 0n)), 0n);
       const totalMintCost = mintCostPerWallet * BigInt(successCount);
 
       const result: MintJobResult = {
@@ -482,7 +591,7 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
   private async executeFleet(
     runId: string,
     walletIndices: number[],
-    signer: LocalEncryptedSigner,
+    signer: Signer,
     publicClient: PublicClient,
     strategy: ReturnType<typeof getStrategy>,
     drop: DropConfig,
@@ -494,11 +603,17 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
     simulations: Map<number, SimulationEvidence>,
     parentLog: pino.Logger,
   ): Promise<WalletMintResult[]> {
+    assertDirectChainExecutionPolicy(
+      chainId,
+      drop.mintPrice * BigInt(this.config.target.quantity),
+      this.config.safety.dryRun,
+    );
+    assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
     const admissionGate = new AdmissionGate();
     // Concurrent execution with Promise.allSettled (per-wallet isolation)
     const promises = walletIndices.map(async (walletIndex): Promise<WalletMintResult> => {
       const walletLog = childLogger(parentLog, 'WalletMint', { walletIndex });
-      const startTime = Date.now();
+      const startTime = this.now().getTime();
       let builtNonce: number | undefined;
       const walletInfo = (await signer.listWallets()).find((wallet) => wallet.index === walletIndex);
       if (!walletInfo) throw new Error(`Wallet index ${walletIndex} not found`);
@@ -506,6 +621,10 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
       let reservation: import('./types.js').SpendReservation | undefined;
       let releaseAdmission: (() => void) | undefined;
       let submittedHash: import('viem').Hash | undefined;
+      let attemptIds: string[] = [];
+      let submissionAttemptId: string | undefined;
+      let executionId: string | undefined;
+      let transactionIntentId: string | undefined;
 
       try {
         // Check kill switch
@@ -513,14 +632,6 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           return {
             walletIndex, address: walletAddress, status: 'killed',
             error: this.killSwitch.getReason(), durationMs: Date.now() - startTime,
-          };
-        }
-
-        // Check spend cap
-        if (!this.reservationProvider && this.spendTracker.isCapExceeded()) {
-          return {
-            walletIndex, address: walletAddress, status: 'skipped',
-            error: 'Spend cap exceeded', durationMs: Date.now() - startTime,
           };
         }
 
@@ -553,6 +664,9 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           maxPriorityFeePerGas: parseGwei(this.config.fees.maxPriorityFeePerGasGwei.toString()),
         };
 
+        const identity = this.identityForWallet?.({ index: walletIndex, address: walletAddress }, runId)
+          ?? canonicalExecutionIdentity(runId, this.intentId, walletIndex, walletAddress);
+
         if (this.config.safety.dryRun) {
           const serialized = serializeTransaction(tx);
           walletLog.info({
@@ -564,20 +678,56 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           }, '🏜️ DRY RUN — tx built but not sent');
 
           return {
-            walletIndex, address: walletAddress, status: 'prepared', simulation,
+            walletIndex,
+            address: walletAddress,
+            status: 'prepared',
+            executionId: identity.executionId,
+            transactionIntentId: identity.transactionIntentId,
+            lifecycleState: 'prepared',
+            simulation,
             durationMs: Date.now() - startTime,
           };
         }
 
-        const executionId = `${runId}:wallet:${walletIndex}`;
-        const transactionIntentId = `${executionId}:intent`;
-        const intent: TransactionIntent = { chainId, from: walletAddress, to: tx.to!, value, data: calldata, nonce, gasLimit, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas!, runId, policyRef: 'phase-1' };
+        executionId = identity.executionId;
+        transactionIntentId = identity.transactionIntentId;
+        const intent: TransactionIntent = {
+          chainId,
+          from: walletAddress,
+          to: tx.to!,
+          value,
+          data: calldata,
+          nonce,
+          gasLimit,
+          maxFeePerGas: tx.maxFeePerGas!,
+          maxPriorityFeePerGas: tx.maxPriorityFeePerGas!,
+          campaignId: this.config.target.campaignId,
+          runId,
+          policyRef: 'phase-1',
+        };
+        if (!this.config.safety.dryRun) {
+          assertSimulationFresh(
+            simulation,
+            this.now(),
+            this.config.timing.simulationFreshnessMs ?? 120_000,
+          );
+        }
+        this.checkKill();
+        if (this.lifecycleStore) {
+          await this.lifecycleStore.persistIntent({
+            id: transactionIntentId,
+            executionId,
+            intent,
+            createdAt: this.now().toISOString(),
+          });
+        }
         // Serialize the irreversible admission boundary. A kill arriving while
         // another wallet is being signed cannot let this wallet pass unnoticed.
         releaseAdmission = await admissionGate.enter();
         if (this.killSwitch.isKilled()) throw new MintError(MintErrorType.KILLED, 'Kill switch triggered before signing', walletIndex);
-        reservation = this.reservationProvider
-          ? await this.reservationProvider.reserve({
+        if (!this.reservationProvider) throw new MintError(MintErrorType.DURABLE_RESERVATION_REQUIRED, 'Live execution requires a normalized durable reservation provider', walletIndex);
+        this.checkKill();
+        reservation = await this.reservationProvider.reserve({
             idempotencyKey: `${transactionIntentId}:reservation`,
             chainId,
             walletIndex,
@@ -600,25 +750,98 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
               freeMint: value === 0n,
               priorityFeeComponentWei: tx.maxPriorityFeePerGas!.toString(),
             },
-          })
-          : undefined;
+          });
+        this.checkKill();
         const signedTx = await signer.signTransaction(walletIndex, intent);
+        this.checkKill();
 
         walletLog.info({ event: 'tx_signed' }, 'Transaction signed');
+
+        const signedHash = keccak256(signedTx);
+        attemptIds = [`${executionId}:attempt:signed`];
+        await this.lifecycleStore?.persistAttempt({
+          id: attemptIds[0]!,
+          executionId,
+          transactionIntentId,
+          endpoint: 'signer',
+          responseClass: 'signed',
+          txHash: signedHash,
+          nonce,
+          attemptedAt: this.now().toISOString(),
+        });
 
         // Broadcast
         if (this.killSwitch.isKilled()) {
           throw new MintError(MintErrorType.KILLED, 'Kill switch triggered before broadcast', walletIndex);
         }
-        const broadcastResults = await broadcaster.broadcast([signedTx], broadcaster.name === 'flashbots'
-          ? { targetBlock: (await publicClient.getBlockNumber()) + 1n, maxBumps: this.config.safety.maxReplacementBumps }
-          : { maxBumps: this.config.safety.maxReplacementBumps });
+        let broadcastResults: BroadcastResult[];
+        try {
+          broadcastResults = await broadcaster.broadcast([signedTx], broadcaster.name === 'flashbots'
+            ? { targetBlock: (await publicClient.getBlockNumber()) + 1n, maxBumps: this.config.safety.maxReplacementBumps }
+            : { maxBumps: this.config.safety.maxReplacementBumps });
+          const observed = broadcastResults.find((result) => result.success || result.ambiguous || classifyBroadcastResult(result) === 'ambiguous' || classifyBroadcastResult(result) === 'timeout');
+          if (observed) submittedHash = observed.txHash !== '0x' ? observed.txHash : signedHash;
+        } catch (error) {
+          // A provider exception after signing is indistinguishable from a
+          // lost response. Retain the signed hash for hash/nonce recovery.
+          submittedHash = signedHash;
+          await this.persistReconciliation({
+            executionId,
+            txHash: signedHash,
+            fromAddress: walletAddress,
+            nonce,
+            state: 'ambiguous',
+            source: 'broadcast',
+            details: { reason: redactProviderError(error instanceof Error ? error.message : String(error)) },
+          });
+          throw error;
+        }
+        this.checkKill();
+        const attemptIdByResultIndex = new Map<number, string>();
+        for (const [resultIndex, result] of broadcastResults.entries()) {
+          const responseClass = classifyBroadcastResult(result);
+          const resultHash = result.txHash !== '0x' ? result.txHash : undefined;
+          const attemptId = broadcastAttemptId(executionId, resultIndex, responseClass);
+          attemptIds.push(attemptId);
+          attemptIdByResultIndex.set(resultIndex, attemptId);
+          await this.lifecycleStore?.persistAttempt({
+            id: attemptId,
+            executionId,
+            transactionIntentId,
+            endpoint: result.endpoint,
+            responseClass,
+            ...(resultHash ? { txHash: resultHash } : {}),
+            nonce,
+            redactedError: result.error ? redactProviderError(result.error) : undefined,
+            attemptedAt: this.now().toISOString(),
+          });
+        }
         releaseAdmission();
         releaseAdmission = undefined;
-        const successResult = broadcastResults.find((r) => r.success);
+        const selectedSubmission = selectBroadcastAttempt(executionId, broadcastResults);
+        const successResultIndex = selectedSubmission?.resultIndex ?? -1;
+        const successResult = selectedSubmission?.result;
 
         if (!successResult) {
           const errors = broadcastResults.map((r) => r.error).join('; ');
+          const ambiguousResultIndex = broadcastResults.findIndex((r) => r.ambiguous || classifyBroadcastResult(r) === 'ambiguous' || classifyBroadcastResult(r) === 'timeout');
+          const ambiguousResult = ambiguousResultIndex >= 0 ? broadcastResults[ambiguousResultIndex] : undefined;
+          if (ambiguousResult) {
+            submittedHash = ambiguousResult.txHash !== '0x' ? ambiguousResult.txHash : signedHash;
+            submissionAttemptId = attemptIdByResultIndex.get(ambiguousResultIndex);
+            nonceManager.consumeNonce(walletAddress);
+            await this.persistReconciliation({
+              executionId,
+              transactionAttemptId: attemptIdByResultIndex.get(ambiguousResultIndex),
+              txHash: submittedHash,
+              fromAddress: walletAddress,
+              nonce,
+              state: 'ambiguous',
+              source: 'broadcast',
+              details: { responseClass: classifyBroadcastResult(ambiguousResult), reason: redactProviderError(ambiguousResult.error ?? 'provider response was lost') },
+            });
+            throw new MintError(MintErrorType.AMBIGUOUS_SUBMISSION, `Broadcast outcome is ambiguous: ${errors}`, walletIndex);
+          }
           throw new MintError(MintErrorType.RPC_ERROR, `All broadcast endpoints failed: ${errors}`, walletIndex);
         }
 
@@ -627,6 +850,7 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           endpoint: successResult.endpoint, latencyMs: successResult.latencyMs,
         }, `Tx broadcast: ${successResult.txHash}`);
         submittedHash = successResult.txHash;
+        submissionAttemptId = selectedSubmission?.attemptId ?? attemptIdByResultIndex.get(successResultIndex);
 
         nonceManager.consumeNonce(walletAddress);
 
@@ -643,16 +867,72 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           effectiveGasPrice: receipt.effectiveGasPrice.toString(),
         }, `Tx confirmed: ${receipt.status} in block ${receipt.blockNumber}`);
 
-        // Record spend
-        if (!this.reservationProvider) this.spendTracker.recordSpend(receipt.gasUsed, receipt.effectiveGasPrice, value);
-        await reservation?.settle(value, receipt.gasUsed * receipt.effectiveGasPrice);
+        const actualGasCostWei = receipt.gasUsed * receipt.effectiveGasPrice;
+        const actualMintValueWei = receipt.status === 'success' ? value : 0n;
+        const reconciliation = reconcileByHashAndNonce({
+          originalHash: signedHash,
+          observedHash: receipt.txHash,
+          receiptVisible: true,
+          receiptStatus: receipt.status,
+          receiptCanonical: true,
+        });
+        const lifecycleState = lifecycleStateForFinality(chainId, receipt.finalityStage, receipt.status);
+        const productSuccess = receipt.status === 'success' && (chainId !== 4663 || receipt.finalityStage === 'ethereum_final');
+        const reconciliationState = reconciliation.state === 'matched'
+          ? 'matched'
+          : reconciliation.state === 'reorged' ? 'reorged' : 'ambiguous';
+        await this.lifecycleStore?.persistReceipt({
+          id: `${executionId}:receipt:${receipt.blockHash}`,
+          executionId,
+          transactionAttemptId: submissionAttemptId ?? `${executionId}:attempt:signed`,
+          txHash: receipt.txHash,
+          status: receipt.status === 'success' ? (productSuccess ? 'confirmed' : 'pending') : 'reverted',
+          blockNumber: receipt.blockNumber,
+          blockHash: receipt.blockHash,
+          confirmations: receipt.confirmations,
+          gasUsed: receipt.gasUsed,
+          effectiveGasPrice: receipt.effectiveGasPrice,
+          ...(receipt.l1DataFeeWei === undefined ? {} : { l1DataFeeWei: receipt.l1DataFeeWei }),
+          finalityStage: receipt.finalityStage,
+          finalitySource: chainId === 4663 ? 'robinhood-staged-observer' : 'ethereum-confirmation',
+          observedAt: this.now().toISOString(),
+        });
+        await this.persistReconciliation({
+          executionId,
+          transactionAttemptId: submissionAttemptId,
+          txHash: receipt.txHash,
+          fromAddress: walletAddress,
+          nonce,
+          state: reconciliationState,
+          source: 'receipt-watcher',
+          details: { finalityStage: receipt.finalityStage, reason: reconciliation.reason },
+        });
+        if (shouldSettleReceipt(chainId, receipt.status, receipt.finalityStage)) {
+          const components = {
+            ...actualSettlementComponents(
+              actualGasCostWei,
+              receipt.l1DataFeeWei ?? 0n,
+              receipt.priorityFeeComponentWei ?? 0n,
+            ),
+            actualMintValueWei,
+          };
+          if (reservation.settleComponents) await reservation.settleComponents(components);
+          else await reservation.settle(
+            actualMintValueWei,
+            actualGasCostWei + (receipt.l1DataFeeWei ?? 0n),
+          );
+        }
 
-        const totalCost = receipt.gasUsed * receipt.effectiveGasPrice + value;
+        const actualL1DataFeeWei = receipt.l1DataFeeWei ?? 0n;
+        const totalFeeWei = actualGasCostWei + actualL1DataFeeWei;
+        // totalCostWei is the all-in amount. L1 is added only when the chain
+        // provides an authoritative receipt component.
+        const totalCost = totalFeeWei + actualMintValueWei;
 
         return {
           walletIndex,
           address: walletAddress,
-          status: receipt.status === 'success' ? 'success' : 'failed',
+          status: productSuccess ? 'success' : receipt.status === 'reverted' ? 'failed' : 'timeout',
           txHash: receipt.txHash,
           nonce,
           blockNumber: receipt.blockNumber,
@@ -660,9 +940,20 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           finalityStage: receipt.finalityStage,
           gasUsed: receipt.gasUsed,
           effectiveGasPrice: receipt.effectiveGasPrice,
+          l1DataFeeWei: actualL1DataFeeWei,
+          totalFeeWei,
           totalCostWei: totalCost,
-          durationMs: Date.now() - startTime,
-          error: receipt.status === 'reverted' ? 'Transaction reverted on-chain' : undefined,
+          executionId,
+          transactionIntentId,
+          reservationId: reservation.reservationId,
+          attemptIds,
+          submittedAttemptId: submissionAttemptId,
+          lifecycleState,
+          reconciliationState,
+          durationMs: this.now().getTime() - startTime,
+          error: receipt.status === 'reverted'
+            ? 'Transaction reverted on-chain'
+            : productSuccess ? undefined : 'Robinhood finality is pending Ethereum finality',
           simulation,
         };
 
@@ -672,11 +963,51 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
         // error. Keep its reservation for reconciliation; release only work
         // that never crossed the broadcast boundary.
         if (!submittedHash) await reservation?.release();
-        const error = err instanceof MintError ? err : new MintError(
-          MintErrorType.UNKNOWN,
-          err instanceof Error ? err.message : String(err),
-          walletIndex,
-        );
+        const error = err instanceof MintError ? err : err instanceof ReceiptReorgedError
+          ? new MintError(MintErrorType.REORGED_TRANSACTION, err.message, walletIndex)
+          : err instanceof ReceiptTimeoutError
+            ? new MintError(MintErrorType.TIMEOUT, err.message, walletIndex)
+          : err instanceof LifecycleGateError
+            ? new MintError(lifecycleErrorType(err.code), err.message, walletIndex)
+            : new MintError(
+              MintErrorType.UNKNOWN,
+              err instanceof Error ? err.message : String(err),
+              walletIndex,
+            );
+        let recoveryState: WalletMintResult['reconciliationState'];
+        if (submittedHash && executionId && builtNonce !== undefined) {
+          let nonceConsumedByDifferentHash = false;
+          if (!(err instanceof ReceiptReorgedError)) {
+            try {
+              nonceConsumedByDifferentHash = (await publicClient.getTransactionCount({ address: walletAddress, blockTag: 'pending' })) > builtNonce;
+            } catch {
+              // A failed nonce read is itself unresolved; never infer a drop.
+            }
+          }
+          const unresolved = err instanceof ReceiptReorgedError
+            ? { state: 'reorged' as const, reason: err.message, blockNumber: err.blockNumber }
+            : reconcileByHashAndNonce({
+              originalHash: submittedHash,
+              observedHash: submittedHash,
+              receiptVisible: false,
+              nonceConsumedByDifferentHash,
+            });
+          recoveryState = unresolved.state;
+          await this.persistReconciliation({
+            executionId,
+            transactionAttemptId: submissionAttemptId ?? attemptIds.at(-1),
+            txHash: submittedHash,
+            fromAddress: walletAddress,
+            nonce: builtNonce,
+            state: unresolved.state,
+            source: error.type === MintErrorType.AMBIGUOUS_SUBMISSION ? 'broadcast' : 'receipt-watcher',
+            details: {
+              reason: redactProviderError(error.message),
+              errorType: error.type,
+              ...(err instanceof ReceiptReorgedError ? { blockNumber: err.blockNumber.toString() } : {}),
+            },
+          });
+        }
 
         walletLog.error({ event: 'wallet_error', errorType: error.type, error: error.message },
           `Wallet ${walletIndex} failed: ${error.message}`);
@@ -687,9 +1018,23 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
           status: submittedHash ? 'timeout' : 'failed',
           ...(submittedHash ? { txHash: submittedHash } : {}),
           nonce: builtNonce,
+          ...(executionId ? { executionId } : {}),
+          ...(transactionIntentId ? { transactionIntentId } : {}),
+          ...(reservation ? { reservationId: reservation.reservationId } : {}),
+          ...(attemptIds.length > 0 ? { attemptIds } : {}),
+          ...(submissionAttemptId ? { submittedAttemptId: submissionAttemptId } : {}),
+          ...(submittedHash
+            ? recoveryState === 'reorged'
+              ? { lifecycleState: 'reorged' as const, reconciliationState: 'reorged' as const }
+              : recoveryState === 'replaced'
+                ? { lifecycleState: 'replaced' as const, reconciliationState: 'replaced' as const }
+                : recoveryState === 'dropped'
+                  ? { lifecycleState: 'dropped' as const, reconciliationState: 'dropped' as const }
+                  : { lifecycleState: 'submitted' as const, reconciliationState: recoveryState ?? 'ambiguous' as const }
+            : {}),
           error: error.message,
           simulation: simulations.get(walletIndex),
-          durationMs: Date.now() - startTime,
+          durationMs: this.now().getTime() - startTime,
         };
       }
     });
@@ -711,6 +1056,18 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
     });
   }
 
+  private async persistReconciliation(
+    record: Omit<LifecycleReconciliationRecord, 'id' | 'checkedAt'> & { transactionAttemptId?: string },
+  ): Promise<void> {
+    if (!this.lifecycleStore) return;
+    const timestamp = this.now().toISOString();
+    await this.lifecycleStore.persistReconciliation({
+      ...record,
+      id: `${record.executionId}:reconciliation:${timestamp}`,
+      checkedAt: timestamp,
+    });
+  }
+
   /** Programmatic kill switch. */
   kill(reason: string): void {
     this.killSwitch.kill(reason);
@@ -718,7 +1075,12 @@ const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
 
   /** Get spend summary. */
   getSpendSummary() {
-    return this.spendTracker.getSummary();
+    return this.spendTracker?.getSummary() ?? {
+      mintSpendEth: '0',
+      dailySpendEth: '0',
+      mintCapEth: this.config.safety.maxSpendEth.toString(),
+      dailyCapEth: this.config.safety.dailySpendCapEth.toString(),
+    };
   }
 
   /** Check kill switch — throws if killed. */
