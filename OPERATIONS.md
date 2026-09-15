@@ -9,8 +9,9 @@ execution.
 Provide `SECRET_STORE_PATH`, `RPC_SECRET_NAMES`, `STORE_PATH`, and
 `KILL_SWITCH_PATH` through the host secret mechanism or service manager. The
 secret store path must point to `Rets/MINT_BOT_SECRETS.env` or
-`Rets/TEST_BOT.env`. Archive-backed fork tests use the `ROBINHOOD_ARCHIVE_RPC` key by
-reference only. The approved keystore directory is `./Rets/wallets`; its
+`Rets/TEST_BOT.env`. Archive-backed Robinhood replay uses the
+`ROBINHOOD_ARCHIVE_RPC` key by reference only and also accepts the preserved
+`~/W3/Rets/archive-rpc.env` file. The approved keystore directory is `./Rets/wallets`; its
 Product Owner passphrase must be requested through a hidden interactive prompt
 by the host launcher when needed. Do not expose it as an environment variable,
 argument, log field, backup artifact, or CI secret.
@@ -72,9 +73,9 @@ through the `ROBINHOOD_ARCHIVE_RPC` secret reference; the value is injected by t
 secret manager and never written to logs, artifacts, or workflow files.
 
 The archive replay launcher passes the archive reference only to Anvil. Vitest
-receives only `ANVIL_RPC_URL=http://127.0.0.1:8545`; fork tests must never read
-`ROBINHOOD_ARCHIVE_RPC` directly. The genuine Robinhood fixture verifies local Anvil
-chain `31337`, historical block state, and public SeaDrop singleton code. The
+receives only the loopback `ANVIL_ROBINHOOD_RPC_URL` plus the non-secret fixture
+inputs; fork tests must never read `ROBINHOOD_ARCHIVE_RPC` directly. The genuine
+Robinhood fixture verifies local Anvil chain `4663`, historical block state, and public SeaDrop singleton code. The
 CI fork gate must be followed by replay coverage for failed, reverted,
 replacement, reorg, restart, kill-switch, and reconciliation scenarios. A
 vanilla Anvil run is only a fallback smoke test and is not evidence of archive

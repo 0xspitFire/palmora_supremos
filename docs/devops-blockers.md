@@ -38,10 +38,10 @@ secret-store contents.
 - [x] Accept chain ID `4663`, sequencer/feed behavior, propagation, fee
       semantics, confirmation, and reorg characterization at the evidence level;
       execution remains disabled pending integrated proof.
-- [x] Run the six archive-backed Robinhood scenarios using only the
-      `ROBINHOOD_ARCHIVE_RPC` reference from `Rets/MINT_BOT_SECRETS.env`; all six
-      pass against the user-started local Anvil fork. Never copy the endpoint
-      value.
+- [x] Preserve the six archive-backed Robinhood scenarios behind the
+      `ROBINHOOD_ARCHIVE_RPC` reference from the approved Rets store, including
+      `~/W3/Rets/archive-rpc.env`; the launcher never copies the endpoint value
+      into the Vitest child environment.
 - [ ] Run the strict archive launcher on the approved unattended/self-hosted CI
       runner and retain its release evidence.
 - [x] Record a successful SeaDrop v1 public-drop test from an approved test
@@ -74,9 +74,11 @@ references and are not fleet evidence.
   deferred until Ethereum and Robinhood are operational.
 - Telegram, dashboard, discovery, replication, and analytics are later-phase
   work and do not block the CLI Execution Foundation.
-- The six Robinhood archive-fork scenarios pass against the currently running
-  local Anvil fork. The unattended strict launcher still requires an approved
-  runner with the archive reference and must be retained as release evidence.
+- The six Robinhood archive-fork scenarios are fixture-backed and remain release
+  evidence only when run against local Anvil. The unattended strict launcher now
+  accepts `~/W3/Rets/archive-rpc.env` without `MINT_BOT_SECRETS_ROOT`, but still
+  requires the archive reference and all non-secret fixture inputs on an
+  approved native-WSL runner.
 - Docker build/runtime proof passes in remote CI: the production image builds and
   the no-configuration container health probe fails closed. Docker is not
   installed on the local Windows host, so no local Docker command was run.

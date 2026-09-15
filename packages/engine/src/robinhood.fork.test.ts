@@ -1,7 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { resolve } from 'node:path';
-import { existsSync } from 'node:fs';
-import { readSecret } from './secrets.js';
+import { decodeFunctionData, type Hex } from 'viem';
 import { ROBINHOOD_SEADROP_POSITIVE_FIXTURE } from './robinhood-evidence.js';
 import { getChainConfig } from './chains.js';
 
@@ -15,11 +13,24 @@ import { getChainConfig } from './chains.js';
 type Rpc = (method: string, params?: unknown[]) => Promise<any>;
 let fork: Rpc;
 let setupError: Error | undefined;
-const secretRoot = process.env.MINT_BOT_SECRETS_ROOT ?? [
-  resolve(process.cwd(), 'Rets'),
-  resolve(process.cwd(), '../../../Rets'),
-  resolve(process.cwd(), '../../../../../Rets'),
-].find((candidate) => existsSync(resolve(candidate, 'MINT_BOT_SECRETS.env'))) ?? resolve(process.cwd(), 'Rets');
+const replayEnabled = process.env.MINT_BOT_FORK_REPLAY === 'true';
+const rpcUrl = process.env.ANVIL_ROBINHOOD_RPC_URL ?? process.env.ANVIL_RPC_URL ?? 'http://127.0.0.1:8545';
+const forkBlockText = process.env.ROBINHOOD_FORK_BLOCK;
+const nft = process.env.ROBINHOOD_SEADROP_NFT;
+const feeRecipient = process.env.ROBINHOOD_SEADROP_FEE_RECIPIENT;
+const mintValueWei = process.env.ROBINHOOD_SEADROP_MINT_VALUE_WEI;
+const mintPublicAbi = [{
+  type: 'function',
+  name: 'mintPublic',
+  stateMutability: 'payable',
+  inputs: [
+    { name: 'nftContract', type: 'address' },
+    { name: 'feeRecipient', type: 'address' },
+    { name: 'minterIfNotPayer', type: 'address' },
+    { name: 'quantity', type: 'uint256' },
+  ],
+  outputs: [],
+}] as const;
 
 async function makeRpc(url: string): Promise<Rpc> {
   let id = 0;
@@ -35,36 +46,36 @@ async function makeRpc(url: string): Promise<Rpc> {
   };
 }
 
-beforeAll(async () => {
-  try {
-    // Values remain in memory only for the RPC call and are never logged.
-    try {
-      // The strict runner starts local Anvil from this read-only reference.
-      // Assertions intentionally use only local fork state after startup.
-      await readSecret('ROBINHOOD_ARCHIVE_RPC', 'mainnet', secretRoot);
-    } catch (error) {
-      throw new Error(`archive reference unavailable: ${error instanceof Error ? error.message : 'read failed'}`);
-    }
-    fork = await makeRpc('http://127.0.0.1:8545');
-    let client: string;
-    try {
-      client = await fork('web3_clientVersion') as string;
-    } catch {
-      throw new Error('Anvil fork endpoint unreachable');
-    }
-    if (!client.toLowerCase().includes('anvil')) throw new Error('ROBINHOOD_ARCHIVE_RPC is not an Anvil endpoint');
-    const chainId = await fork('eth_chainId');
-    if (chainId !== '0x1237') throw new Error(`Fork chain mismatch: expected 4663, observed ${chainId}`);
-  } catch (error) {
-    setupError = error instanceof Error ? error : new Error(String(error));
-  }
-});
-
 function requireSetup(): void {
   if (setupError) throw new Error(`Archive-backed Robinhood fork unavailable: ${setupError.message}`);
 }
 
-describe.skipIf(process.env.MINT_BOT_FORK_REPLAY !== 'true')('Robinhood archive-backed fork replay', () => {
+describe.skipIf(!replayEnabled || !forkBlockText || !nft || !feeRecipient || !mintValueWei)('Robinhood archive-backed fork replay', () => {
+  beforeAll(async () => {
+    try {
+      const parsedUrl = new URL(rpcUrl);
+      if (parsedUrl.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(parsedUrl.hostname)) {
+        throw new Error('ANVIL_ROBINHOOD_RPC_URL must target loopback Anvil');
+      }
+      if (!/^\d+$/.test(forkBlockText!)) throw new Error('ROBINHOOD_FORK_BLOCK must be a decimal block number');
+      if (!/^0x[0-9a-fA-F]{40}$/.test(nft!) || !/^0x[0-9a-fA-F]{40}$/.test(feeRecipient!)) throw new Error('Robinhood NFT and fee-recipient inputs must be addresses');
+      if (!/^\d+$/.test(mintValueWei!)) throw new Error('ROBINHOOD_SEADROP_MINT_VALUE_WEI must be an integer');
+      if (BigInt(forkBlockText!) < ROBINHOOD_SEADROP_POSITIVE_FIXTURE.blockNumber) throw new Error('ROBINHOOD_FORK_BLOCK must include the approved positive fixture');
+      fork = await makeRpc(rpcUrl);
+      let client: string;
+      try {
+        client = await fork('web3_clientVersion') as string;
+      } catch {
+        throw new Error('Anvil fork endpoint unreachable');
+      }
+      if (!client.toLowerCase().includes('anvil')) throw new Error('Local Robinhood endpoint is not Anvil');
+      const chainId = await fork('eth_chainId');
+      if (chainId !== '0x1237') throw new Error('Fork chain mismatch: expected 4663');
+    } catch (error) {
+      setupError = error instanceof Error ? error : new Error('fork setup failed');
+    }
+  });
+
   it('replays the historical positive SeaDrop transaction and receipt', async () => {
     requireSetup();
     const historicalBlock = `0x${ROBINHOOD_SEADROP_POSITIVE_FIXTURE.blockNumber.toString(16)}`;
@@ -80,6 +91,12 @@ describe.skipIf(process.env.MINT_BOT_FORK_REPLAY !== 'true')('Robinhood archive-
     expect(BigInt(tx?.value)).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.mintAmountWei);
     expect(typeof tx?.input).toBe('string');
     expect(tx?.input.length).toBeGreaterThan(10);
+    expect(nft?.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.nftContract.toLowerCase());
+    expect(BigInt(mintValueWei!)).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.mintAmountWei);
+    const decoded = decodeFunctionData({ abi: mintPublicAbi, data: tx.input as Hex });
+    expect(decoded.functionName).toBe('mintPublic');
+    expect(decoded.args?.[0].toLowerCase()).toBe(nft?.toLowerCase());
+    expect(decoded.args?.[1].toLowerCase()).toBe(feeRecipient?.toLowerCase());
     expect(receipt?.from.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.wallet.toLowerCase());
     expect(receipt?.blockNumber).toBe(historicalBlock);
   });

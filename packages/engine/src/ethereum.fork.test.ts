@@ -40,13 +40,33 @@ async function receipt(hash: string): Promise<{ status: string } | null> {
   return null;
 }
 
-describe.skipIf(!rpcUrl || !nft || !feeRecipient || !mintValueWei)('Ethereum three-wallet SeaDrop fork', () => {
+function isLoopback(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function eoaAccounts(): Promise<string[]> {
+  const accounts = await rpc('eth_accounts') as string[];
+  const code = await Promise.all(accounts.map((account) => rpc('eth_getCode', [account, 'latest'])));
+  return accounts.filter((_, index) => code[index] === '0x');
+}
+
+function mintData(quantity: bigint): `0x${string}` {
+  return encodeFunctionData({ abi: mintPublicAbi, functionName: 'mintPublic', args: [nft!, feeRecipient!, zeroAddress, quantity] });
+}
+
+describe.skipIf(!rpcUrl || !isLoopback(rpcUrl) || !nft || !feeRecipient || !mintValueWei)('Ethereum three-wallet SeaDrop fork', () => {
   it('executes the same public SeaDrop intent from three independent unlocked Anvil wallets', async () => {
     expect(await rpc('eth_chainId')).toBe('0x1');
-    const accounts = await rpc('eth_accounts') as string[];
-    expect(accounts.length).toBeGreaterThanOrEqual(3);
-    const data = encodeFunctionData({ abi: mintPublicAbi, functionName: 'mintPublic', args: [nft!, feeRecipient!, zeroAddress, 1n] });
-    const hashes = await Promise.all(accounts.slice(0, 3).map((from) => rpc('eth_sendTransaction', [{
+    const senders = await eoaAccounts();
+    expect(senders.length).toBeGreaterThanOrEqual(3);
+    const data = mintData(1n);
+    const hashes = await Promise.all(senders.slice(0, 3).map((from) => rpc('eth_sendTransaction', [{
       from,
       to: seaDrop,
       value: `0x${BigInt(mintValueWei!).toString(16)}`,
@@ -55,5 +75,27 @@ describe.skipIf(!rpcUrl || !nft || !feeRecipient || !mintValueWei)('Ethereum thr
     const receipts = await Promise.all(hashes.map((hash) => receipt(hash)));
     expect(receipts).toHaveLength(3);
     expect(receipts.every((item) => item?.status === '0x1')).toBe(true);
+  });
+
+  it('rejects a price-drift call without broadcasting', async () => {
+    const value = BigInt(mintValueWei!);
+    if (value === 0n) return;
+    const sender = (await eoaAccounts())[0];
+    expect(sender).toBeDefined();
+    await expect(rpc('eth_call', [{ from: sender, to: seaDrop, value: `0x${(value - 1n).toString(16)}`, data: mintData(1n) }, 'latest'])).rejects.toThrow();
+  });
+
+  it('rejects an insufficient-funds estimate without broadcasting', async () => {
+    const sender = (await eoaAccounts())[0];
+    expect(sender).toBeDefined();
+    await expect(rpc('eth_estimateGas', [{ from: sender, to: seaDrop, value: `0x${((1n << 256n) - 1n).toString(16)}`, data: mintData(1n) }])).rejects.toThrow();
+  });
+
+  it('rejects an allocation-sized sold-out probe without broadcasting', async () => {
+    const sender = (await eoaAccounts())[0];
+    expect(sender).toBeDefined();
+    const quantity = 1_000_000n;
+    const value = BigInt(mintValueWei!) * quantity;
+    await expect(rpc('eth_call', [{ from: sender, to: seaDrop, value: `0x${value.toString(16)}`, data: mintData(quantity) }, 'latest'])).rejects.toThrow();
   });
 });

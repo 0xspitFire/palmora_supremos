@@ -11,7 +11,29 @@ fixture, or substitute for the accepted characterization gate.
 - Execution: disabled until characterization, safety, reconciliation, and
   Product Owner acceptance gates pass.
 - Archive RPC: referenced only by the `ROBINHOOD_ARCHIVE_RPC` key in the read-only
-  `Rets/MINT_BOT_SECRETS.env` store. The endpoint value is never recorded here.
+  `~/W3/Rets/archive-rpc.env` store (or an explicitly approved Rets root). The
+  endpoint value is never recorded here or passed to Vitest.
+
+## Strict replay inputs
+
+The strict local-Anvil wrapper requires these non-secret fixture inputs:
+
+- `ROBINHOOD_FORK_BLOCK`: decimal archive fork block at or after the approved positive fixture block.
+- `ANVIL_ROBINHOOD_RPC_URL`: loopback HTTP URL for the local Anvil instance; it defaults to `http://127.0.0.1:8545`.
+- `ROBINHOOD_SEADROP_NFT`: approved positive-fixture NFT contract address.
+- `ROBINHOOD_SEADROP_FEE_RECIPIENT`: fee recipient encoded in the approved positive fixture.
+- `ROBINHOOD_SEADROP_MINT_VALUE_WEI`: positive-fixture mint value in wei.
+
+The launcher additionally requires an archive reference key named
+`ROBINHOOD_ARCHIVE_RPC` in `~/W3/Rets/archive-rpc.env`. The key value is read
+only by the launcher to start local Anvil; it is not logged or placed in the
+Vitest child environment. `MINT_BOT_FORK_REPLAY=true` is set internally for the
+local child run. `ANVIL_BIN` is optional and defaults to `anvil`.
+
+The approved transaction hash, wallet, SeaDrop singleton, and fixture block are
+code-owned evidence constants, so they are not additional environment inputs.
+The replay performs only local Anvil reads and local test-wallet mechanics; it
+never submits an external transaction.
 
 ## Failed hashes
 
