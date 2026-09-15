@@ -83,3 +83,12 @@ Receive workflows from Product Manager, interaction rules from Product Designer,
   Backend read boundary; arbitrary JSON is not globally coerced into numbers.
 - A Robinhood L2 receipt without an Ethereum-final observation is persisted as
   unresolved evidence, never promoted to settlement or inferred finality.
+
+## 2026-09-15 refinements
+
+- Database 015 request identity is fleet-scoped by `request_id` and
+  wallet-scoped by `wallet_id`; Backend preserves that shared request identity
+  while retaining per-wallet idempotency keys and execution fingerprints.
+- Versioned reservation metadata is explicit when available: `mint_class`,
+  active fee-policy identity and snapshot, and the canonical
+  `campaign:<id>` period are persisted before engine side effects.

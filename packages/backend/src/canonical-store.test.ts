@@ -35,8 +35,8 @@ async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false
   const db = openDatabase(join(directory, 'state.sqlite'));
   const profileId = `profile-${chainId}`;
   db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(profileId, chainId, chainId === ETHEREUM ? 'Ethereum' : 'Robinhood', '[]', 2, NOW);
-  db.prepare('UPDATE chain_profile SET execution_enabled = ?, verification_status = ? WHERE id = ?').run(executionEnabled ? 1 : 0, 'verified', profileId);
-  if (includeVerification) db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`verification-${chainId}`, profileId, 'verified', chainId, chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : null, chainId === ROBINHOOD ? 'RH_ARCHIVE_REFERENCE' : 'ETH_ARCHIVE_REFERENCE', chainId === ETHEREUM ? 'ETH_FEED_REFERENCE' : null, JSON.stringify({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : 'ETH_FEED_REFERENCE', sourceBlock: 1, sourceBlockHash: '0xblock', expiresAt: evidenceExpiresAt, acceptedAt: NOW, acceptedBy: 'test-operator', approvalProof: 'test-proof', strategyVersion: 'seadrop-v1-public@1' }), NOW, 'test-operator', NOW);
+  db.prepare('UPDATE chain_profile SET execution_enabled = ?, verification_status = ? WHERE id = ?').run(chainId === ROBINHOOD ? 0 : executionEnabled ? 1 : 0, chainId === ROBINHOOD ? 'execution_blocked' : 'verified', profileId);
+  if (includeVerification) db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`verification-${chainId}`, profileId, chainId === ROBINHOOD ? 'execution_blocked' : 'verified', chainId, chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : null, chainId === ROBINHOOD ? 'RH_ARCHIVE_REFERENCE' : 'ETH_ARCHIVE_REFERENCE', chainId === ETHEREUM ? 'ETH_FEED_REFERENCE' : null, JSON.stringify({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : 'ETH_FEED_REFERENCE', sourceBlock: 1, sourceBlockHash: '0xblock', expiresAt: evidenceExpiresAt, acceptedAt: NOW, acceptedBy: 'test-operator', approvalProof: 'test-proof', strategyVersion: 'seadrop-v1-public@1' }), NOW, 'test-operator', NOW);
   db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`fee-${chainId}`, profileId, `test-${chainId}-${paid ? 'paid' : 'free'}`, chainId === ETHEREUM ? 'ordering' : 'fee_only', '34', '40', '20', 2, paid ? 1 : 0, 1, NOW, 'allowed');
   const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW) });
   await store.open();
@@ -61,7 +61,9 @@ async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: re
   const run: RunRecord = { id: `run-${campaignValue.id}`, intentId: `intent-${campaignValue.id}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
   const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [...simulationIds], evidenceAt: NOW, createdAt: NOW };
   await fixtureValue.store.transaction((state) => { state.runs.push(run); state.intents.push(intent); });
-  return { run, intent, input: { run, intent, campaign: campaignValue, wallets } };
+  const persistedRun = fixtureValue.store.snapshot().runs.find((item) => item.id === run.id);
+  if (!persistedRun) throw new Error('run missing');
+  return { run: persistedRun, intent, input: { run: persistedRun, intent, campaign: campaignValue, wallets } };
 }
 
 describe('CanonicalStoreBridge', () => {
@@ -124,6 +126,18 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  it('preserves the Backend request digest across canonical arm replay', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM);
+      const validated = { campaign: campaignValue, wallets: [], simulationIds: [], evidenceAt: NOW };
+      const first = await value.application.command('arm', { validated, mode: 'dry-run', idempotencyKey: 'canonical-arm-once' });
+      const replay = await value.application.command('arm', { validated, mode: 'dry-run', idempotencyKey: 'canonical-arm-once' });
+      expect(replay.id).toBe(first.id);
+      expect(value.store.snapshot().runs.find((run) => run.id === first.id)?.requestDigest).toMatch(/^[a-f0-9]{64}$/);
+    } finally { await close(value); }
+  });
+
   it('admits multiple wallets exactly at the run and daily caps', async () => {
     const value = await fixture(ETHEREUM);
     try {
@@ -132,6 +146,41 @@ describe('CanonicalStoreBridge', () => {
       const admission = await value.store.admitExecution(prepared.input);
       expect(admission.reservations).toHaveLength(2);
       expect(admission.reservations.reduce((total, reservation) => total + reservation.amountWei, 0n)).toBe(68n);
+      const rows = value.db.prepare('SELECT r.wallet_id, r.request_id, r.request_fingerprint, r.mint_class, r.fee_policy_id, r.fee_policy_version, r.fee_policy_snapshot_json, r.policy_snapshot_json, r.mint_period_id, e.request_id AS execution_request_id, e.request_fingerprint AS execution_request_fingerprint, ti.request_id AS intent_request_id, ti.request_fingerprint AS intent_request_fingerprint FROM spend_reservation r JOIN execution e ON e.id = r.execution_id JOIN transaction_intent ti ON ti.id = r.transaction_intent_id WHERE r.request_id = ? ORDER BY r.wallet_id').all(prepared.run.id) as Array<{ wallet_id: string; request_id: string; request_fingerprint: string; mint_class: string; fee_policy_id: string | null; fee_policy_version: string | null; fee_policy_snapshot_json: string; policy_snapshot_json: string; mint_period_id: string; execution_request_id: string | null; execution_request_fingerprint: string | null; intent_request_id: string | null; intent_request_fingerprint: string | null }>;
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((row) => row.wallet_id)).size).toBe(2);
+      expect(new Set(rows.map((row) => row.request_id))).toEqual(new Set([prepared.run.id]));
+      expect(new Set(rows.map((row) => row.request_fingerprint))).toEqual(new Set([value.store.snapshot().runs.find((run) => run.id === prepared.run.id)?.requestDigest]));
+      for (const row of rows) {
+        expect(row.mint_class).toBe('free');
+        expect(row.fee_policy_id).toBeTruthy();
+        expect(row.fee_policy_version).toBeTruthy();
+        expect(JSON.parse(row.fee_policy_snapshot_json)).toMatchObject({ id: row.fee_policy_id, version: row.fee_policy_version });
+        expect(row.mint_period_id).toBe(`campaign:${campaignValue.id}`);
+        expect(JSON.parse(row.policy_snapshot_json)).toMatchObject({ mintClass: 'free', feePolicyId: row.fee_policy_id, feePolicyVersion: row.fee_policy_version, mintPeriodId: row.mint_period_id });
+        expect(row.execution_request_id).toBe(row.intent_request_id);
+        expect(row.execution_request_fingerprint).toBe(row.intent_request_fingerprint);
+        expect(row.execution_request_id).toBe(prepared.intent.id);
+      }
+    } finally { await close(value); }
+  });
+
+  it('classifies paid Ethereum reservations with the active fee-policy snapshot', async () => {
+    const value = await fixture(ETHEREUM, true);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM, true);
+      const prepared = await armed(value, campaignValue, [WALLET_ONE, WALLET_TWO]);
+      const admission = await value.store.admitExecution(prepared.input);
+      const rows = value.db.prepare('SELECT mint_class, fee_policy_id, fee_policy_version, fee_policy_snapshot_json, mint_period_id FROM spend_reservation WHERE request_id = ? ORDER BY id').all(prepared.run.id) as Array<{ mint_class: string; fee_policy_id: string | null; fee_policy_version: string | null; fee_policy_snapshot_json: string; mint_period_id: string }>;
+      expect(admission.reservations).toHaveLength(2);
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(row.mint_class).toBe('paid');
+        expect(row.fee_policy_id).toBeTruthy();
+        expect(row.fee_policy_version).toBeTruthy();
+        expect(JSON.parse(row.fee_policy_snapshot_json)).toMatchObject({ id: row.fee_policy_id, version: row.fee_policy_version, paidMintsEnabled: 1 });
+        expect(row.mint_period_id).toBe(`campaign:${campaignValue.id}`);
+      }
     } finally { await close(value); }
   });
 

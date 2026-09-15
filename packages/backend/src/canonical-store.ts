@@ -381,6 +381,8 @@ function mapChainVerification(row: { chain_id: number; status: string; checked_a
 export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readonly databaseStore: SqliteBackendStore;
   private opened = false;
+  private supportsReservationBoundaryFields = false;
+  private supportsCampaignPeriods = false;
   private readonly durable: boolean;
   private readonly actor: string;
   private readonly now: () => Date;
@@ -394,9 +396,13 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public async open(): Promise<void> {
     const row = this.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null };
-    if (row.version !== 14) throw new Error('NORMALIZED_SCHEMA_VERSION_REQUIRED');
+    if (row.version === null || row.version < 14) throw new Error('NORMALIZED_SCHEMA_VERSION_REQUIRED');
     const backendState = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backend_state'").get() as { name: string } | undefined;
     if (backendState) throw new Error('JSON_BACKEND_STATE_MUST_NOT_BE_LIVE');
+    const reservationColumns = new Set((this.db.prepare('PRAGMA table_info(spend_reservation)').all() as Array<{ name: string }>).map((column) => column.name));
+    this.supportsReservationBoundaryFields = ['mint_class', 'fee_policy_id', 'fee_policy_version', 'fee_policy_snapshot_json'].every((column) => reservationColumns.has(column));
+    this.supportsCampaignPeriods = Boolean(this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'campaign_period'").get());
+    if (row.version >= 15 && (!this.supportsReservationBoundaryFields || !this.supportsCampaignPeriods)) throw new Error('NORMALIZED_SCHEMA_RESERVATION_CONTRACT_REQUIRED');
     this.opened = true;
   }
 
@@ -473,10 +479,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.ensureOpen();
     const input = record as { runId?: string; campaignId?: string; requestFingerprint?: string };
     if (!input.runId) throw new Error('RUN_ID_REQUIRED');
-    const row = this.db.prepare('SELECT campaign_id, request_fingerprint FROM execution_run WHERE id = ?').get(input.runId) as { campaign_id: string; request_fingerprint: string } | undefined;
+    const row = this.db.prepare('SELECT campaign_id, request_fingerprint, reason FROM execution_run WHERE id = ?').get(input.runId) as { campaign_id: string; request_fingerprint: string; reason: string | null } | undefined;
     if (!row) throw new Error('RUN_NOT_FOUND');
     if (input.campaignId && row.campaign_id !== input.campaignId) throw new Error('RUN_CAMPAIGN_MISMATCH');
-    if (input.requestFingerprint && row.request_fingerprint !== input.requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+    const runReason = decodeRecord<{ backendRequestDigest?: string }>(row.reason);
+    const backendFingerprint = runReason?.backendRequestDigest ?? row.request_fingerprint;
+    if (input.requestFingerprint && backendFingerprint !== input.requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
   }
 
   public async persistEngineIntent(record: unknown): Promise<void> {
@@ -558,6 +566,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (wallets.length === 0) throw new Error('EMPTY_RESERVATION_BATCH');
     if (new Set(wallets.map((wallet) => wallet.toLowerCase())).size !== wallets.length) throw new Error('DUPLICATE_WALLET');
     if (input.campaign.chainId === ROBINHOOD_CHAIN_ID && input.campaign.feePolicy.kind === 'paid') throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
+    const requestFingerprint = this.runFingerprint(input.run.id);
+    if (input.run.requestDigest !== requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.exec('PRAGMA defer_foreign_keys = ON');
@@ -577,8 +587,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         const policyId = this.policyId(input.campaign.id, wallet);
         const existing = this.db.prepare('SELECT id, status, amount_wei, usage_date, created_at, settled_at, chain_profile_id, campaign_id, execution_id, transaction_intent_id, request_fingerprint FROM spend_reservation WHERE id = ?').get(reservationId) as { id: string; status: 'reserved' | 'settled' | 'released' | 'expired'; amount_wei: string; usage_date: string; created_at: string; settled_at: string | null; chain_profile_id: string | null; campaign_id: string | null; execution_id: string | null; transaction_intent_id: string | null; request_fingerprint: string | null } | undefined;
         if (existing?.status === 'released' || existing?.status === 'expired') throw new Error('RESERVATION_IDEMPOTENCY_REPLAY');
-        if (existing && existing.request_fingerprint !== null && existing.request_fingerprint !== input.run.requestDigest) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+        if (existing && existing.request_fingerprint !== null && existing.request_fingerprint !== requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
         const usageDate = this.now().toISOString().slice(0, 10);
+        if (!this.db.prepare('SELECT id FROM execution WHERE id = ?').get(executionId)) {
+          this.databaseStore.saveExecution({ id: executionId, campaignId: input.campaign.id, walletId: canonicalWallet.walletId, transactionIntentId: intentId, state: 'prepared', runId: input.run.id, createdAt: this.now().toISOString(), updatedAt: this.now().toISOString() });
+          this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'execution', entityId: executionId, newState: 'prepared', actor: this.actor, source: 'backend-admission', reason: 'pre-action execution persisted before reservation and engine side effect', policyVersion: 'phase1', occurredAt: this.now().toISOString() });
+        }
         if (!existing) {
           this.assertCanonicalFeePolicy(input.campaign, input.campaign.feePolicy);
           this.assertCaps(canonicalWallet.walletId, input.campaign, usageDate, amount, totalRunExposure);
@@ -587,16 +601,24 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
           const l2ExecutionGasWei = fee.l2ExecutionGasBudgetWei ?? 0n;
           const l1DataGasWei = fee.l1DataGasBudgetWei ?? 0n;
           const priorityFeeComponentWei = fee.configuredPriorityFeeWei;
-          const insertReservation = this.db.prepare('INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at, chain_profile_id, campaign_id, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei, policy_snapshot_json, mint_period_id, transaction_intent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'reserved\', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-          insertReservation.run(reservationId, canonicalWallet.walletId, executionId, `${input.run.id}:${wallet.toLowerCase()}`, input.run.id, input.run.requestDigest, policyId, amount.toString(), amount.toString(), usageDate, this.now().toISOString(), canonicalWallet.chainProfileId, input.campaign.id, mintValueWei.toString(), l2ExecutionGasWei.toString(), l1DataGasWei.toString(), priorityFeeComponentWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.replacementBudgetWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.mintValueBufferWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.l2ExecutionGasBufferWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.l1DataGasBufferWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.priorityFeeBufferWei.toString(), encode(this.reservationSnapshot(input)), input.campaign.id, intentId);
-          this.databaseStore.saveExecution({ id: executionId, campaignId: input.campaign.id, walletId: canonicalWallet.walletId, transactionIntentId: intentId, state: 'prepared', runId: input.run.id, requestId: input.run.idempotencyKey ?? input.run.id, requestFingerprint: input.run.requestDigest, reservationId, createdAt: this.now().toISOString(), updatedAt: this.now().toISOString() });
-          this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'execution', entityId: executionId, newState: 'prepared', actor: this.actor, source: 'backend-admission', reason: 'pre-action execution persisted before signing or broadcast', policyVersion: 'phase1', occurredAt: this.now().toISOString() });
+          const mintClass = mintValueWei === 0n ? 'free' : 'paid';
+          const mintPeriodId = this.mintPeriodId(input.campaign.id);
+          const activeFeePolicy = this.activeFeePolicy(canonicalWallet.chainProfileId);
+          const reservationSnapshot = encode(this.reservationSnapshot(input, { mintClass, feePolicyId: activeFeePolicy.id, feePolicyVersion: activeFeePolicy.version, mintPeriodId }));
+          if (this.supportsReservationBoundaryFields) {
+            const feePolicySnapshot = encode({ id: activeFeePolicy.id, version: activeFeePolicy.version, priorityFeeSemantics: activeFeePolicy.priority_fee_semantics, maxTotalFeeWei: activeFeePolicy.max_total_fee_wei, freeMintTotalFeeCapWei: activeFeePolicy.free_mint_total_fee_cap_wei, freeMintPriorityFeeComponentWei: activeFeePolicy.free_mint_priority_fee_component_wei, freeMintPriorityFeeMultiplier: activeFeePolicy.free_mint_priority_fee_multiplier, paidMintsEnabled: activeFeePolicy.paid_mints_enabled, zeroPriorityFeePolicy: activeFeePolicy.zero_priority_fee_policy });
+            const insertReservation = this.db.prepare('INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at, chain_profile_id, campaign_id, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei, policy_snapshot_json, mint_period_id, transaction_intent_id, mint_class, fee_policy_id, fee_policy_version, fee_policy_snapshot_json) VALUES (@id, @walletId, @executionId, @idempotencyKey, @requestId, @requestFingerprint, @policyId, @amountWei, @reservedAmountWei, @usageDate, \'reserved\', @createdAt, @chainProfileId, @campaignId, @mintValueWei, @l2ExecutionGasWei, @l1DataGasWei, @priorityFeeComponentWei, @replacementBudgetWei, @mintValueBufferWei, @l2ExecutionGasBufferWei, @l1DataGasBufferWei, @priorityFeeBufferWei, @policySnapshotJson, @mintPeriodId, @transactionIntentId, @mintClass, @feePolicyId, @feePolicyVersion, @feePolicySnapshotJson)');
+            insertReservation.run({ id: reservationId, walletId: canonicalWallet.walletId, executionId, idempotencyKey: `${input.run.id}:${wallet.toLowerCase()}`, requestId: input.run.id, requestFingerprint, policyId, amountWei: amount.toString(), reservedAmountWei: amount.toString(), usageDate, createdAt: this.now().toISOString(), chainProfileId: canonicalWallet.chainProfileId, campaignId: input.campaign.id, mintValueWei: mintValueWei.toString(), l2ExecutionGasWei: l2ExecutionGasWei.toString(), l1DataGasWei: l1DataGasWei.toString(), priorityFeeComponentWei: priorityFeeComponentWei.toString(), replacementBudgetWei: PHASE1_ZERO_ADMISSION_BUFFERS.replacementBudgetWei.toString(), mintValueBufferWei: PHASE1_ZERO_ADMISSION_BUFFERS.mintValueBufferWei.toString(), l2ExecutionGasBufferWei: PHASE1_ZERO_ADMISSION_BUFFERS.l2ExecutionGasBufferWei.toString(), l1DataGasBufferWei: PHASE1_ZERO_ADMISSION_BUFFERS.l1DataGasBufferWei.toString(), priorityFeeBufferWei: PHASE1_ZERO_ADMISSION_BUFFERS.priorityFeeBufferWei.toString(), policySnapshotJson: reservationSnapshot, mintPeriodId, transactionIntentId: intentId, mintClass, feePolicyId: activeFeePolicy.id, feePolicyVersion: activeFeePolicy.version, feePolicySnapshotJson: feePolicySnapshot });
+          } else {
+            const insertReservation = this.db.prepare('INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at, chain_profile_id, campaign_id, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei, policy_snapshot_json, mint_period_id, transaction_intent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'reserved\', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            insertReservation.run(reservationId, canonicalWallet.walletId, executionId, `${input.run.id}:${wallet.toLowerCase()}`, input.run.id, requestFingerprint, policyId, amount.toString(), amount.toString(), usageDate, this.now().toISOString(), canonicalWallet.chainProfileId, input.campaign.id, mintValueWei.toString(), l2ExecutionGasWei.toString(), l1DataGasWei.toString(), priorityFeeComponentWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.replacementBudgetWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.mintValueBufferWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.l2ExecutionGasBufferWei.toString(), PHASE1_ZERO_ADMISSION_BUFFERS.l1DataGasBufferWei.toString(), reservationSnapshot, mintPeriodId, intentId);
+          }
           totalRunExposure += amount;
-        }
-        if (!this.db.prepare('SELECT id FROM execution WHERE id = ?').get(executionId)) {
-          this.databaseStore.saveExecution({ id: executionId, campaignId: input.campaign.id, walletId: canonicalWallet.walletId, transactionIntentId: intentId, state: 'prepared', runId: input.run.id, requestId: input.run.idempotencyKey ?? input.run.id, requestFingerprint: input.run.requestDigest, reservationId, createdAt: this.now().toISOString(), updatedAt: this.now().toISOString() });
-          this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'execution', entityId: executionId, newState: 'prepared', actor: this.actor, source: 'backend-admission', reason: 'pre-action execution persisted before signing or broadcast', policyVersion: 'phase1', occurredAt: this.now().toISOString() });
-        }
+         }
+         const executionReservation = this.db.prepare('SELECT reservation_id FROM execution WHERE id = ?').get(executionId) as { reservation_id: string | null } | undefined;
+         if (!executionReservation) throw new Error('EXECUTION_REQUIRED');
+         if (executionReservation.reservation_id !== null && executionReservation.reservation_id !== reservationId) throw new Error('EXECUTION_RESERVATION_IDENTITY_MISMATCH');
+         if (executionReservation.reservation_id === null) this.db.prepare('UPDATE execution SET reservation_id = ? WHERE id = ?').run(reservationId, executionId);
         const persistedReservation = this.db.prepare('SELECT id, wallet_id, execution_id, transaction_intent_id, amount_wei, reserved_amount_wei, settled_amount_wei, usage_date, status, created_at, settled_at, chain_profile_id, campaign_id, (SELECT run_id FROM execution WHERE id = spend_reservation.execution_id) AS run_id, (SELECT chain_id FROM chain_profile WHERE id = spend_reservation.chain_profile_id) AS chain_id FROM spend_reservation WHERE id = ?').get(reservationId) as DatabaseReservationRow;
         reservations.push(this.mapReservation(persistedReservation, input.run.id, input.campaign.chainId));
         executionIds.set(wallet.toLowerCase(), { wallet, intentId, executionId });
@@ -624,7 +646,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         this.db.prepare("UPDATE spend_reservation SET status = 'released' WHERE execution_id = ? AND status = 'reserved'").run(row.id);
       }
       this.db.prepare("UPDATE execution_run SET state = 'aborted', updated_at = ? WHERE state IN ('prepared', 'active', 'recovering')").run(this.now().toISOString());
-      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution_run', entityId: 'global', newState: 'aborted', actor: this.actor, reason, policySnapshot: { kind: 'event', eventType: 'kill', eventData: { reason } }, occurredAt: this.now().toISOString() });
+      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'state_transition', entityId: 'global', newState: 'aborted', actor: this.actor, reason, policySnapshot: { kind: 'event', eventType: 'kill', eventData: { reason } }, occurredAt: this.now().toISOString() });
       this.db.exec('COMMIT');
     } catch (error) {
       if (this.db.inTransaction) this.db.exec('ROLLBACK');
@@ -664,8 +686,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const rows = this.db.prepare('SELECT id, request_id, request_fingerprint, campaign_id, state, reason, created_at, updated_at FROM execution_run ORDER BY created_at, id').all() as DatabaseRunRow[];
     return rows.flatMap((row) => {
       if (!row.campaign_id) return [];
-      const reason = decodeRecord<{ intentId?: string; idempotencyKey?: string; mode?: RunRecord['mode'] }>(row.reason);
-      return [{ id: row.id, intentId: reason?.intentId ?? canonicalId('intent', row.id), campaignId: row.campaign_id, mode: reason?.mode === 'live' ? 'live' : 'dry-run', requestDigest: row.request_fingerprint, state: backendRunState(row.state), ...(reason?.idempotencyKey ? { idempotencyKey: reason.idempotencyKey } : row.request_id.startsWith('run:') ? {} : { idempotencyKey: row.request_id }), createdAt: row.created_at, updatedAt: row.updated_at }];
+      const reason = decodeRecord<{ intentId?: string; idempotencyKey?: string; mode?: RunRecord['mode']; backendRequestDigest?: string }>(row.reason);
+      return [{ id: row.id, intentId: reason?.intentId ?? canonicalId('intent', row.id), campaignId: row.campaign_id, mode: reason?.mode === 'live' ? 'live' : 'dry-run', requestDigest: reason?.backendRequestDigest ?? row.request_fingerprint, state: backendRunState(row.state), ...(reason?.idempotencyKey ? { idempotencyKey: reason.idempotencyKey } : row.request_id.startsWith('run:') ? {} : { idempotencyKey: row.request_id }), createdAt: row.created_at, updatedAt: row.updated_at }];
     });
   }
 
@@ -802,9 +824,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private persistRun(run: RunRecord, prior: RunRecord | undefined): void {
-    const reason = encode({ kind: 'run', intentId: run.intentId, mode: run.mode, ...(run.idempotencyKey ? { idempotencyKey: run.idempotencyKey } : {}) });
+    const reason = encode({ kind: 'run', intentId: run.intentId, mode: run.mode, backendRequestDigest: run.requestDigest, ...(run.idempotencyKey ? { idempotencyKey: run.idempotencyKey } : {}) });
     if (!prior) {
-      this.databaseStore.saveRun({ id: run.id, requestId: run.idempotencyKey ?? `run:${run.id}`, requestFingerprint: run.requestDigest, campaignId: run.campaignId, state: dbRunState(run.state), actor: this.actor, source: 'backend', reason, createdAt: run.createdAt, updatedAt: run.updatedAt });
+       this.databaseStore.saveRun({ id: run.id, requestId: run.idempotencyKey ?? `run:${run.id}`, requestPayload: { backendRequestDigest: run.requestDigest }, campaignId: run.campaignId, state: dbRunState(run.state), actor: this.actor, source: 'backend', reason, createdAt: run.createdAt, updatedAt: run.updatedAt });
       this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'execution_run', entityId: run.id, newState: dbRunState(run.state), actor: this.actor, source: 'backend', reason: 'run created', policyVersion: 'phase1', occurredAt: run.createdAt });
       return;
     }
@@ -823,7 +845,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const id = this.intentRowId(intent.id, wallet);
       if (this.db.prepare('SELECT id FROM transaction_intent WHERE id = ?').get(id)) continue;
       const policyId = this.ensureSpendPolicy(canonicalWallet.walletId, campaign);
-      const record: TransactionIntentRecord = { id, campaignId: campaign.id, walletId: canonicalWallet.walletId, intentClass: 'mint', toAddress: campaign.contract, valueWei: campaign.mintPriceWei * BigInt(campaign.quantity), calldata: '0x', chainProfileId: graph.chainProfileId, fromAddress: wallet, gasLimitWei: campaign.spendPolicy.gasCeilingWei, maxFeePerGasWei: campaign.feePolicy.totalFeeBudgetWei ?? 0n, maxPriorityFeePerGasWei: campaign.feePolicy.configuredPriorityFeeWei, idempotencyKey: `${intent.id}:${wallet.toLowerCase()}`, requestId: intent.id, requestFingerprint: this.runFingerprint(intent.runId), runId: intent.runId, policySnapshot: policySnapshot(campaign, this.runFor(intent.runId), intent), createdAt: intent.createdAt };
+       const record: TransactionIntentRecord = { id, campaignId: campaign.id, walletId: canonicalWallet.walletId, intentClass: 'mint', toAddress: campaign.contract, valueWei: campaign.mintPriceWei * BigInt(campaign.quantity), calldata: '0x', chainProfileId: graph.chainProfileId, fromAddress: wallet, gasLimitWei: campaign.spendPolicy.gasCeilingWei, maxFeePerGasWei: campaign.feePolicy.totalFeeBudgetWei ?? 0n, maxPriorityFeePerGasWei: campaign.feePolicy.configuredPriorityFeeWei, idempotencyKey: `${intent.id}:${wallet.toLowerCase()}`, requestId: intent.id, runId: intent.runId, policySnapshot: policySnapshot(campaign, this.runFor(intent.runId), intent), createdAt: intent.createdAt };
       this.databaseStore.saveIntent(record);
       this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'transaction_intent', entityId: id, newState: 'prepared', actor: this.actor, source: 'backend', reason: 'immutable intent persisted before action', policyVersion: 'phase1', occurredAt: intent.createdAt });
       void policyId;
@@ -960,6 +982,19 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)').run(canonicalId('fee', `${chainProfileId}:${encode(policy)}`), chainProfileId, `backend-${digest(encode(policy))}`, chainId === ETHEREUM_CHAIN_ID ? 'ordering' : 'fee_only', (policy.totalFeeBudgetWei ?? 0n).toString(), (policy.freeTotalSpendCapWei ?? 0n).toString(), policy.configuredPriorityFeeWei.toString(), 2, policy.kind === 'paid' ? 1 : 0, this.now().toISOString(), policy.configuredPriorityFeeWei === 0n ? 'requires_po_resolution' : 'allowed');
   }
 
+  private activeFeePolicy(chainProfileId: string): { id: string; version: string; priority_fee_semantics: 'ordering' | 'fee_only'; max_total_fee_wei: string; free_mint_total_fee_cap_wei: string; free_mint_priority_fee_component_wei: string; free_mint_priority_fee_multiplier: number; paid_mints_enabled: number; zero_priority_fee_policy: string } {
+    const row = this.db.prepare('SELECT id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, zero_priority_fee_policy FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(chainProfileId) as { id: string; version: string; priority_fee_semantics: 'ordering' | 'fee_only'; max_total_fee_wei: string; free_mint_total_fee_cap_wei: string; free_mint_priority_fee_component_wei: string; free_mint_priority_fee_multiplier: number; paid_mints_enabled: number; zero_priority_fee_policy: string } | undefined;
+    if (!row) throw new Error('FEE_POLICY_REQUIRED');
+    return row;
+  }
+
+  private mintPeriodId(campaignId: string): string {
+    if (!this.supportsCampaignPeriods) return campaignId;
+    const row = this.db.prepare("SELECT id FROM campaign_period WHERE campaign_id = ? AND id = ?").get(campaignId, `campaign:${campaignId}`) as { id: string } | undefined;
+    if (!row) throw new Error('CAMPAIGN_PERIOD_REQUIRED');
+    return row.id;
+  }
+
   private ensureWallet(chainProfileId: string, address: string, campaign: Campaign): { walletId: string; chainProfileId: string } {
     const existing = this.db.prepare('SELECT id FROM wallet WHERE chain_profile_id = ? AND lower(address) = lower(?)').get(chainProfileId, address) as { id: string } | undefined;
     if (existing) { this.ensureSpendPolicy(existing.id, campaign); return { walletId: existing.id, chainProfileId }; }
@@ -1049,8 +1084,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private runFingerprint(runId: string): string {
-    const row = this.db.prepare('SELECT request_fingerprint FROM execution_run WHERE id = ?').get(runId) as { request_fingerprint: string } | undefined;
-    return row?.request_fingerprint ?? digest(runId);
+    const row = this.db.prepare('SELECT request_fingerprint, reason FROM execution_run WHERE id = ?').get(runId) as { request_fingerprint: string; reason: string | null } | undefined;
+    const reason = decodeRecord<{ backendRequestDigest?: string }>(row?.reason);
+    return reason?.backendRequestDigest ?? row?.request_fingerprint ?? digest(runId);
   }
 
   private updateRunState(runId: string, state: ExecutionRunRecord['state'], run: RunRecord): void {
@@ -1080,9 +1116,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return mint + fee + buffers;
   }
 
-  private reservationSnapshot(input: CanonicalAdmissionInput): Record<string, unknown> {
+  private reservationSnapshot(input: CanonicalAdmissionInput, boundary?: { mintClass: string; feePolicyId: string; feePolicyVersion: string; mintPeriodId: string }): Record<string, unknown> {
     const fee = input.campaign.feePolicy;
-    return { chainProfileId: this.chainProfileForCampaign(input.campaign.id)?.id, campaignId: input.campaign.id, runId: input.run.id, requestFingerprint: input.run.requestDigest, freeMint: fee.kind === 'free', mintValueWei: (input.campaign.mintPriceWei * BigInt(input.campaign.quantity)).toString(), l2ExecutionGasWei: (fee.l2ExecutionGasBudgetWei ?? 0n).toString(), l1DataGasWei: (fee.l1DataGasBudgetWei ?? 0n).toString(), priorityFeeComponentWei: fee.configuredPriorityFeeWei.toString(), ...Object.fromEntries(Object.entries(PHASE1_ZERO_ADMISSION_BUFFERS).map(([key, value]) => [key, value.toString()])), allInExposureWei: this.exposure(input.campaign).toString() };
+    return { chainProfileId: this.chainProfileForCampaign(input.campaign.id)?.id, campaignId: input.campaign.id, runId: input.run.id, requestFingerprint: this.runFingerprint(input.run.id), freeMint: input.campaign.mintPriceWei === 0n, mintClass: boundary?.mintClass ?? (input.campaign.mintPriceWei === 0n ? 'free' : 'paid'), ...(boundary?.feePolicyId ? { feePolicyId: boundary.feePolicyId } : {}), ...(boundary?.feePolicyVersion ? { feePolicyVersion: boundary.feePolicyVersion } : {}), ...(boundary?.mintPeriodId ? { mintPeriodId: boundary.mintPeriodId } : {}), mintValueWei: (input.campaign.mintPriceWei * BigInt(input.campaign.quantity)).toString(), l2ExecutionGasWei: (fee.l2ExecutionGasBudgetWei ?? 0n).toString(), l1DataGasWei: (fee.l1DataGasBudgetWei ?? 0n).toString(), priorityFeeComponentWei: fee.configuredPriorityFeeWei.toString(), ...Object.fromEntries(Object.entries(PHASE1_ZERO_ADMISSION_BUFFERS).map(([key, value]) => [key, value.toString()])), allInExposureWei: this.exposure(input.campaign).toString() };
   }
 
   private assertCanonicalFeePolicy(campaign: Campaign, fee: FeePolicy): void {
