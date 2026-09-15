@@ -21,7 +21,7 @@ async function hasForkTests(directory) {
 
 if (!await hasForkTests(join(root, 'packages'))) throw new Error('Archive fork replay requires at least one *.fork.test.ts fixture');
 
-const anvil = spawn('anvil', ['--fork-url', forkRpc, '--chain-id', '4663', '--host', '127.0.0.1', '--port', '8545', '--silent'], { cwd: root, stdio: 'ignore' });
+const anvil = spawn('anvil', ['--fork-url', forkRpc, '--chain-id', '4663', '--host', '127.0.0.1', '--port', '8545', '--mnemonic-random'], { cwd: root, stdio: 'ignore' });
 let anvilError;
 anvil.once('error', (error) => { anvilError = error; });
 try {

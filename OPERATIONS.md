@@ -11,8 +11,9 @@ Provide `SECRET_STORE_PATH`, `RPC_SECRET_NAMES`, `STORE_PATH`, and
 runtime secret store may be `Rets/MINT_BOT_SECRETS.env` or
 `Rets/TEST_BOT.env` under an approved host path. The health probe reads only
 the named values it needs and never prints them. Archive-backed local fork
-tests must use only the `ROBINHOOD_ARCHIVE_RPC` or Ethereum archive key by
-reference from `~/W3/Rets/archive-rpc.env`. The approved keystore directory is
+tests must use the `ROBINHOOD_ARCHIVE_RPC` key by reference from
+`~/W3/Rets/archive-rpc.env`, or the Ethereum archive key by reference from
+`~/W3/Rets/eth-archive-rpc.env`. The approved keystore directory is
 `./Rets/wallets`; its
 Product Owner passphrase must be requested through a hidden interactive prompt
 by the host launcher when needed. Do not expose it as an environment variable,
@@ -98,20 +99,20 @@ through the `ROBINHOOD_ARCHIVE_RPC` reference in
 manager and never written to logs, artifacts, or workflow files.
 
 The archive replay launcher passes the archive reference only to Anvil. Vitest
-receives only `ANVIL_RPC_URL=http://127.0.0.1:8545`; fork tests must never read
-`ROBINHOOD_ARCHIVE_RPC` directly. `pnpm ops:fork-replay` runs the Robinhood
-suite and rejects any skipped or todo test. `pnpm ops:ethereum-fork` is a
-separate strict gate for the configured Ethereum fixture and also rejects
-skips. The genuine Robinhood fixture verifies local Anvil chain `4663`,
-historical block state, and public SeaDrop singleton code. A vanilla Anvil run
-is only a fallback smoke test and is not evidence of archive fork
-compatibility.
-The Ethereum launcher reads its archive endpoint by reference from
-`~/W3/Rets/archive-rpc.env` and requires the non-secret fixture names
+receives only the loopback `ANVIL_ROBINHOOD_RPC_URL` plus the non-secret fixture
+inputs; fork tests must never read `ROBINHOOD_ARCHIVE_RPC` directly. The genuine
+Robinhood fixture verifies local Anvil chain `4663`, historical block state, and
+public SeaDrop singleton code. `pnpm ops:fork-replay` rejects skipped or todo
+tests. The Ethereum launcher reads its archive endpoint by reference from
+`~/W3/Rets/eth-archive-rpc.env` and requires the non-secret fixture names
 `ETHEREUM_FORK_BLOCK`, `ETHEREUM_SEADROP_NFT`,
 `ETHEREUM_SEADROP_FEE_RECIPIENT`, and
 `ETHEREUM_SEADROP_MINT_VALUE_WEI`. It validates those values before starting
 Anvil and passes only the fixture metadata plus the local Anvil URL to Vitest.
+The CI fork gate must be followed by replay coverage for failed, reverted,
+replacement, reorg, restart, kill-switch, and reconciliation scenarios. A
+vanilla Anvil run is only a fallback smoke test and is not evidence of archive
+fork compatibility.
 Product success requires Ethereum finality; Robinhood soft and posted states
 must remain retained as intermediate reconciliation states.
 

@@ -67,3 +67,10 @@ Receive chain priority/policy from Product Manager and CTO. Give Backend transac
 - Receipt-attempt linkage must use the exact successful endpoint attempt, not the last endpoint response in a multi-provider fanout.
 - Receipt gas settlement separates authoritative total gas, priority component, and L1 data fee. Do not fabricate an L1 fee or count a priority component twice.
 - Kill checks belong at simulation, admission/provider reservation, signing, broadcast, and provider-response boundaries. Signer decryption paths must scrub intermediate buffers and decrypted key references on success and failure.
+
+## 2026-09-15 Fork replay refinements
+
+- Strict Robinhood replay may resolve its archive reference from `~/W3/Rets/archive-rpc.env`; `MINT_BOT_SECRETS_ROOT` is optional and the archive value must never enter the Vitest child environment or logs.
+- Require a decimal fork block at or after the approved positive fixture, a loopback Anvil URL, and explicit NFT, fee-recipient, and mint-value fixture inputs. The positive transaction hash and wallet remain code-owned evidence constants.
+- Fork tests must select only local unlocked accounts whose `eth_getCode` result is exactly `0x`; never assume the first RPC account is an EOA.
+- Negative fork probes for price drift, allocation/sold-out bounds, and insufficient funds must use `eth_call` or `eth_estimateGas` so no external transaction is submitted.

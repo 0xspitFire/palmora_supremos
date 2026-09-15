@@ -12,7 +12,8 @@
 | Local Anvil endpoint | `http://127.0.0.1:8546` |
 | Local chain ID | `1` |
 | Wallets exercised | `3` independent unlocked Anvil wallets |
-| Test result | `PASS` |
+| Probe coverage | `PASS; positive mint, price drift, insufficient funds, and allocation-sized sold-out probes` |
+| Test result | `PASS; 4 tests` |
 | Strict wrapper | `PASS; no skipped tests` |
 | Raw archive URL or credentials | `none recorded` |
 
