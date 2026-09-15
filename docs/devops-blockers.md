@@ -133,9 +133,10 @@ references and are not fleet evidence.
       access and validate the four Ethereum non-secret fixture names.
 - [x] Strict Ethereum replay passes locally with the approved archive reference,
       four fork probes, and no skipped tests.
-- [ ] Strict Robinhood replay still requires the four non-secret fixture fields
-      and approved unattended-runner evidence; its archive reference remains
-      read-only and is never copied into the child environment.
+- [x] Strict Robinhood replay passes locally with all six tests and no skips using
+      the four non-secret fixture fields; its archive reference remains read-only
+      and is never copied into the child environment.
+- [ ] Retain equivalent evidence from the approved unattended native-WSL runner.
 - [ ] Remote runner, Docker acceptance, service supervision, branch protection,
       Product Owner recovery approval, and live-readiness evidence remain
       owner-controlled gates.

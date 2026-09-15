@@ -35,6 +35,20 @@ code-owned evidence constants, so they are not additional environment inputs.
 The replay performs only local Anvil reads and local test-wallet mechanics; it
 never submits an external transaction.
 
+## Latest Strict Replay
+
+- Date: `2026-09-15`.
+- Fixture metadata: `Fixtures/robinhood-testmint-fixture.env`.
+- Local Anvil: `http://127.0.0.1:8545`, chain ID `4663`.
+- Result: `PASS`; 6 tests passed, 0 skipped.
+- Coverage: historical positive receipt, invalid-value revert, duplicate-call
+  revert, same-nonce replacement, receipt disappearance after reorg, and staged
+  finality labeling.
+- Archive credentials and resolved endpoint: not recorded.
+
+This is local archive-fork evidence only. It does not enable Robinhood execution,
+replace remote CI evidence, or authorize live capital.
+
 ## Failed hashes
 
 The Product Owner identified five failed transaction hashes belonging to other

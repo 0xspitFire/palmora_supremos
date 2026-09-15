@@ -157,7 +157,7 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm ops:negative-cases`: pass.
 - `pnpm ops:recovery-drill`: pass.
 - `pnpm test:fork`: 6 Robinhood and 4 Ethereum tests skip without fork fixture injection; the deterministic suite does not claim archive evidence.
-- `pnpm ops:fork-replay`: remains blocked until the four non-secret Robinhood fixture fields are supplied; the archive value is read by reference from `~/W3/Rets/archive-rpc.env` and never passed to Vitest.
+- `pnpm ops:fork-replay`: passes strictly with 6 Robinhood tests and no skips using the four non-secret fixture fields; the archive value is read by reference from `~/W3/Rets/archive-rpc.env` and never passed to Vitest.
 - `pnpm ops:ethereum-fork`: passes strictly with 4 Ethereum fork probes using `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC` and `Fixtures/ethereum-seadrop-fixture.env` by reference.
 - `pnpm ops:health`: expected fail-closed result without production configuration.
 - `forge test --root ~/W3/seadrop-test`: 2 passed, 0 failed, 0 skipped.

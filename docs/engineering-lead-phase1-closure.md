@@ -12,7 +12,7 @@ closure integration. The current published candidate is `origin/main` at
 
 | Product Spec §17-P1 criterion | Current status |
 | --- | --- |
-| Three-wallet live SeaDrop fork in CI | **PARTIAL**: four Ethereum fork probes pass locally with the approved archive reference; remote CI evidence is pending. Robinhood strict replay is blocked only by missing non-secret fixture metadata. |
+| Three-wallet live SeaDrop fork in CI | **PARTIAL**: four Ethereum fork probes and six Robinhood replay tests pass locally with approved references; remote unattended CI evidence is pending. |
 | Revert, sold-out, caps, insufficient funds, kill, daily-cap coverage | **PARTIAL**: Ethereum price-drift, insufficient-funds, and allocation-sized sold-out probes pass; kill/daily-cap and complete fleet failure coverage remain outstanding. |
 | Custody leak regression | **PARTIAL**: secret-boundary, redaction, signer cleanup, and zeroization checks pass; no heap-dump rehearsal has been recorded. |
 | CLI generate -> fund -> dry-run -> run -> summary -> kill | **PARTIAL**: Backend/CLI closure tests and contracts pass; no configured end-to-end wallet/funding/live-store rehearsal has been witnessed. |
