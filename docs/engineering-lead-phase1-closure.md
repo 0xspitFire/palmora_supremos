@@ -46,6 +46,7 @@ All accepted local specialist tips are already ancestors of `origin/main`; repla
 | Tip | Relation to `origin/main` | Integration disposition |
 | --- | --- | --- |
 | Database `84552a5` | Ancestor | Already published through the Database merge. |
+| Database hardening `c4406ce` | Unique tip beyond `origin/main` | Conditional only; migration `015` needs a wallet-scoped intent request identity and a two-wallet regression before acceptance. |
 | Backend `0ef9dc8` including `5d94a62` | Ancestor | Already published through the Backend merge. |
 | Blockchain `5b61532` including `e9028fe` | Ancestor | Already published through the Blockchain merge. |
 | Blockchain closure `5eae6e4` | Unique tip beyond `origin/main` | Retain for human review; do not replay automatically because it overlaps published fork evidence and still needs approved Rets inputs. |
