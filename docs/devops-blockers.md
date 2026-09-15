@@ -104,8 +104,9 @@ references and are not fleet evidence.
    no-configuration container health probe that fails closed. The updated
    workflow requires a native-WSL runner; it has not been rerun in this slice.
 - The required Ethereum three-wallet SeaDrop fork test and strict runner are
-  present, but remain pending approved archive access and fixture configuration;
-  the default deterministic suite records this as an external skip.
+  present and pass with the approved archive reference and fixture configuration;
+  the default deterministic suite remains an external skip when those inputs are
+  not injected.
 - Remote branch protection is an authenticated repository-admin operation. The
    branch and workflow can be pushed, but protection is not represented as code;
    the required-check mapping and redacted verification template are in

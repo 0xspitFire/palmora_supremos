@@ -136,8 +136,9 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm ops:recovery-drill`: pass with `sqlite-backup-restore` and kill switch engaged.
 - `pnpm test -- --reporter=dot`: 95 pass, 7 skip across 12 passed test files and 2 skipped fork files.
 - `pnpm ops:clean-checkout`: intentionally fails in the project root because preserved untracked recovery artifacts remain.
-- `pnpm test:fork`: 6 Robinhood tests pass; 1 Ethereum test skips because its separate RPC, NFT, fee-recipient, and mint-value variables are not configured.
+- `pnpm test:fork`: 6 Robinhood tests pass; the Ethereum test passes when its separate archive RPC reference and fixture variables are configured.
 - `pnpm ops:fork-replay`: passes with 6 Robinhood tests and 1 Ethereum skip after fix `09d320a` corrected the repository-root Vitest config path. Anvil is available and was not the blocker.
+- `pnpm ops:ethereum-fork`: passes strictly with 1 Ethereum three-wallet SeaDrop test, using Anvil on port `8546` with chain ID `1` and the approved archive reference `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC`.
 - `pnpm ops:health`: fails closed with missing secret-store, store, RPC, chain-verification, reconciliation, and finality configuration.
 
 ### Native WSL `~/W3/MintBot`
@@ -165,6 +166,6 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 1. Curate the preserved Robinhood report and historical product-design document.
 2. Decide whether to retain or delete remote specialist branches after a final branch-retention review.
 3. Decide whether the separate `~/W3/seadrop-test` fixture should become its own repository or remain local test input.
-4. Configure the separate Ethereum fork variables and run its one skipped test; retain `ROBINHOOD_ARCHIVE_RPC` behind the intentional preserved operational backup or another approved secret store.
+4. Retain the completed Ethereum fork inputs behind the approved fixture/archive references; retain `ROBINHOOD_ARCHIVE_RPC` behind the intentional preserved operational backup or another approved secret store.
 5. Open Antigravity/VS Code through Remote-WSL and confirm future Agent Manager worktrees are created under the WSL filesystem.
 6. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.

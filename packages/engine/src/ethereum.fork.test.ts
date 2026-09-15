@@ -44,9 +44,11 @@ describe.skipIf(!rpcUrl || !nft || !feeRecipient || !mintValueWei)('Ethereum thr
   it('executes the same public SeaDrop intent from three independent unlocked Anvil wallets', async () => {
     expect(await rpc('eth_chainId')).toBe('0x1');
     const accounts = await rpc('eth_accounts') as string[];
-    expect(accounts.length).toBeGreaterThanOrEqual(3);
+    const code = await Promise.all(accounts.map((account) => rpc('eth_getCode', [account, 'latest'])));
+    const senders = accounts.filter((_, index) => code[index] === '0x');
+    expect(senders.length).toBeGreaterThanOrEqual(3);
     const data = encodeFunctionData({ abi: mintPublicAbi, functionName: 'mintPublic', args: [nft!, feeRecipient!, zeroAddress, 1n] });
-    const hashes = await Promise.all(accounts.slice(0, 3).map((from) => rpc('eth_sendTransaction', [{
+    const hashes = await Promise.all(senders.slice(0, 3).map((from) => rpc('eth_sendTransaction', [{
       from,
       to: seaDrop,
       value: `0x${BigInt(mintValueWei!).toString(16)}`,

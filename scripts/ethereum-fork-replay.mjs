@@ -4,19 +4,21 @@ import { resolve } from 'node:path';
 import { runStrictVitest } from './strict-vitest.mjs';
 
 const root = resolve(process.cwd());
-const secretRoot = process.env.MINT_BOT_SECRETS_ROOT ?? [resolve(root, 'Rets'), resolve(root, '../../../Rets')].find((candidate) => existsSync(resolve(candidate, 'MINT_BOT_SECRETS.env'))) ?? resolve(root, 'Rets');
 const sourceReference = process.env.ETHEREUM_FORK_SOURCE ?? 'Rets/MINT_BOT_SECRETS.env:ETHEREUM_FORK_RPC';
-if (sourceReference !== 'Rets/MINT_BOT_SECRETS.env:ETHEREUM_FORK_RPC') throw new Error('Ethereum archive source must be the approved Rets reference');
-const secretFile = resolve(secretRoot, 'MINT_BOT_SECRETS.env');
-if (!secretFile.replaceAll('\\', '/').endsWith('Rets/MINT_BOT_SECRETS.env')) throw new Error('Ethereum source must be an approved Rets reference');
-const forkRpc = readReference(secretFile, 'ETHEREUM_FORK_RPC');
+const [sourcePath, sourceName] = sourceReference.split(':');
+const normalizedSourcePath = sourcePath?.replaceAll('\\', '/') ?? '';
+const approvedSource = ((normalizedSourcePath === 'Rets/MINT_BOT_SECRETS.env' || normalizedSourcePath.endsWith('/Rets/MINT_BOT_SECRETS.env')) && sourceName === 'ETHEREUM_FORK_RPC')
+  || ((normalizedSourcePath === 'Rets/eth-archive-rpc.env' || normalizedSourcePath.endsWith('/Rets/eth-archive-rpc.env')) && sourceName === 'ETHEREUM_ARCHIVE_RPC');
+if (!approvedSource) throw new Error('Ethereum archive source must be an approved Rets reference');
+const secretFile = resolve(root, sourcePath);
+const forkRpc = readReference(secretFile, sourceName);
 const forkBlock = process.env.ETHEREUM_FORK_BLOCK;
 if (!forkBlock || !/^\d+$/.test(forkBlock)) throw new Error('ETHEREUM_FORK_BLOCK is required');
 for (const name of ['ETHEREUM_SEADROP_NFT', 'ETHEREUM_SEADROP_FEE_RECIPIENT', 'ETHEREUM_SEADROP_MINT_VALUE_WEI']) {
   if (!process.env[name]) throw new Error(`${name} fixture reference is required`);
 }
 
-const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', ['--fork-url', forkRpc, '--fork-block-number', forkBlock, '--chain-id', '1', '--host', '127.0.0.1', '--port', '8546', '--silent'], { cwd: root, stdio: 'ignore', windowsHide: true });
+const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', ['--fork-url', forkRpc, '--fork-block-number', forkBlock, '--chain-id', '1', '--host', '127.0.0.1', '--port', '8546', '--mnemonic-random'], { cwd: root, stdio: 'ignore', windowsHide: true });
 try {
   await waitForRpc('http://127.0.0.1:8546');
   const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
