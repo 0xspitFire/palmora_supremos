@@ -30,8 +30,8 @@ decisions; it does not erase their recovery provenance.
 
 | Item | Observed state | Decision |
 | --- | --- | --- |
-| Canonical published tip | `origin/main` = `9e76fd0` (`Record Robinhood fork replay evidence`), following `d7e72f0` | Use the current published source of truth; the earlier `d7e72f0` state is historical. |
-| Local main ref | `main` = `dc3a2a2`, behind `origin/main` by 35 commits | Do not repair, reset, abort, merge, or edit this checkout. |
+| Canonical published tip | `origin/main` = `275cef2` (`Record branch protection plan blocker`), following `9e76fd0` | Use the current published source of truth; the earlier `d7e72f0`/`9e76fd0` states are historical. |
+| Local main ref | `main` = `dc3a2a2`, behind `origin/main` by 38 commits | Do not repair, reset, abort, merge, or edit this checkout. |
 | Local main index | 119 unique unmerged paths represented by 255 index entries | Treat as an unfinished/index-only conflict overlay with no reliable sequencer state. |
 | Merge metadata | `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, rebase-merge, and rebase-apply are absent | Do not infer an abortable merge; preserve the index and filesystem as-is. |
 | Durable snapshot | `/home/Junayd/W3/recovery-input/main-conflict/` contains `index`, `staged.patch`, `unstaged.patch`, `status.txt`, `unmerged-paths.txt`, `all-refs.bundle`, and fixture references | Snapshot is retained and its unmerged entries match local `main`. Do not read or copy secret values. |
@@ -47,6 +47,7 @@ All accepted local specialist tips are already ancestors of `origin/main`; repla
 | --- | --- | --- |
 | Database `84552a5` | Ancestor | Already published through the Database merge. |
 | Database hardening `c4406ce` | Unique tip beyond `origin/main` | Conditional only; a temporary `015` request-id index rejects the accepted two-wallet bridge, and `saveIntent()` also needs wallet-scoped lookup before acceptance. |
+| Database wallet-scope fix `4be1659` | Unique tip beyond `origin/main` | Database-released and test-green; Backend must revalidate its compatibility bridge before this tip is integrated. |
 | Backend `0ef9dc8` including `5d94a62` | Ancestor | Already published through the Backend merge. |
 | Blockchain `5b61532` including `e9028fe` | Ancestor | Already published through the Blockchain merge. |
 | Blockchain closure `5eae6e4` | Ancestor of current `origin/main` | Already published by the later origin merges; no replay. |
@@ -59,7 +60,7 @@ All accepted local specialist tips are already ancestors of `origin/main`; repla
 | `origin/engineers` `b94180d` plus unique `a71d9bc` | One patch-equivalent and one unique remote change | Human review only; not selected automatically. |
 | `origin/cto-restored` `b29fdd0` | Ancestor | Retain remote/recovery references. |
 
-Before alignment, the Lead candidate differed from the then-current `origin/main` in five fork-evidence/replay paths: `RECOVERY_INVENTORY.md`, `docs/devops-blockers.md`, `docs/ethereum-fork-evidence.md`, `packages/engine/src/ethereum.fork.test.ts`, and `scripts/ethereum-fork-replay.mjs`. Commit `4553706` aligned those paths to the published content at that time, and the later origin updates now make `git diff origin/main..HEAD` contain only Lead-owned documentation. The older candidate versions remain preserved in `833081d` for auditability.
+Before alignment, the Lead candidate differed from the then-current `origin/main` in five fork-evidence/replay paths: `RECOVERY_INVENTORY.md`, `docs/devops-blockers.md`, `docs/ethereum-fork-evidence.md`, `packages/engine/src/ethereum.fork.test.ts`, and `scripts/ethereum-fork-replay.mjs`. Commit `4553706` aligned those paths to the published content at that time. The current Lead branch is intentionally a preserved candidate based on the older local ref; `git diff origin/main..HEAD` currently shows 29 historical source/documentation paths in addition to Lead documentation. A future reconstruction must start from current `origin/main` rather than replaying this historical candidate. The older versions remain preserved in `833081d` for auditability.
 
 ## Lead Branch Checkpoint
 
@@ -67,12 +68,13 @@ Before alignment, the Lead candidate differed from the then-current `origin/main
 - `833081d` preserves the reviewed Phase 1 integration candidate on the Lead branch.
 - `4553706` aligns the candidate's fork-evidence/replay paths with published `origin/main`.
 - `fb03f8c`, `c7f4c15`, and `6635a39` record subsequent Lead evidence/checkpoint updates.
+- `db43182` records resolution of the Database 015 hold in Lead skills; Database `4be1659` remains pending Backend revalidation.
 - The Lead worktree is clean after these commits. No merge, reset, or repair was performed on `main`.
 
 ## Safe Reconstruction Path
 
 1. Preserve `/home/Junayd/W3/recovery-input/main-conflict/` and the local `main` index unchanged. Do not use `git reset`, `git merge --abort`, `git checkout`, `git clean`, or an in-place conflict resolution.
-2. Create or select a clean feature worktree rooted at the current `origin/main` (`9e76fd0`), verify its path is below `/home/Junayd/W3/`, and verify a clean status before applying any change.
+2. Create or select a clean feature worktree rooted at the current `origin/main` (`275cef2`), verify its path is below `/home/Junayd/W3/`, and verify a clean status before applying any change.
 3. Do not cherry-pick the accepted Database, Backend, Blockchain, or DevOps tips because they are already in `origin/main`; Lead commit `4553706` already retains the newer fork paths.
 4. Apply only explicitly reviewed Lead documentation or genuinely unique remote work, in dependency order Database -> Backend -> Blockchain -> DevOps, with a separate review for each handoff.
 5. Run the complete WSL validation set from the clean candidate. Resolve fork-input, CI, and live-rehearsal blockers through the normal human integration owner, not by altering local `main` or copying secrets.
@@ -115,4 +117,4 @@ Before alignment, the Lead candidate differed from the then-current `origin/main
 
 **NO-GO / NOT ELIGIBLE FOR RELEASE OR MERGE**
 
-The Lead candidate is committed on `engineering-lead-wsl` as `833081d` plus `4553706`, with Lead documentation in `9cf50c9`, `fb03f8c`, `c7f4c15`, and `6635a39`; its normal unit command passes with 139 passed and 7 fork skips, while the aligned candidate remains separate from `main`. No merge to `main`, reset, or repair was performed. No secret values were requested, read into logs, copied, or exposed.
+The Lead candidate is committed on `engineering-lead-wsl` as `833081d` plus `4553706`, with Lead documentation in `9cf50c9`, `fb03f8c`, `c7f4c15`, `6635a39`, and `db43182`; its normal unit command previously passed with 139 passed and 7 fork skips, while the candidate remains separate from `main`. Database `4be1659` is released but not yet revalidated through Backend compatibility. No merge to `main`, reset, or repair was performed. No secret values were requested, read into logs, copied, or exposed.
