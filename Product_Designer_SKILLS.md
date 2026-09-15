@@ -56,3 +56,10 @@ Receive scope and acceptance criteria from Product Manager, chain constraints fr
 - Robinhood is direct-to-sequencer FCFS, not an Ethereum mempool/Flashbots experience.
 - `Cancelled` means pre-active user cancellation, `Aborted` a safety stop, and `Failed` technical inability.
 - Historical wireframes may use superseded sequencing; canonical root specs take precedence.
+
+## Dated refinements
+
+- 2026-09-14: Treat the Phase 1 CLI as the only execution control surface. Use the explicit sequence `approve -> arm -> run -> summary`; do not expose a one-step live mint shortcut.
+- 2026-09-14: Approval is an auditable acknowledgement of a frozen scope and never signs, broadcasts, or arms by itself. `ARM LIVE CAMPAIGN` is the separate typed commitment boundary; `ARM DRY RUN` must remain visibly non-spending.
+- 2026-09-14: Render stale or unknown readiness as blocked/ unresolved rather than guessing. Failed simulation offers inspect, exclude, or rerun only; retry is shown only when Backend marks the typed state safe.
+- 2026-09-14: Phase 2 web and Telegram surfaces may expose read-only intelligence, readiness, and alerts only. Phase 3 introduces approval, arm, pause, and kill controls through Backend-confirmed mutations.
