@@ -10,16 +10,16 @@ administrator must apply and verify them remotely.
 
 | Setting | Required value | Evidence |
 | --- | --- | --- |
-| Pull request before merge | Enabled | Pending admin verification |
-| Required checks | `environment`, `verify`, `anvil`, `docker` | Mapped in `docs/ci-required-checks.md` |
-| Up-to-date branch | Required | Pending admin verification |
-| Force pushes | Disabled | Pending admin verification |
-| Branch deletion | Disabled | Pending admin verification |
-| Ordinary bypass actors | None | Pending admin verification |
+| Pull request before merge | Enabled | **Not configured** in the 2026-09-15 read-only query |
+| Required checks | `environment`, `verify`, `anvil`, `docker` | Mapped in `docs/ci-required-checks.md`; **not configured** |
+| Up-to-date branch | Required | **Not configured** in the 2026-09-15 read-only query |
+| Force pushes | Disabled | **Not verified**; protection is not configured |
+| Branch deletion | Disabled | **Not verified**; protection is not configured |
+| Ordinary bypass actors | None | **Not verified**; protection is not configured |
 
 The `anvil` check is the strict archive replay gate. It must not be satisfied
-by a skipped, todo, or vanilla-Anvil-only run. The Ethereum strict replay is a
-release-candidate dependency until its approved fixture is available.
+by a skipped, todo, or vanilla-Anvil-only run. The local Ethereum and Robinhood
+strict replays now pass; remote required-check evidence remains pending.
 
 ## Redacted Verification Record
 
@@ -30,10 +30,10 @@ release-candidate dependency until its approved fixture is available.
 | Verification actor | `[REDACTED_ADMIN_ID]` |
 | Verification time (UTC) | `[UTC_TIMESTAMP]` |
 | Required checks observed | `environment`, `verify`, `anvil`, `docker` |
-| Pull request required | `[PENDING]` |
-| Up-to-date required | `[PENDING]` |
-| Force pushes allowed | `[PENDING]` |
-| Deletion allowed | `[PENDING]` |
+| Pull request required | `false` observed; administrator action required |
+| Up-to-date required | `false` observed; administrator action required |
+| Force pushes allowed | `not applicable until protection is configured` |
+| Deletion allowed | `not applicable until protection is configured` |
 | Secret values observed | `none` |
 
 The administrator may use the repository provider's branch-protection API or
@@ -42,5 +42,7 @@ workflow secret values, or other credentials into this file or a handoff.
 
 ## Blocker
 
-Remote verification is not claimed by this branch because it requires an
-authenticated repository-administration action outside the worktree.
+The 2026-09-15 read-only query found no protection configuration on
+`phase1-integration`. An authenticated repository administrator must configure
+the required settings, then rerun the redacted verification record. This is a
+release blocker and is not changed by local test results.
