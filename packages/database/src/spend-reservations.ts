@@ -47,31 +47,11 @@ export interface SettlementComponents {
   actualL1DataGasWei: bigint;
   actualPriorityFeeComponentWei?: bigint;
   actualReplacementBudgetWei?: bigint;
+  authoritativeReceiptId?: string;
+  authoritativeReconciliationId?: string;
 }
 
-export class SpendCapExceededError extends Error {
-  constructor() { super('daily spend cap exceeded'); }
-}
-
-export class ReservationConflictError extends Error {
-  constructor() { super('idempotency key was reused with a different request fingerprint'); }
-}
-
-function encode(value: unknown): string {
-  const result = JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item);
-  if (result !== undefined && /"(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token)"\s*:/i.test(result)) throw new Error('secret-like values must remain in the approved secret store');
-  return result ?? '{}';
-}
-
-function digest(value: unknown): string {
-  return createHash('sha256').update(encode(value)).digest('hex');
-}
-
-function nonNegative(amounts: bigint[], message: string): void {
-  if (amounts.some((amount) => amount < 0n)) throw new Error(message);
-}
-
-function componentExposure(row: {
+interface StoredReservationRow {
   status: ReservationStatus;
   amount_wei: string;
   reserved_amount_wei: string | null;
@@ -84,7 +64,51 @@ function componentExposure(row: {
   l2_execution_gas_buffer_wei: string | null;
   l1_data_gas_buffer_wei: string | null;
   priority_fee_buffer_wei: string | null;
-}): bigint {
+}
+
+export class SpendCapExceededError extends Error {
+  constructor() { super('daily spend cap exceeded'); }
+}
+
+export class ReservationConflictError extends Error {
+  constructor() { super('idempotency key was reused with a different request fingerprint'); }
+}
+
+function encode(value: unknown): string {
+  const normalize = (item: unknown): unknown => {
+    if (typeof item === 'bigint') return item.toString();
+    if (Array.isArray(item)) return item.map((entry) => normalize(entry));
+    if (item !== null && typeof item === 'object') return Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, normalize(entry)]));
+    return item;
+  };
+  const result = JSON.stringify(normalize(value));
+  if (result !== undefined && /"(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token)"\s*:/i.test(result)) throw new Error('secret-like values must remain in the approved secret store');
+  return result ?? '{}';
+}
+
+function digest(value: unknown): string {
+  return createHash('sha256').update(encode(value)).digest('hex');
+}
+
+function policyUsageDate(at: Date, timezone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(at);
+    const values = new Map(parts.map((part) => [part.type, part.value]));
+    const year = values.get('year');
+    const month = values.get('month');
+    const day = values.get('day');
+    if (!year || !month || !day) throw new Error('invalid policy timezone');
+    return `${year}-${month}-${day}`;
+  } catch {
+    throw new Error('invalid spend policy timezone');
+  }
+}
+
+function nonNegative(amounts: bigint[], message: string): void {
+  if (amounts.some((amount) => amount < 0n)) throw new Error(message);
+}
+
+function componentExposure(row: StoredReservationRow): bigint {
   if (row.status === 'reserved') return BigInt(row.reserved_amount_wei === null || row.reserved_amount_wei === '0' ? row.amount_wei : row.reserved_amount_wei);
   if (row.status === 'settled') return BigInt(row.amount_wei);
   return 0n;
@@ -121,42 +145,50 @@ export class SpendReservations {
     nonNegative([request.amountWei], 'reservation amount must be non-negative');
     if (request.amountWei === 0n) throw new Error('reservation amount must be positive');
     const at = request.at ?? new Date();
-    const usageDate = at.toISOString().slice(0, 10);
     if (request.idempotencyKey.length === 0) throw new Error('idempotency key must not be empty');
-    const requestFingerprint = request.requestFingerprint ?? digest({
-      walletId: request.walletId,
-      executionId: request.executionId ?? null,
-      policyId: request.policyId,
-      amountWei: request.amountWei.toString(),
-      usageDate,
-    });
     return this.immediate(() => {
       if (this.isKillSwitchEngaged()) throw new Error('kill switch engaged');
       if (request.executionId) {
         const execution = this.db.prepare('SELECT wallet_id FROM execution WHERE id = ?').get(request.executionId) as { wallet_id: string } | undefined;
         if (!execution || execution.wallet_id !== request.walletId) throw new Error('reservation execution does not match wallet');
       }
+      const policy = this.db.prepare('SELECT daily_cap_wei AS cap, timezone FROM spend_policy WHERE id = ? AND wallet_id = ? AND active = 1').get(request.policyId, request.walletId) as { cap: string; timezone: string } | undefined;
+      if (!policy) throw new Error('active spend policy not found');
+      const day = policyUsageDate(at, policy.timezone);
+      const computedFingerprint = digest({
+        walletId: request.walletId,
+        executionId: request.executionId ?? null,
+        policyId: request.policyId,
+        amountWei: request.amountWei.toString(),
+        usageDate: day,
+        timezone: policy.timezone,
+      });
+      if (request.requestFingerprint !== undefined && request.requestFingerprint !== computedFingerprint) throw new ReservationConflictError();
       const existing = this.db.prepare('SELECT status, request_fingerprint FROM spend_reservation WHERE idempotency_key = ?').get(request.idempotencyKey) as { status: ReservationStatus; request_fingerprint: string | null } | undefined;
       if (existing) {
-        if (existing.request_fingerprint !== null && existing.request_fingerprint !== requestFingerprint) throw new ReservationConflictError();
+        if (existing.request_fingerprint !== computedFingerprint) throw new ReservationConflictError();
         return existing.status;
       }
-      const policy = this.db.prepare('SELECT daily_cap_wei AS cap FROM spend_policy WHERE id = ? AND wallet_id = ? AND active = 1').get(request.policyId, request.walletId) as { cap: string } | undefined;
-      if (!policy) throw new Error('active spend policy not found');
-      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(request.walletId, usageDate) as Array<{ status: ReservationStatus; amount_wei: string; reserved_amount_wei: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string | null; mint_value_buffer_wei: string | null; l2_execution_gas_buffer_wei: string | null; l1_data_gas_buffer_wei: string | null; priority_fee_buffer_wei: string | null }>;
+      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(request.walletId, day) as Array<{ status: ReservationStatus; amount_wei: string; reserved_amount_wei: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string | null; mint_value_buffer_wei: string | null; l2_execution_gas_buffer_wei: string | null; l1_data_gas_buffer_wei: string | null; priority_fee_buffer_wei: string | null }>;
       const used = rows.reduce((total, row) => total + componentExposure(row), 0n);
       if (used + request.amountWei > BigInt(policy.cap)) throw new SpendCapExceededError();
-      this.db.prepare('INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'reserved\', ?)').run(request.id, request.walletId, request.executionId ?? null, request.idempotencyKey, request.requestId ?? request.idempotencyKey, requestFingerprint, request.policyId, request.amountWei.toString(), request.amountWei.toString(), usageDate, at.toISOString());
+      this.db.prepare('INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at, mint_class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'reserved\', ?, \'legacy\')').run(request.id, request.walletId, request.executionId ?? null, request.idempotencyKey, request.requestId ?? request.idempotencyKey, computedFingerprint, request.policyId, request.amountWei.toString(), request.amountWei.toString(), day, at.toISOString());
       return 'reserved';
     });
   }
 
   public transition(id: string, status: Exclude<ReservationStatus, 'reserved'>, at = new Date()): void {
     this.immediate(() => {
-      const row = this.db.prepare("SELECT status, amount_wei FROM spend_reservation WHERE id = ? AND status = 'reserved'").get(id) as { status: ReservationStatus; amount_wei: string } | undefined;
+      const row = this.db.prepare("SELECT status, amount_wei, execution_id, transaction_intent_id, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei FROM spend_reservation WHERE id = ? AND status = 'reserved'").get(id) as { status: ReservationStatus; amount_wei: string; execution_id: string | null; transaction_intent_id: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string } | undefined;
       if (!row) throw new Error('reservation is missing or no longer reservable');
+      if (status === 'settled' && (row.execution_id !== null || row.transaction_intent_id !== null || [row.mint_value_wei, row.l2_execution_gas_wei, row.l1_data_gas_wei, row.priority_fee_component_wei, row.replacement_budget_wei].some((amount) => amount !== '0'))) throw new Error('linked reservations require authoritative component settlement');
+      if (status === 'released' || status === 'expired') {
+        const attempts = row.execution_id ? this.db.prepare('SELECT COUNT(*) AS count FROM transaction_attempt WHERE execution_id = ?').get(row.execution_id) as { count: number } : row.transaction_intent_id ? this.db.prepare('SELECT COUNT(*) AS count FROM transaction_attempt WHERE transaction_intent_id = ?').get(row.transaction_intent_id) as { count: number } : { count: 0 };
+        if (attempts.count > 0) throw new Error('submitted reservations cannot be released or expired');
+      }
       const result = this.db.prepare("UPDATE spend_reservation SET status = ?, settled_at = CASE WHEN ? = 'settled' THEN ? ELSE settled_at END, settled_amount_wei = CASE WHEN ? = 'settled' THEN amount_wei ELSE settled_amount_wei END WHERE id = ? AND status = 'reserved'").run(status, status, at.toISOString(), status, id);
       if (result.changes !== 1) throw new Error('reservation is missing or no longer reservable');
+      if (status === 'settled') this.db.prepare('INSERT INTO spend_ledger_entry (id, wallet_id, execution_id, reservation_id, entry_type, component, amount_wei, created_at) SELECT ?, wallet_id, execution_id, id, \'mint\', \'total\', amount_wei, ? FROM spend_reservation WHERE id = ?').run(`${id}:settled:total`, at.toISOString(), id);
     });
   }
 
@@ -169,70 +201,69 @@ export class SpendReservations {
     const amounts = [request.mintValueWei, request.l2ExecutionGasWei, request.l1DataGasWei, request.priorityFeeComponentWei, replacementBudgetWei, mintValueBufferWei, l2ExecutionGasBufferWei, l1DataGasBufferWei, priorityFeeBufferWei];
     nonNegative(amounts, 'reservation amounts must be non-negative');
     const at = request.at ?? new Date();
-    const usageDate = at.toISOString().slice(0, 10);
-    const periodId = request.mintPeriodId ?? 'default';
+    let usageDate = at.toISOString().slice(0, 10);
+    let periodId = request.mintPeriodId ?? 'default';
     if (request.idempotencyKey.length === 0) throw new Error('idempotency key must not be empty');
     const priorityExposure = request.priorityFeeComponentWei + priorityFeeBufferWei;
     const feeExposure = request.l2ExecutionGasWei + l2ExecutionGasBufferWei + request.l1DataGasWei + l1DataGasBufferWei + priorityExposure + replacementBudgetWei;
     const exposure = request.mintValueWei + mintValueBufferWei + feeExposure;
-    const requestFingerprint = request.requestFingerprint ?? digest({
-      walletId: request.walletId,
-      chainProfileId: request.chainProfileId,
-      campaignId: request.campaignId,
-      mintPeriodId: periodId,
-      executionId: request.executionId ?? null,
-      transactionIntentId: request.transactionIntentId ?? null,
-      policyId: request.policyId,
-      mintValueWei: request.mintValueWei.toString(),
-      l2ExecutionGasWei: request.l2ExecutionGasWei.toString(),
-      l1DataGasWei: request.l1DataGasWei.toString(),
-      priorityFeeComponentWei: request.priorityFeeComponentWei.toString(),
-      replacementBudgetWei: replacementBudgetWei.toString(),
-      mintValueBufferWei: mintValueBufferWei.toString(),
-      l2ExecutionGasBufferWei: l2ExecutionGasBufferWei.toString(),
-      l1DataGasBufferWei: l1DataGasBufferWei.toString(),
-      priorityFeeBufferWei: priorityFeeBufferWei.toString(),
-      freeMint: request.freeMint,
-    });
     if (exposure === 0n) throw new Error('reservation exposure must be positive');
     return this.immediate(() => {
       if (this.isKillSwitchEngaged()) throw new Error('kill switch engaged');
-      const chain = this.db.prepare('SELECT chain_id, execution_enabled FROM chain_profile WHERE id = ?').get(request.chainProfileId) as { chain_id: number; execution_enabled: number } | undefined;
+      const chain = this.db.prepare('SELECT chain_id, execution_enabled, verification_status FROM chain_profile WHERE id = ?').get(request.chainProfileId) as { chain_id: number; execution_enabled: number; verification_status: string } | undefined;
       if (!chain) throw new Error('chain profile not found');
+      if (chain.chain_id === 4663 && !request.freeMint) throw new Error('paid Robinhood mints are blocked');
+      if (chain.chain_id === 4663 && chain.execution_enabled !== 1) throw new Error('Robinhood execution is disabled');
+      if (chain.verification_status !== 'verified' || chain.execution_enabled !== 1) throw new Error('chain execution is not enabled or verified');
+      if (chain.chain_id === 4663 && request.mintValueWei !== 0n) throw new Error('Robinhood reservations must have zero mint value');
+      if (!request.executionId || !request.transactionIntentId) throw new Error('execution reservation requires execution and transaction intent linkage');
       const wallet = this.db.prepare('SELECT chain_profile_id FROM wallet WHERE id = ?').get(request.walletId) as { chain_profile_id: string } | undefined;
       if (!wallet || wallet.chain_profile_id !== request.chainProfileId) throw new Error('reservation chain does not match wallet');
       const campaign = this.db.prepare('SELECT ct.chain_profile_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id WHERE c.id = ?').get(request.campaignId) as { chain_profile_id: string } | undefined;
       if (!campaign || campaign.chain_profile_id !== request.chainProfileId) throw new Error('reservation chain does not match campaign');
-      if (chain.chain_id === 4663 && !request.freeMint) throw new Error('paid Robinhood mints are blocked');
-      if (chain.chain_id === 4663 && chain.execution_enabled !== 1) throw new Error('Robinhood execution is disabled');
-      if (chain.chain_id === 4663 && request.mintValueWei !== 0n) throw new Error('Robinhood reservations must have zero mint value');
-      const existing = this.db.prepare('SELECT status, request_fingerprint FROM spend_reservation WHERE idempotency_key = ?').get(request.idempotencyKey) as { status: ReservationStatus; request_fingerprint: string | null } | undefined;
-      if (existing) {
-        if (existing.request_fingerprint !== requestFingerprint) throw new ReservationConflictError();
-        return existing.status;
-      }
-      const policy = this.db.prepare('SELECT daily_cap_wei AS cap, free_mint_wallet_cap_wei AS walletCap, free_mint_period_cap_wei AS periodCap FROM spend_policy WHERE id = ? AND wallet_id = ? AND active = 1').get(request.policyId, request.walletId) as { cap: string; walletCap: string; periodCap: string } | undefined;
+      const linkage = this.db.prepare('SELECT e.wallet_id AS execution_wallet_id, e.campaign_id AS execution_campaign_id, e.reservation_id, i.wallet_id AS intent_wallet_id, i.campaign_id AS intent_campaign_id, i.chain_profile_id AS intent_chain_profile_id FROM execution e JOIN transaction_intent i ON i.id = e.transaction_intent_id WHERE e.id = ? AND i.id = ?').get(request.executionId, request.transactionIntentId) as { execution_wallet_id: string; execution_campaign_id: string; reservation_id: string | null; intent_wallet_id: string; intent_campaign_id: string; intent_chain_profile_id: string | null } | undefined;
+      if (!linkage || linkage.execution_wallet_id !== request.walletId || linkage.execution_campaign_id !== request.campaignId || linkage.intent_wallet_id !== request.walletId || linkage.intent_campaign_id !== request.campaignId || linkage.intent_chain_profile_id !== request.chainProfileId) throw new Error('reservation execution and intent linkage mismatch');
+      if (linkage.reservation_id !== null) throw new Error('execution already has a reservation');
+      periodId = request.mintPeriodId ?? `campaign:${request.campaignId}`;
+      const period = this.db.prepare('SELECT id FROM campaign_period WHERE id = ? AND campaign_id = ?').get(periodId, request.campaignId) as { id: string } | undefined;
+      if (!period) throw new Error('reservation period is not an approved campaign period');
+      const policy = this.db.prepare('SELECT daily_cap_wei AS cap, timezone, campaign_cap_wei AS campaignCap, free_mint_wallet_cap_wei AS walletCap, free_mint_period_cap_wei AS periodCap FROM spend_policy WHERE id = ? AND wallet_id = ? AND active = 1').get(request.policyId, request.walletId) as { cap: string; timezone: string; campaignCap: string | null; walletCap: string; periodCap: string } | undefined;
       if (!policy) throw new Error('active spend policy not found');
-      const feePolicy = this.db.prepare('SELECT max_total_fee_wei AS maxFee, free_mint_total_fee_cap_wei AS freeFee, free_mint_priority_fee_component_wei AS component, free_mint_priority_fee_multiplier AS multiplier, paid_mints_enabled AS paid, zero_priority_fee_policy AS zeroPolicy FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(request.chainProfileId) as { maxFee: string; freeFee: string; component: string; multiplier: number; paid: number; zeroPolicy: 'requires_po_resolution' | 'blocked' | 'allowed' } | undefined;
+      usageDate = policyUsageDate(at, policy.timezone);
+      const feePolicy = this.db.prepare('SELECT id, version, max_total_fee_wei AS maxFee, free_mint_total_fee_cap_wei AS freeFee, free_mint_priority_fee_component_wei AS component, free_mint_priority_fee_multiplier AS multiplier, paid_mints_enabled AS paid, zero_priority_fee_policy AS zeroPolicy FROM fee_policy WHERE chain_profile_id = ? AND active = 1').get(request.chainProfileId) as { id: string; version: string; maxFee: string; freeFee: string; component: string; multiplier: number; paid: number; zeroPolicy: 'requires_po_resolution' | 'blocked' | 'allowed' } | undefined;
       if (!feePolicy) throw new Error('active fee policy not found');
       if (!request.freeMint && feePolicy.paid !== 1) throw new Error('paid-mint policy is not approved');
-      if (priorityExposure === 0n && feePolicy.zeroPolicy === 'blocked') throw new Error('zero-priority-fee policy is blocked');
-      if (priorityExposure === 0n && feePolicy.zeroPolicy !== 'allowed') throw new Error('zero-priority-fee policy requires PO resolution');
+      if (request.priorityFeeComponentWei === 0n && feePolicy.zeroPolicy === 'blocked') throw new Error('zero-priority-fee policy is blocked');
+      if (request.priorityFeeComponentWei === 0n && feePolicy.zeroPolicy !== 'allowed') throw new Error('zero-priority-fee policy requires PO resolution');
       if (request.freeMint && priorityExposure > BigInt(feePolicy.component) * BigInt(feePolicy.multiplier)) throw new Error('priority fee component exceeds free-mint policy');
       const feeCap = BigInt(request.freeMint ? feePolicy.freeFee : feePolicy.maxFee);
       if (feeExposure > feeCap) throw new Error('total fee exceeds policy');
       if (replacementBudgetWei > feeCap) throw new Error('replacement budget exceeds fee policy');
-      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(request.walletId, usageDate) as Array<{ status: ReservationStatus; amount_wei: string; reserved_amount_wei: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string | null; mint_value_buffer_wei: string | null; l2_execution_gas_buffer_wei: string | null; l1_data_gas_buffer_wei: string | null; priority_fee_buffer_wei: string | null }>;
+      const computedFingerprint = digest({ walletId: request.walletId, chainProfileId: request.chainProfileId, campaignId: request.campaignId, mintPeriodId: periodId, executionId: request.executionId, transactionIntentId: request.transactionIntentId, policyId: request.policyId, mintClass: request.freeMint ? 'free' : 'paid', mintValueWei: request.mintValueWei.toString(), l2ExecutionGasWei: request.l2ExecutionGasWei.toString(), l1DataGasWei: request.l1DataGasWei.toString(), priorityFeeComponentWei: request.priorityFeeComponentWei.toString(), replacementBudgetWei: replacementBudgetWei.toString(), mintValueBufferWei: mintValueBufferWei.toString(), l2ExecutionGasBufferWei: l2ExecutionGasBufferWei.toString(), l1DataGasBufferWei: l1DataGasBufferWei.toString(), priorityFeeBufferWei: priorityFeeBufferWei.toString(), policySnapshot: request.policySnapshot ?? null, effectiveSpendPolicy: { id: request.policyId, cap: policy.cap, timezone: policy.timezone, campaignCap: policy.campaignCap, walletCap: policy.walletCap, periodCap: policy.periodCap }, effectiveFeePolicy: { id: feePolicy.id, version: feePolicy.version, maxFee: feePolicy.maxFee, freeFee: feePolicy.freeFee, component: feePolicy.component, multiplier: feePolicy.multiplier, paid: feePolicy.paid, zeroPolicy: feePolicy.zeroPolicy }, usageDate });
+      if (request.requestFingerprint !== undefined && request.requestFingerprint !== computedFingerprint) throw new ReservationConflictError();
+      const existing = this.db.prepare('SELECT status, request_fingerprint FROM spend_reservation WHERE idempotency_key = ?').get(request.idempotencyKey) as { status: ReservationStatus; request_fingerprint: string | null } | undefined;
+      if (existing) {
+        if (existing.request_fingerprint !== computedFingerprint) throw new ReservationConflictError();
+        return existing.status;
+      }
+      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(request.walletId, usageDate) as StoredReservationRow[];
       const used = rows.reduce((total, row) => total + componentExposure(row), 0n);
       if (used + exposure > BigInt(policy.cap)) throw new SpendCapExceededError();
-      const scopedRows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND chain_profile_id = ? AND campaign_id = ? AND mint_period_id = ? AND status IN ('reserved', 'settled')").all(request.walletId, request.chainProfileId, request.campaignId, periodId) as Array<{ status: ReservationStatus; amount_wei: string; reserved_amount_wei: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string | null; mint_value_buffer_wei: string | null; l2_execution_gas_buffer_wei: string | null; l1_data_gas_buffer_wei: string | null; priority_fee_buffer_wei: string | null }>;
+      const scopedRows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND mint_class = 'free' AND status IN ('reserved', 'settled')").all(request.walletId) as StoredReservationRow[];
       const scopedExposure = scopedRows.reduce((total, row) => total + componentExposure(row), 0n);
       if (request.freeMint && scopedExposure + exposure > BigInt(policy.walletCap)) throw new SpendCapExceededError();
-      const periodRows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE chain_profile_id = ? AND campaign_id = ? AND mint_period_id = ? AND status IN ('reserved', 'settled')").all(request.chainProfileId, request.campaignId, periodId) as Array<{ status: ReservationStatus; amount_wei: string; reserved_amount_wei: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string | null; mint_value_buffer_wei: string | null; l2_execution_gas_buffer_wei: string | null; l1_data_gas_buffer_wei: string | null; priority_fee_buffer_wei: string | null }>;
+      const campaignCap = policy.campaignCap === null ? BigInt(policy.cap) : BigInt(policy.campaignCap);
+      const campaignRows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND campaign_id = ? AND status IN ('reserved', 'settled')").all(request.walletId, request.campaignId) as StoredReservationRow[];
+      const campaignExposure = campaignRows.reduce((total, row) => total + componentExposure(row), 0n);
+      if (campaignExposure + exposure > campaignCap) throw new SpendCapExceededError();
+      const periodRows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE chain_profile_id = ? AND campaign_id = ? AND mint_period_id = ? AND mint_class = 'free' AND status IN ('reserved', 'settled')").all(request.chainProfileId, request.campaignId, periodId) as StoredReservationRow[];
       const periodExposure = periodRows.reduce((total, row) => total + componentExposure(row), 0n);
       if (request.freeMint && periodExposure + exposure > BigInt(policy.periodCap)) throw new SpendCapExceededError();
-      const snapshot = encode(request.policySnapshot ?? { chainProfileId: request.chainProfileId, campaignId: request.campaignId, freeMint: request.freeMint, mintValueWei: request.mintValueWei.toString(), l2ExecutionGasWei: request.l2ExecutionGasWei.toString(), l1DataGasWei: request.l1DataGasWei.toString(), priorityFeeComponentWei: request.priorityFeeComponentWei.toString(), replacementBudgetWei: replacementBudgetWei.toString(), mintValueBufferWei: mintValueBufferWei.toString(), l2ExecutionGasBufferWei: l2ExecutionGasBufferWei.toString(), l1DataGasBufferWei: l1DataGasBufferWei.toString(), priorityFeeBufferWei: priorityFeeBufferWei.toString(), priorityFeeMultiplier: feePolicy.multiplier });
-      this.db.prepare("INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at, chain_profile_id, campaign_id, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei, policy_snapshot_json, mint_period_id, transaction_intent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(request.id, request.walletId, request.executionId ?? null, request.idempotencyKey, request.requestId ?? request.idempotencyKey, requestFingerprint, request.policyId, exposure.toString(), exposure.toString(), usageDate, at.toISOString(), request.chainProfileId, request.campaignId, request.mintValueWei.toString(), request.l2ExecutionGasWei.toString(), request.l1DataGasWei.toString(), request.priorityFeeComponentWei.toString(), replacementBudgetWei.toString(), mintValueBufferWei.toString(), l2ExecutionGasBufferWei.toString(), l1DataGasBufferWei.toString(), priorityFeeBufferWei.toString(), snapshot, periodId, request.transactionIntentId ?? null);
+      const snapshot = encode(request.policySnapshot ?? { chainProfileId: request.chainProfileId, campaignId: request.campaignId, mintClass: request.freeMint ? 'free' : 'paid', mintValueWei: request.mintValueWei.toString(), l2ExecutionGasWei: request.l2ExecutionGasWei.toString(), l1DataGasWei: request.l1DataGasWei.toString(), priorityFeeComponentWei: request.priorityFeeComponentWei.toString(), replacementBudgetWei: replacementBudgetWei.toString(), mintValueBufferWei: mintValueBufferWei.toString(), l2ExecutionGasBufferWei: l2ExecutionGasBufferWei.toString(), l1DataGasBufferWei: l1DataGasBufferWei.toString(), priorityFeeBufferWei: priorityFeeBufferWei.toString(), feePolicyId: feePolicy.id, feePolicyVersion: feePolicy.version, feePolicyMaxFeeWei: feePolicy.maxFee, feePolicyFreeFeeWei: feePolicy.freeFee, zeroPriorityFeePolicy: feePolicy.zeroPolicy, usageDate });
+      const feePolicySnapshot = encode({ id: feePolicy.id, version: feePolicy.version, maxFee: feePolicy.maxFee, freeFee: feePolicy.freeFee, component: feePolicy.component, multiplier: feePolicy.multiplier, paid: feePolicy.paid, zeroPolicy: feePolicy.zeroPolicy });
+      this.db.prepare("INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at, chain_profile_id, campaign_id, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei, policy_snapshot_json, mint_period_id, transaction_intent_id, mint_class, fee_policy_id, fee_policy_version, fee_policy_snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(request.id, request.walletId, request.executionId, request.idempotencyKey, request.requestId ?? request.idempotencyKey, computedFingerprint, request.policyId, exposure.toString(), exposure.toString(), usageDate, at.toISOString(), request.chainProfileId, request.campaignId, request.mintValueWei.toString(), request.l2ExecutionGasWei.toString(), request.l1DataGasWei.toString(), request.priorityFeeComponentWei.toString(), replacementBudgetWei.toString(), mintValueBufferWei.toString(), l2ExecutionGasBufferWei.toString(), l1DataGasBufferWei.toString(), priorityFeeBufferWei.toString(), snapshot, periodId, request.transactionIntentId, request.freeMint ? 'free' : 'paid', feePolicy.id, feePolicy.version, feePolicySnapshot);
+      const result = this.db.prepare('UPDATE execution SET reservation_id = ? WHERE id = ? AND reservation_id IS NULL').run(request.id, request.executionId);
+      if (result.changes !== 1) throw new Error('execution reservation linkage could not be established');
       return 'reserved';
     });
   }
@@ -255,8 +286,17 @@ export class SpendReservations {
     const actualPriorityFeeComponentWei = components.actualPriorityFeeComponentWei ?? 0n;
     const actualReplacementBudgetWei = components.actualReplacementBudgetWei ?? 0n;
     nonNegative([components.actualMintValueWei, components.actualL2ExecutionGasWei, components.actualL1DataGasWei, actualPriorityFeeComponentWei, actualReplacementBudgetWei], 'settled amounts must be non-negative');
-    const row = this.db.prepare("SELECT wallet_id, execution_id, status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE id = ? AND status = 'reserved'").get(id) as { wallet_id: string; execution_id: string | null; status: ReservationStatus; amount_wei: string; reserved_amount_wei: string; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string; mint_value_buffer_wei: string; l2_execution_gas_buffer_wei: string; l1_data_gas_buffer_wei: string; priority_fee_buffer_wei: string } | undefined;
+    const row = this.db.prepare("SELECT wallet_id, execution_id, transaction_intent_id, status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE id = ? AND status = 'reserved'").get(id) as { wallet_id: string; execution_id: string | null; transaction_intent_id: string | null; status: ReservationStatus; amount_wei: string; reserved_amount_wei: string; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string; mint_value_buffer_wei: string; l2_execution_gas_buffer_wei: string; l1_data_gas_buffer_wei: string; priority_fee_buffer_wei: string } | undefined;
     if (!row) throw new Error('reservation is missing or no longer reservable');
+    if (row.execution_id !== null) {
+      const latestReceipt = this.db.prepare('SELECT r.id, r.status FROM transaction_receipt r JOIN transaction_attempt a ON a.id = r.transaction_attempt_id WHERE a.execution_id = ? AND r.id = (SELECT r2.id FROM transaction_receipt r2 JOIN transaction_attempt a2 ON a2.id = r2.transaction_attempt_id WHERE a2.execution_id = ? ORDER BY r2.observed_at DESC, r2.id DESC LIMIT 1)').get(row.execution_id, row.execution_id) as { id: string; status: string } | undefined;
+      const latestReconciliation = this.db.prepare('SELECT rr.id, rr.state FROM reconciliation_record rr WHERE rr.execution_id = ? ORDER BY rr.checked_at DESC, rr.id DESC LIMIT 1').get(row.execution_id) as { id: string; state: string } | undefined;
+      if (!latestReceipt && !latestReconciliation) throw new Error('settlement requires authoritative receipt or reconciliation');
+      if (latestReceipt && !['confirmed', 'reverted', 'reorged', 'dropped'].includes(latestReceipt.status) && latestReconciliation?.state !== 'final' && latestReconciliation?.state !== 'reorged') throw new Error('settlement outcome is not authoritative');
+      if (latestReconciliation?.state === 'ambiguous') throw new Error('ambiguous reconciliation cannot settle');
+      if (components.authoritativeReceiptId !== undefined && components.authoritativeReceiptId !== latestReceipt?.id) throw new Error('settlement receipt is not the latest authoritative receipt');
+      if (components.authoritativeReconciliationId !== undefined && components.authoritativeReconciliationId !== latestReconciliation?.id) throw new Error('settlement reconciliation is not the latest authoritative record');
+    }
     const mintBound = BigInt(row.mint_value_wei) + BigInt(row.mint_value_buffer_wei);
     const l2Bound = BigInt(row.l2_execution_gas_wei) + BigInt(row.l2_execution_gas_buffer_wei);
     const l1Bound = BigInt(row.l1_data_gas_wei) + BigInt(row.l1_data_gas_buffer_wei);

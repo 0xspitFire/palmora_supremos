@@ -3,7 +3,9 @@ import type { SqliteDatabase } from './database.js';
 const STATE_ID = 'global';
 
 function encode(value: unknown): string {
-  return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? `${item}n` : item);
+  const encoded = JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? `${item}n` : item);
+  if (encoded !== undefined && /"(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token)"\s*:/i.test(encoded)) throw new Error('secret-like values must remain in the approved secret store');
+  return encoded;
 }
 
 function decode<T>(value: string): T {
@@ -34,11 +36,12 @@ export class BackendStateRepository {
   }
 
   public write<T>(state: T): void {
+    const encoded = encode(state);
     this.db.prepare(`
       INSERT INTO backend_state (id, state_json, updated_at)
       VALUES (?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at
-    `).run(STATE_ID, encode(state), new Date().toISOString());
+    `).run(STATE_ID, encoded, new Date().toISOString());
   }
 
   public transaction<TState, TResult>(initial: TState, mutate: (state: TState) => TResult): TResult {

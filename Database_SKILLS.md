@@ -68,3 +68,10 @@ Receive entities from Product Manager, architecture from CTO/Lead, and event fac
 - A paid Ethereum reservation accounts atomically for mint value, L2 execution gas, L1 data gas, priority fee, and bounded replacement exposure. Settlement is monotonic and cannot exceed any reserved component or the reserved all-in amount.
 - Chain ID `4663` rejects paid reservations at the database boundary. A zero priority component is accepted only when the explicit fee policy says `allowed`; policy snapshots and settlement components remain auditable.
 - Recovery queries must identify unresolved attempts, orphaned reservations, duplicate `(from, nonce)` identities, stale simulations, and reorg exposure before new work is admitted. Backups require integrity/schema verification and recorded, secret-free evidence.
+
+### 2026-09-15 — Boundary audit hardening
+
+- Migration `015_database_boundary_hardening.sql` makes chain verification and explicit execution enablement prerequisites for every reservation, persists mint classification and approved campaign periods, and snapshots the effective fee policy used for admission.
+- Reorg and replacement lineage is append-only and recovery-visible; release is allowed only before submission, while linked settlement requires an authoritative receipt or reconciliation outcome and bounded component evidence.
+- File-backed databases must report WAL, migrations are serialized under one writer lock, and current migration checksums/object sets are required for backup verification. Raw observation pruning is policy-driven and records measured retention evidence.
+- `BackendStateRepository` remains a compatibility dependency until Backend adopts the normalized repository boundary; it is not an approved live authority and must not be extended with new state fields or operational credentials.
