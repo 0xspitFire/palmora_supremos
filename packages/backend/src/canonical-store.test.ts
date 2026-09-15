@@ -282,6 +282,40 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  it('binds lifecycle receipts to the exact Engine attempt across endpoints', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM);
+      const prepared = await armed(value, campaignValue);
+      const admission = await value.store.admitExecution(prepared.input);
+      const executionId = admission.executions[0]!.executionId;
+      const transactionIntentId = admission.executions[0]!.intentId;
+      await value.store.persistEngineAttempt({ id: 'endpoint-attempt-a', executionId, transactionIntentId, endpoint: 'provider-a', responseClass: 'accepted', txHash: `0x${'a'.repeat(64)}`, nonce: 4, attemptedAt: NOW });
+      await value.store.persistEngineAttempt({ id: 'endpoint-attempt-b', executionId, transactionIntentId, endpoint: 'provider-b', responseClass: 'accepted', txHash: `0x${'b'.repeat(64)}`, nonce: 4, attemptedAt: NOW });
+      await value.store.persistEngineReceipt({ id: 'endpoint-receipt', executionId, transactionAttemptId: 'endpoint-attempt-b', txHash: `0x${'b'.repeat(64)}`, status: 'confirmed', blockNumber: 16n, blockHash: `0x${'c'.repeat(64)}`, confirmations: 2, gasUsed: 3n, effectiveGasPrice: 2n, finalityStage: 'ethereum_final', observedAt: NOW });
+      const row = value.db.prepare('SELECT transaction_attempt_id FROM transaction_receipt WHERE id = ?').get('endpoint-receipt') as { transaction_attempt_id: string };
+      expect(row.transaction_attempt_id).toBe('endpoint-attempt-b');
+      expect(value.store.snapshot().receipts.find((receipt) => receipt.id === 'endpoint-receipt')?.transactionAttemptId).toBe('endpoint-attempt-b');
+    } finally { await close(value); }
+  });
+
+  it('does not charge mint value for a reverted lifecycle receipt', async () => {
+    const value = await fixture(ETHEREUM, true);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM, true);
+      const prepared = await armed(value, campaignValue);
+      const admission = await value.store.admitExecution(prepared.input);
+      const executionId = admission.executions[0]!.executionId;
+      const transactionIntentId = admission.executions[0]!.intentId;
+      await value.store.persistEngineAttempt({ id: 'reverted-attempt', executionId, transactionIntentId, endpoint: 'provider', responseClass: 'accepted', txHash: `0x${'d'.repeat(64)}`, nonce: 5, attemptedAt: NOW });
+      await value.store.persistEngineReceipt({ id: 'reverted-receipt', executionId, transactionAttemptId: 'reverted-attempt', txHash: `0x${'d'.repeat(64)}`, status: 'reverted', blockNumber: 17n, blockHash: `0x${'e'.repeat(64)}`, confirmations: 1, gasUsed: 3n, effectiveGasPrice: 2n, l1DataFeeWei: 4n, finalityStage: 'unknown', observedAt: NOW });
+      const receipt = value.store.snapshot().receipts.find((item) => item.id === 'reverted-receipt');
+      expect(receipt?.state).toBe('Failed');
+      expect(receipt?.actualSpendWei).toBe(10n);
+      expect(value.store.snapshot().attempts.find((item) => item.id === 'reverted-attempt')?.endpoint).toBe('provider');
+    } finally { await close(value); }
+  });
+
   it('persists an unresolved Robinhood receipt without inventing Ethereum finality', async () => {
     const store = new DurableStore();
     const campaignValue: Campaign = { id: 'rh-campaign', state: 'Armed', chainId: ROBINHOOD, contract: CONTRACT, strategy: 'seadrop-v1-public', quantity: 1, dryRun: false, broadcastMode: 'sequencer', spendPolicy: { maxRunWei: 1_000n, dailyCapWei: 1_000n, gasCeilingWei: 100n }, chainVerification: { chainId: ROBINHOOD, status: 'verified', seaDropCompatible: true, sourceBlock: 1n, endpointReference: 'RH_SEQUENCER_REFERENCE' }, mintPriceWei: 0n, feePolicy: { kind: 'free', configuredPriorityFeeWei: 20n, freeTotalSpendCapWei: 40n, l2ExecutionGasBudgetWei: 10n, l1DataGasBudgetWei: 4n, totalFeeBudgetWei: 34n }, createdAt: NOW, updatedAt: NOW };

@@ -5,6 +5,7 @@ import type {
   LifecycleEventRecord,
   ReceiptRecord as DatabaseReceiptRecord,
   ReconciliationRecord as DatabaseReconciliationRecord,
+  SettlementComponents,
   SqliteDatabase,
   TransactionIntentRecord,
 } from '@mint-bot/database';
@@ -449,6 +450,108 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.ensureOpen();
   }
 
+  public async settleExecutionComponents(id: string, components: SettlementComponents): Promise<void> {
+    this.ensureOpen();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare('SELECT status FROM spend_reservation WHERE id = ?').get(id) as { status: string } | undefined;
+      if (!row) throw new Error('RESERVATION_NOT_FOUND');
+      if (row.status === 'settled') {
+        this.db.exec('COMMIT');
+        return;
+      }
+      if (row.status !== 'reserved') throw new Error('INVALID_RESERVATION_TRANSITION');
+      this.databaseStore.settleExecutionComponents(id, components, this.now());
+      this.db.exec('COMMIT');
+    } catch (error) {
+      if (this.db.inTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  public async persistEngineRun(record: unknown): Promise<void> {
+    this.ensureOpen();
+    const input = record as { runId?: string; campaignId?: string; requestFingerprint?: string };
+    if (!input.runId) throw new Error('RUN_ID_REQUIRED');
+    const row = this.db.prepare('SELECT campaign_id, request_fingerprint FROM execution_run WHERE id = ?').get(input.runId) as { campaign_id: string; request_fingerprint: string } | undefined;
+    if (!row) throw new Error('RUN_NOT_FOUND');
+    if (input.campaignId && row.campaign_id !== input.campaignId) throw new Error('RUN_CAMPAIGN_MISMATCH');
+    if (input.requestFingerprint && row.request_fingerprint !== input.requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+  }
+
+  public async persistEngineIntent(record: unknown): Promise<void> {
+    this.ensureOpen();
+    const input = record as { id?: string; executionId?: string; intent?: { campaignId?: string; runId?: string; from?: string } };
+    if (!input.id || !input.executionId) throw new Error('EXECUTION_IDENTITY_REQUIRED');
+    const row = this.db.prepare('SELECT ti.campaign_id, ti.run_id, w.address, e.id AS execution_id FROM transaction_intent ti JOIN wallet w ON w.id = ti.wallet_id LEFT JOIN execution e ON e.transaction_intent_id = ti.id WHERE ti.id = ? ORDER BY e.created_at DESC LIMIT 1').get(input.id) as { campaign_id: string; run_id: string | null; address: string; execution_id: string | null } | undefined;
+    if (!row || row.execution_id !== input.executionId) throw new Error('CANONICAL_INTENT_EXECUTION_MISMATCH');
+    if (input.intent?.campaignId && input.intent.campaignId !== row.campaign_id) throw new Error('INTENT_CAMPAIGN_MISMATCH');
+    if (input.intent?.runId && input.intent.runId !== row.run_id) throw new Error('INTENT_RUN_MISMATCH');
+    if (input.intent?.from && input.intent.from.toLowerCase() !== row.address.toLowerCase()) throw new Error('INTENT_WALLET_MISMATCH');
+  }
+
+  public async persistEngineAttempt(record: unknown): Promise<void> {
+    this.ensureOpen();
+    const input = record as { id?: string; executionId?: string; transactionIntentId?: string; endpoint?: string; responseClass?: string; txHash?: string; nonce?: number; replacementOfId?: string; redactedError?: string; attemptedAt?: string };
+    if (typeof input.id !== 'string' || typeof input.executionId !== 'string' || typeof input.transactionIntentId !== 'string' || typeof input.endpoint !== 'string' || typeof input.responseClass !== 'string' || typeof input.nonce !== 'number' || typeof input.attemptedAt !== 'string') throw new Error('LIFECYCLE_ATTEMPT_FACTS_REQUIRED');
+    const id = input.id;
+    const executionId = input.executionId;
+    const transactionIntentId = input.transactionIntentId;
+    const endpoint = input.endpoint;
+    const responseClass = input.responseClass;
+    const nonce = input.nonce;
+    const attemptedAt = input.attemptedAt;
+    const identity = this.executionIdentity(executionId);
+    if (!identity || identity.transactionIntentId !== transactionIntentId) throw new Error('CANONICAL_ATTEMPT_IDENTITY_MISMATCH');
+    const state = responseClass === 'signed' ? 'Signed' : ['timeout', 'ambiguous'].includes(responseClass) ? 'Pending' : ['rejected', 'provider_error'].includes(responseClass) ? 'Failed' : 'Submitted';
+    await this.transaction((current) => {
+      if (current.attempts.some((attempt) => attempt.id === id)) return;
+      current.attempts.push({ id, executionId, runId: identity.runId, wallet: identity.wallet, nonce, endpoint, ...(input.txHash ? { hash: input.txHash } : {}), ...(input.redactedError ? { redactedError: input.redactedError } : {}), ...(input.replacementOfId ? { replacementOfId: input.replacementOfId } : {}), state, createdAt: attemptedAt, updatedAt: attemptedAt });
+    });
+  }
+
+  public async persistEngineReceipt(record: unknown): Promise<void> {
+    this.ensureOpen();
+    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; status?: string; blockNumber?: bigint; blockHash?: string; confirmations?: number; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; finalityStage?: string; finalitySource?: string; observedAt?: string };
+    if (typeof input.id !== 'string' || typeof input.executionId !== 'string' || typeof input.transactionAttemptId !== 'string' || typeof input.txHash !== 'string' || typeof input.status !== 'string' || typeof input.observedAt !== 'string') throw new Error('LIFECYCLE_RECEIPT_FACTS_REQUIRED');
+    const id = input.id;
+    const executionId = input.executionId;
+    const transactionAttemptId = input.transactionAttemptId;
+    const txHash = input.txHash;
+    const status = input.status;
+    const observedAt = input.observedAt;
+    const identity = this.executionIdentity(executionId);
+    if (!identity) throw new Error('EXECUTION_CHAIN_REQUIRED');
+    if (input.blockNumber === undefined || !input.blockHash) {
+      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution', entityId: executionId, newState: 'pending', actor: this.actor, reason: 'pending receipt retained without terminal receipt facts', policySnapshot: { kind: 'event', eventType: 'pending_receipt', eventData: { executionId } }, occurredAt: observedAt });
+      return;
+    }
+    const blockNumber = input.blockNumber;
+    const blockHash = input.blockHash;
+    const mappedStatus = status === 'reverted' ? 'Failed' : status === 'reorged' ? 'Reorged' : 'Confirmed';
+    const lifecycleAttemptHash = this.attemptHash(transactionAttemptId, executionId);
+    if (lifecycleAttemptHash.toLowerCase() !== txHash.toLowerCase()) throw new Error('RECEIPT_ATTEMPT_HASH_MISMATCH');
+    const actualMintValueWei = ['reverted', 'reorged', 'dropped'].includes(status) ? 0n : identity.valueWei;
+    const actualL2ExecutionGasWei = (input.gasUsed ?? 0n) * (input.effectiveGasPrice ?? 0n);
+    const actualL1DataGasWei = input.l1DataFeeWei ?? 0n;
+    const actualSpendWei = actualMintValueWei + actualL2ExecutionGasWei + actualL1DataGasWei;
+    await this.transaction((current) => {
+      if (current.receipts.some((receipt) => receipt.id === id)) return;
+      current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
+      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution', entityId: executionId, actor: this.actor, reason: 'lifecycle receipt accounting components', newState: 'receipt_accounting', policySnapshot: { kind: 'receipt_accounting', receiptId: id, actualSpendWei: actualSpendWei.toString(), actualMintValueWei: actualMintValueWei.toString(), actualL2ExecutionGasWei: actualL2ExecutionGasWei.toString(), actualL1DataGasWei: actualL1DataGasWei.toString() }, occurredAt: observedAt });
+    });
+  }
+
+  public async persistEngineReconciliation(record: unknown): Promise<void> {
+    this.ensureOpen();
+    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; fromAddress?: string; nonce?: number; state?: string; source?: string; details?: Record<string, unknown>; checkedAt?: string };
+    if (!input.id || !input.executionId || !input.fromAddress || input.nonce === undefined || !input.state || !input.source || !input.checkedAt) throw new Error('LIFECYCLE_RECONCILIATION_FACTS_REQUIRED');
+    const identity = this.executionIdentity(input.executionId);
+    if (!identity) throw new Error('EXECUTION_CHAIN_REQUIRED');
+    if (this.db.prepare('SELECT id FROM reconciliation_record WHERE id = ?').get(input.id)) return;
+    this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, ...(input.transactionAttemptId ? { transactionAttemptId: input.transactionAttemptId } : {}), ...(input.txHash ? { txHash: input.txHash } : {}), fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, details: input.details ?? {}, executionId: input.executionId });
+  }
+
   public async admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult> {
     this.ensureOpen();
     const wallets = [...input.wallets];
@@ -594,7 +697,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const runId = row.run_id ?? '';
       if (!runIds.has(runId) || !row.execution_id) return [];
       const state = executionState(row.response_class);
-      return [{ id: row.id, executionId: row.execution_id, runId, wallet: row.address, ...(row.nonce === null ? {} : { nonce: row.nonce }), ...(row.tx_hash === null ? {} : { hash: row.tx_hash }), state, createdAt: row.attempted_at, updatedAt: row.attempted_at } satisfies AttemptRecord];
+      return [{ id: row.id, executionId: row.execution_id, runId, wallet: row.address, ...(row.nonce === null ? {} : { nonce: row.nonce }), ...(row.tx_hash === null ? {} : { hash: row.tx_hash }), endpoint: row.endpoint, ...(row.redacted_error === null ? {} : { redactedError: row.redacted_error }), state, createdAt: row.attempted_at, updatedAt: row.attempted_at } satisfies AttemptRecord];
     });
   }
 
@@ -608,9 +711,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const finality = attempt.finality_stage === 'soft' ? 'soft' : attempt.finality_stage === 'posted' ? 'posted' : attempt.finality_stage === 'ethereum_final' && row.run_id && this.runChain(row.run_id, runs) === ROBINHOOD_CHAIN_ID ? 'final' : undefined;
       const ledgerRows = this.db.prepare("SELECT amount_wei FROM spend_ledger_entry WHERE execution_id = ? AND component <> 'refund'").all(row.execution_id) as Array<{ amount_wei: string }>;
       const settled = this.db.prepare("SELECT settled_amount_wei FROM spend_reservation WHERE execution_id = ? AND status = 'settled' ORDER BY settled_at DESC LIMIT 1").get(row.execution_id) as { settled_amount_wei: string | null } | undefined;
+      const accountingRows = this.db.prepare("SELECT policy_snapshot_json FROM audit_event WHERE entity_type = 'execution' AND policy_snapshot_json IS NOT NULL ORDER BY occurred_at DESC, id DESC").all() as Array<{ policy_snapshot_json: string }>;
+      const lifecycleAccounting = accountingRows.map((item) => decode<{ kind?: string; receiptId?: string; actualSpendWei?: string }>(item.policy_snapshot_json)).find((item) => item?.kind === 'receipt_accounting' && item.receiptId === row.id);
       const ledgerAmount = ledgerRows.reduce((total, item) => total + BigInt(item.amount_wei), 0n);
-      const actualSpendWei = settled?.settled_amount_wei === null || settled?.settled_amount_wei === undefined ? ledgerAmount : BigInt(settled.settled_amount_wei);
-      return [{ id: row.id, executionId: row.execution_id, runId: row.run_id, state, ...(finality ? { robinhoodFinality: finality } : {}), ...(row.block_number === null ? {} : { blockNumber: BigInt(row.block_number) }), ...(row.block_hash === null ? {} : { blockHash: row.block_hash }), ...(ledgerRows.length > 0 || settled?.settled_amount_wei !== null && settled?.settled_amount_wei !== undefined ? { actualSpendWei } : {}), observedAt: row.observed_at } satisfies ReceiptRecord];
+      const actualSpendWei = settled?.settled_amount_wei === null || settled?.settled_amount_wei === undefined ? ledgerRows.length > 0 ? ledgerAmount : lifecycleAccounting?.actualSpendWei === undefined ? undefined : BigInt(lifecycleAccounting.actualSpendWei) : BigInt(settled.settled_amount_wei);
+      return [{ id: row.id, executionId: row.execution_id, runId: row.run_id, transactionAttemptId: row.transaction_attempt_id, state, ...(finality ? { robinhoodFinality: finality } : {}), ...(row.block_number === null ? {} : { blockNumber: BigInt(row.block_number) }), ...(row.block_hash === null ? {} : { blockHash: row.block_hash }), ...(actualSpendWei === undefined ? {} : { actualSpendWei }), observedAt: row.observed_at } satisfies ReceiptRecord];
     });
   }
 
@@ -753,7 +858,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (prior) return;
     const intentId = this.intentRowIdFromExecution(attempt.executionId, attempt.wallet, attempt.runId);
     if (!intentId) throw new Error('TRANSACTION_INTENT_REQUIRED');
-    this.databaseStore.recordAttempt({ id: attempt.id, transactionIntentId: intentId, endpoint: 'engine', responseClass: attempt.state, ...(attempt.nonce === undefined ? {} : { nonce: attempt.nonce }), ...(attempt.hash === undefined ? {} : { txHash: attempt.hash }), executionId: attempt.executionId, attemptedAt: attempt.createdAt });
+    this.databaseStore.recordAttempt({ id: attempt.id, transactionIntentId: intentId, endpoint: attempt.endpoint ?? 'engine', responseClass: attempt.state, ...(attempt.nonce === undefined ? {} : { nonce: attempt.nonce }), ...(attempt.hash === undefined ? {} : { txHash: attempt.hash }), ...(attempt.redactedError === undefined ? {} : { redactedError: attempt.redactedError }), ...(attempt.replacementOfId === undefined ? {} : { replacementOfId: attempt.replacementOfId }), executionId: attempt.executionId, attemptedAt: attempt.createdAt });
     const target = attempt.state.toLowerCase();
     const nextState = target === 'pending' ? 'submitted' : target;
     this.transitionExecutionSafe(attempt.executionId, nextState, `engine attempt ${attempt.state}`);
@@ -763,7 +868,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (prior) return;
     const chain = this.db.prepare('SELECT cp.chain_id FROM execution e JOIN campaign c ON c.id = e.campaign_id JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id WHERE e.id = ?').get(receipt.executionId) as { chain_id: 1 | 4663 } | undefined;
     if (!chain) throw new Error('EXECUTION_CHAIN_REQUIRED');
-    const attempt = this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(receipt.executionId) as { id: string } | undefined;
+    const attempt = receipt.transactionAttemptId ? this.db.prepare('SELECT id FROM transaction_attempt WHERE id = ? AND execution_id = ?').get(receipt.transactionAttemptId, receipt.executionId) as { id: string } | undefined : this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(receipt.executionId) as { id: string } | undefined;
     if (!attempt || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined) throw new Error('RECEIPT_PERSISTENCE_FACTS_REQUIRED');
     const chainId = chain.chain_id;
     this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'reverted', blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, finalityStage: canonicalReceiptFinalityStage(chainId, receipt.state, receipt.robinhoodFinality), finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
@@ -915,10 +1020,16 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return row?.id;
   }
 
-  private attemptHash(attemptId: string): string {
-    const row = this.db.prepare('SELECT tx_hash FROM transaction_attempt WHERE id = ?').get(attemptId) as { tx_hash: string | null } | undefined;
+  private attemptHash(attemptId: string, executionId?: string): string {
+    const row = executionId ? this.db.prepare('SELECT tx_hash FROM transaction_attempt WHERE id = ? AND execution_id = ?').get(attemptId, executionId) as { tx_hash: string | null } | undefined : this.db.prepare('SELECT tx_hash FROM transaction_attempt WHERE id = ?').get(attemptId) as { tx_hash: string | null } | undefined;
     if (!row?.tx_hash) throw new Error('RECEIPT_TRANSACTION_HASH_REQUIRED');
     return row.tx_hash;
+  }
+
+  private executionIdentity(executionId: string): { runId: string; campaignId: string; wallet: string; transactionIntentId: string; chainId: 1 | 4663; chainProfileId: string; valueWei: bigint } | undefined {
+    const row = this.db.prepare('SELECT e.run_id, e.campaign_id, e.transaction_intent_id, ti.value_wei, w.address, cp.chain_id, cp.id AS chain_profile_id FROM execution e JOIN transaction_intent ti ON ti.id = e.transaction_intent_id JOIN wallet w ON w.id = e.wallet_id JOIN chain_profile cp ON cp.id = w.chain_profile_id WHERE e.id = ?').get(executionId) as { run_id: string | null; campaign_id: string; transaction_intent_id: string; value_wei: string; address: string; chain_id: 1 | 4663; chain_profile_id: string } | undefined;
+    if (!row?.run_id) return undefined;
+    return { runId: row.run_id, campaignId: row.campaign_id, wallet: row.address, transactionIntentId: row.transaction_intent_id, chainId: row.chain_id, chainProfileId: row.chain_profile_id, valueWei: BigInt(row.value_wei) };
   }
 
   private runFor(runId: string): RunRecord | undefined {
