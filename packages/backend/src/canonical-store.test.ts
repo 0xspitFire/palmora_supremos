@@ -256,6 +256,25 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  it('does not charge mint value for a reverted lifecycle receipt', async () => {
+    const value = await fixture(ETHEREUM, true);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM, true);
+      const prepared = await armed(value, campaignValue);
+      const admission = await value.store.admitExecution(prepared.input);
+      const execution = admission.executions[0]!;
+      const txHash = `0x${'c'.repeat(64)}`;
+      await value.store.persistEngineAttempt({ id: 'reverted-attempt', executionId: execution.executionId, transactionIntentId: execution.intentId, endpoint: 'public', responseClass: 'submitted', txHash, nonce: 7, attemptedAt: NOW });
+      await value.store.persistEngineReceipt({ id: 'reverted-receipt', executionId: execution.executionId, transactionAttemptId: 'reverted-attempt', txHash, status: 'reverted', blockNumber: 18n, blockHash: `0x${'d'.repeat(64)}`, confirmations: 2, gasUsed: 2n, effectiveGasPrice: 4n, l1DataFeeWei: 4n, finalityStage: 'ethereum_final', finalitySource: 'receipt-watcher', observedAt: NOW });
+      const accounting = value.db.prepare("SELECT policy_snapshot_json FROM audit_event WHERE entity_type = 'execution' AND entity_id = ? AND reason = 'lifecycle receipt accounting components'").get(execution.executionId) as { policy_snapshot_json: string } | undefined;
+      expect(accounting ? JSON.parse(accounting.policy_snapshot_json) : undefined).toMatchObject({ actualMintValueWei: '0', actualL2ExecutionGasWei: '8', actualL1DataGasWei: '4', actualSpendWei: '12' });
+      await value.store.settleExecutionComponents(admission.reservations[0]!.id, { actualMintValueWei: 0n, actualL2ExecutionGasWei: 8n, actualL1DataGasWei: 4n, actualPriorityFeeComponentWei: 0n, actualReplacementBudgetWei: 0n });
+      const receipt = value.store.snapshot().receipts.find((item) => item.id === 'reverted-receipt');
+      expect(receipt?.state).toBe('Failed');
+      expect(receipt?.actualSpendWei).toBe(12n);
+    } finally { await close(value); }
+  });
+
   it('does not overwrite a provider-settled reservation during coordinator post-processing', async () => {
     const value = await fixture(ETHEREUM);
     try {
