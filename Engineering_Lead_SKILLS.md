@@ -78,3 +78,7 @@ Receive product acceptance from Product Manager, UX contracts from Product Desig
 
 - Ethereum fork variables may be read by reference from `/home/Junayd/W3/Rets` with read-only access only. Rets is local testing input; raw values must never be copied, logged, committed, or included in handoffs. Remote-WSL is the required IDE/runtime context.
 - The private `0xspitFire/palmora-seadrop-fixture` repository at commit `085a973` and its standalone Counter harness remain isolated non-runtime fixtures. Remote specialist branches remain retained after integration review and are not merge authorization.
+
+### 2026-09-15 — Migration 015 multi-wallet identity hold
+
+- Database migration `015_database_boundary_hardening.sql` remains unaccepted until `transaction_intent` request identity is wallet-scoped. A global `request_id` uniqueness constraint conflicts with the accepted one-intent-per-wallet fleet mapping; prove the corrected schema with a two-wallet admission and recomputed per-wallet fingerprints before integration.
