@@ -78,10 +78,11 @@ const cli = yargs(hideBin(process.argv))
     })
   .command('approve', 'Persist explicit campaign approval', (args) => args
     .option('campaign-id', { type: 'string', demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
     .option('idempotency-key', { type: 'string' }), async (args) => {
       try {
         const runtime = await createCliRuntime(runtimeRoot);
-        const validated = await validatedCampaign(runtime, args.campaignId);
+        const validated = await validatedCampaign(runtime, args.campaignId, await publicWallets(walletFile(args.walletFile)));
         const response = await runtime.application.command('approve', { validated, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
         process.stdout.write(`${json(response)}\n`);
       } catch (error) { printError(error); }
@@ -161,9 +162,17 @@ const cli = yargs(hideBin(process.argv))
     const runtime = await createCliRuntime(runtimeRoot);
     try { await runtime.application.command('validate'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
   })
-  .command('dry-run', 'Prepare a non-broadcast dry run', {}, async () => {
+  .command('dry-run', 'Prepare a non-broadcast dry run for a persisted campaign', (args) => args
+    .option('campaign-id', { type: 'string', demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
+    .option('idempotency-key', { type: 'string' }), async (args) => {
     const runtime = await createCliRuntime(runtimeRoot);
-    try { await runtime.application.command('dry-run'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+    try {
+      const wallets = await publicWallets(walletFile(args.walletFile));
+      const validated = await validatedCampaign(runtime, args.campaignId, wallets);
+      const response = await runtime.application.command('dry-run', { validated, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
+      process.stdout.write(`${json(response)}\n`);
+    } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
   })
   .command('arm', 'Arm a persisted campaign through Backend admission', (args) => args
     .option('campaign-id', { type: 'string', demandOption: true })
@@ -181,11 +190,12 @@ const cli = yargs(hideBin(process.argv))
   })
   .command('run', 'Execute an admitted run through Backend admission', (args) => args
     .option('run-id', { type: 'string', demandOption: true })
-    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
+    .option('idempotency-key', { type: 'string' }), async (args) => {
     const runtime = await createCliRuntime(runtimeRoot);
     try {
       const wallets = await publicWallets(walletFile(args.walletFile));
-      const response = await runtime.application.command('run', { runId: args.runId, wallets });
+      const response = await runtime.application.command('run', { runId: args.runId, wallets, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
       process.stdout.write(`${json(response)}\n`);
     } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
   })

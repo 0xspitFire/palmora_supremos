@@ -5,7 +5,7 @@ import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngine
 
 export interface CliRuntime { store: BackendStore; coordinator: ExecutionCoordinator; application: BackendApplication; walletRoot: string; }
 
-export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>): Promise<CliRuntime> {
+export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>): Promise<CliRuntime> {
   const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true });
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
