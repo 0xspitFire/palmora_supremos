@@ -55,3 +55,26 @@ Receive product acceptance from Product Manager, UX contracts from Product Desig
 - Reachable Git objects were repaired from a GitHub mirror; protected recovery refs must remain until cleanup approval.
 - Recovered specialist branches are clean and mostly integrated or patch-equivalent to canonical commits.
 - Backend persistence integration and Database schema authority must remain explicit.
+
+## Dated refinements
+
+### 2026-09-14 — Phase 1 closure sequencing
+
+- After native WSL attestation, freeze contracts before implementation and gate Wave 1 in this order: Database, Backend, Blockchain, then DevOps. A later gate is not integration-eligible until the prior handoff is reviewed and accepted.
+- Database's normalized SQLite adapter is the sole live store. Legacy process-local or parallel persistence abstractions may remain only as explicitly non-live test fixtures until retired or mapped to the SQLite contract.
+- Product Design and Frontend remain contract-only during this closure: they may define or review read-model/API semantics but may not add a Phase 1 execution surface or cross-boundary implementation.
+- Handoffs must identify `Status`, `Worktree/branch`, `Commit`, `Ownership surface`, `Dependencies satisfied`, `Tests/builds/migrations/simulations`, `Contract changes`, `Limitations/blockers`, `Integration eligibility`, and a no-secrets statement.
+- The lead uses actual Git ancestry and reproducible native-WSL evidence as integration authority; recovery prose that conflicts with the commit graph is a documentation follow-up, not merge proof.
+- Paid public Ethereum remains allowed by product policy. Robinhood characterization is evidence only, execution stays disabled, and paid Robinhood remains blocked until the separate operational release gate is accepted.
+- Native-WSL preflight must inspect dependency resolution for conflict markers in the repository root as well as the candidate worktree. A clean specialist worktree is not validation-ready when shared tooling resolves the contaminated `main` checkout; report the blocker and do not repair, reset, or merge `main` from the lead flow.
+- The Blockchain lifecycle contract requires the Backend adapter to pass canonical run/intent identities, advertise a normalized durable SQLite reservation capability, preserve componentized all-in settlement, and carry staged/reorg finality without relying on result-ID rebinding as authority. DevOps remains gated behind this adapter follow-up and its evidence.
+
+### 2026-09-15 — Canonical lifecycle identity and admission guard
+
+- The Engine/CLI adapter must propagate canonical run, intent, execution, transaction-attempt, and receipt identities into normalized SQLite without synthetic duplicate attempts.
+- Canonical admission must verify the current chain profile is execution-enabled and latest-verified before inserting execution state. Chain 4663 remains hard-blocked regardless of mutable policy rows, while paid public Ethereum requires explicit enabled/verified configuration.
+
+### 2026-09-15 — Fork input and fixture retention
+
+- Ethereum fork variables may be read by reference from `/home/Junayd/W3/Rets` with read-only access only. Rets is local testing input; raw values must never be copied, logged, committed, or included in handoffs. Remote-WSL is the required IDE/runtime context.
+- The private `0xspitFire/palmora-seadrop-fixture` repository at commit `085a973` and its standalone Counter harness remain isolated non-runtime fixtures. Remote specialist branches remain retained after integration review and are not merge authorization.
