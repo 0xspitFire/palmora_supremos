@@ -43,6 +43,9 @@ workflow secret values, or other credentials into this file or a handoff.
 ## Blocker
 
 The 2026-09-15 read-only query found no protection configuration on
-`phase1-integration`. An authenticated repository administrator must configure
-the required settings, then rerun the redacted verification record. This is a
-release blocker and is not changed by local test results.
+`phase1-integration`. An authorized protection write was attempted and rejected
+with HTTP `403` because this private repository requires GitHub Pro or an
+eligible organization plan for branch protection. An authenticated repository
+administrator must enable an eligible plan or use an approved organization
+policy, configure the required settings, then rerun this redacted verification
+record. This is a release blocker and is not changed by local test results.
