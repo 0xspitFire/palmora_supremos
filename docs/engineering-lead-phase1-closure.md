@@ -26,6 +26,7 @@ All accepted local specialist tips are already ancestors of `origin/main`; repla
 | Database `84552a5` | Ancestor | Already published through the Database merge. |
 | Backend `0ef9dc8` including `5d94a62` | Ancestor | Already published through the Backend merge. |
 | Blockchain `5b61532` including `e9028fe` | Ancestor | Already published through the Blockchain merge. |
+| Blockchain closure `5eae6e4` | Unique tip beyond `origin/main` | Retain for human review; do not replay automatically because it overlaps published fork evidence and still needs approved Rets inputs. |
 | DevOps `5a98f2f` including `738e06d` | Ancestor | Already published through the DevOps merge. |
 | `origin/phase1-integration` `cc6aee2` | Ancestor | Retain remote reference; do not replay. |
 | `origin/backend-engineer` `370d7c0` | Ancestor | Retain remote reference; no unique work. |
