@@ -87,7 +87,7 @@ describe('database migrations and spend reservations', () => {
   it('serializes concurrent migration startup without stale migration reads', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'mint-migration-race-'));
     const filename = join(directory, 'state.sqlite');
-    const databaseModule = JSON.stringify(pathToFileURL(createRequire(import.meta.url).resolve('@mint-bot/database')).href);
+    const databaseModule = JSON.stringify(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../dist/index.js')).href);
     const workerSource = `
       const { workerData, parentPort } = await import('node:worker_threads');
       const { openDatabase } = await import(${databaseModule});
@@ -419,6 +419,18 @@ describe('database migrations and spend reservations', () => {
     repository.recordAttempt({ id: 'attempt-identity', transactionIntentId: 'intent-identity', endpoint: 'test', responseClass: 'accepted', txHash: '0xidentity', executionId: 'execution-identity', attemptedAt: '2026-01-01T00:00:01.000Z' });
     expect(db.prepare('SELECT run_id, request_fingerprint, from_address, chain_profile_id FROM transaction_intent WHERE id = ?').get('intent-identity')).toMatchObject({ run_id: 'run-identity', from_address: '0xabc', chain_profile_id: 'chain' });
     expect(db.prepare('SELECT execution_id FROM transaction_attempt WHERE id = ?').get('attempt-identity')).toEqual({ execution_id: 'execution-identity' });
+    db.close();
+  });
+
+  it('scopes run-level request IDs by wallet for multi-wallet admissions', () => {
+    const db = fixture();
+    const campaignId = campaignFixture(db, 'multi-wallet');
+    db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('wallet-two', 'chain', '0xdef', 'reference-only', '2026-01-01T00:00:00.000Z')").run();
+    const repository = new DurableRepository(db);
+    repository.saveIntent({ id: 'intent-wallet-one', campaignId, walletId: 'wallet', intentClass: 'mint', toAddress: '0xcontract', valueWei: 1n, calldata: '0x01', idempotencyKey: 'intent-wallet-one-key', requestId: 'shared-run-request', chainProfileId: 'chain', createdAt: '2026-01-01T00:00:00.000Z' });
+    repository.saveIntent({ id: 'intent-wallet-two', campaignId, walletId: 'wallet-two', intentClass: 'mint', toAddress: '0xcontract', valueWei: 1n, calldata: '0x01', idempotencyKey: 'intent-wallet-two-key', requestId: 'shared-run-request', chainProfileId: 'chain', createdAt: '2026-01-01T00:00:00.000Z' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM transaction_intent WHERE request_id = ?').get('shared-run-request')).toEqual({ count: 2 });
+    expect(() => repository.saveIntent({ id: 'intent-wallet-two-conflict', campaignId, walletId: 'wallet-two', intentClass: 'mint', toAddress: '0xcontract', valueWei: 2n, calldata: '0x02', idempotencyKey: 'intent-wallet-two-key-2', requestId: 'shared-run-request', chainProfileId: 'chain', createdAt: '2026-01-01T00:00:00.000Z' })).toThrow(IdempotencyConflictError);
     db.close();
   });
 

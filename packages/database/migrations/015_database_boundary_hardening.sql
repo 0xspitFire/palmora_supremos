@@ -62,9 +62,9 @@ UPDATE fee_policy
 CREATE UNIQUE INDEX idx_fee_policy_one_active ON fee_policy(chain_profile_id) WHERE active = 1;
 CREATE UNIQUE INDEX idx_reservation_execution_identity ON spend_reservation(execution_id) WHERE execution_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_reservation_intent_identity ON spend_reservation(transaction_intent_id) WHERE transaction_intent_id IS NOT NULL;
-CREATE UNIQUE INDEX idx_intent_request_identity ON transaction_intent(request_id) WHERE request_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_intent_request_identity ON transaction_intent(request_id, wallet_id) WHERE request_id IS NOT NULL;
 DROP INDEX IF EXISTS idx_reservation_request_identity;
-CREATE UNIQUE INDEX idx_reservation_request_identity ON spend_reservation(request_id) WHERE request_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_reservation_request_identity ON spend_reservation(request_id, wallet_id) WHERE request_id IS NOT NULL;
 CREATE INDEX idx_campaign_wallet_enabled ON campaign_wallet(campaign_id, enabled, wallet_id);
 CREATE INDEX idx_campaign_period_scope ON campaign_period(campaign_id, period_key, starts_at, ends_at);
 CREATE INDEX idx_reorg_resolution_event_time ON reorg_resolution(reorg_event_id, resolved_at);

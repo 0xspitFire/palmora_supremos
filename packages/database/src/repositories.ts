@@ -321,7 +321,7 @@ export class DurableRepository {
       const identityQueries = [[record.idempotencyKey, 'idempotency_key'], [record.requestId, 'request_id']] as const;
       for (const [identity, column] of identityQueries) {
         if (!identity) continue;
-        const existing = this.db.prepare(`SELECT id, request_fingerprint FROM transaction_intent WHERE ${column} = ?`).get(identity) as { id: string; request_fingerprint: string | null } | undefined;
+        const existing = this.db.prepare(column === 'request_id' ? `SELECT id, request_fingerprint FROM transaction_intent WHERE request_id = ? AND wallet_id = ?` : `SELECT id, request_fingerprint FROM transaction_intent WHERE idempotency_key = ?`).get(...(column === 'request_id' ? [identity, record.walletId] : [identity])) as { id: string; request_fingerprint: string | null } | undefined;
         if (existing) {
           if (existing.request_fingerprint !== requestFingerprint) throw new IdempotencyConflictError();
           return;
