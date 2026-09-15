@@ -124,6 +124,7 @@ const cli = yargs(hideBin(process.argv))
     .option('gas-padding', { type: 'number', default: 1.2 })
     .option('dry-run', { type: 'boolean', default: true }), async (args) => {
       try {
+        if (!args.dryRun) throw new Error('EXPLICIT_APPROVE_ARM_RUN_REQUIRED');
         const file = walletFile(args.walletFile);
         const wallets = (await publicWallets(file)).slice(0, args.maxWallets);
         if (wallets.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
@@ -136,7 +137,7 @@ const cli = yargs(hideBin(process.argv))
           contract: args.contract,
           strategy: 'seadrop-v1-public',
           quantity: args.quantity,
-          dryRun: args.dryRun,
+          dryRun: true,
           maxRunWei: parseEther(args.maxSpendEth.toString()),
           dailyCapWei: parseEther(args.dailyCapEth.toString()),
           gasCeilingWei: parseEther(args.maxSpendEth.toString()),
@@ -145,10 +146,8 @@ const cli = yargs(hideBin(process.argv))
           mintPriceWei: 0n,
           feePolicy,
         });
-        const mode = args.dryRun ? 'dry-run' : 'live';
         const validated = { campaign, wallets, evidenceAt: new Date().toISOString(), simulationIds: [] };
-        if (!args.dryRun) await runtime.application.command('approve', { validated, idempotencyKey: `mint:${campaign.id}` });
-        const armed = await runtime.application.command('arm', { validated, mode });
+        const armed = await runtime.application.command('arm', { validated, mode: 'dry-run' });
         const result = await runtime.application.command('execute', { runId: armed.id, wallets });
         process.stdout.write(`${json(result)}\n`);
       } catch (error) { process.stdout.write(`${blocked(error)}\n`); }

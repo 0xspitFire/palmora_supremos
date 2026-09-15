@@ -32,6 +32,7 @@ describe('CLI integration boundary', () => {
     const source = await readFile(fileURLToPath(new URL('./index.ts', import.meta.url)), 'utf8');
     expect(source).not.toContain('new MintEngine');
     expect(source).not.toContain('unavailableEngine');
+    expect(source).toContain('EXPLICIT_APPROVE_ARM_RUN_REQUIRED');
   });
 
   it('creates a durable SQLite backend runtime', async () => {
