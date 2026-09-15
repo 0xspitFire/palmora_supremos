@@ -156,16 +156,17 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm ops:policy`: pass with conservative CI-equivalent values.
 - `pnpm ops:negative-cases`: pass.
 - `pnpm ops:recovery-drill`: pass.
-- `pnpm test:fork`: 6 Robinhood tests pass using the preserved `Rets` reference; 1 Ethereum test skips because separate Ethereum fork variables are not configured.
-- `pnpm ops:fork-replay`: passes with 6 Robinhood tests and 1 Ethereum skip using `MINT_BOT_SECRETS_ROOT` pointed at the intentional preserved operational backup; Anvil is available.
+- `pnpm test:fork`: 6 Robinhood and 4 Ethereum tests skip without fork fixture injection; the deterministic suite does not claim archive evidence.
+- `pnpm ops:fork-replay`: remains blocked until the four non-secret Robinhood fixture fields are supplied; the archive value is read by reference from `~/W3/Rets/archive-rpc.env` and never passed to Vitest.
+- `pnpm ops:ethereum-fork`: passes strictly with 4 Ethereum fork probes using `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC` and `Fixtures/ethereum-seadrop-fixture.env` by reference.
 - `pnpm ops:health`: expected fail-closed result without production configuration.
 - `forge test --root ~/W3/seadrop-test`: 2 passed, 0 failed, 0 skipped.
 
 ## Pending decisions and gates
 
 1. Curate the preserved Robinhood report and historical product-design document.
-2. Decide whether to retain or delete remote specialist branches after a final branch-retention review.
-3. Decide whether the separate `~/W3/seadrop-test` fixture should become its own repository or remain local test input.
-4. Retain the completed Ethereum fork inputs behind the approved fixture/archive references; retain `ROBINHOOD_ARCHIVE_RPC` behind the intentional preserved operational backup or another approved secret store.
+2. Retain remote specialist branches after integration review, as decided by the Product Owner.
+3. Retain `~/W3/seadrop-test` as the private `palmora-seadrop-fixture` repository at its recorded commit.
+4. Retain the completed Ethereum fork inputs behind the approved fixture/archive references; supply the missing Robinhood non-secret fixture fields before its strict replay.
 5. Open Antigravity/VS Code through Remote-WSL and confirm future Agent Manager worktrees are created under the WSL filesystem.
 6. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
