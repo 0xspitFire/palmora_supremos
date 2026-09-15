@@ -146,7 +146,7 @@ checks.feed = robinhoodProbe
 if (process.env.CHECK_FORK === 'true') {
   const archiveSecretName = process.env.ARCHIVE_FORK_SECRET_NAME ?? 'ROBINHOOD_ARCHIVE_RPC';
   const normalizedPath = secretStorePath?.replaceAll('\\', '/');
-  checks.archiveFork = normalizedPath?.endsWith('Rets/MINT_BOT_SECRETS.env') && secretStore?.has(archiveSecretName)
+  checks.archiveFork = normalizedPath === '/home/Junayd/W3/Rets/archive-rpc.env' && secretStore?.has(archiveSecretName)
     ? { status: 'ok', reference: archiveSecretName }
     : { status: 'failed', reason: 'ARCHIVE_REFERENCE_REQUIRED' };
 } else {

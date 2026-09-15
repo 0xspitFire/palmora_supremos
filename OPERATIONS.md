@@ -8,10 +8,12 @@ execution.
 
 Provide `SECRET_STORE_PATH`, `RPC_SECRET_NAMES`, `STORE_PATH`, and
 `KILL_SWITCH_PATH` through the host secret mechanism or service manager. The
-secret store path must point to `Rets/MINT_BOT_SECRETS.env` or
-`Rets/TEST_BOT.env`; the health probe reads only the named values it needs and
-never prints them. Archive-backed fork tests use the `ROBINHOOD_ARCHIVE_RPC` key
-by reference only. The approved keystore directory is `./Rets/wallets`; its
+runtime secret store may be `Rets/MINT_BOT_SECRETS.env` or
+`Rets/TEST_BOT.env` under an approved host path. The health probe reads only
+the named values it needs and never prints them. Archive-backed local fork
+tests must use only the `ROBINHOOD_ARCHIVE_RPC` or Ethereum archive key by
+reference from `~/W3/Rets/archive-rpc.env`. The approved keystore directory is
+`./Rets/wallets`; its
 Product Owner passphrase must be requested through a hidden interactive prompt
 by the host launcher when needed. Do not expose it as an environment variable,
 argument, log field, backup artifact, or CI secret.
@@ -91,8 +93,9 @@ but exclude paid-mint value. Encrypted backups retain for exactly 30 days under
 Official Robinhood endpoints are chain ID `4663` (`0x1237`), sequencer
 `https://sequencer.mainnet.chain.robinhood.com`, and feed
 `wss://feed.mainnet.chain.robinhood.com`. CI may use the archive endpoint only
-through the `ROBINHOOD_ARCHIVE_RPC` secret reference; the value is injected by the
-secret manager and never written to logs, artifacts, or workflow files.
+through the `ROBINHOOD_ARCHIVE_RPC` reference in
+`/home/Junayd/W3/Rets/archive-rpc.env`; the value is injected by the secret
+manager and never written to logs, artifacts, or workflow files.
 
 The archive replay launcher passes the archive reference only to Anvil. Vitest
 receives only `ANVIL_RPC_URL=http://127.0.0.1:8545`; fork tests must never read
@@ -103,6 +106,12 @@ skips. The genuine Robinhood fixture verifies local Anvil chain `4663`,
 historical block state, and public SeaDrop singleton code. A vanilla Anvil run
 is only a fallback smoke test and is not evidence of archive fork
 compatibility.
+The Ethereum launcher reads its archive endpoint by reference from
+`~/W3/Rets/archive-rpc.env` and requires the non-secret fixture names
+`ETHEREUM_FORK_BLOCK`, `ETHEREUM_SEADROP_NFT`,
+`ETHEREUM_SEADROP_FEE_RECIPIENT`, and
+`ETHEREUM_SEADROP_MINT_VALUE_WEI`. It validates those values before starting
+Anvil and passes only the fixture metadata plus the local Anvil URL to Vitest.
 Product success requires Ethereum finality; Robinhood soft and posted states
 must remain retained as intermediate reconciliation states.
 

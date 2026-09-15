@@ -10,8 +10,9 @@ fixture, or substitute for the accepted characterization gate.
 - Feed: `wss://feed.mainnet.chain.robinhood.com`.
 - Execution: disabled until characterization, safety, reconciliation, and
   Product Owner acceptance gates pass.
-- Archive RPC: referenced only by the `ROBINHOOD_ARCHIVE_RPC` key in the read-only
-  `Rets/MINT_BOT_SECRETS.env` store. The endpoint value is never recorded here.
+- Archive RPC: referenced only by the `ROBINHOOD_ARCHIVE_RPC` key in the
+  read-only `~/W3/Rets/archive-rpc.env` store. The endpoint value is never
+  recorded here.
 
 ## Failed hashes
 

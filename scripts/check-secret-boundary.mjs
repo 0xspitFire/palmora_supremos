@@ -12,7 +12,7 @@ if (trackedSecretFiles.length) {
   process.exit();
 }
 
-const ignoredPaths = ['.env/MINT_BOT_SECRETS', '.env/TEST_BOT', 'Rets/MINT_BOT_SECRETS.env', 'Rets/TEST_BOT.env', 'Rets/wallets'];
+const ignoredPaths = ['.env/MINT_BOT_SECRETS', '.env/TEST_BOT', 'Rets/MINT_BOT_SECRETS.env', 'Rets/TEST_BOT.env', 'Rets/archive-rpc.env', 'Rets/wallets'];
 for (const path of ignoredPaths) {
   try {
     await run('git', ['check-ignore', '--no-index', '--quiet', path]);
