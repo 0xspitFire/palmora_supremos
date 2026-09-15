@@ -1,7 +1,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 
-const ALLOWED_FILES = new Set(['MINT_BOT_SECRETS', 'MINT_BOT_SECRETS.env', 'TEST_BOT', 'TEST_BOT.env']);
+const ALLOWED_FILES = new Set(['MINT_BOT_SECRETS', 'MINT_BOT_SECRETS.env', 'TEST_BOT', 'TEST_BOT.env', 'archive-rpc.env']);
 
 /**
  * Read one approved secret-store file without writing, interpolating, or

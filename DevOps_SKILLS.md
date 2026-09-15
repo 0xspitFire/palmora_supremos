@@ -77,3 +77,17 @@ Receive gates from CTO/Engineering Lead, fixtures from Blockchain, health/recove
   an enabled orchestrator. No service is eligible for live execution until
   startup reconciliation, encrypted backup/restore, rotation, log controls,
   and branch protection are independently witnessed.
+
+### 2026-09-15
+
+- The only approved local archive reference is `~/W3/Rets/archive-rpc.env`.
+  Fork launchers may read named values from that regular file at runtime, but
+  must never print, copy, or pass archive URLs to test processes.
+- The Ethereum strict fixture requires the non-secret names
+  `ETHEREUM_FORK_BLOCK`, `ETHEREUM_SEADROP_NFT`,
+  `ETHEREUM_SEADROP_FEE_RECIPIENT`, and
+  `ETHEREUM_SEADROP_MINT_VALUE_WEI`; missing or malformed metadata must fail
+  closed before Anvil starts.
+- A successful local recovery drill is evidence for backup/restore mechanics
+  only. Remote CI, branch protection, service supervision, and live readiness
+  require independent owner or administrator evidence.

@@ -98,6 +98,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Run strict archive fork replay
         run: pnpm ops:fork-replay
+        env:
+          ROBINHOOD_FORK_SOURCE: '~/W3/Rets/archive-rpc.env:ROBINHOOD_ARCHIVE_RPC'
 
   docker:
     needs: environment
@@ -149,6 +151,8 @@ jobs:
         run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile
       - run: pnpm ops:fork-replay
+        env:
+          ROBINHOOD_FORK_SOURCE: '~/W3/Rets/archive-rpc.env:ROBINHOOD_ARCHIVE_RPC'
 
   ethereum-fork-replay:
     if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'
@@ -171,3 +175,5 @@ jobs:
         run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile
       - run: pnpm ops:ethereum-fork
+        env:
+          ETHEREUM_FORK_SOURCE: '~/W3/Rets/archive-rpc.env:ETHEREUM_FORK_RPC'

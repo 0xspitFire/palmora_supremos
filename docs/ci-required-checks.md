@@ -10,18 +10,24 @@ names from `.github/workflows/ci.yml`:
 
 `environment` is the native-WSL prerequisite. `anvil` is the strict archive
 fork gate, not a vanilla Anvil reachability check; it starts local Anvil from
-the approved `ROBINHOOD_ARCHIVE_RPC` reference and rejects skipped tests. The
+the approved `ROBINHOOD_ARCHIVE_RPC` reference in
+`~/W3/Rets/archive-rpc.env` and rejects skipped tests. The
 current fixture is the Engine-owned replay surface; Backend/Database
 integration remains a specialist dependency and is not claimed by this
 workflow change.
 The separate `ethereum-fork-replay` job is required for an Ethereum release
 candidate after its approved fixture is provisioned and also rejects skips.
+Its required non-secret fixture inputs are `ETHEREUM_FORK_BLOCK`,
+`ETHEREUM_SEADROP_NFT`, `ETHEREUM_SEADROP_FEE_RECIPIENT`, and
+`ETHEREUM_SEADROP_MINT_VALUE_WEI`; the archive endpoint remains a secret-store
+reference only.
 
 The manual `archive-fork-replay` job is retained for an explicit Robinhood
 release-evidence rerun. It is evidence-gated and should become a required
 release check only after an approved unattended native-WSL runner is
 available. The runner must check out below `/home/Junayd/W3/`, provide Foundry
-and Anvil `1.8.1`, and expose only the secret-store reference to the launcher.
+and Anvil `1.8.1`, and expose only the reference to
+`~/W3/Rets/archive-rpc.env` to the launcher.
 Vitest receives only the local Anvil URL and non-secret fixture metadata.
 
 Branch protection evidence must show, for the protected integration branch:

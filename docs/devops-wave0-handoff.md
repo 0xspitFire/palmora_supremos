@@ -24,7 +24,7 @@ mints remain blocked.
 | Area | Files | State |
 | --- | --- | --- |
 | Environment | `scripts/native-preflight.mjs`, `package.json` | Implemented |
-| Strict fork boundary | `scripts/strict-vitest.mjs`, `scripts/ops-fork-replay.mjs`, `scripts/ethereum-fork-replay.mjs`, `scripts/fork-replay.mjs` | Implemented; runner evidence pending |
+| Strict fork boundary | `scripts/archive-reference.mjs`, `scripts/strict-vitest.mjs`, `scripts/ops-fork-replay.mjs`, `scripts/ethereum-fork-replay.mjs`, `scripts/fork-replay.mjs`, `scripts/secret-store.mjs`, `scripts/check-secret-boundary.mjs` | Implemented; runner evidence pending |
 | CI | `.github/workflows/ci.yml`, `docker-compose.yml` | Prepared; native runner pending |
 | Health/runbook | `scripts/healthcheck.mjs`, `OPERATIONS.md` | Aligned |
 | Evidence | `docs/ci-required-checks.md`, `docs/devops-blockers.md`, `docs/branch-protection-evidence.md`, `docs/backup-restore-evidence.md`, `docs/service-evidence.md` | Redacted templates |
@@ -79,10 +79,14 @@ part of this evidence.
 - The current fork fixture is Engine-owned. An integrated Engine/Backend/
   Database fork path still needs the Blockchain, Backend, and Database
   specialist handoffs before it can be release evidence.
-- Robinhood archive replay needs only the approved secret-store reference at
-  runner runtime; no raw value is requested or stored by this handoff.
+- Robinhood archive replay needs only the approved
+  `~/W3/Rets/archive-rpc.env:ROBINHOOD_ARCHIVE_RPC` reference at runner
+  runtime; no raw value is requested or stored by this handoff.
 - Ethereum strict replay still needs its approved archive reference and
-  non-secret fixture metadata.
+  non-secret fixture metadata. Required non-secret names are
+  `ETHEREUM_FORK_BLOCK`, `ETHEREUM_SEADROP_NFT`,
+  `ETHEREUM_SEADROP_FEE_RECIPIENT`, and
+  `ETHEREUM_SEADROP_MINT_VALUE_WEI`.
 - Branch protection needs repository-admin verification; see
   `docs/branch-protection-evidence.md`.
 - A long-running Backend orchestrator entrypoint is still required before any
@@ -100,3 +104,38 @@ this handoff. Fork launchers keep archive access at the Anvil boundary and
 pass only local RPC plus non-secret fixture metadata to Vitest. No `main`
 branch edit, merge, reset, or force operation was performed. Integration status:
 **NOT ELIGIBLE** for final integration or release validation.
+
+## Phase 1 Closure Audit - 2026-09-15
+
+- Actual `origin/main` was inspected at `d7e72f0`; its tracked package metadata
+  is valid and its prior Ethereum launcher uses a different historical Rets
+  file convention. This worktree did not merge or edit that branch.
+- The approved current reference contract is
+  `~/W3/Rets/archive-rpc.env`; launchers reject other source paths and keep
+  archive URLs out of Vitest's environment.
+- The approved archive reference file was confirmed present/readable by
+  metadata only. Its contents and values were not read, printed, or copied by
+  this audit.
+- Foundry/Anvil tooling is installed and preflighted, but strict archive replay
+  remains unrun in this worktree because no fork execution or secret-value
+  access was authorized.
+
+## Phase 1 Closure Validation - 2026-09-15
+
+- Actual `origin/main` is `d7e72f0` and its tracked `package.json` parses as
+  valid JSON. The shared `/home/Junayd/W3/MintBot` working directory still has
+  unresolved merge states, including `package.json`; this branch did not edit
+  or repair that checkout.
+- `pnpm ops:environment`, `pnpm ops:policy`, `pnpm ops:secret-boundary`,
+  `pnpm ops:negative-cases`, `pnpm ops:recovery-drill`, `pnpm lint`,
+  `pnpm typecheck`, and `pnpm build` pass natively in this worktree.
+- `pnpm test -- --reporter=dot` starts successfully here with `95 passed` and
+  `7 skipped`; the skipped tests are the two external fork suites and are not
+  release evidence. `pnpm test:fork -- --reporter=dot` records `7 skipped`.
+- Robinhood, Ethereum, and generic fork wrappers reject an unapproved source
+  path before opening a file or starting Anvil. The approved archive reference
+  was checked for readability by metadata only; its values were not read,
+  printed, copied, or logged.
+- Strict archive fork replay, Docker/service acceptance, branch-protection
+  verification, and release integration remain unrun because they require
+  owner-provisioned fixtures, infrastructure, or administration access.

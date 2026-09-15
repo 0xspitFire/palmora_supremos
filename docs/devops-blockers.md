@@ -63,7 +63,7 @@ secret-store contents.
       execution remains disabled pending integrated proof.
 - [x] Historical evidence records six archive-backed Robinhood scenarios using
       only the `ROBINHOOD_ARCHIVE_RPC` reference from
-      `Rets/MINT_BOT_SECRETS.env`; no endpoint value is copied here.
+      `~/W3/Rets/archive-rpc.env`; no endpoint value is copied here.
 - [ ] Run the strict archive launcher on the approved unattended native-WSL CI
       runner and retain its release evidence.
 - [x] Record a successful SeaDrop v1 public-drop test from an approved test
@@ -104,10 +104,28 @@ references and are not fleet evidence.
    no-configuration container health probe that fails closed. The updated
    workflow requires a native-WSL runner; it has not been rerun in this slice.
 - The required Ethereum three-wallet SeaDrop fork test and strict runner are
-  present, but remain pending approved archive access and fixture configuration;
-  the default deterministic suite records this as an external skip.
+   present, but remain pending approved archive access and fixture configuration
+   from `~/W3/Rets/archive-rpc.env`; required non-secret metadata is the fork
+   block, NFT address, fee-recipient address, and mint value in wei. The default
+   deterministic suite records this as an external skip.
 - Remote branch protection is an authenticated repository-admin operation. The
    branch and workflow can be pushed, but protection is not represented as code;
    the required-check mapping and redacted verification template are in
    `docs/branch-protection-evidence.md` and must be verified remotely after
    push.
+
+## Phase 1 closure audit - 2026-09-15
+
+- [x] Native preflight, policy, secret boundary, negative cases, lint,
+      typecheck, build, and ephemeral recovery drill pass in the isolated WSL
+      worktree.
+- [x] The approved `~/W3/Rets/archive-rpc.env` reference is present/readable by
+      metadata; its contents remain outside this repository and were not read
+      or logged by the audit.
+- [x] Fork wrappers reject non-approved source paths before file or Anvil
+      access and validate the four Ethereum non-secret fixture names.
+- [ ] Strict Robinhood/Ethereum fork replay remains unrun; no archive values or
+      fixture inputs were requested for this audit.
+- [ ] Remote runner, Docker acceptance, service supervision, branch protection,
+      Product Owner recovery approval, and live-readiness evidence remain
+      owner-controlled gates.

@@ -7,6 +7,14 @@ const SAFE_ENVIRONMENT = [
   'PATH', 'HOME', 'COREPACK_HOME', 'PNPM_HOME', 'TMPDIR', 'LANG', 'LC_ALL',
   'CI', 'NODE_ENV',
 ];
+const ALLOWED_OVERRIDES = new Set([
+  'MINT_BOT_FORK_REPLAY',
+  'ANVIL_RPC_URL',
+  'ANVIL_ETHEREUM_RPC_URL',
+  'ETHEREUM_SEADROP_NFT',
+  'ETHEREUM_SEADROP_FEE_RECIPIENT',
+  'ETHEREUM_SEADROP_MINT_VALUE_WEI',
+]);
 
 /**
  * Run one or more fork suites with a JSON report and reject skipped tests.
@@ -14,6 +22,9 @@ const SAFE_ENVIRONMENT = [
  * passed to Vitest; archive credentials remain in the launcher boundary.
  */
 export async function runStrictVitest({ root, vitest, config, files, environment = {} }) {
+  if (Object.keys(environment).some((name) => !ALLOWED_OVERRIDES.has(name))) {
+    throw new Error('Strict fork environment contains an unapproved variable');
+  }
   const reportDirectory = await mkdtemp(join(tmpdir(), 'mint-bot-vitest-'));
   const reportFile = join(reportDirectory, 'report.json');
   const childEnvironment = Object.fromEntries(
