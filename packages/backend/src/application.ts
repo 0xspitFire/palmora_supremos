@@ -4,6 +4,7 @@ import type { BackendStore } from './store.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { HealthService } from './health.js';
 import { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI } from './policy.js';
+import { liveRequestDigest } from './evidence.js';
 
 export interface CommandResponse<T> { id: string; state: string; nextAction: string; createdAt: string; retryable: boolean; blockingReason?: string; data?: T; }
 export interface CampaignInput { chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; }
@@ -20,16 +21,22 @@ export class BackendApplication {
     if (name === 'health') { const health = new HealthService(this.store).check(); return { id: 'health', state: health.state, nextAction: health.ready ? 'Monitor health' : 'Resolve blocking reasons', createdAt: now, retryable: false, data: health as T }; }
     if (name === 'kill') { const reason = String(input.reason ?? 'operator kill'); await this.coordinator.kill(reason); return { id: 'kill', state: 'Aborted', nextAction: 'Reconcile submitted work', createdAt: now, retryable: false }; }
     if (name === 'reconcile') { await this.coordinator.reconcile(); return { id: String(input.idempotencyKey ?? 'reconcile'), state: 'Reconciled', nextAction: 'Inspect run records', createdAt: now, retryable: false }; }
-    if (name === 'prepare' || name === 'resolve' || name === 'validate' || name === 'simulate' || name === 'dry-run') throw new Error(`${name.toUpperCase()}_ADAPTER_NOT_CONFIGURED`);
+    if (name === 'prepare' || name === 'resolve' || name === 'validate' || name === 'simulate') throw new Error(`${name.toUpperCase()}_ADAPTER_NOT_CONFIGURED`);
     if (name === 'approve') {
       const validated = input.validated as ValidatedCampaign | undefined;
       if (!validated) throw new Error('VALIDATED_CAMPAIGN_REQUIRED');
       const campaign = this.store.snapshot().campaigns.find(item => item.id === validated.campaign.id);
       if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
       const approvalKey = typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0 ? input.idempotencyKey : `approval:${campaign.id}:${validated.evidenceAt}`;
+      const wallets = [...(validated.wallets ?? [])];
+      const simulationIds = [...(validated.simulationIds ?? [])];
+      const requestDigest = liveRequestDigest(campaign, 'live', wallets, simulationIds);
       const existing = this.store.snapshot().events.find(event => event.type === 'campaign_approved' && event.data.idempotencyKey === approvalKey);
-      if (existing) return { id: existing.id, state: 'Approved', nextAction: 'Arm the approved campaign', createdAt: existing.at, retryable: false, data: existing.data as T };
-      const event = { id: `approval_${randomUUID()}`, type: 'campaign_approved', at: now, data: { campaignId: campaign.id, idempotencyKey: approvalKey, evidenceAt: validated.evidenceAt, simulationIds: validated.simulationIds ?? [] } };
+      if (existing) {
+        if (existing.data.requestDigest !== requestDigest) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+        return { id: existing.id, state: 'Approved', nextAction: 'Arm the approved campaign', createdAt: existing.at, retryable: false, data: existing.data as T };
+      }
+      const event = { id: `approval_${randomUUID()}`, type: 'campaign_approved', at: now, data: { campaignId: campaign.id, idempotencyKey: approvalKey, requestDigest, wallets, evidenceAt: validated.evidenceAt, simulationIds } };
       await this.store.transaction(state => { state.events.push(event); });
       return { id: event.id, state: 'Approved', nextAction: 'Arm the approved campaign', createdAt: now, retryable: false, data: event.data as T };
     }
@@ -39,18 +46,52 @@ export class BackendApplication {
       const mode = input.mode === 'live' ? 'live' : 'dry-run';
       if (mode === 'live') {
         const campaign = this.store.snapshot().campaigns.find(item => item.id === validated.campaign.id);
-        const approved = this.store.snapshot().events.some(event => event.type === 'campaign_approved' && event.data.campaignId === validated.campaign.id && (!input.approvalId || event.id === input.approvalId));
+        const approvalDigest = campaign ? liveRequestDigest(campaign, 'live', [...(validated.wallets ?? [])], [...(validated.simulationIds ?? [])]) : undefined;
+        const approved = this.store.snapshot().events.some(event => event.type === 'campaign_approved' && event.data.campaignId === validated.campaign.id && event.data.requestDigest === approvalDigest && (!input.approvalId || event.id === input.approvalId));
         if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
         if (!approved) throw new Error('APPROVAL_REQUIRED');
       }
       const run = await this.coordinator.arm(validated, mode, typeof input.idempotencyKey === 'string' ? input.idempotencyKey : undefined);
       return { id: run.id, state: run.state, nextAction: 'Execute run', createdAt: run.createdAt, retryable: false, data: run as unknown as T };
     }
+    if (name === 'dry-run') {
+      const validated = input.validated as ValidatedCampaign | undefined;
+      if (!validated || !Array.isArray(validated.wallets)) throw new Error('VALIDATED_CAMPAIGN_REQUIRED');
+      const campaign = this.store.snapshot().campaigns.find(item => item.id === validated.campaign.id);
+      if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
+      const wallets = validated.wallets.filter((wallet): wallet is string => typeof wallet === 'string');
+      const simulationIds = [...(validated.simulationIds ?? [])];
+      const idempotencyKey = typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0 ? input.idempotencyKey : `dry-run:${campaign.id}:${wallets.map(wallet => wallet.toLowerCase()).join(',')}`;
+      const requestDigest = liveRequestDigest(campaign, 'dry-run', wallets, simulationIds);
+      const priorCommand = this.store.snapshot().events.find(event => event.type === 'command_dry_run' && event.data.idempotencyKey === idempotencyKey);
+      if (priorCommand) {
+        if (priorCommand.data.requestDigest !== requestDigest) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+        return priorCommand.data.response as CommandResponse<T>;
+      }
+      const run = await this.coordinator.arm({ ...validated, campaign, wallets, simulationIds }, 'dry-run', idempotencyKey);
+      const result = await this.coordinator.execute(run.id, wallets);
+      const completed = this.store.snapshot().runs.find(item => item.id === run.id);
+      if (!completed) throw new Error('RUN_NOT_FOUND');
+      const response: CommandResponse<T> = { id: run.id, state: completed.state, nextAction: 'Inspect run summary', createdAt: now, retryable: false, data: result as T };
+      await this.store.transaction(state => { state.events.push({ id: `cmd_${randomUUID()}`, type: 'command_dry_run', runId: run.id, at: now, data: { idempotencyKey, requestDigest, response } }); });
+      return response;
+    }
     if (name === 'run' || name === 'execute') {
       if (typeof input.runId !== 'string' || !Array.isArray(input.wallets)) throw new Error('RUN_AND_WALLETS_REQUIRED');
-      const result = await this.coordinator.execute(input.runId, input.wallets.filter((wallet): wallet is string => typeof wallet === 'string'));
-      const run = this.store.snapshot().runs.find(item => item.id === input.runId); if (!run) throw new Error('RUN_NOT_FOUND');
-      return { id: input.runId, state: run.state, nextAction: ['Completed', 'Failed', 'Aborted'].includes(run.state) ? 'Inspect run' : 'Monitor run', createdAt: now, retryable: false, data: result as T };
+      const runId = input.runId;
+      const wallets = input.wallets.filter((wallet): wallet is string => typeof wallet === 'string');
+      const idempotencyKey = typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0 ? input.idempotencyKey : `run:${runId}:${wallets.map(wallet => wallet.toLowerCase()).join(',')}`;
+      const requestDigest = `${runId}:${wallets.map(wallet => wallet.toLowerCase()).join(',')}`;
+      const priorCommand = this.store.snapshot().events.find(event => event.type === 'command_run' && event.data.idempotencyKey === idempotencyKey);
+      if (priorCommand) {
+        if (priorCommand.data.requestDigest !== requestDigest) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+        return priorCommand.data.response as CommandResponse<T>;
+      }
+      const result = await this.coordinator.execute(runId, wallets);
+      const run = this.store.snapshot().runs.find(item => item.id === runId); if (!run) throw new Error('RUN_NOT_FOUND');
+      const response: CommandResponse<T> = { id: runId, state: run.state, nextAction: ['Completed', 'Failed', 'Aborted'].includes(run.state) ? 'Inspect run' : 'Monitor run', createdAt: now, retryable: false, data: result as T };
+      await this.store.transaction(state => { state.events.push({ id: `cmd_${randomUUID()}`, type: 'command_run', runId, at: now, data: { idempotencyKey, requestDigest, response } }); });
+      return response;
     }
     if (name === 'summary') {
       const state = this.store.snapshot();
@@ -61,8 +102,10 @@ export class BackendApplication {
     if (name === 'fund') {
       const state = this.store.snapshot();
       const run = typeof input.runId === 'string' ? state.runs.find(item => item.id === input.runId) : undefined;
+      if (input.runId !== undefined && !run) throw new Error('RUN_NOT_FOUND');
       const intent = run ? state.intents.find(item => item.id === run.intentId) : undefined;
       const wallets = Array.isArray(input.wallets) ? input.wallets.filter((wallet): wallet is string => typeof wallet === 'string') : intent?.wallets ?? [];
+      if (wallets.length === 0) throw new Error('FUNDING_WALLETS_REQUIRED');
       return { id: typeof input.runId === 'string' ? input.runId : 'fund', state: 'FundingReport', nextAction: 'Fund through the approved operator flow, then rerun health', createdAt: now, retryable: false, data: { wallets, autoFund: false, canonicalSource: 'wallet_balance', note: 'Backend never handles private keys or performs unattended funding' } as T };
     }
     throw new Error(`${String(name).toUpperCase()}_UNSUPPORTED`);

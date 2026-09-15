@@ -86,6 +86,30 @@ describe('backend Phase 1 blockers', () => {
     await coordinator.execute(run.id, ['wallet']); expect(prepare).toHaveBeenCalledOnce(); expect(execute).not.toHaveBeenCalled(); expect(store.snapshot().runs[0]?.state).toBe('Completed');
   });
 
+  it('runs the typed dry-run workflow and replays run commands by idempotency key', async () => {
+    const store = new DurableStore(); const campaign = await new BackendApplication(store, undefined as never).createCampaign({ chainId: 1, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, maxRunWei: 100n, dailyCapWei: 200n, gasCeilingWei: 40n, chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, endpointReference: 'ETHEREUM_RPC_REFERENCE' }, feePolicy });
+    const app = new BackendApplication(store, new ExecutionCoordinator(store, engine())); const validated = { campaign, wallets: ['wallet'], simulationIds: [], evidenceAt: '2026-08-28T00:00:00.000Z' };
+    const dryRun = await app.command('dry-run', { validated });
+    const dryReplay = await app.command('dry-run', { validated });
+    expect(dryRun.state).toBe('Completed');
+    expect(dryReplay).toEqual(dryRun);
+    const secondArm = await app.command('arm', { validated, mode: 'dry-run', idempotencyKey: 'second-arm' });
+    const firstRun = await app.command('run', { runId: secondArm.id, wallets: ['wallet'], idempotencyKey: 'run-once' });
+    const replay = await app.command('run', { runId: secondArm.id, wallets: ['wallet'], idempotencyKey: 'run-once' });
+    expect(replay).toEqual(firstRun);
+    expect((await app.command('summary', { runId: secondArm.id })).state).toBe('Summarized');
+    expect((await app.command('fund', { runId: secondArm.id })).data).toMatchObject({ wallets: ['wallet'], autoFund: false });
+    expect((await app.command('kill', { reason: 'test kill' })).state).toBe('Aborted');
+  });
+
+  it('binds approval idempotency to the approved wallet and simulation payload', async () => {
+    const store = new DurableStore(); const campaign = await new BackendApplication(store, undefined as never).createCampaign({ chainId: 1, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, maxRunWei: 100n, dailyCapWei: 200n, gasCeilingWei: 40n, chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, endpointReference: 'ETHEREUM_RPC_REFERENCE' }, feePolicy });
+    const app = new BackendApplication(store, new ExecutionCoordinator(store, engine())); const validated = { campaign, wallets: ['wallet-a'], simulationIds: ['simulation-a'], evidenceAt: '2026-08-28T00:00:00.000Z' };
+    const first = await app.command('approve', { validated, idempotencyKey: 'approval-once' }); const replay = await app.command('approve', { validated, idempotencyKey: 'approval-once' });
+    expect(replay.id).toBe(first.id);
+    await expect(app.command('approve', { validated: { ...validated, wallets: ['wallet-b'] }, idempotencyKey: 'approval-once' })).rejects.toThrow('IDEMPOTENCY_KEY_CONFLICT');
+  });
+
   it('rejects caller-asserted verification without authoritative evidence', async () => {
     const store = new ReadyStore(); const input = await readyLiveInput(store); await store.transaction(state => { state.chainEvidence = []; });
     await expect(new ExecutionCoordinator(store, engine()).arm(input, 'live')).rejects.toThrow('CHAIN_VERIFICATION_EVIDENCE_NOT_FOUND');
