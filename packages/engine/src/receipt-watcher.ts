@@ -29,6 +29,23 @@ export interface ReceiptWatcherOptions {
   finalityObserver?: FinalityObserver | ((txHash: Hash, blockNumber: bigint) => Promise<FinalityStage>);
 }
 
+export class ReceiptReorgedError extends Error {
+  public constructor(
+    public readonly txHash: Hash,
+    public readonly blockNumber: bigint,
+  ) {
+    super(`Receipt for ${txHash} is no longer canonical`);
+    this.name = 'ReceiptReorgedError';
+  }
+}
+
+export class ReceiptTimeoutError extends Error {
+  public constructor(public readonly txHash: Hash, public readonly waitedMs: number) {
+    super(`Timeout waiting for receipt of ${txHash} after ${waitedMs}ms`);
+    this.name = 'ReceiptTimeoutError';
+  }
+}
+
 type ResolvedReceiptWatcherOptions =
   Required<Omit<ReceiptWatcherOptions, 'finalityObserver'>> &
   Pick<ReceiptWatcherOptions, 'finalityObserver'>;
@@ -78,11 +95,19 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
                 ? this.options.finalityPolicy.stages[0]!
                 : this.options.finalityPolicy.settlementStage
             );
+            if (observation && 'canonical' in observation && !observation.canonical) {
+              throw new ReceiptReorgedError(txHash, receipt.blockNumber);
+            }
             if ((observation && !observation.ready) || finalityStage !== this.options.finalityPolicy.settlementStage) {
               pollInterval = this.options.initialPollMs;
               await sleep(pollInterval);
               continue;
             }
+            const componentReceipt = receipt as typeof receipt & {
+              l1Fee?: bigint;
+              l1DataFee?: bigint;
+              priorityFeeComponentWei?: bigint;
+            };
             return {
               txHash,
               status: receipt.status === 'success' ? 'success' : 'reverted',
@@ -90,6 +115,12 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
               blockHash: receipt.blockHash,
               gasUsed: receipt.gasUsed,
               effectiveGasPrice: receipt.effectiveGasPrice,
+              ...(componentReceipt.l1DataFee === undefined && componentReceipt.l1Fee === undefined
+                ? {}
+                : { l1DataFeeWei: componentReceipt.l1DataFee ?? componentReceipt.l1Fee }),
+              ...(componentReceipt.priorityFeeComponentWei === undefined
+                ? {}
+                : { priorityFeeComponentWei: componentReceipt.priorityFeeComponentWei }),
               confirmations,
               finalityStage,
             };
@@ -99,7 +130,8 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
           // since we know the tx is included
           pollInterval = this.options.initialPollMs;
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof ReceiptReorgedError) throw error;
         // Receipt not found yet — this is expected, keep polling
       }
 
@@ -113,9 +145,7 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
       );
     }
 
-    throw new Error(
-      `Timeout waiting for receipt of ${txHash} after ${this.options.maxWaitMs}ms`
-    );
+    throw new ReceiptTimeoutError(txHash, this.options.maxWaitMs);
   }
 }
 

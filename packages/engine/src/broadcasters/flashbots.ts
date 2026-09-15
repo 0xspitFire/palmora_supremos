@@ -64,16 +64,23 @@ export class FlashbotsBroadcaster implements Broadcaster {
           endpoint: this.relayUrl,
           latencyMs,
           success: true,
+          responseClass: 'accepted',
           providerReference: submitted.bundleHash,
         });
       } catch (err) {
         const latencyMs = performance.now() - startTime;
+        const error = err instanceof Error ? err.message : String(err);
+        const ambiguous = !/relay error|returned no bundle hash/i.test(error);
         results.push({
-          txHash: '0x' as Hash,
+          // Keep the deterministic transaction identity even when relay
+          // response handling fails; recovery must reconcile by hash and nonce.
+          txHash: keccak256(signedTxs[0]!),
           endpoint: this.relayUrl,
           latencyMs,
           success: false,
-          error: err instanceof Error ? err.message : String(err),
+          error,
+          responseClass: ambiguous ? 'ambiguous' : 'rejected',
+          ...(ambiguous ? { ambiguous: true } : {}),
         });
       }
     }

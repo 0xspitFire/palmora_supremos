@@ -1,10 +1,12 @@
 export { backupDatabase, migrate, openDatabase, pruneRawObservations, verifyBackup } from './database.js';
-export { SpendCapExceededError, SpendReservations } from './spend-reservations.js';
-export type { ExecutionReservationRequest, ReservationRequest, ReservationStatus } from './spend-reservations.js';
+export type { BackupVerification } from './database.js';
+export { ReservationConflictError, SpendCapExceededError, SpendReservations } from './spend-reservations.js';
+export type { ExecutionReservationRequest, ReservationRequest, ReservationStatus, SettlementComponents } from './spend-reservations.js';
 export { DurableRepository } from './repositories.js';
-export type { AuditEventRecord, BackupPolicyRecord, ChainVerificationRecord, ExecutionRecord, FeePolicyRecord, LifecycleEventRecord, ReceiptRecord, ReconciliationRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
+export { IdempotencyConflictError } from './repositories.js';
+export type { AuditEventRecord, BackupPolicyRecord, ChainVerificationRecord, ExecutionRecord, ExecutionRunRecord, FeePolicyRecord, LifecycleEventRecord, ReceiptRecord, ReconciliationRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
 export { ReadModels } from './read-models.js';
-export type { ActiveExecutionRow, ChainVerificationRow, OpportunityEvidenceRow, PendingReconciliationRow, ReadinessRow } from './read-models.js';
+export type { ActiveExecutionRow, ChainVerificationRow, DuplicateNonceIdentityRow, OpportunityEvidenceRow, OrphanReservationRow, PendingReconciliationRow, ReadinessRow, ReorgExposureRow, StaleSimulationRow } from './read-models.js';
 export { SqliteBackendStore } from './backend-store.js';
 export type { BackendStore } from './backend-store.js';
 export { BackendStateRepository } from './backend-state.js';

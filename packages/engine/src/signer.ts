@@ -31,6 +31,11 @@ const IV_LENGTH = 12;
 const SCRYPT_KEY_LENGTH = 32;
 const SCRYPT_OPTIONS = { N: 2 ** 18, r: 8, p: 1, maxmem: 256 * 1024 * 1024 };
 
+/** Replace decrypted key references before they leave the decryption scope. */
+export function zeroizePrivateKeyArray(privateKeys: Hex[] | undefined): void {
+  privateKeys?.fill('0x00' as Hex);
+}
+
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
@@ -171,37 +176,48 @@ export class LocalEncryptedSigner implements ISigner {
     const iv = Buffer.from(encryptedFile.iv, 'hex');
     const authTag = Buffer.from(encryptedFile.authTag, 'hex');
     const ciphertext = Buffer.from(encryptedFile.ciphertext, 'hex');
-    const kek = scryptSync(passphrase, salt, SCRYPT_KEY_LENGTH, SCRYPT_OPTIONS);
+    let kek: Buffer | undefined;
+    let decrypted: Buffer | undefined;
+    let privateKeys: Hex[] | undefined;
+    try {
+      kek = scryptSync(passphrase, salt, SCRYPT_KEY_LENGTH, SCRYPT_OPTIONS);
 
-    // Decrypt
-    const decipher = createDecipheriv(ALGORITHM, kek, iv);
-    decipher.setAuthTag(authTag);
-    const decrypted = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]);
+      // Decrypt
+      const decipher = createDecipheriv(ALGORITHM, kek, iv);
+      decipher.setAuthTag(authTag);
+      decrypted = Buffer.concat([
+        decipher.update(ciphertext),
+        decipher.final(),
+      ]);
 
-    const privateKeys = JSON.parse(decrypted.toString('utf8')) as Hex[];
+      privateKeys = JSON.parse(decrypted.toString('utf8')) as Hex[];
 
-    // Build wallet objects
-    if (!Array.isArray(privateKeys) || privateKeys.length !== encryptedFile.wallets.length || privateKeys.some((pk) => !/^0x[0-9a-f]{64}$/i.test(pk))) {
-      throw new Error('Invalid wallet file key material');
-    }
-    signer.wallets = privateKeys.map((pk, index) => {
-      const account = privateKeyToAccount(pk);
-      if (account.address.toLowerCase() !== encryptedFile.wallets[index]!.address.toLowerCase()) {
-        throw new Error(`Wallet metadata mismatch at index ${index}`);
+      // Build wallet objects. Private keys are only held for account creation;
+      // the encrypted file and signer API never expose them to callers.
+      if (!Array.isArray(privateKeys) || privateKeys.length !== encryptedFile.wallets.length || privateKeys.some((pk) => !/^0x[0-9a-f]{64}$/i.test(pk))) {
+        throw new Error('Invalid wallet file key material');
       }
-      return {
-        index,
-        address: account.address,
-        account,
-      };
-    });
-
-    // Zeroize intermediate buffers
-    kek.fill(0);
-    decrypted.fill(0);
+      signer.wallets = privateKeys.map((pk, index) => {
+        const account = privateKeyToAccount(pk);
+        if (account.address.toLowerCase() !== encryptedFile.wallets[index]!.address.toLowerCase()) {
+          throw new Error(`Wallet metadata mismatch at index ${index}`);
+        }
+        return {
+          index,
+          address: account.address,
+          account,
+        };
+      });
+    } finally {
+      // Cleanup is required on both successful and failed decryption paths.
+      kek?.fill(0);
+      decrypted?.fill(0);
+      salt.fill(0);
+      iv.fill(0);
+      authTag.fill(0);
+      ciphertext.fill(0);
+      zeroizePrivateKeyArray(privateKeys);
+    }
 
     return signer;
   }

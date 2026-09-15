@@ -16,6 +16,7 @@ export type {
   MintStrategy,
   Broadcaster,
   BroadcastResult,
+  BroadcastResponseClass,
   BroadcastOptions,
   Signer,
   WalletInfo,
@@ -28,6 +29,15 @@ export type {
   TransactionIntent,
   SpendReservation,
   SpendReservationProvider,
+  ReservationSettlementComponents,
+  ExecutionIdentity,
+  LifecycleRunRecord,
+  LifecycleIntentRecord,
+  LifecycleAttemptRecord,
+  LifecycleReceiptRecord,
+  LifecycleReconciliationRecord,
+  EngineLifecycleStore,
+  SignerFactory,
   ExecutionReservationRequest,
   ExecutionReservationStatus,
   SpendReservationsPort,
@@ -39,6 +49,7 @@ export { MintError, MintErrorType } from './types.js';
 
 // Engine
 export { MintEngine } from './mint-engine.js';
+export type { MintEngineOptions } from './mint-engine.js';
 
 // Chain config
 export { getChainConfig, getChainByName, getAllChains, resolveChainId, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS, OPENSEA_FEE_COLLECTOR } from './chains.js';
@@ -60,13 +71,14 @@ export {
 } from './broadcasters/index.js';
 
 // Signer
-export { LocalEncryptedSigner, generateAndEncryptWallets } from './signer.js';
+export { LocalEncryptedSigner, generateAndEncryptWallets, zeroizePrivateKeyArray } from './signer.js';
 
 // Nonce manager
 export { NonceManagerImpl } from './nonce-manager.js';
 
 // Receipt watcher
 export { ReceiptWatcherImpl } from './receipt-watcher.js';
+export { ReceiptReorgedError, ReceiptTimeoutError } from './receipt-watcher.js';
 export { EthereumFinalityObserver, RobinhoodFinalityObserver } from './finality-observer.js';
 export type { FinalityObserver, FinalityObservation, FinalitySources, RobinhoodFinalitySources } from './finality-observer.js';
 
@@ -77,9 +89,27 @@ export { ROBINHOOD_SEADROP_POSITIVE_FIXTURE, ROBINHOOD_EXTERNAL_FAILED_HASHES_AR
 export { evaluateRobinhoodVerification, applyRobinhoodVerification } from './robinhood-gate.js';
 export { correlateSequencerObservation } from './sequencer-correlation.js';
 export { reconcileTransaction } from './reconciliation.js';
+export { mapChainStatus } from './reconciliation.js';
+export {
+  LifecycleGateError,
+  assertDirectChainExecutionPolicy,
+  assertDurableReservationProvider,
+  assertSimulationFresh,
+  assertTimingWindow,
+  broadcastAttemptId,
+  selectBroadcastAttempt,
+  classifyBroadcastResult,
+  canonicalExecutionIdentity,
+  reservationCampaignId,
+  reconcileByHashAndNonce,
+  lifecycleStateForFinality,
+  shouldSettleReceipt,
+  actualSettlementComponents,
+} from './lifecycle.js';
+export type { ExecutionGate, SubmissionDisposition } from './lifecycle.js';
 export type { RobinhoodGateEvidence, RobinhoodGateResult } from './robinhood-gate.js';
 export type { SequencerObservation, RpcObservation, SequencerCorrelation } from './sequencer-correlation.js';
-export type { ReconciliationInput, ReconciliationAction } from './reconciliation.js';
+export type { ReconciliationInput, ReconciliationAction, ExactChainStatus } from './reconciliation.js';
 
 // Logger
 export { createLogger, childLogger } from './logger.js';

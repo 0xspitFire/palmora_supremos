@@ -10,8 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  environment:
+    runs-on: [self-hosted, linux, wsl]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - name: Verify native WSL toolchain
+        run: pnpm ops:environment
+
   verify:
-    runs-on: ubuntu-22.04
+    needs: environment
+    runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +45,11 @@ jobs:
         with:
           node-version: 20.19.1
           cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - name: Verify native WSL toolchain
+        run: pnpm ops:environment
       - name: Install SQLite backup tool
         run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes sqlite3
       - run: pnpm install --frozen-lockfile
@@ -52,7 +78,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   anvil:
-    runs-on: ubuntu-22.04
+    needs: environment
+    runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -65,23 +92,31 @@ jobs:
           cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.0.0
+          version: v1.8.1
+      - name: Verify native WSL toolchain
+        run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile
-      - name: Start local Anvil
-        shell: bash
-        run: |
-          anvil --chain-id 31337 --block-time 1 --host 127.0.0.1 > "$RUNNER_TEMP/anvil.log" 2>&1 &
-          for i in {1..30}; do curl --silent --fail -X POST http://127.0.0.1:8545 -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' && exit 0; sleep 1; done
-          cat "$RUNNER_TEMP/anvil.log"
-          exit 1
-      - name: Confirm Anvil smoke service
-        run: cast block-number --rpc-url http://127.0.0.1:8545
+      - name: Run strict archive fork replay
+        run: pnpm ops:fork-replay
 
   docker:
-    runs-on: ubuntu-22.04
+    needs: environment
+    runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.1
+          cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - name: Verify native WSL toolchain
+        run: pnpm ops:environment
       - name: Build production image
         run: docker build --tag mint-bot:ci .
       - name: Verify fail-closed container health
@@ -95,7 +130,8 @@ jobs:
 
   archive-fork-replay:
     if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'
-    runs-on: self-hosted
+    needs: environment
+    runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -108,13 +144,16 @@ jobs:
           cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.0.0
+          version: v1.8.1
+      - name: Verify native WSL toolchain
+        run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile
       - run: pnpm ops:fork-replay
 
   ethereum-fork-replay:
     if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'
-    runs-on: self-hosted
+    needs: environment
+    runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -127,6 +166,8 @@ jobs:
           cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.0.0
+          version: v1.8.1
+      - name: Verify native WSL toolchain
+        run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile
       - run: pnpm ops:ethereum-fork

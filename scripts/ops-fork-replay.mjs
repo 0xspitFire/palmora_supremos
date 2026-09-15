@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { runStrictVitest } from './strict-vitest.mjs';
 
 const root = resolve(process.cwd());
 const secretRoot = process.env.MINT_BOT_SECRETS_ROOT ?? [
@@ -9,7 +10,9 @@ const secretRoot = process.env.MINT_BOT_SECRETS_ROOT ?? [
 ].find((candidate) => existsSync(resolve(candidate, 'MINT_BOT_SECRETS.env'))) ?? resolve(root, 'Rets');
 
 // Read the archive source internally by approved reference name. Never print it.
-const archiveUrl = readReference(resolve(secretRoot, 'MINT_BOT_SECRETS.env'), 'ROBINHOOD_ARCHIVE_RPC');
+const secretFile = resolve(secretRoot, 'MINT_BOT_SECRETS.env');
+if (!secretFile.replaceAll('\\', '/').endsWith('Rets/MINT_BOT_SECRETS.env')) throw new Error('Archive source must be an approved Rets reference');
+const archiveUrl = readReference(secretFile, 'ROBINHOOD_ARCHIVE_RPC');
 const port = 8545;
 const host = '127.0.0.1';
 const forkBlock = Number(0x2c92c19n);
@@ -29,7 +32,13 @@ try {
   await Promise.race([waitForRpc(`http://${host}:${port}`), anvilFailure]);
   const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
   if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
-  const result = await run(process.execPath, [vitest, 'run', '--config', 'vitest.fork.config.ts'], root);
+  const result = await runStrictVitest({
+    root,
+    vitest,
+    config: resolve(root, 'vitest.fork.config.ts'),
+    files: [resolve(root, 'packages/engine/src/robinhood.fork.test.ts')],
+    environment: { MINT_BOT_FORK_REPLAY: 'true', ANVIL_RPC_URL: `http://${host}:${port}` },
+  });
   if (result !== 0) process.exitCode = result;
 } finally {
   anvil.kill('SIGTERM');
@@ -56,12 +65,4 @@ async function waitForRpc(url) {
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error('Local Anvil did not become ready on 127.0.0.1:8545');
-}
-
-function run(command, args, cwd) {
-  return new Promise((resolveCode) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit', windowsHide: true, env: { ...process.env, MINT_BOT_FORK_REPLAY: 'true', ANVIL_RPC_URL: 'http://127.0.0.1:8545' } });
-    child.on('error', () => resolveCode(1));
-    child.on('exit', (code) => resolveCode(code ?? 1));
-  });
 }

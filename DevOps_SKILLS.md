@@ -56,3 +56,24 @@ Receive gates from CTO/Engineering Lead, fixtures from Blockchain, health/recove
 - Fork jobs currently skip unless explicitly dispatched on an approved runner with fixtures; a green skipped job is not evidence.
 - `Rets/` contains ignored sensitive material and must never be copied or logged.
 - Robinhood monitoring must model direct sequencer submission, FCFS, staged posting, and Ethereum finality.
+
+## Dated refinements
+
+### 2026-09-14
+
+- `pnpm ops:environment` is the first gate for local and CI operations. It
+  requires a native WSL Linux kernel and a resolved worktree below
+  `/home/Junayd/W3/`, then verifies Node `20.19.1`, pnpm `9.15.4`, and
+  Foundry/Anvil `1.8.1` without reading a secret store.
+- Strict fork launchers must pass only the local Anvil endpoint and explicit
+  non-secret fixture metadata to Vitest. They must fail when the report
+  contains skipped or todo tests; a vanilla Anvil smoke check is not fork
+  evidence.
+- Health probes use secret-store paths and named references as configuration
+  boundaries, never as output. Endpoint, signer, notification, migration,
+  kill-switch, reconciliation, backup, and finality checks report safe reason
+  codes and redacted metadata only.
+- Service and recovery evidence must distinguish a proposed host contract from
+  an enabled orchestrator. No service is eligible for live execution until
+  startup reconciliation, encrypted backup/restore, rotation, log controls,
+  and branch protection are independently witnessed.

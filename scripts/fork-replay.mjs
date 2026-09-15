@@ -1,6 +1,7 @@
-import { readdir } from 'node:fs/promises';
+import { access, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { runStrictVitest } from './strict-vitest.mjs';
 
 const forkRpc = process.env.ROBINHOOD_ARCHIVE_RPC;
 const sourceReference = process.env.ARCHIVE_FORK_SOURCE ?? '';
@@ -33,15 +34,19 @@ try {
     } catch { /* wait for Anvil */ }
   }
   if (!ready) throw new Error('Anvil did not become ready for archive replay');
-  const runner = process.platform === 'win32' ? 'corepack.cmd' : 'corepack';
-  const testEnvironment = { ...process.env, ANVIL_RPC_URL: 'http://127.0.0.1:8545' };
-  delete testEnvironment.ROBINHOOD_ARCHIVE_RPC;
-  delete testEnvironment.ARCHIVE_FORK_SOURCE;
-  await new Promise((resolve, reject) => {
-    const child = spawn(runner, ['pnpm', 'exec', 'vitest', 'run', '--config', 'vitest.fork.config.ts'], { stdio: 'inherit', env: testEnvironment });
-    child.once('error', reject);
-    child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`Fork replay failed with exit code ${code}`)));
+  const testEnvironment = { MINT_BOT_FORK_REPLAY: 'true', ANVIL_RPC_URL: 'http://127.0.0.1:8545' };
+  const vitest = join(root, 'packages', 'engine', 'node_modules', 'vitest', 'vitest.mjs');
+  if (!await access(vitest).then(() => true).catch(() => false)) {
+    throw new Error('Engine Vitest binary is unavailable');
+  }
+  const code = await runStrictVitest({
+    root,
+    vitest,
+    config: join(root, 'vitest.fork.config.ts'),
+    files: ['packages/engine/src/robinhood.fork.test.ts', 'packages/engine/src/ethereum.fork.test.ts'],
+    environment: testEnvironment,
   });
+  if (code !== 0) throw new Error(`Fork replay failed with exit code ${code}`);
 } finally {
   anvil.kill();
 }
