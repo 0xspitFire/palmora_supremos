@@ -26,7 +26,7 @@
 | Approved artifact input | `/home/Junayd/W3/recovery-input/`; report hashes match Windows source and stale archive is checksum-equivalent |
 | Windows fallback | `C:\Users\hamid\AGravity\W3` remains intact as a fallback; its `Rets/` secrets were not copied into the active clone |
 | Old rsync copy | `~/W3/MintBot-rsync-preserved` is an intentional operational backup, not a usable checkout; it contains `Rets/` including the archive reference and must remain isolated from development |
-| Agent Manager | Completed specialist sessions are stopped; one idle CTO session remains. Seven orphaned worktree-only records remain as UI metadata, while no corresponding physical Git worktrees remain. |
+| Agent Manager | Completed specialist sessions are stopped; one idle CTO session remains. Stale specialist mappings have been removed, and no corresponding physical Git worktrees remain. |
 
 ## Surviving worktrees and branches
 
