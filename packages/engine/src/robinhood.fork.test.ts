@@ -19,18 +19,40 @@ const forkBlockText = process.env.ROBINHOOD_FORK_BLOCK;
 const nft = process.env.ROBINHOOD_SEADROP_NFT;
 const feeRecipient = process.env.ROBINHOOD_SEADROP_FEE_RECIPIENT;
 const mintValueWei = process.env.ROBINHOOD_SEADROP_MINT_VALUE_WEI;
-const mintPublicAbi = [{
+const mintSignedAbi = [{
   type: 'function',
-  name: 'mintPublic',
+  name: 'mintSigned',
   stateMutability: 'payable',
   inputs: [
     { name: 'nftContract', type: 'address' },
     { name: 'feeRecipient', type: 'address' },
     { name: 'minterIfNotPayer', type: 'address' },
     { name: 'quantity', type: 'uint256' },
+    {
+      name: 'mintParams',
+      type: 'tuple',
+      components: [
+        { name: 'mintPrice', type: 'uint256' },
+        { name: 'maxTotalMintableByWallet', type: 'uint256' },
+        { name: 'startTime', type: 'uint256' },
+        { name: 'endTime', type: 'uint256' },
+        { name: 'dropStageIndex', type: 'uint256' },
+        { name: 'maxTotalMintableByWalletPerStage', type: 'uint256' },
+        { name: 'feeBps', type: 'uint256' },
+        { name: 'restrictFeeRecipients', type: 'bool' },
+      ],
+    },
+    { name: 'salt', type: 'uint256' },
+    { name: 'signature', type: 'bytes' },
   ],
   outputs: [],
 }] as const;
+
+async function localEoaAccounts(): Promise<string[]> {
+  const accounts = await fork('eth_accounts') as string[];
+  const code = await Promise.all(accounts.map((account) => fork('eth_getCode', [account, 'latest'])));
+  return accounts.filter((_, index) => code[index] === '0x');
+}
 
 async function makeRpc(url: string): Promise<Rpc> {
   let id = 0;
@@ -93,15 +115,18 @@ describe.skipIf(!replayEnabled || !forkBlockText || !nft || !feeRecipient || !mi
     expect(tx?.input.length).toBeGreaterThan(10);
     expect(nft?.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.nftContract.toLowerCase());
     expect(BigInt(mintValueWei!)).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.mintAmountWei);
-    const decoded = decodeFunctionData({ abi: mintPublicAbi, data: tx.input as Hex });
-    expect(decoded.functionName).toBe('mintPublic');
+    const decoded = decodeFunctionData({ abi: mintSignedAbi, data: tx.input as Hex });
+    expect(decoded.functionName).toBe('mintSigned');
     expect(decoded.args?.[0].toLowerCase()).toBe(nft?.toLowerCase());
     expect(decoded.args?.[1].toLowerCase()).toBe(feeRecipient?.toLowerCase());
+    expect(decoded.args?.[3]).toBe(1n);
+    expect(decoded.args?.[6]).toMatch(/^0x[0-9a-fA-F]+$/);
+    expect((decoded.args?.[6] as string).length).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.signatureHexLength);
     expect(receipt?.from.toLowerCase()).toBe(ROBINHOOD_SEADROP_POSITIVE_FIXTURE.wallet.toLowerCase());
     expect(receipt?.blockNumber).toBe(historicalBlock);
   });
 
-  it('replays a failed public-mint call with an invalid value without writing state', async () => {
+  it('replays a failed signed-mint call with an invalid value without writing state', async () => {
     requireSetup();
     const tx = await fork('eth_getTransactionByHash', [ROBINHOOD_SEADROP_POSITIVE_FIXTURE.txHash]);
     expect(tx).not.toBeNull();
@@ -113,7 +138,7 @@ describe.skipIf(!replayEnabled || !forkBlockText || !nft || !feeRecipient || !mi
       from: tx.from,
       to: tx.to,
       data: tx.input,
-      value: '0x0',
+      value: '0x1',
     }, tx.blockNumber])).rejects.toThrow();
   });
 
@@ -133,7 +158,7 @@ describe.skipIf(!replayEnabled || !forkBlockText || !nft || !feeRecipient || !mi
 
   it('records a replacement outcome using local Anvil accounts only', async () => {
     requireSetup();
-    const accounts = await fork('eth_accounts') as string[];
+    const accounts = await localEoaAccounts();
     expect(accounts.length).toBeGreaterThan(0);
     const from = accounts[0];
     await fork('evm_setAutomine', [false]);
@@ -153,7 +178,8 @@ describe.skipIf(!replayEnabled || !forkBlockText || !nft || !feeRecipient || !mi
 
   it('replays receipt disappearance across an Anvil reorg', async () => {
     requireSetup();
-    const accounts = await fork('eth_accounts') as string[];
+    const accounts = await localEoaAccounts();
+    expect(accounts.length).toBeGreaterThan(0);
     const from = accounts[0];
     const snapshot = await fork('evm_snapshot');
     const gasPrice = await fork('eth_gasPrice');

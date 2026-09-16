@@ -87,3 +87,4 @@ Receive chain priority/policy from Product Manager and CTO. Give Backend transac
 
 - A strict Robinhood fixture must accept decimal zero for `ROBINHOOD_SEADROP_MINT_VALUE_WEI`; zero is valid and required for a FREE mint, but it is never an execution authorization.
 - The scheduled fixture and code-owned positive evidence must agree on the authoritative transaction identity and decoded mint arguments before a strict replay can be treated as release evidence.
+- The verified replacement transaction is `mintSigned`, not the four-argument `mintPublic` strategy path; record that distinction explicitly and do not treat signed-mint compatibility as public-mint execution approval.

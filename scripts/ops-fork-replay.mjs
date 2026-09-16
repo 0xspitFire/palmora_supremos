@@ -23,6 +23,7 @@ const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', [
   '--chain-id', '4663',
   '--host', anvilHost,
   '--port', String(anvilPort),
+  '--mnemonic-random',
   '--silent',
 ], { cwd: root, stdio: 'ignore', windowsHide: true, env: toolEnvironment() });
 const anvilFailure = new Promise((_, reject) => {
@@ -40,6 +41,7 @@ try {
     'run',
     '--config', 'vitest.fork.config.ts',
     'packages/engine/src/robinhood.fork.test.ts',
+    '--reporter=verbose',
     '--reporter=json',
     '--outputFile', reportFile,
   ], root, {

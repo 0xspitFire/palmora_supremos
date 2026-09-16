@@ -66,8 +66,9 @@ secret-store contents.
       `~/W3/Rets/archive-rpc.env`; no endpoint value is copied here.
 - [ ] Run the strict archive launcher on the approved unattended/self-hosted CI
       runner and retain its release evidence.
-- [x] Record a successful SeaDrop v1 public-drop test from an approved test
-      wallet with provenance and reconciliation evidence at the evidence level.
+- [x] Record a successful SeaDrop v1 FREE signed-mint characterization from an
+      approved test wallet with provenance and reconciliation evidence at the
+      evidence level. This does not substitute for public-mint strategy proof.
 - [x] Demonstrate FREE mint value exposure `<= 2x` the configured priority-fee
       component, with independent worst-case L2 and L1 gas reserves in unit and
       database policy tests.
@@ -120,9 +121,9 @@ references and are not fleet evidence.
   on the clean native-WSL candidate using the approved archive reference and
   scheduled fixture metadata; the default deterministic suite still records
   fork tests as an external skip when the launcher is not invoked.
-- The Robinhood strict launcher passed locally with explicit non-secret fixture
-  overrides. The scheduled fixture must provide effective values for all four
-  fields before its unattended zero-skip result can be claimed.
+- The Robinhood strict launcher passed locally from the scheduled non-secret
+  fixture with six tests and zero skips. The approved unattended/self-hosted
+  runner must still retain equivalent release evidence.
 - Remote branch protection is an authenticated repository-admin operation. The
    branch and workflow can be pushed, but protection is not represented as code;
    the required-check mapping and redacted verification template are in

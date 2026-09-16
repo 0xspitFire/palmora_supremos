@@ -77,7 +77,7 @@ const CHAINS: Record<SupportedChainId, ChainConfig> = {
 // ── Robinhood Chain ───────────────────────────────────────
   // Characterization evidence (2026-08-26). Chain identity, endpoint identity,
   // FCFS ordering, EIP-1559 semantics, three-stage finality, absence of private
-  // orderflow, and a live SeaDrop-v1 public-drop mint are recorded below. LIVE
+  // orderflow, and a live SeaDrop-v1 signed FREE mint are recorded below. LIVE
   // EXECUTION is still DISABLED pending the fork + negative-case SeaDrop suite.
 4663: {
     chainId: 4663,
@@ -96,9 +96,9 @@ const CHAINS: Record<SupportedChainId, ChainConfig> = {
       acceptedBy: 'Junayd (Product Owner)',
       acceptedAt: '2026-08-26T00:00:00.000Z',
       reportRef: './Robinhood Technical Report',
-      liveMintEvidenceRef: 'tx 0xf24e0c85f6f4fa71d012b6ffbfbc871b901fb1e949635799d1821716013d891e',
-      liveMintTxHash: '0xf24e0c85f6f4fa71d012b6ffbfbc871b901fb1e949635799d1821716013d891e',
-      notes: 'Verified live: chainId 0x1237 (4663); SeaDrop singleton 0x00005EA00Ac477B1030CE78506496e8C2dE24bf5 deployed; NFT 0x45ce024f314a2f74c63a8a51743677df97a8d99e; mintPublic qty 1, amount 0.00009 ETH, fee bps 1000, token 3477 ownerOf=test wallet; EIP-1559 gasUsed 121501, block 0x2c92c19; receipt status 0x1. External failed-hash evidence for other wallets is documentation-only and is not used as fleet fixtures. Execution still blocked pending fork + negative-case suite.',
+      liveMintEvidenceRef: 'tx 0x790edf4d04c66e3d3ea1e6ed9c2a81466962824159f247a95f1b3503c30ac158',
+      liveMintTxHash: '0x790edf4d04c66e3d3ea1e6ed9c2a81466962824159f247a95f1b3503c30ac158',
+      notes: 'Verified archive-backed FREE characterization: chainId 0x1237 (4663); SeaDrop singleton 0x00005EA00Ac477B1030CE78506496e8C2dE24bf5; NFT 0x8572DC3c69Eb735C6Dccc1E89d087820e51361Af; mintSigned qty 1 with zero transaction value, signed args and fee recipient 0x0000a26b00c1F0DF003000390027140000fAa719; token 517 ownerOf=verified wallet 0xecc7bc61bf2eac93fd62d9e6bf7f57f3b497c58f; block 0x3cc90a5; receipt status 0x1. Execution remains blocked pending the integrated negative-case, durable reconciliation, finality, and safety gates.',
     },
 executionEnabled: false,
   },

@@ -1,19 +1,21 @@
 import type { Address, Hash } from 'viem';
 
-/** Positive fixture supplied by the Product Owner; external failed hashes are excluded. */
+/** Authoritative FREE fixture independently verified against the approved archive fork. */
 export const ROBINHOOD_SEADROP_POSITIVE_FIXTURE = {
   chainId: 4663 as const,
-  txHash: '0xf24e0c85f6f4fa71d012b6ffbfbc871b901fb1e949635799d1821716013d891e' as Hash,
+  txHash: '0x790edf4d04c66e3d3ea1e6ed9c2a81466962824159f247a95f1b3503c30ac158' as Hash,
   seaDropAddress: '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5' as Address,
-  nftContract: '0x45ce024f314a2f74c63a8a51743677df97a8d99e' as Address,
-  wallet: '0x81c104DcB898416FD4f81eAd091DbA5b8f46F37A' as Address,
-  tokenId: 3477n,
+  nftContract: '0x8572DC3c69Eb735C6Dccc1E89d087820e51361Af' as Address,
+  wallet: '0xecc7bc61bf2eac93fd62d9e6bf7f57f3b497c58f' as Address,
+  tokenId: 517n,
   quantity: 1,
-  blockNumber: 0x2c92c19n,
-  mintAmountWei: 0x51dac207a000n,
+  blockNumber: 0x3cc90a5n,
+  mintAmountWei: 0n,
+  transactionType: 'mintSigned' as const,
+  signatureHexLength: 132,
   receiptStatus: 'success' as const,
-  source: 'Product Owner supplied live transaction evidence' as const,
-  provenance: 'Approved wallet -> SeaDrop v1 public mint -> Robinhood 4663 receipt' as const,
+  source: 'Product Owner supplied authoritative FREE archive transaction evidence' as const,
+  provenance: 'Approved archive fork -> SeaDrop v1 signed FREE mint -> Robinhood 4663 receipt' as const,
 } as const;
 
 /** External failed transaction hashes are documentation/revert references only. */
