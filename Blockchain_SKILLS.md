@@ -82,3 +82,8 @@ Receive chain priority/policy from Product Manager and CTO. Give Backend transac
 - Historical Ethereum fork evidence is reviewable but must be rerun from the clean candidate with `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC`, scheduled fixture metadata, fresh code-free senders, and zero skipped or todo tests.
 - Scheduled Robinhood fixture metadata is characterization input only. Empty or missing effective values fail closed before archive access; they never become an execution authorization or a substitute for Product Owner approval.
 - Strict fork launchers must run only their target test file, reject skipped/todo JSON results, and keep archive references outside logs, child environments, commits, and external transactions.
+
+## 2026-09-16 FREE Robinhood replay refinement
+
+- A strict Robinhood fixture must accept decimal zero for `ROBINHOOD_SEADROP_MINT_VALUE_WEI`; zero is valid and required for a FREE mint, but it is never an execution authorization.
+- The scheduled fixture and code-owned positive evidence must agree on the authoritative transaction identity and decoded mint arguments before a strict replay can be treated as release evidence.

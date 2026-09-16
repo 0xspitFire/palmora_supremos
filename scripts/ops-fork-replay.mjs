@@ -101,7 +101,7 @@ function readAddress(name) {
 
 function readUint(name) {
   const value = process.env[name] ?? fixtureValues[name];
-  if (!value || !/^\d+$/.test(value) || BigInt(value) <= 0n) throw new Error(`${name} is required`);
+  if (!value || !/^\d+$/.test(value)) throw new Error(`${name} is required`);
   return value;
 }
 
