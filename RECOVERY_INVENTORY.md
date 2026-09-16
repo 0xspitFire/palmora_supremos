@@ -14,9 +14,9 @@
 
 | Item | State |
 | --- | --- |
-| Main branch | native WSL clone at `~/W3/MintBot`, synchronized with `origin/main` at `57e1e95` |
+| Main branch | native WSL clone at `~/W3/MintBot`, synchronized with `origin/main` at `550e4b7` |
 | Main repair | `public-mempool.ts` restored from canonical implementation and committed as `84451d0` |
-| Canonical Phase 1 source | `phase1-integration` plus reviewed closure patches, merged into `main` through candidate `57e1e95` |
+| Canonical Phase 1 source | `phase1-integration` plus reviewed closure patches, merged into `main` at `550e4b7` |
 | Canonical PR | PR #6, merged; isolated candidate resolved its single `packages/engine/src/types.ts` conflict |
 | CTO PR | PR #7, merged from `cto-restored`; duplicate `cto-2` checkout removed and branch retained |
 | Git integrity | Reachable objects repaired from a fresh GitHub mirror; no reachable object is missing |
@@ -32,9 +32,9 @@
 
 | Source/location | Role | Branch / commit | Classification | Unique work and conflicts | Validation | Cleanup |
 | --- | --- | --- | --- | --- | --- | --- |
-| Project root | Main | `main` / `57e1e95` | Integrated Phase 1 baseline, not live-ready | CTO source of truth, Database 015/identity, Backend reservation metadata, Blockchain Robinhood evidence, Lead closure status, and Frontend read-model contract are published. Robinhood execution remains gated. | Main install, typecheck, build, lint, secret boundary, policy, negative cases, recovery drill, and 151 tests pass. Strict Robinhood replay passes 6 tests and strict Ethereum replay passes. `Fixtures/` remains intentionally untracked. | Keep. Synchronized with `origin/main`. |
-| `.kilo/recovered-phase1-integration` (removed) | Integration | `phase1-integration` / `cc6aee2` | Integrated canonical source | Its 118-file Phase 1 delta and reviewed closure patches are included in `main` through `57e1e95`; production runtime evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 151 tests pass. | Worktree removed; branch retained. |
-| `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` (removed) | Integration candidate | `recovery/cto-main-candidate` / `57e1e95` | Merged into main | Candidate contains current `origin/main` plus Database, Backend, Blockchain, Lead, Frontend, and CTO closure patches. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, 151 tests, strict Robinhood replay, and strict Ethereum replay pass. | Worktree removed; branch retained. |
+| Project root | Main | `main` / `550e4b7` | Integrated Phase 1 baseline, not live-ready | CTO source of truth, Database 015/identity, Backend reservation metadata, Blockchain Robinhood evidence, Lead closure status, and Frontend read-model contract are published. Robinhood execution remains gated. | Main install, typecheck, build, lint, secret boundary, policy, negative cases, recovery drill, and 151 tests pass. Strict Robinhood replay passes 6 tests and strict Ethereum replay passes. `Fixtures/` remains intentionally untracked. | Keep. Synchronized with `origin/main`. |
+| `.kilo/recovered-phase1-integration` (removed) | Integration | `phase1-integration` / `cc6aee2` | Integrated canonical source | Its 118-file Phase 1 delta and reviewed closure patches are included in `main` at `550e4b7`; production runtime evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 151 tests pass. | Worktree removed; branch retained. |
+| `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` (removed) | Integration candidate | `recovery/cto-main-candidate` / `57e1e95` | Merged into main | Candidate contained current `origin/main` plus Database, Backend, Blockchain, Lead, Frontend, and CTO closure patches. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, 151 tests, strict Robinhood replay, and strict Ethereum replay passed. | Worktree and local ref removed; content is in `main`, remote history, and recovery bundle. |
 | `.kilo/recovered-backend-engineer` (removed) | Backend | `backend-engineer` / `370d7c0` | Already integrated | Earlier Backend tip is an ancestor of canonical work; closure commits were cherry-picked as reviewed equivalents. | Worktree clean; published remotely. | Worktree removed; branch retained. |
 | `.kilo/recovered-blockchain-engineer` (removed) | Blockchain | `blockchain-engineer` / `157368e` | Already integrated by equivalent commit | Earlier tip plus final Robinhood commits are represented in `main`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
 | `.kilo/recovered-database-engineer` (removed) | Database | `database-engineer` / `f84bb64` | Already integrated by reviewed closure patches | Database 015 and wallet-scoped identity are represented in `main` as equivalent cherry-picked commits. | Worktree clean; published remotely. | Worktree removed; branch retained. |
@@ -125,7 +125,7 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 
 ### Current `main`
 
-- The tracked tree is identical to the validated `recovery/phase1-main-candidate` at `f72d83a`, with only the recovery-inventory update added afterward.
+- The tracked tree is the validated `recovery/cto-main-candidate` at `57e1e95` plus the final recovery-inventory and CTO source-of-truth updates, published as `550e4b7`.
 - `pnpm install --frozen-lockfile`: pass.
 - `pnpm typecheck`: pass after forced reconciliation of generated dependencies.
 - `pnpm build`: pass.
