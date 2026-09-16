@@ -74,3 +74,11 @@ Receive chain priority/policy from Product Manager and CTO. Give Backend transac
 - Require a decimal fork block at or after the approved positive fixture, a loopback Anvil URL, and explicit NFT, fee-recipient, and mint-value fixture inputs. The positive transaction hash and wallet remain code-owned evidence constants.
 - Fork tests must select only local unlocked accounts whose `eth_getCode` result is exactly `0x`; never assume the first RPC account is an EOA.
 - Negative fork probes for price drift, allocation/sold-out bounds, and insufficient funds must use `eth_call` or `eth_estimateGas` so no external transaction is submitted.
+- Ethereum strict replay uses only `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC` and the scheduled `Fixtures/ethereum-seadrop-fixture.env` metadata, with local Anvil fixed to loopback port 8546 and chain ID 1.
+- Robinhood strict replay uses `~/W3/Rets/archive-rpc.env:ROBINHOOD_ARCHIVE_RPC` and `Fixtures/robinhood-testmint-fixture.env`; strict wrappers must select only their target fork test file and fail if the JSON report contains skipped or todo tests.
+
+## 2026-09-16 CTO/Lead closure refinements
+
+- Historical Ethereum fork evidence is reviewable but must be rerun from the clean candidate with `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC`, scheduled fixture metadata, fresh code-free senders, and zero skipped or todo tests.
+- Scheduled Robinhood fixture metadata is characterization input only. Empty or missing effective values fail closed before archive access; they never become an execution authorization or a substitute for Product Owner approval.
+- Strict fork launchers must run only their target test file, reject skipped/todo JSON results, and keep archive references outside logs, child environments, commits, and external transactions.

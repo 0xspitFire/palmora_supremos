@@ -113,8 +113,16 @@ references and are not fleet evidence.
    accepts `~/W3/Rets/archive-rpc.env` without `MINT_BOT_SECRETS_ROOT`, but still
    requires the archive reference and all non-secret fixture inputs on an
    approved native-WSL runner.
-- Docker build/runtime proof passes in recorded remote evidence, but the updated
-   workflow has not been rerun in this closure slice.
+- Docker build/runtime proof passes in remote CI: the production image builds and
+  the no-configuration container health probe fails closed. Docker is not
+  installed on the local Windows host, so no local Docker command was run.
+- The required Ethereum three-wallet SeaDrop fork test and strict runner passed
+  on the clean native-WSL candidate using the approved archive reference and
+  scheduled fixture metadata; the default deterministic suite still records
+  fork tests as an external skip when the launcher is not invoked.
+- The Robinhood strict launcher passed locally with explicit non-secret fixture
+  overrides. The scheduled fixture must provide effective values for all four
+  fields before its unattended zero-skip result can be claimed.
 - Remote branch protection is an authenticated repository-admin operation. The
    branch and workflow can be pushed, but protection is not represented as code;
    the required-check mapping and redacted verification template are in

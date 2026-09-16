@@ -16,7 +16,8 @@ fixture, or substitute for the accepted characterization gate.
 
 ## Strict replay inputs
 
-The strict local-Anvil wrapper requires these non-secret fixture inputs:
+The strict local-Anvil wrapper reads these non-secret fixture inputs from
+`Fixtures/robinhood-testmint-fixture.env` when they are not explicitly set:
 
 - `ROBINHOOD_FORK_BLOCK`: decimal archive fork block at or after the approved positive fixture block.
 - `ANVIL_ROBINHOOD_RPC_URL`: loopback HTTP URL for the local Anvil instance; it defaults to `http://127.0.0.1:8545`.
@@ -28,7 +29,13 @@ The launcher additionally requires an archive reference key named
 `ROBINHOOD_ARCHIVE_RPC` in `~/W3/Rets/archive-rpc.env`. The key value is read
 only by the launcher to start local Anvil; it is not logged or placed in the
 Vitest child environment. `MINT_BOT_FORK_REPLAY=true` is set internally for the
-local child run. `ANVIL_BIN` is optional and defaults to `anvil`.
+local child run. `ANVIL_BIN` is optional and defaults to `anvil`. Strict replay
+must run the six Robinhood scenarios with zero skipped or todo tests.
+
+The wrapper has been exercised with explicit non-secret fixture overrides and
+passed all six scenarios on local Anvil. The scheduled fixture file must have
+effective non-empty values for the required fields before an unattended
+zero-skip replay is claimed; missing values fail closed before archive access.
 
 The approved transaction hash, wallet, SeaDrop singleton, and fixture block are
 code-owned evidence constants, so they are not additional environment inputs.
