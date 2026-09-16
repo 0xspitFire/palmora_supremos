@@ -14,9 +14,9 @@
 
 | Item | State |
 | --- | --- |
-| Main branch | native WSL clone at `~/W3/MintBot`, synchronized with `origin/main`; current tip is the latest recovery-inventory commit |
+| Main branch | native WSL clone at `~/W3/MintBot`, synchronized with `origin/main` at `57e1e95` |
 | Main repair | `public-mempool.ts` restored from canonical implementation and committed as `84451d0` |
-| Canonical Phase 1 source | `phase1-integration` at `cc6aee2`, merged into `main` through candidate `f72d83a` |
+| Canonical Phase 1 source | `phase1-integration` plus reviewed closure patches, merged into `main` through candidate `57e1e95` |
 | Canonical PR | PR #6, merged; isolated candidate resolved its single `packages/engine/src/types.ts` conflict |
 | CTO PR | PR #7, merged from `cto-restored`; duplicate `cto-2` checkout removed and branch retained |
 | Git integrity | Reachable objects repaired from a fresh GitHub mirror; no reachable object is missing |
@@ -26,24 +26,24 @@
 | Approved artifact input | `/home/Junayd/W3/recovery-input/`; report hashes match Windows source and stale archive is checksum-equivalent |
 | Windows fallback | `C:\Users\hamid\AGravity\W3` remains intact as a fallback; its `Rets/` secrets were not copied into the active clone |
 | Old rsync copy | `~/W3/MintBot-rsync-preserved` is an intentional operational backup, not a usable checkout; it contains `Rets/` including the archive reference and must remain isolated from development |
-| Agent Manager | All previously stale sessions were stopped; ten orphaned worktree-only records remain, plus one newly created idle Blockchain session. No stale physical Git worktrees remain. |
+| Agent Manager | Completed specialist sessions are stopped; one idle CTO session remains. Seven orphaned worktree-only records remain as UI metadata, while no corresponding physical Git worktrees remain. |
 
 ## Surviving worktrees and branches
 
 | Source/location | Role | Branch / commit | Classification | Unique work and conflicts | Validation | Cleanup |
 | --- | --- | --- | --- | --- | --- | --- |
-| Project root | Main | `main` / current `origin/main` tip | Integrated Phase 1 baseline, not live-ready | Broadcaster repair, recovery documentation, Backend, Database, hardened engine, CI, and operations stack are now published. Robinhood execution remains gated. | Main install, typecheck, build, lint, secret boundary, policy, negative cases, recovery drill, and 95 tests pass. Seven fork tests skip; strict fork replay fails without Anvil. Clean-checkout is intentionally blocked by preserved untracked recovery artifacts. | Keep. Synchronized with `origin/main`. |
-| `.kilo/recovered-phase1-integration` (removed) | Integration | `phase1-integration` / `cc6aee2` | Integrated canonical source | Its 118-file Phase 1 delta is included in `main` through merge candidate `f72d83a`; fork/runtime release evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip without Anvil/fixtures. | Worktree removed; branch retained. |
-| `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` (removed) | Integration candidate | `recovery/phase1-main-candidate` / `f72d83a` | Merged into main | Candidate contains `main` plus `phase1-integration`; both `CHAIN_NOT_VERIFIED` and `INVALID_CONFIG` are retained. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 95 tests pass. Seven fork tests skip; health and strict fork launcher fail closed without production configuration. | Worktree removed; branch retained. |
-| `.kilo/recovered-backend-engineer` (removed) | Backend | `backend-engineer` / `370d7c0` | Already integrated | Tip is an ancestor of `phase1-integration` and therefore `main`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
-| `.kilo/recovered-blockchain-engineer` (removed) | Blockchain | `blockchain-engineer` / `157368e` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `b99ac68`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
-| `.kilo/recovered-database-engineer` (removed) | Database | `database-engineer` / `f84bb64` | Already integrated by equivalent commit | Tip is patch-equivalent to canonical `c6e1106`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
-| `.kilo/recovered-devops-engineer` (removed) | DevOps | `devops-engineer` / `d62bf48` | Integrated with context adaptation | Canonical `2f1558c` carries the same 78-line runtime/recovery change adapted to the integrated stack. | Worktree clean; published remotely. | Worktree removed; branch retained. |
-| `.kilo/recovered-engineers` (removed) | Engineering Lead | `engineers` / `b94180d` | Superseded integration line | `b94180d` is patch-equivalent to canonical `f45ccfe`. Report-only `a71d9bc` is not in canonical history, but canonical blocker/status documents supersede it. Previously accidental deletions were restored; worktree is clean. | Published remotely after object refetch. | Worktree removed; branch retained. |
-| `.kilo/recovered-cto` (removed) | CTO | `cto-restored` / `b29fdd0` | Already integrated | Tip is an ancestor of canonical Phase 1 and contains `CTO_Brief.md`; PR #7 is merged. | Worktree clean; published remotely. | Worktree removed; branch retained. |
-| `.kilo/worktrees/cto-2` (removed) | CTO | `cto-2` / `b29fdd0` | Exact duplicate | Same commit and tree as merged `cto-restored`; Agent Manager associated it with PR #7. | Worktree clean. | Worktree removed; branch retained. |
-| `.kilo/recovered-frontend-engineer` (removed) | Frontend | `frontend-engineer` / `43ad380` | Duplicate baseline | Initial commit only; no frontend implementation, consistent with Phase 1 scope. | Worktree clean; published remotely. | Worktree removed; branch retained. |
-| `.kilo/recovered-product-design-spec` (removed) | Product Design | `product-design-spec` / `43ad380` | Duplicate baseline | Branch has no design-spec commit. The historical design file survives in the stale archive. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| Project root | Main | `main` / `57e1e95` | Integrated Phase 1 baseline, not live-ready | CTO source of truth, Database 015/identity, Backend reservation metadata, Blockchain Robinhood evidence, Lead closure status, and Frontend read-model contract are published. Robinhood execution remains gated. | Main install, typecheck, build, lint, secret boundary, policy, negative cases, recovery drill, and 151 tests pass. Strict Robinhood replay passes 6 tests and strict Ethereum replay passes. `Fixtures/` remains intentionally untracked. | Keep. Synchronized with `origin/main`. |
+| `.kilo/recovered-phase1-integration` (removed) | Integration | `phase1-integration` / `cc6aee2` | Integrated canonical source | Its 118-file Phase 1 delta and reviewed closure patches are included in `main` through `57e1e95`; production runtime evidence remains incomplete. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, and 151 tests pass. | Worktree removed; branch retained. |
+| `C:\Users\hamid\AppData\Local\Temp\kilo\w3-phase1-main-candidate` (removed) | Integration candidate | `recovery/cto-main-candidate` / `57e1e95` | Merged into main | Candidate contains current `origin/main` plus Database, Backend, Blockchain, Lead, Frontend, and CTO closure patches. | Clean checkout; lint, secret boundary, policy, negative cases, recovery drill, typecheck, build, 151 tests, strict Robinhood replay, and strict Ethereum replay pass. | Worktree removed; branch retained. |
+| `.kilo/recovered-backend-engineer` (removed) | Backend | `backend-engineer` / `370d7c0` | Already integrated | Earlier Backend tip is an ancestor of canonical work; closure commits were cherry-picked as reviewed equivalents. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-blockchain-engineer` (removed) | Blockchain | `blockchain-engineer` / `157368e` | Already integrated by equivalent commit | Earlier tip plus final Robinhood commits are represented in `main`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-database-engineer` (removed) | Database | `database-engineer` / `f84bb64` | Already integrated by reviewed closure patches | Database 015 and wallet-scoped identity are represented in `main` as equivalent cherry-picked commits. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-devops-engineer` (removed) | DevOps | `devops-engineer` / `d62bf48` | Integrated with context adaptation | Canonical DevOps gates are already in `main`; no later unique DevOps code remained. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-engineers` (removed) | Engineering Lead | `engineers` / `b94180d` | Superseded integration line | Reviewed Lead closure status commits are represented in `main`; the old report-only line is retained only for provenance. | Published remotely after object refetch. | Worktree removed; branch retained. |
+| `.kilo/recovered-cto` (removed) | CTO | `cto-restored` / `b29fdd0` | Already integrated | CTO brief is included in canonical history; WSL source-of-truth continuation is published through `cto-wsl`. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/worktrees/cto-2` (removed) | CTO | `cto-2` / `b29fdd0` | Exact duplicate | Same commit and tree as merged `cto-restored`; no unique CTO work remained. | Worktree clean. | Worktree removed; branch retained. |
+| `.kilo/recovered-frontend-engineer` (removed) | Frontend | `frontend-engineer` / `43ad380` | Contract-only Phase 1 work | Phase 2 read-model contract is now published; no Phase 1 web UI was added. | Worktree clean; published remotely. | Worktree removed; branch retained. |
+| `.kilo/recovered-product-design-spec` (removed) | Product Design | `product-design-spec` / `43ad380` | Contract-only Phase 1 work | Product Design contract is now published through the integrated branch; web UI remains deferred. | Worktree clean; published remotely. | Worktree removed; branch retained. |
 | Local refs removed | Misc. stale branches | `chemical-bittersweet`, `cto`, `cto-2`, `lead-engineer`, `recovered-product-design-spec`, `recovery/phase1-main-candidate` | Verified obsolete duplicates | All were merged, duplicated, or ancestor commits; useful content is in `main`, remote branches, the bundle, or imported recovery refs. | Deleted with non-forcing `git branch -d` after bundle verification. | Branch refs removed; remote specialist branches and `refs/recovery/*` retained. |
 
 ## Archived stale filesystem snapshots
@@ -118,9 +118,9 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm ops:recovery-drill`: pass using temporary non-production paths.
 - `pnpm typecheck`: pass.
 - `pnpm build`: pass.
-- `pnpm test -- --reporter=dot`: 95 pass, 7 skip across 12 passed test files and 2 skipped fork files.
-- `pnpm test:fork`: 7 tests skip because Anvil and approved fixtures are unavailable. This is not fork evidence.
-- `pnpm ops:fork-replay`: fail closed because the candidate has no copied `Rets/MINT_BOT_SECRETS.env` reference. The secret was intentionally not copied.
+- `pnpm test -- --reporter=dot`: 151 pass, 10 skip across 15 passed test files and 2 skipped fork files.
+- `pnpm test:fork`: 6 Robinhood tests pass when the approved fixture reference is provided; Ethereum tests require separate fixture variables.
+- `pnpm ops:fork-replay`: strict six-case Robinhood replay passes using `~/W3/Rets/archive-rpc.env` by reference.
 - `pnpm ops:health`: fail closed because production secret-store, store, RPC, verification, reconciliation, and finality configuration is absent.
 
 ### Current `main`
@@ -134,11 +134,11 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm ops:policy`: pass with CI-equivalent conservative environment values.
 - `pnpm ops:negative-cases`: pass.
 - `pnpm ops:recovery-drill`: pass with `sqlite-backup-restore` and kill switch engaged.
-- `pnpm test -- --reporter=dot`: 95 pass, 7 skip across 12 passed test files and 2 skipped fork files.
+- `pnpm test -- --reporter=dot`: 151 pass, 10 skip across 15 passed test files and 2 skipped fork files.
 - `pnpm ops:clean-checkout`: intentionally fails in the project root because preserved untracked recovery artifacts remain.
 - `pnpm test:fork`: 6 Robinhood tests pass; the Ethereum test passes when its separate archive RPC reference and fixture variables are configured.
-- `pnpm ops:fork-replay`: passes with 6 Robinhood tests and 1 Ethereum skip after fix `09d320a` corrected the repository-root Vitest config path. Anvil is available and was not the blocker.
-- `pnpm ops:ethereum-fork`: passes strictly with 1 Ethereum three-wallet SeaDrop test, using Anvil on port `8546` with chain ID `1` and the approved archive reference `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC`.
+- `pnpm ops:fork-replay`: passes strictly with 6 Robinhood tests after the environment/path fixes in the reviewed Blockchain closure commits. Anvil is available and the archive value remains outside the Vitest child environment.
+- `pnpm ops:ethereum-fork`: passes strictly with the approved Ethereum fixture and archive reference.
 - `pnpm ops:health`: fails closed with missing secret-store, store, RPC, chain-verification, reconciliation, and finality configuration.
 
 ### Native WSL `~/W3/MintBot`
@@ -151,22 +151,22 @@ Original incomplete WIP commit `ad16926` lost its stash-index parent during the 
 - `pnpm lint`: pass.
 - `pnpm typecheck`: pass.
 - `pnpm build`: pass.
-- `pnpm test -- --reporter=dot`: 95 pass, 7 skip.
+- `pnpm test -- --reporter=dot`: 151 pass, 10 skip.
 - `pnpm ops:secret-boundary`: pass; no `Rets/` or secret paths are tracked or present in the active clone.
 - `pnpm ops:policy`: pass with conservative CI-equivalent values.
 - `pnpm ops:negative-cases`: pass.
 - `pnpm ops:recovery-drill`: pass.
-- `pnpm test:fork`: 6 Robinhood and 4 Ethereum tests skip without fork fixture injection; the deterministic suite does not claim archive evidence.
-- `pnpm ops:fork-replay`: passes strictly with 6 Robinhood tests and no skips using the four non-secret fixture fields; the archive value is read by reference from `~/W3/Rets/archive-rpc.env` and never passed to Vitest.
-- `pnpm ops:ethereum-fork`: passes strictly with 4 Ethereum fork probes using `/home/Junayd/W3/Rets/eth-archive-rpc.env:ETHEREUM_ARCHIVE_RPC` and `Fixtures/ethereum-seadrop-fixture.env` by reference.
+- `pnpm test:fork`: 6 Robinhood and 4 Ethereum tests require explicit fixture injection; the deterministic suite does not claim archive evidence without it.
+- `pnpm ops:fork-replay`: passes strictly with 6 Robinhood tests; the archive value is read by reference from `~/W3/Rets/archive-rpc.env` and never passed to Vitest.
+- `pnpm ops:ethereum-fork`: passes strictly with 4 Ethereum fork probes using the approved archive reference and `Fixtures/ethereum-seadrop-fixture.env` by reference.
 - `pnpm ops:health`: expected fail-closed result without production configuration.
 - `forge test --root ~/W3/seadrop-test`: 2 passed, 0 failed, 0 skipped.
 
 ## Pending decisions and gates
 
 1. Curate the preserved Robinhood report and historical product-design document.
-2. Retain remote specialist branches after integration review, as decided by the Product Owner.
-3. Retain `~/W3/seadrop-test` as the private `palmora-seadrop-fixture` repository at its recorded commit.
-4. Retain the completed Ethereum fork inputs behind the approved fixture/archive references; supply the missing Robinhood non-secret fixture fields before its strict replay.
-5. Open Antigravity/VS Code through Remote-WSL and confirm future Agent Manager worktrees are created under the WSL filesystem.
+2. Decide whether to retain remote specialist branches after integration review.
+3. Retain or publish `~/W3/seadrop-test` as the private `palmora-seadrop-fixture` repository.
+4. Open Antigravity/VS Code through Remote-WSL and confirm future Agent Manager worktrees are created under the WSL filesystem.
+5. Provide production secret-store, signer, RPC, backup, notification, and finality configuration for `ops:health`.
 6. Keep Robinhood execution disabled until strict fork, sequencer/feed correlation, restart/replacement/reorg/kill-switch, backup/restore, finality, and Product Owner evidence gates pass.
