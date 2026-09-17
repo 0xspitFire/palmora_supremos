@@ -85,6 +85,21 @@ describe('CanonicalStoreBridge', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it('creates a canonical fee policy for a fresh chain profile', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mint-backend-fee-'));
+    const db = openDatabase(join(directory, 'state.sqlite'));
+    db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run('profile-ethereum', ETHEREUM, 'Ethereum', '[]', 2, NOW);
+    const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW) });
+    await store.open();
+    try {
+      await new BackendApplication(store, new ExecutionCoordinator(store, noopEngine)).createCampaign(campaignInput(ETHEREUM));
+      expect(db.prepare('SELECT COUNT(*) AS count FROM fee_policy WHERE chain_profile_id = ?').get('profile-ethereum')).toEqual({ count: 1 });
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not bind an orphaned run to the first campaign', async () => {
     const value = await fixture(ETHEREUM);
     try {

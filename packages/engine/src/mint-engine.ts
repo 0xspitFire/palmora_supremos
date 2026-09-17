@@ -672,7 +672,7 @@ export class MintEngine {
           const serialized = serializeTransaction(tx);
           walletLog.info({
             event: 'dry_run',
-            serializedTx: serialized,
+            transactionDigest: keccak256(serialized),
             to: tx.to,
             value: formatEther(value),
             gasLimit: gasLimit.toString(),

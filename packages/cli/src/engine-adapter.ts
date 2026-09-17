@@ -8,7 +8,9 @@ import {
   type MintJobConfig,
   type MintJobResult,
   type ReservationSettlementComponents,
+  type SignerFactory,
   type SpendReservationProvider,
+  type WalletInfo,
 } from '@mint-bot/engine';
 import type {
   AttemptRecord,
@@ -28,7 +30,10 @@ interface WalletFile {
 }
 
 export interface MintEngineAdapterOptions {
-  readonly walletFile: string;
+  readonly walletFile?: string;
+  readonly walletList?: () => Promise<WalletInfo[]>;
+  readonly signerFactory?: SignerFactory;
+  readonly passphraseProvider?: () => Promise<string>;
   readonly killSwitchFile: string;
   readonly secretRoot: string;
   readonly logFile: string;
@@ -101,13 +106,27 @@ async function assertPrefixSelection(path: string, addresses: readonly string[])
   return selected.map((wallet) => wallet.index);
 }
 
+async function assertWalletSelection(options: MintEngineAdapterOptions, addresses: readonly string[]): Promise<number[]> {
+  if (options.walletList) {
+    if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
+    const available = await options.walletList();
+    const selected = available.slice(0, addresses.length);
+    if (selected.length !== addresses.length || selected.some((wallet, index) => wallet.address.toLowerCase() !== addresses[index]!.toLowerCase())) {
+      throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
+    }
+    return selected.map((wallet) => wallet.index);
+  }
+  if (!options.walletFile) throw new Error('WALLET_SOURCE_REQUIRED');
+  return assertPrefixSelection(options.walletFile, addresses);
+}
+
 function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
   const chain = chainName(campaign.chainId);
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
   return {
     target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id },
-    fleet: { walletFile: options.walletFile, maxWallets },
+    fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
     fees: { maxFeePerGasGwei: options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding },
     safety: {
@@ -200,19 +219,21 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
 
 export function createMintEngineAdapter(options: MintEngineAdapterOptions): EngineAdapter {
   const run = async (campaign: Campaign, wallets: readonly string[], dryRun: boolean, runId: string, intentId?: string, reservationProvider?: SpendReservationProvider): Promise<ExecutionResult> => {
-    await assertPrefixSelection(options.walletFile, wallets);
+    await assertWalletSelection(options, wallets);
     const config = makeConfig(campaign, options, dryRun, wallets.length);
     const persistedRun = options.getState().runs.find((run) => run.id === runId);
     const engineOptions = {
       ...(reservationProvider ? { reservationProvider } : {}),
       ...(options.lifecycleStore ? { lifecycleStore: options.lifecycleStore } : {}),
+      ...(options.signerFactory ? { signerFactory: options.signerFactory } : {}),
       runId,
       ...(intentId ? { intentId } : {}),
       requestId: persistedRun?.idempotencyKey ?? runId,
       requestFingerprint: persistedRun?.requestDigest ?? `${campaign.id}:${campaign.chainId}:${campaign.contract.toLowerCase()}:${campaign.quantity}`,
       identityForWallet: (wallet: { index: number; address: Address }, identityRunId: string) => canonicalExecutionIdentity(identityRunId, intentId, wallet.index, wallet.address),
     };
-    const result = await new MintEngine(config, engineOptions).execute(await promptHiddenPassphrase());
+    const passphrase = options.passphraseProvider ? await options.passphraseProvider() : await promptHiddenPassphrase();
+    const result = await new MintEngine(config, engineOptions).execute(passphrase);
     return mapResult(result, runId, campaign);
   };
 

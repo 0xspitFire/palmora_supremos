@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { parseEther, parseGwei } from 'viem';
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { type Address, type Hex, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { generateAndEncryptWallets } from '@mint-bot/engine';
-import { createCliRuntime } from './runtime.js';
+import { createTurnkeyClient, generateAndEncryptWallets, importAndEncryptWallets, importPrivateKeyToTurnkey, readTurnkeySecretConfig } from '@mint-bot/engine';
+import type { WalletImportRecord } from '@mint-bot/engine';
+import type { TurnkeyWalletMap } from '@mint-bot/engine';
+import { configuredSecretRoot, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
 import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
@@ -15,6 +17,7 @@ const blocked = (error: unknown) => JSON.stringify({ state: 'Blocked', blockingR
 
 const DEFAULT_WALLET_FILE = join(runtimeRoot, 'Rets', 'wallets', 'wallets.json');
 const DEFAULT_KILL_FILE = join(runtimeRoot, 'Rets', 'state', 'killswitch');
+const DEFAULT_WALLET_IMPORT_ROOT = '/home/Junayd/W3/Rets/wallets';
 
 function walletFile(value: string | undefined): string {
   return resolveWalletPath(runtimeRoot, value ?? process.env.MINT_BOT_WALLET_FILE ?? './Rets/wallets/wallets.json');
@@ -25,9 +28,69 @@ async function ensureParent(path: string): Promise<void> {
 }
 
 async function publicWallets(path: string): Promise<string[]> {
+  if (turnkeyCustodyEnabled()) return (await configuredWallets(runtimeRoot, path)).map((wallet) => wallet.address);
   const content = JSON.parse(await readFile(path, 'utf8')) as { wallets?: Array<{ address?: string }> };
   if (!Array.isArray(content.wallets) || content.wallets.length === 0 || content.wallets.some((wallet) => !wallet.address)) throw new Error('Wallet file has no valid public wallet list');
   return content.wallets.map((wallet) => wallet.address!);
+}
+
+function walletImportRoot(value: string | undefined): string {
+  const candidate = resolve(value ?? DEFAULT_WALLET_IMPORT_ROOT);
+  const allowedRoots = [resolve(DEFAULT_WALLET_IMPORT_ROOT), resolve(runtimeRoot, 'Rets', 'wallets')];
+  if (!allowedRoots.some((root) => candidate === root)) throw new Error('Wallet import root is not approved');
+  return candidate;
+}
+
+function turnkeyMapPath(value: string | undefined): string {
+  const secretRoot = resolve(configuredSecretRoot(runtimeRoot));
+  const candidate = resolve(value ?? join(secretRoot, 'turnkey-wallet-map.json'));
+  const outside = relative(secretRoot, candidate);
+  if (outside === '..' || outside.startsWith(`..${sep}`) || isAbsolute(outside)) throw new Error('Turnkey wallet map must remain under the configured secret root');
+  return candidate;
+}
+
+async function writeTurnkeyWalletMap(path: string, map: TurnkeyWalletMap): Promise<void> {
+  await ensureParent(path);
+  const temporaryPath = `${path}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporaryPath, JSON.stringify(map, null, 2), { encoding: 'utf8', mode: 0o600 });
+    await rename(temporaryPath, path);
+  } finally {
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+function parseWalletEnv(content: string, fileName: string): WalletImportRecord {
+  const values = new Map<string, string>();
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    if (key !== 'WALLET_ADD' && key !== 'ACC_KEY') continue;
+    if (values.has(key)) throw new Error(`Duplicate ${key} in ${fileName}`);
+    values.set(key, line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, ''));
+  }
+  const address = values.get('WALLET_ADD');
+  const privateKey = values.get('ACC_KEY');
+  if (!address || !privateKey) throw new Error(`Wallet import fields missing in ${fileName}`);
+  return { address: address as Address, privateKey: privateKey as Hex };
+}
+
+async function readWalletImportRecords(root: string, files: string): Promise<WalletImportRecord[]> {
+  const names = files.split(',').map((name) => name.trim()).filter(Boolean);
+  if (names.length < 1 || names.some((name) => !/^[A-Za-z0-9._-]+\.env$/.test(name))) {
+    throw new Error('Wallet import files must be comma-separated .env basenames');
+  }
+  const records: WalletImportRecord[] = [];
+  for (const name of names) {
+    const path = join(root, name);
+    const file = await lstat(path);
+    if (!file.isFile() || (file.mode & 0o077) !== 0) throw new Error(`Wallet import file permissions must be owner-only: ${name}`);
+    records.push(parseWalletEnv(await readFile(path, 'utf8'), name));
+  }
+  return records;
 }
 
 function printError(error: unknown): never {
@@ -69,11 +132,74 @@ const cli = yargs(hideBin(process.argv))
   .command('wallet list', 'List wallet addresses without decrypting private keys', (args) => args
     .option('file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
       try {
+        if (turnkeyCustodyEnabled()) {
+          const wallets = await configuredWallets(runtimeRoot, walletFile(args.file));
+          wallets.forEach((wallet) => console.log(`${wallet.index}\t${wallet.address}`));
+          return;
+        }
         const content = JSON.parse(await readFile(walletFile(args.file), 'utf8')) as {
           wallets?: Array<{ index: number; address: string }>;
         };
         if (!Array.isArray(content.wallets)) throw new Error('Wallet file has no valid public wallet list');
         content.wallets.forEach((wallet) => console.log(`${wallet.index}\t${wallet.address}`));
+      } catch (error) { printError(error); }
+    })
+  .command('wallet import', 'Encrypt approved wallet env files for local testing', (args) => args
+    .option('input-dir', { type: 'string', default: DEFAULT_WALLET_IMPORT_ROOT })
+    .option('files', { type: 'string', demandOption: true, description: 'Comma-separated .env basenames' })
+    .option('output', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
+      try {
+        const root = walletImportRoot(args.inputDir);
+        const records = await readWalletImportRecords(root, args.files);
+        const count = records.length;
+        const output = walletFile(args.output);
+        await ensureParent(output);
+        try {
+          await withHiddenPassphrase(async (passphrase) => {
+            await importAndEncryptWallets(records, passphrase, output);
+          });
+        } finally {
+          records.fill({ address: '0x0000000000000000000000000000000000000000' as Address, privateKey: '0x00' as Hex });
+        }
+        console.log(`Imported ${count} wallets into ${output}`);
+      } catch (error) { printError(error); }
+    })
+  .command('wallet import-turnkey', 'Encrypt and import approved wallet env files into Turnkey', (args) => args
+    .option('input-dir', { type: 'string', default: DEFAULT_WALLET_IMPORT_ROOT })
+    .option('files', { type: 'string', demandOption: true, description: 'Comma-separated .env basenames' })
+    .option('map-output', { type: 'string' })
+    .option('policy-id', { type: 'string' })
+    .option('confirm', { type: 'boolean', default: false }), async (args) => {
+      try {
+        if (!args.confirm) throw new Error('TURNKEY_IMPORT_REQUIRES_CONFIRM');
+        const root = walletImportRoot(args.inputDir);
+        const records = await readWalletImportRecords(root, args.files);
+        try {
+          const names = args.files.split(',').map((name) => name.trim()).filter(Boolean);
+          const secretRoot = configuredSecretRoot(runtimeRoot);
+          const { organizationId, userId, apiPublicKey, apiPrivateKey } = await readTurnkeySecretConfig(secretRoot);
+          const client = createTurnkeyClient(organizationId, apiPublicKey, apiPrivateKey);
+          const wallets: TurnkeyWalletMap['wallets'] = [];
+          for (const [index, record] of records.entries()) {
+            const imported = await importPrivateKeyToTurnkey(client, organizationId, userId, {
+              name: `mintbot-${names[index]!.replace(/\.env$/i, '')}`,
+              address: record.address,
+              privateKey: record.privateKey,
+            });
+            wallets.push({ ...imported, index });
+          }
+          await writeTurnkeyWalletMap(turnkeyMapPath(args.mapOutput), {
+            version: 1,
+            organizationId,
+            ...(args.policyId ? { policyId: args.policyId } : {}),
+            wallets,
+          });
+          console.log(`Imported ${wallets.length} wallets into Turnkey and wrote the public wallet map`);
+        } catch {
+          throw new Error('TURNKEY_IMPORT_FAILED');
+        } finally {
+          records.fill({ address: '0x0000000000000000000000000000000000000000' as Address, privateKey: '0x00' as Hex });
+        }
       } catch (error) { printError(error); }
     })
   .command('approve', 'Persist explicit campaign approval', (args) => args

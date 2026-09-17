@@ -74,24 +74,42 @@ if (!storePath || /[\r\n]/.test(storePath)) {
       if (integrity !== 'ok') throw new Error('sqlite_integrity_failed');
       const migration = database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get();
       const schemaVersion = Number(migration?.version);
-      checks.migration = Number.isInteger(schemaVersion) && schemaVersion >= 9
+      checks.migration = Number.isInteger(schemaVersion) && schemaVersion >= 15
         ? { status: 'ok', version: schemaVersion }
         : { status: 'failed', reason: 'SCHEMA_MIGRATION_REQUIRED' };
-      const row = database.prepare('SELECT state_json FROM backend_state WHERE id = ?').get('global');
-      if (!row?.state_json) throw new Error('backend_state_missing');
-      state = JSON.parse(row.state_json, (_key, value) => typeof value === 'string' && /^\d+n$/.test(value) ? BigInt(value.slice(0, -1)) : value);
+      if (checks.migration.status !== 'ok') throw new Error('schema_migration_required');
+      const legacyStateTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backend_state'").get();
+      if (legacyStateTable) throw new Error('legacy_backend_state_not_supported');
+      const runtimeRow = database.prepare('SELECT policy_snapshot_json FROM runtime_readiness_snapshot ORDER BY captured_at DESC, rowid DESC LIMIT 1').get();
+      const runtimeSnapshot = parseJson(runtimeRow?.policy_snapshot_json);
+      if (!runtimeSnapshot?.runtime) throw new Error('runtime_readiness_snapshot_missing');
+      state = { runtime: runtimeSnapshot.runtime };
       const runtimeControl = database.prepare("SELECT kill_switch_engaged FROM runtime_control WHERE id = 'global'").get();
-      databaseKillSwitchEngaged = Boolean(state.killed) || runtimeControl?.kill_switch_engaged === 1;
-      const backup = database.prepare("SELECT outcome, kill_switch_engaged FROM backup_restore_evidence WHERE outcome = 'passed' ORDER BY recorded_at DESC LIMIT 1").get();
+      databaseKillSwitchEngaged = Boolean(state.runtime?.operational?.killSwitchEngaged) || runtimeControl?.kill_switch_engaged === 1;
+      const backup = database.prepare("SELECT outcome, kill_switch_engaged, schema_version, evidence_json FROM backup_restore_evidence WHERE outcome = 'passed' ORDER BY recorded_at DESC LIMIT 1").get();
+      const backupEvidence = parseJson(backup?.evidence_json);
       checks.backup = backup?.kill_switch_engaged === 1
+        && Number(backup.schema_version) >= schemaVersion
+        && backupEvidence?.encryptionVerified === true
+        && backupEvidence?.integrityCheck === 'ok'
         ? { status: 'ok', evidence: 'recorded', killSwitch: 'engaged' }
         : { status: 'failed', reason: 'BACKUP_EVIDENCE_REQUIRED' };
-      checks.store = { status: 'ok', integrity: 'ok' };
+      const unresolved = database.prepare('SELECT COUNT(*) AS count FROM recovery_unresolved_submissions').get();
+      if (Number(unresolved?.count) > 0) throw new Error('unresolved_submissions_present');
+      checks.store = { status: 'ok', integrity: 'ok', schemaVersion, store: 'canonical-sqlite' };
     } finally {
       database.close();
     }
   } catch (error) {
-    checks.store = { status: 'failed', error: error instanceof Error ? error.name : 'store_probe_error' };
+    const reason = error instanceof Error && [
+      'legacy_backend_state_not_supported',
+      'runtime_readiness_snapshot_missing',
+      'unresolved_submissions_present',
+      'schema_migration_required',
+    ].includes(error.message)
+      ? error.message.toUpperCase()
+      : 'STORE_PROBE_FAILED';
+    checks.store = { status: 'failed', reason };
     checks.migration ??= { status: 'failed', reason: 'STORE_PROBE_REQUIRED' };
     checks.backup = { status: 'failed', reason: 'STORE_PROBE_REQUIRED' };
   }
@@ -206,4 +224,9 @@ async function checkFeed(url) {
   } catch {
     return false;
   }
+}
+
+function parseJson(value) {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  try { return JSON.parse(value); } catch { return undefined; }
 }
