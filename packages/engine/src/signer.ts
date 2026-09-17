@@ -16,7 +16,7 @@
  */
 
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'node:crypto';
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { type Address, type Hex, parseTransaction, serializeTransaction } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { Signer as ISigner, WalletInfo, TransactionIntent } from './types.js';
@@ -29,7 +29,8 @@ const ALGORITHM = 'aes-256-gcm';
 const SALT_LENGTH = 32;
 const IV_LENGTH = 12;
 const SCRYPT_KEY_LENGTH = 32;
-const SCRYPT_OPTIONS = { N: 2 ** 18, r: 8, p: 1, maxmem: 256 * 1024 * 1024 };
+// Node's scrypt implementation needs a small amount of overhead beyond N*r*128.
+const SCRYPT_OPTIONS = { N: 2 ** 18, r: 8, p: 1, maxmem: 512 * 1024 * 1024 };
 
 /** Replace decrypted key references before they leave the decryption scope. */
 export function zeroizePrivateKeyArray(privateKeys: Hex[] | undefined): void {
@@ -53,6 +54,11 @@ interface DecryptedWallet {
   index: number;
   address: Address;
   account: ReturnType<typeof privateKeyToAccount>;
+}
+
+export interface WalletImportRecord {
+  address: Address;
+  privateKey: Hex;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -96,38 +102,95 @@ export async function generateAndEncryptWallets(
     keyBytes.fill(0);
   }
 
-  // Encrypt private keys
-  const salt = randomBytes(SALT_LENGTH);
-  const iv = randomBytes(IV_LENGTH);
-  const kek = scryptSync(passphrase, salt, SCRYPT_KEY_LENGTH, SCRYPT_OPTIONS);
+  return encryptWallets(privateKeys, walletInfos, passphrase, outputPath);
+}
 
-  const plaintext = JSON.stringify(privateKeys);
-  const cipher = createCipheriv(ALGORITHM, kek, iv);
-  const encrypted = Buffer.concat([
-    cipher.update(plaintext, 'utf8'),
-    cipher.final(),
-  ]);
-  const authTag = cipher.getAuthTag();
+/**
+ * Encrypt existing independent wallets into the CLI keystore format.
+ * Private keys are accepted only for the duration of this operation.
+ */
+export async function importAndEncryptWallets(
+  records: readonly WalletImportRecord[],
+  passphrase: string,
+  outputPath: string,
+): Promise<WalletInfo[]> {
+  if (records.length < 1 || records.length > 50) {
+    throw new Error('Wallet count must be between 1 and 50');
+  }
+  if (passphrase.length < 8) {
+    throw new Error('Passphrase must be at least 8 characters');
+  }
 
-  // Build encrypted file
-  const encryptedFile: EncryptedWalletFile = {
-    version: 1,
-    salt: salt.toString('hex'),
-    iv: iv.toString('hex'),
-    authTag: authTag.toString('hex'),
-    ciphertext: encrypted.toString('hex'),
-    wallets: walletInfos.map((w) => ({ index: w.index, address: w.address })),
-  };
+  const privateKeys: Hex[] = [];
+  try {
+    for (const record of records) {
+      if (!/^0x[0-9a-f]{64}$/i.test(record.privateKey)) {
+        throw new Error('Invalid wallet import key material');
+      }
+      const account = privateKeyToAccount(record.privateKey);
+      if (account.address.toLowerCase() !== record.address.toLowerCase()) {
+        throw new Error('Wallet import address mismatch');
+      }
+      privateKeys.push(record.privateKey);
+    }
+    const walletInfos = records.map((record, index) => ({ index, address: record.address }));
+    return await encryptWallets(privateKeys, walletInfos, passphrase, outputPath);
+  } catch (error) {
+    zeroizePrivateKeyArray(privateKeys);
+    throw error;
+  }
+}
 
-  const temporaryPath = `${outputPath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
-  await writeFile(temporaryPath, JSON.stringify(encryptedFile, null, 2), { encoding: 'utf8', mode: 0o600 });
-  await rename(temporaryPath, outputPath);
+async function encryptWallets(
+  privateKeys: Hex[],
+  walletInfos: WalletInfo[],
+  passphrase: string,
+  outputPath: string,
+): Promise<WalletInfo[]> {
+  let temporaryPath: string | undefined;
+  let kek: Buffer | undefined;
+  let salt: Buffer | undefined;
+  let iv: Buffer | undefined;
+  let encrypted: Buffer | undefined;
+  let plaintext: Buffer | undefined;
+  try {
+    // Encrypt private keys
+    salt = randomBytes(SALT_LENGTH);
+    iv = randomBytes(IV_LENGTH);
+    kek = scryptSync(passphrase, salt, SCRYPT_KEY_LENGTH, SCRYPT_OPTIONS);
 
-  // Zeroize sensitive material
-  kek.fill(0);
-  privateKeys.forEach((_, idx) => { privateKeys[idx] = '0x00' as Hex; });
+    plaintext = Buffer.from(JSON.stringify(privateKeys), 'utf8');
+    const cipher = createCipheriv(ALGORITHM, kek, iv);
+    encrypted = Buffer.concat([
+      cipher.update(plaintext),
+      cipher.final(),
+    ]);
+    const authTag = cipher.getAuthTag();
 
-  return walletInfos;
+    // Build encrypted file
+    const encryptedFile: EncryptedWalletFile = {
+      version: 1,
+      salt: salt.toString('hex'),
+      iv: iv.toString('hex'),
+      authTag: authTag.toString('hex'),
+      ciphertext: encrypted.toString('hex'),
+      wallets: walletInfos.map((w) => ({ index: w.index, address: w.address })),
+    };
+
+    temporaryPath = `${outputPath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+    await writeFile(temporaryPath, JSON.stringify(encryptedFile, null, 2), { encoding: 'utf8', mode: 0o600 });
+    await rename(temporaryPath, outputPath);
+    temporaryPath = undefined;
+    return walletInfos;
+  } finally {
+    if (temporaryPath) await unlink(temporaryPath).catch(() => undefined);
+    kek?.fill(0);
+    salt?.fill(0);
+    iv?.fill(0);
+    encrypted?.fill(0);
+    plaintext?.fill(0);
+    zeroizePrivateKeyArray(privateKeys);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

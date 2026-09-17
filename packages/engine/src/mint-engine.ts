@@ -672,7 +672,7 @@ export class MintEngine {
           const serialized = serializeTransaction(tx);
           walletLog.info({
             event: 'dry_run',
-            serializedTx: serialized,
+            transactionDigest: keccak256(serialized),
             to: tx.to,
             value: formatEther(value),
             gasLimit: gasLimit.toString(),
@@ -704,7 +704,7 @@ export class MintEngine {
           maxPriorityFeePerGas: tx.maxPriorityFeePerGas!,
           campaignId: this.config.target.campaignId,
           runId,
-          policyRef: 'phase-1',
+          policyRef: this.config.target.policyRef ?? 'phase-1',
         };
         if (!this.config.safety.dryRun) {
           assertSimulationFresh(
@@ -746,7 +746,7 @@ export class MintEngine {
             replacementBudgetWei: replacementPriorityBudget(tx.maxPriorityFeePerGas!),
             freeMint: value === 0n,
             policySnapshot: {
-              policyRef: 'phase-1',
+              policyRef: this.config.target.policyRef ?? 'phase-1',
               chainId,
               freeMint: value === 0n,
               priorityFeeComponentWei: tx.maxPriorityFeePerGas!.toString(),
