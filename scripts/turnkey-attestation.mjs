@@ -6,11 +6,12 @@ import { createTurnkeyClient, readTurnkeySecretConfig } from '../packages/engine
 const secretRoot = resolve(process.env.MINT_BOT_SECRET_ROOT ?? resolve(process.cwd(), 'Rets'));
 const config = await readTurnkeySecretConfig(secretRoot);
 if (!config.appName) throw new Error('TURNKEY_APP_NAME_REQUIRED');
+if (!config.attestationActivityId) throw new Error('TURNKEY_ATTESTATION_ACTIVITY_REQUIRED');
 const output = resolve(config.attestationPath ?? resolve(secretRoot, 'turnkey-attestation.json'));
 const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
 
 const activitiesResponse = await client.getActivities({ organizationId: config.organizationId, paginationOptions: { limit: '100' } });
-const activity = activitiesResponse.activities.find((candidate) => candidate.status === 'ACTIVITY_STATUS_COMPLETED' && candidate.type.startsWith('ACTIVITY_TYPE_SIGN_TRANSACTION'));
+const activity = activitiesResponse.activities.find((candidate) => candidate.id === config.attestationActivityId && candidate.status === 'ACTIVITY_STATUS_COMPLETED' && candidate.type.startsWith('ACTIVITY_TYPE_SIGN_TRANSACTION'));
 if (!activity) throw new Error('TURNKEY_SIGN_ACTIVITY_REQUIRED');
 const appProofs = (await client.getAppProofs({ organizationId: config.organizationId, activityId: activity.id })).appProofs;
 if (appProofs.length === 0) throw new Error('TURNKEY_APP_PROOFS_UNAVAILABLE');

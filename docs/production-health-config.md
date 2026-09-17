@@ -55,6 +55,7 @@ must still remain outside git.
 ```text
 MINT_BOT_CUSTODY=turnkey
 MINT_BOT_SECRET_ROOT=/home/Junayd/W3/Rets
+TURNKEY_SECRET_FILE=/home/Junayd/W3/Rets/turnkey.env
 TURNKEY_ORGANIZATION_ID=<host-configured>
 TURNKEY_API_PUBLIC_KEY=<host-configured>
 TURNKEY_API_PRIVATE_KEY=<secret-manager-only>
@@ -62,6 +63,7 @@ TURNKEY_USER_ID=<host-configured>
 TURNKEY_WALLET_MAP_PATH=/home/Junayd/W3/Rets/turnkey-wallet-map.json
 # Optional until Turnkey Verifiable Cloud waitlist access is granted.
 TURNKEY_APP_NAME=<turnkey-verified-enclave-app-uuid>
+TURNKEY_ATTESTATION_ACTIVITY_ID=<approved-signing-activity-id>
 TURNKEY_ATTESTATION_PATH=/home/Junayd/W3/Rets/turnkey-attestation.json
 SIGNER_HEALTH_URL=http://127.0.0.1:8787/health
 ```
@@ -129,6 +131,7 @@ node packages/cli/dist/index.js wallet import-turnkey \
   --input-dir /home/Junayd/W3/Rets/wallets \
   --files w1.env,w2.env,w3.env \
   --policy-id <approved-turnkey-policy-id> \
+  --policy-digest <keccak256-of-policy-condition> \
   --confirm
 ```
 

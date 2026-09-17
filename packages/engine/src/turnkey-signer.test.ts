@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { privateKeyToAccount } from 'viem/accounts';
-import type { Address, Hex } from 'viem';
+import { keccak256, toBytes, type Address, type Hex } from 'viem';
 import { describe, expect, it } from 'vitest';
 import { TurnkeySigner } from './turnkey-signer.js';
 
@@ -18,13 +18,17 @@ describe('TurnkeySigner', () => {
       gasLimit: 21_000n,
       maxFeePerGas: 2_000_000_000n,
       maxPriorityFeePerGas: 100_000_000n,
+      policyRef: 'policy-test',
     };
     const signedTransaction = await account.signTransaction({ type: 'eip1559', ...intent, gas: intent.gasLimit });
+    const policyCondition = 'turnkey-policy-test';
     let observedSignWith = '';
     let observedType = '';
     const signer = new TurnkeySigner({
       organizationId: 'org-test',
       wallets: [{ index: 0, address: account.address, signWith: 'turnkey-account-test' }],
+      policyId: 'policy-test',
+      policyDigest: keccak256(toBytes(policyCondition)),
       client: {
         signTransaction: async (input) => {
           observedSignWith = input.signWith;
@@ -32,6 +36,7 @@ describe('TurnkeySigner', () => {
           return { signedTransaction: signedTransaction.slice(2) };
         },
         getWhoami: async () => ({ organizationId: 'org-test' }),
+        getPolicies: async () => ({ policies: [{ policyId: 'policy-test', effect: 'EFFECT_ALLOW', condition: policyCondition }] }),
       },
     });
 
@@ -49,6 +54,8 @@ describe('TurnkeySigner', () => {
     const signer = new TurnkeySigner({
       organizationId: 'org-test',
       wallets: [{ index: 0, address: account.address, signWith: account.address }],
+      policyId: 'policy-test',
+      policyDigest: `0x${'0'.repeat(64)}`,
       client: {
         signTransaction: async () => ({ signedTransaction: '0x02' }),
         getWhoami: async () => ({ organizationId: 'org-test' }),

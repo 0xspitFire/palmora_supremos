@@ -1,4 +1,5 @@
 import { encryptPrivateKeyToBundle } from '@turnkey/crypto';
+import { privateKeyToAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
 import type { TurnkeyWalletReference } from './turnkey-signer.js';
 
@@ -34,6 +35,9 @@ export async function importPrivateKeyToTurnkey(
   userId: string,
   input: TurnkeyPrivateKeyImport,
 ): Promise<TurnkeyWalletReference> {
+  if (!/^0x[0-9a-f]{64}$/i.test(input.privateKey) || privateKeyToAccount(input.privateKey).address.toLowerCase() !== input.address.toLowerCase()) {
+    throw new Error('TURNKEY_IMPORT_ADDRESS_MISMATCH');
+  }
   const init = await client.initImportPrivateKey({ organizationId, userId, generateAppProofs: true });
   const encryptedBundle = await encryptPrivateKeyToBundle({
     privateKey: input.privateKey,

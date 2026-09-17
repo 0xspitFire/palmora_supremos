@@ -6,21 +6,31 @@ const host = process.env.TURNKEY_SIGNER_HEALTH_HOST ?? '127.0.0.1';
 const port = Number(process.env.TURNKEY_SIGNER_HEALTH_PORT ?? 8787);
 const secretRoot = resolve(process.env.MINT_BOT_SECRET_ROOT ?? resolve(process.cwd(), 'Rets'));
 let activeSigner;
+let probeInFlight;
 
 function failureReason(error) {
   const reason = error instanceof Error ? error.message : '';
   return /^[A-Z0-9_]+$/.test(reason) ? reason : 'TURNKEY_HEALTH_FAILED';
 }
 
-async function probe() {
-  activeSigner?.zeroize();
-  activeSigner = await TurnkeySigner.fromSecrets('mainnet', secretRoot);
+async function runProbe() {
+  const signer = await TurnkeySigner.fromSecrets('mainnet', secretRoot);
+  activeSigner = signer;
   try {
-    return await activeSigner.probe();
+    return await signer.probe();
   } finally {
-    activeSigner.zeroize();
-    activeSigner = undefined;
+    signer.zeroize();
+    if (activeSigner === signer) activeSigner = undefined;
   }
+}
+
+function probe() {
+  if (!probeInFlight) {
+    probeInFlight = runProbe().finally(() => {
+      probeInFlight = undefined;
+    });
+  }
+  return probeInFlight;
 }
 
 const server = createServer(async (request, response) => {

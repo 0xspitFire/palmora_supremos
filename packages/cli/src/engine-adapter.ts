@@ -34,6 +34,7 @@ export interface MintEngineAdapterOptions {
   readonly walletList?: () => Promise<WalletInfo[]>;
   readonly signerFactory?: SignerFactory;
   readonly passphraseProvider?: () => Promise<string>;
+  readonly policyRef?: string;
   readonly killSwitchFile: string;
   readonly secretRoot: string;
   readonly logFile: string;
@@ -125,7 +126,7 @@ function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRu
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
   return {
-    target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id },
+    target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id, ...(options.policyRef ? { policyRef: options.policyRef } : {}) },
     fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
     fees: { maxFeePerGasGwei: options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding },
