@@ -116,7 +116,7 @@ jobs:
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
       - name: Build production image
-        run: docker build --tag mint-bot:ci .
+        run: docker build --network=host --tag mint-bot:ci .
       - name: Verify fail-closed container health
         shell: bash
         run: |
