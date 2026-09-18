@@ -16,6 +16,38 @@ export { APPROVED_KEYSTORE_REFERENCE, MAINNET_SECRET_FILE_REFERENCE, assertSafeC
 export type { BackendConfig, SecretReference, SecretStore } from './config.js';
 export { ReadModelService } from './read-model.js';
 export type { RunReadModel } from './read-model.js';
+export { Phase2ReadModelService, ReadModelV1Service, READ_MODEL_CONTRACT, READ_MODEL_VERSION } from './read-model-v1.js';
+export type {
+  AlertReadModel,
+  CalendarEntry,
+  CampaignSummary,
+  CheckOutcome,
+  EthAmount,
+  FinalityReadModel,
+  Freshness,
+  GateCheck,
+  GateSummary,
+  HomeReadModel,
+  OpportunityReadModel,
+  OutcomeReason,
+  ProjectionRequest,
+  Provenance,
+  ReadModelAvailability,
+  ReadModelEnvelope,
+  ReadModelIssue,
+  ReadinessSummary,
+  RetryPolicy,
+  SafeAction,
+  SourcedAmount,
+  SourcedQuantity,
+  SystemHealthReadModel,
+  TimelineEvent,
+  TransactionAttemptReadModel,
+  TransactionReceiptReadModel,
+  WalletExecutionResult,
+  WalletReadinessRow,
+  ReconciliationReadModel,
+} from './read-model-v1.js';
 export { normalizeTotalFeeBudget } from './fees.js';
 export type { FeeBudgetInput } from './fees.js';
 export { resolveWalletPath } from './keystore-path.js';
