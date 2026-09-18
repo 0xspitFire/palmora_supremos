@@ -1,10 +1,14 @@
-# Phase 1 Engineering Review
+# Phase 1 Execution Foundation Review
 
 Review date: 2026-08-25
 
-Reviewed against `PRODUCT_SPEC.md`, `PRODUCT_DESIGN_SPEC.md` in the product-design worktree, `CTO_Brief.md` in the silk-thursday worktree, the five `PLAN_*.md` files, and the actual engineers worktree.
+Reviewed against the intelligence-focused MVP and its preceding Execution Foundation in `PRODUCT_SPEC.md`, the canonical `PRODUCT_DESIGN_SPEC.md`, `CTO_Brief.md`, the five `PLAN_*.md` files, and the actual engineers worktree. The intended audience is average blockchain consumers, so usability includes plain-language guidance and safe defaults.
 
 ## 1. Executive Verdict
+
+Product Owner scope update: the product MVP is intelligence-focused. This review covers the Phase 1 Execution Foundation that precedes that MVP. The intended audience is average blockchain consumers, so the eventual release must provide plain-language guidance and cannot require engineering knowledge for ordinary decisions.
+
+Robinhood scope update: Base is supported but follows Ethereum and Robinhood operational enablement. Robinhood success must use `Submitted → Included → Posted to Ethereum → Ethereum final`; the first two stages are not success. Positive characterization is evidence only, and the chain remains blocked until the integrated operational gates pass.
 
 ### Phase 1 Not Ready
 
