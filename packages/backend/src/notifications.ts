@@ -63,7 +63,6 @@ export class NotificationDispatcher {
           if (existing.text !== safeText) throw new Error('NOTIFICATION_IDEMPOTENCY_CONFLICT');
           return undefined;
         }
-        if (existing?.state === 'delivered' && existing.text !== safeText) throw new Error('NOTIFICATION_IDEMPOTENCY_CONFLICT');
         const outbox = existing ?? {
           id: `notify_${source.id}`,
           sourceEventId: source.id,
