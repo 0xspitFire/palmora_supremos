@@ -178,20 +178,24 @@ export class ReadModels {
 
   public staleSimulations(asOf = new Date()): StaleSimulationRow[] {
     const rows = this.db.prepare(`
-      WITH latest_intent AS (
+      WITH params AS (
+        SELECT julianday(?) AS as_of
+      ), latest_intent AS (
         SELECT i.*
           FROM transaction_intent i
-         WHERE i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = i.campaign_id AND i2.wallet_id = i.wallet_id ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1)
+         WHERE julianday(i.created_at) <= (SELECT as_of FROM params)
+           AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = i.campaign_id AND i2.wallet_id = i.wallet_id AND julianday(i2.created_at) <= (SELECT as_of FROM params) ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1)
       ), latest_simulation AS (
         SELECT s.*
           FROM simulation s
-         WHERE s.id = (SELECT s2.id FROM simulation s2 WHERE s2.campaign_id = s.campaign_id AND s2.wallet_id = s.wallet_id ORDER BY s2.checked_at DESC, s2.id DESC LIMIT 1)
+         WHERE julianday(s.checked_at) <= (SELECT as_of FROM params)
+           AND s.id = (SELECT s2.id FROM simulation s2 WHERE s2.campaign_id = s.campaign_id AND s2.wallet_id = s.wallet_id AND julianday(s2.checked_at) <= (SELECT as_of FROM params) ORDER BY s2.checked_at DESC, s2.id DESC LIMIT 1)
       )
       SELECT s.id AS simulation_id, s.wallet_id, s.campaign_id, s.transaction_intent_id, s.outcome, s.checked_at, s.freshness_seconds, s.source_block_number
         FROM latest_simulation s
         LEFT JOIN latest_intent i ON i.campaign_id = s.campaign_id AND i.wallet_id = s.wallet_id
-       WHERE (i.id IS NULL OR s.transaction_intent_id = i.id)
-         AND julianday(s.checked_at) + (s.freshness_seconds / 86400.0) < julianday(?)
+       WHERE (i.id IS NULL OR s.transaction_intent_id IS NULL OR s.transaction_intent_id = i.id)
+         AND julianday(s.checked_at) + (s.freshness_seconds / 86400.0) < (SELECT as_of FROM params)
        ORDER BY s.checked_at, s.id
     `).all(asOf.toISOString()) as Array<{ simulation_id: string; wallet_id: string; campaign_id: string; transaction_intent_id: string | null; outcome: StaleSimulationRow['outcome']; checked_at: string; freshness_seconds: number; source_block_number: number }>;
     return rows.map((row) => ({ simulationId: row.simulation_id, walletId: row.wallet_id, campaignId: row.campaign_id, transactionIntentId: row.transaction_intent_id, outcome: row.outcome, checkedAt: row.checked_at, freshnessSeconds: row.freshness_seconds, sourceBlockNumber: row.source_block_number }));

@@ -359,6 +359,8 @@ export class DurableRepository {
   public recordSimulation(record: SimulationRecord): void {
     if (!Number.isInteger(record.sourceBlockNumber) || record.sourceBlockNumber < 0) throw new Error('simulation source block must be a non-negative integer');
     if (!Number.isInteger(record.freshnessSeconds) || record.freshnessSeconds < 0) throw new Error('simulation freshness must be a non-negative integer');
+    const checkedAt = Date.parse(record.checkedAt);
+    if (!Number.isFinite(checkedAt) || checkedAt > Date.now() + 30_000) throw new Error('simulation checked time is invalid or in the future');
     this.immediate(() => {
       const campaign = this.db.prepare('SELECT ct.chain_profile_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id WHERE c.id = ?').get(record.campaignId) as { chain_profile_id: string } | undefined;
       const wallet = this.db.prepare('SELECT chain_profile_id FROM wallet WHERE id = ?').get(record.walletId) as { chain_profile_id: string } | undefined;
