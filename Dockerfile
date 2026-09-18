@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM node:20.19.1-bookworm-slim AS build
 
 WORKDIR /app
@@ -5,7 +7,12 @@ RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.json ./
 COPY packages ./packages
 COPY scripts ./scripts
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=mintbot-pnpm-store,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store \
+    && pnpm fetch --frozen-lockfile
+RUN --mount=type=cache,id=mintbot-pnpm-store,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store \
+    && pnpm install --offline --frozen-lockfile
 RUN pnpm build
 RUN CI=1 pnpm prune --prod
 

@@ -386,12 +386,14 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readonly durable: boolean;
   private readonly actor: string;
   private readonly now: () => Date;
+  private readonly walletKeyReferencePrefix: string;
 
-  public constructor(private readonly db: SqliteDatabase, options: { durable?: boolean; actor?: string; now?: () => Date } = {}) {
+  public constructor(private readonly db: SqliteDatabase, options: { durable?: boolean; actor?: string; now?: () => Date; walletKeyReferencePrefix?: string } = {}) {
     this.databaseStore = new SqliteBackendStore(db);
     this.durable = options.durable ?? true;
     this.actor = options.actor ?? 'backend';
     this.now = options.now ?? (() => new Date());
+    this.walletKeyReferencePrefix = options.walletKeyReferencePrefix ?? 'Rets/wallets/wallets.json';
   }
 
   public async open(): Promise<void> {
@@ -979,7 +981,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       if (policy.kind === 'paid' && existing.paid_mints_enabled !== 1) throw new Error('PAID_MINT_POLICY_REQUIRED');
       return;
     }
-    this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)').run(canonicalId('fee', `${chainProfileId}:${encode(policy)}`), chainProfileId, `backend-${digest(encode(policy))}`, chainId === ETHEREUM_CHAIN_ID ? 'ordering' : 'fee_only', (policy.totalFeeBudgetWei ?? 0n).toString(), (policy.freeTotalSpendCapWei ?? 0n).toString(), policy.configuredPriorityFeeWei.toString(), 2, policy.kind === 'paid' ? 1 : 0, this.now().toISOString(), policy.configuredPriorityFeeWei === 0n ? 'requires_po_resolution' : 'allowed');
+    this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)').run(canonicalId('fee', `${chainProfileId}:${encode(policy)}`), chainProfileId, `backend-${digest(encode(policy))}`, chainId === ETHEREUM_CHAIN_ID ? 'ordering' : 'fee_only', (policy.totalFeeBudgetWei ?? 0n).toString(), (policy.freeTotalSpendCapWei ?? 0n).toString(), policy.configuredPriorityFeeWei.toString(), 2, policy.kind === 'paid' ? 1 : 0, this.now().toISOString(), policy.configuredPriorityFeeWei === 0n ? 'requires_po_resolution' : 'allowed');
   }
 
   private activeFeePolicy(chainProfileId: string): { id: string; version: string; priority_fee_semantics: 'ordering' | 'fee_only'; max_total_fee_wei: string; free_mint_total_fee_cap_wei: string; free_mint_priority_fee_component_wei: string; free_mint_priority_fee_multiplier: number; paid_mints_enabled: number; zero_priority_fee_policy: string } {
@@ -999,7 +1001,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const existing = this.db.prepare('SELECT id FROM wallet WHERE chain_profile_id = ? AND lower(address) = lower(?)').get(chainProfileId, address) as { id: string } | undefined;
     if (existing) { this.ensureSpendPolicy(existing.id, campaign); return { walletId: existing.id, chainProfileId }; }
     const walletId = canonicalId('wallet', `${chainProfileId}:${address.toLowerCase()}`);
-    this.db.prepare('INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, chainProfileId, address, `Rets/wallets/wallets.json#${address.toLowerCase()}`, this.now().toISOString());
+    this.db.prepare('INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, chainProfileId, address, `${this.walletKeyReferencePrefix}#${address.toLowerCase()}`, this.now().toISOString());
     this.ensureSpendPolicy(walletId, campaign);
     return { walletId, chainProfileId };
   }

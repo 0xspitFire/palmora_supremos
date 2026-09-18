@@ -1,7 +1,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 
-const ALLOWED_FILES = new Set(['MINT_BOT_SECRETS', 'MINT_BOT_SECRETS.env', 'TEST_BOT', 'TEST_BOT.env', 'archive-rpc.env']);
+const ALLOWED_FILES = new Set(['MINT_BOT_SECRETS', 'MINT_BOT_SECRETS.env', 'TEST_BOT', 'TEST_BOT.env', 'archive-rpc.env', 'turnkey.env']);
 
 /**
  * Read one approved secret-store file without writing, interpolating, or
@@ -15,7 +15,7 @@ export async function loadSecretStore(filePath) {
   }
 
   const metadata = await lstat(absolutePath);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
     throw new Error('Secret store must be a regular file');
   }
 
