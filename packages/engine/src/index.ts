@@ -74,7 +74,7 @@ export {
 export { LocalEncryptedSigner, generateAndEncryptWallets, importAndEncryptWallets, zeroizePrivateKeyArray } from './signer.js';
 export type { WalletImportRecord } from './signer.js';
 export { TurnkeySigner, createTurnkeyClient, readTurnkeySecretConfig, readTurnkeyWalletMap } from './turnkey-signer.js';
-export type { TurnkeyClient, TurnkeyHealthReport, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
+export type { TurnkeyClient, TurnkeyHealthReport, TurnkeyPolicyBinding, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
 export { importPrivateKeyToTurnkey } from './turnkey-import.js';
 export type { TurnkeyImportClient, TurnkeyPrivateKeyImport } from './turnkey-import.js';
 
