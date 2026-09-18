@@ -155,9 +155,19 @@ export function verifyBackup(destination: string): BackupVerification {
       const row = rows[index];
       if (row === undefined || row.version !== migration.version || row.name !== migration.file || row.checksum !== migration.checksum) throw new Error(`backup migration mismatch at version ${migration.version}`);
     }
-    const requiredTables = ['schema_migrations', 'chain_profile', 'wallet', 'campaign', 'fee_policy', 'spend_policy', 'transaction_intent', 'transaction_attempt', 'transaction_receipt', 'execution', 'execution_run', 'spend_reservation', 'spend_ledger_entry', 'state_transition', 'audit_event', 'reconciliation_record', 'campaign_wallet', 'campaign_period', 'reorg_event', 'reorg_resolution', 'simulation', 'retention_policy', 'retention_evidence', 'backup_policy', 'backup_restore_evidence'];
+    const requiredObjects = [
+      'schema_migrations', 'chain_profile', 'wallet_group', 'wallet', 'wallet_balance', 'tracked_wallet', 'wallet_stats',
+      'contract', 'collection', 'drop', 'campaign', 'fire_lane', 'eligibility', 'opportunity', 'signal',
+      'transaction_intent', 'simulation', 'transaction_attempt', 'transaction_receipt', 'execution', 'execution_run',
+      'state_transition', 'gas_strategy', 'spend_policy', 'spend_reservation', 'spend_ledger_entry', 'notification',
+      'portfolio_position', 'portfolio_event', 'performance_metric', 'audit_event', 'raw_observation', 'fee_policy',
+      'chain_verification', 'reconciliation_record', 'documentation_fixture', 'runtime_control', 'runtime_readiness_snapshot',
+      'backup_policy', 'retention_policy', 'retention_evidence', 'backup_restore_evidence', 'campaign_wallet', 'campaign_period',
+      'reorg_event', 'reorg_resolution', 'recovery_unresolved_submissions', 'recovery_orphan_reservations',
+      'recovery_duplicate_nonce_identities', 'recovery_reorg_exposure', 'recovery_stale_simulations', 'recovery_replacement_exposure',
+    ];
     const objects = new Set((backup.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").all() as Array<{ name: string }>).map((row) => row.name));
-    for (const table of requiredTables) if (!objects.has(table)) throw new Error(`backup is missing required object: ${table}`);
+    for (const object of requiredObjects) if (!objects.has(object)) throw new Error(`backup is missing required object: ${object}`);
     return { sha256: checksum, schemaVersion: migrations[migrations.length - 1]?.version ?? 0, integrityCheck: 'ok', foreignKeyViolations };
   } finally {
     backup.close();

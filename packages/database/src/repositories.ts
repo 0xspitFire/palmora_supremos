@@ -357,8 +357,17 @@ export class DurableRepository {
   }
 
   public recordSimulation(record: SimulationRecord): void {
+    if (!Number.isInteger(record.sourceBlockNumber) || record.sourceBlockNumber < 0) throw new Error('simulation source block must be a non-negative integer');
+    if (!Number.isInteger(record.freshnessSeconds) || record.freshnessSeconds < 0) throw new Error('simulation freshness must be a non-negative integer');
     this.immediate(() => {
-      this.db.prepare('INSERT INTO simulation (id, wallet_id, campaign_id, transaction_intent_id, source_block_number, source_block_hash, checked_at, freshness_seconds, outcome, revert_taxonomy, tool_version, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.walletId, record.campaignId, record.transactionIntentId ?? null, record.sourceBlockNumber, record.sourceBlockHash ?? null, record.checkedAt, record.freshnessSeconds, record.outcome, record.revertTaxonomy ?? null, record.toolVersion, json(record.details ?? {}) ?? '{}');
+      const campaign = this.db.prepare('SELECT ct.chain_profile_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id WHERE c.id = ?').get(record.campaignId) as { chain_profile_id: string } | undefined;
+      const wallet = this.db.prepare('SELECT chain_profile_id FROM wallet WHERE id = ?').get(record.walletId) as { chain_profile_id: string } | undefined;
+      if (!campaign || !wallet || campaign.chain_profile_id !== wallet.chain_profile_id) throw new Error('simulation wallet and campaign identity mismatch');
+      if (record.transactionIntentId !== undefined) {
+        const intent = this.db.prepare('SELECT wallet_id, campaign_id, chain_profile_id FROM transaction_intent WHERE id = ?').get(record.transactionIntentId) as { wallet_id: string; campaign_id: string; chain_profile_id: string | null } | undefined;
+        if (!intent || intent.wallet_id !== record.walletId || intent.campaign_id !== record.campaignId || (intent.chain_profile_id !== null && intent.chain_profile_id !== campaign.chain_profile_id)) throw new Error('simulation transaction intent identity mismatch');
+      }
+      this.db.prepare('INSERT INTO simulation (id, wallet_id, campaign_id, transaction_intent_id, source_block_number, source_block_hash, checked_at, freshness_seconds, outcome, revert_taxonomy, tool_version, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.walletId, record.campaignId, record.transactionIntentId ?? null, record.sourceBlockNumber, record.sourceBlockHash ?? null, record.checkedAt, record.freshnessSeconds, record.outcome, safeText(record.revertTaxonomy, 'simulation revert taxonomy') ?? null, safeText(record.toolVersion, 'simulation tool version'), json(record.details ?? {}) ?? '{}');
     });
   }
 

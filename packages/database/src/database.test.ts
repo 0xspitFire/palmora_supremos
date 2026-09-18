@@ -53,11 +53,11 @@ function campaignFixture(db: ReturnType<typeof openDatabase>, suffix: string, ch
   return campaignId;
 }
 
-function linkedExecutionFixture(db: ReturnType<typeof openDatabase>, campaignId: string, suffix: string, chainProfileId = 'chain', walletId = chainProfileId === 'chain' ? 'wallet' : `${chainProfileId}-wallet`) {
+function linkedExecutionFixture(db: ReturnType<typeof openDatabase>, campaignId: string, suffix: string, chainProfileId = 'chain', walletId = chainProfileId === 'chain' ? 'wallet' : `${chainProfileId}-wallet`, valueWei = 0n) {
   const repository = new DurableRepository(db);
   const intentId = `intent-${suffix}`;
   const executionId = `execution-${suffix}`;
-  repository.saveIntent({ id: intentId, campaignId, walletId, intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', chainProfileId, createdAt: '2026-01-01T00:00:00.000Z' });
+  repository.saveIntent({ id: intentId, campaignId, walletId, intentClass: 'mint', toAddress: '0xdef', valueWei, calldata: '0x', chainProfileId, createdAt: '2026-01-01T00:00:00.000Z' });
   repository.saveExecution({ id: executionId, campaignId, walletId, transactionIntentId: intentId, state: 'prepared', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
   return { intentId, transactionIntentId: intentId, executionId };
 }
@@ -295,6 +295,12 @@ describe('database migrations and spend reservations', () => {
     staleDb.prepare("UPDATE schema_migrations SET checksum = 'bad' WHERE version = 15").run();
     staleDb.close();
     expect(() => verifyBackup(staleDestination)).toThrow('backup migration mismatch');
+    const missingReadModelDestination = join(directory, 'missing-read-model.sqlite');
+    copyFileSync(destination, missingReadModelDestination);
+    const missingReadModelDb = new BetterSqlite3(missingReadModelDestination);
+    missingReadModelDb.exec('DROP VIEW recovery_stale_simulations');
+    missingReadModelDb.close();
+    expect(() => verifyBackup(missingReadModelDestination)).toThrow('backup is missing required object: recovery_stale_simulations');
     const restored = openDatabase(destination);
     expect(restored.prepare('SELECT COUNT(*) AS count FROM audit_event').get()).toEqual({ count: 1 });
     const repository = new DurableRepository(restored);
@@ -440,7 +446,7 @@ describe('database migrations and spend reservations', () => {
     const campaignId = campaignFixture(db, 'paid');
     db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES ('paid-fee', 'chain', 'paid-v1', 'ordering', '1000', '1000', '10', 2, 1, 1, '2026-01-01T00:00:00.000Z', 'allowed')").run();
     const reservations = new SpendReservations(db);
-    const paidExecution = linkedExecutionFixture(db, campaignId, 'paid');
+    const paidExecution = linkedExecutionFixture(db, campaignId, 'paid', 'chain', 'wallet', 100n);
     const input = { walletId: 'wallet', chainProfileId: 'chain', campaignId, mintPeriodId: `campaign:${campaignId}`, ...paidExecution, policyId: 'policy', freeMint: false, mintValueWei: 100n, l2ExecutionGasWei: 20n, l1DataGasWei: 10n, priorityFeeComponentWei: 5n, replacementBudgetWei: 7n, mintValueBufferWei: 3n, l2ExecutionGasBufferWei: 2n, l1DataGasBufferWei: 1n, priorityFeeBufferWei: 1n, at: new Date('2026-01-01T00:00:00.000Z') };
     expect(reservations.reserveExecution({ ...input, id: 'paid-reservation', idempotencyKey: 'paid-key' })).toBe('reserved');
     expect(db.prepare('SELECT amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei FROM spend_reservation WHERE id = ?').get('paid-reservation')).toEqual({ amount_wei: '149', reserved_amount_wei: '149', mint_value_wei: '100', l2_execution_gas_wei: '20', l1_data_gas_wei: '10', priority_fee_component_wei: '5', replacement_budget_wei: '7' });
@@ -547,6 +553,7 @@ describe('database migrations and spend reservations', () => {
     repository.recordAttempt({ id: 'lineage-submitted-attempt', transactionIntentId: submitted.intentId, executionId: submitted.executionId, endpoint: 'test', responseClass: 'accepted', txHash: '0xlineage', attemptedAt: '2026-01-01T00:00:01.000Z' });
     expect(() => reservations.transition('lineage-submitted-reservation', 'released')).toThrow('submitted reservations cannot be released');
     expect(() => reservations.reserveExecution({ ...request, id: 'lineage-mismatch', idempotencyKey: 'lineage-mismatch-key', transactionIntentId: submitted.intentId, executionId: submitted.executionId })).toThrow('reservation execution and intent linkage mismatch');
+    expect(() => reservations.reserveExecution({ ...request, id: 'lineage-value-mismatch', idempotencyKey: 'lineage-value-mismatch-key', mintValueWei: 1n })).toThrow('reservation mint value does not match transaction intent');
     db.close();
   });
 
@@ -581,6 +588,29 @@ describe('database migrations and spend reservations', () => {
     const db = fixture();
     db.prepare("UPDATE schema_migrations SET checksum = 'bad' WHERE version = 15").run();
     expect(() => migrate(db)).toThrow('migration 15 checksum mismatch');
+    db.close();
+  });
+
+  it('evaluates stale simulations against the requested recovery time', () => {
+    const db = fixture();
+    const campaignId = campaignFixture(db, 'stale-as-of');
+    const { intentId } = linkedExecutionFixture(db, campaignId, 'stale-as-of');
+    const checkedAt = new Date().toISOString();
+    new DurableRepository(db).recordSimulation({ id: 'future-stale-simulation', walletId: 'wallet', campaignId, transactionIntentId: intentId, sourceBlockNumber: 1, checkedAt, freshnessSeconds: 3600, outcome: 'pass', toolVersion: 'test' });
+    const models = new ReadModels(db);
+    expect(models.staleSimulations(new Date(Date.parse(checkedAt) + 1800 * 1000))).toEqual([]);
+    expect(models.staleSimulations(new Date(Date.parse(checkedAt) + 3601 * 1000))).toMatchObject([{ simulationId: 'future-stale-simulation' }]);
+    db.close();
+  });
+
+  it('rejects simulations that cross wallet, campaign, or intent boundaries', () => {
+    const db = fixture();
+    const campaignId = campaignFixture(db, 'simulation-identity');
+    const otherCampaignId = campaignFixture(db, 'simulation-identity-other');
+    const { intentId } = linkedExecutionFixture(db, campaignId, 'simulation-identity');
+    const repository = new DurableRepository(db);
+    expect(() => repository.recordSimulation({ id: 'simulation-campaign-mismatch', walletId: 'wallet', campaignId: otherCampaignId, transactionIntentId: intentId, sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation transaction intent identity mismatch');
+    expect(() => repository.recordSimulation({ id: 'simulation-invalid-block', walletId: 'wallet', campaignId, sourceBlockNumber: -1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation source block must be a non-negative integer');
     db.close();
   });
 });
