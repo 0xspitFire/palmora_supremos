@@ -60,6 +60,11 @@ async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM | typeof
 async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = []): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
   const run: RunRecord = { id: `run-${campaignValue.id}`, intentId: `intent-${campaignValue.id}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
   const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [...simulationIds], evidenceAt: NOW, createdAt: NOW };
+  for (const [index, address] of wallets.entries()) {
+    const walletId = `wallet-${campaignValue.chainId}-${index}`;
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${campaignValue.chainId}`, address, `test-key-${index}`, NOW);
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
+  }
   await fixtureValue.store.transaction((state) => { state.runs.push(run); state.intents.push(intent); });
   const persistedRun = fixtureValue.store.snapshot().runs.find((item) => item.id === run.id);
   if (!persistedRun) throw new Error('run missing');
