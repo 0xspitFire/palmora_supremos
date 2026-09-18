@@ -18,7 +18,7 @@ These decisions supersede older wording in this document and in agent instructio
 - A failed simulation is a hard block. Users may inspect the reason, exclude the affected wallet, or rerun the simulation. There is no general simulation override.
 - Campaign outcomes are standardized: `Cancelled` means the user stopped before active execution; `Aborted` means a safety control, kill switch, or adaptive stop ended remaining work; `Failed` means the system could not complete because of a technical or execution outcome.
 - Robinhood transaction status is standardized as `Submitted → Included → Posted to Ethereum → Ethereum final`. `Included` and `Posted to Ethereum` are not success. The product reports success only after Ethereum finality and retains earlier stages for visibility and recovery.
-- Web delivery is staged: consumer-friendly intelligence and readiness views arrive with the Intelligence MVP in Phase 2; campaign, calendar, and execution controls arrive in Phase 3; opportunity intelligence and evidence views expand in Phase 4; the complete dashboard and analytics arrive in Phase 5.
+- Web delivery is staged: consumer-friendly intelligence, readiness, calendar, reminder, and alert views arrive with the Intelligence MVP in Phase 2; campaign and execution controls arrive in Phase 3; opportunity evidence and investigation expand in Phase 4; the complete dashboard and analytics arrive in Phase 5.
 - Robinhood positive SeaDrop characterization is evidence, not enablement. Execution remains blocked until the release candidate passes archive replay, negative-path tests, per-wallet simulation, durable reservations, sequencer/RPC correlation, restart and duplicate reconciliation, finality observation, and the complete safety and operational gates.
 
 The exact Robinhood blocker is therefore **not chain compatibility**. Compatibility has positive evidence. The blocker is missing integrated operational proof and safe production wiring: the tested durable store is not connected to the live backend path, the runnable CLI can bypass backend admission, the finality observer is not wired, archive fork tests are not passing, and no bot-produced bounded live rehearsal exists.
@@ -131,7 +131,8 @@ watcher observes event (tracked-wallet mint / new contract / phase change) →
 dedupe → create Opportunity(discovered) → gather evidence (wallets involved,
 contract checks, drop reads) → score (deterministic model) →
 score ≥ notify threshold → notify operator (Telegram + feed) →
-operator approves → promotes to Campaign (enters W1 at validate)
+operator inspects (Phase 2; read-only) →
+[Phase 3] proposal approval/promote to Campaign (enters W1 at validate)
 ```
 
 **W3 — Qualify & replicate an observed transaction (Phase 4, gated)**
@@ -166,9 +167,9 @@ aggregate: per wallet / campaign / signal-source → feed back into scoring weig
 
 ## 6. MVP Scope
 
-MVP thesis: the product MVP is **an intelligence and readiness experience for average blockchain consumers**. It answers which opportunities deserve attention, which wallets are eligible and ready, and what the user should do next. The trustworthy execution engine operated via CLI is the Execution Foundation that precedes this MVP and must be proven before it can safely power intelligence-driven actions.
+MVP thesis: the product MVP is **an intelligence and readiness experience for average blockchain consumers**. It answers which opportunities deserve attention, which wallets are eligible and ready, and what the user should do next. The trustworthy execution engine operated via CLI is the Execution Foundation that precedes this MVP and must be proven before it can safely power intelligence-driven actions. The Phase 1 list below is therefore a prerequisite gate, not a reason to defer the Phase 2 read-only product surfaces described in §7 and §17-P2.
 
-### Must Have (MVP exit criteria)
+### Must Have (Phase 1 Execution Foundation prerequisite)
 
 - Engine hardened by Anvil mainnet-fork integration tests (fork at a live SeaDrop drop, warp time, assert fleet mints) running in CI.
 - CLI: `wallet generate/list/fund`, `mint run` (with `--dry-run` default-on), `health`, `kill`.
@@ -180,17 +181,34 @@ MVP thesis: the product MVP is **an intelligence and readiness experience for av
 - Structured JSON logs sufficient to reconstruct any run end-to-end.
 - README-level ops runbook: how to arm, how to abort, how to rotate keys.
 
-### Should Have (immediately after MVP)
+### Phase 2 Intelligence MVP surface commitments (after the Execution Foundation)
 
-- Calibrated timing: chain-time + NTP offset tracking replacing local clock assumptions.
-- Connection prewarming loop (tuned keep-alive dispatcher, periodic re-warm to T-0).
-- Minimal Telegram notifier: execution started / succeeded / failed / aborted, kill-switch confirmation.
-- Post-run summary artifact (per-wallet results, latencies, gas spent).
-- Robinhood characterization is documented, but enablement remains gated by integrated operational proof.
+- Consumer-friendly, read-only web Home/attention, opportunity summary/detail, wallet-by-campaign readiness, calendar, reminder/alert, and run/health status views backed by `mintbot.read-model/v1`.
+- Calendar and eligibility sweeps with source authority, verification time, expiry, and `unknown` distinct from `ineligible`.
+- Deterministic scoring with visible factors, confidence/sample coverage, risks, and safety gates kept separate; a score never authorizes spending.
+- One-way Telegram alerts for opportunity, readiness, reminder, execution-status, kill, cap, underfunded, and health events. Delivery state and canonical read-only links are persisted; alert delivery is never execution proof. Telegram commands and callbacks are not part of Phase 2.
+- Calibrated timing, connection prewarming, and post-run summary artifacts remain supporting operating work when their dependencies are ready.
+- Robinhood characterization is documented, but enablement remains gated by integrated operational proof and is not changed by the Intelligence MVP.
+
+Phase 2 defaults approved by the Product Owner are: one local operator; five
+minutes for readiness freshness; fifteen minutes for discovery and calendar
+freshness; immediate delivery for critical alerts; grouped reminders for
+non-critical items; thirty-day retention for read-model projections and alert
+delivery records; and ninety-day retention for audit events. Backend and
+Database must persist the policy version with each affected record, and may
+only change a default through an explicit product decision.
+
+The six-hour freshness-factor decay in deterministic scoring is a model rule
+for retained historical records, not an extension of the Phase 2 discovery
+freshness window. Phase 2 opportunity/discovery projections are current for 15
+minutes; after that they render `Stale`, remain inspectable for evidence, and
+cannot trigger a new reminder or imply a current recommendation until refreshed.
 
 ### Later
 
-- Campaign/fire-lane model, calendar + eligibility sweeps, opportunity feed, deterministic scoring v1, whale tracker stats, dashboard, OpenSea private-API calldata path (WL/FCFS own-wallet mints), copy-mint replication, EIP-7702 sponsored fleets (requires audit), analytics feedback loop.
+- Phase 3 campaign/fire-lane model, approval/arm and execution controls, operational web views, and two-way Telegram commands.
+- Phase 4 opportunity discovery expansion, tracked-wallet stats, qualified replication, and OpenSea private-API calldata path (WL/FCFS own-wallet mints).
+- Phase 5 analytics feedback loop, FIFO PnL, complete dashboard history, and any EIP-7702 sponsored fleet (requires audit).
 
 ### Explicitly Out of Scope (standing)
 
@@ -224,19 +242,19 @@ Repo due diligence (10 repos, adopt/build/rebuild verdicts), chain research (Eth
 
 ### Phase 2 — Intelligence MVP (after the Execution Foundation)
 
-- Orchestrator process: persistent scheduled jobs (T-minus timers survive restart), job queue, restart recovery (crash between submit and receipt must reconcile on boot).
-- SQLite-class store: wallets-metadata, campaigns-as-jobs (v1 schema keeps Campaign thin), executions, events, spend ledger.
-- Telegram notifier and consumer-friendly dashboard surfaces for discovery, readiness, and reminders.
+- Orchestrator/read-model jobs: persistent discovery, calendar, readiness, reminder, and alert projections survive restart; Phase 2 does not admit or execute a scheduled mint.
+- SQLite-class store: wallets-metadata, campaign/drop associations, opportunities, readiness evidence, calendar sources, alerts, events, and policy versions. Execution reservations and live-submission recovery remain Phase 3 controlled-operations work.
+- One-way Telegram notifier and consumer-friendly, read-only web surfaces for discovery, readiness, calendar, reminders, and operational status. Phase 2 exposes no approval, arm, execution, pause, kill, or other mutation.
 - Runbook-grade observability: run IDs, latency histograms per endpoint, alerting on error-rate anomalies.
 - Intelligence MVP exit does not enable Robinhood. Robinhood remains blocked until its separate operational release gates pass.
-- **Depends on:** P1. **Exit when:** a scheduled mint runs unattended, survives a mid-flight process restart, and reports via Telegram.
+- **Depends on:** P1. **Exit when:** read-only intelligence jobs survive restart, publish consistent projections with freshness/provenance, and report the defined alert events via Telegram. Scheduled mint execution and mid-flight submission recovery are P3 exit criteria.
 
 ### Phase 3 — Validation, Preparation & Controlled Operations
 
 - Campaign model formalized (grouping wallets × drop × policy); manual arm/approve workflow in plain language.
 - Fire lanes: pre-assembled, prewarmed, pre-signed-ready wallet groups; per-lane status; adaptive stop conditions (sold out, price change, cap hit).
 - Gas strategy profiles (fat-cap/priority-compete default; replacement bump ladder).
-- Calendar + eligibility sweeps (own-wallet allowlist checks where on-chain readable); readiness matrix; deadline notifications; first operational web views.
+- First operational web views consume the Phase 2 calendar, eligibility, readiness, reminder, and alert read models; they add campaign and execution context without moving those read-only sources or their freshness policy into Phase 3.
 - Two-way Telegram commands (view, approve, pause, kill).
 - **Depends on:** P2. **Exit when:** operator arms an FCFS-style public mint from Telegram and gets per-wallet results without touching a terminal.
 
@@ -269,7 +287,7 @@ IDs grouped by domain. `[P#]` = earliest phase.
 - **FR-CHAIN-003** [P1]: Robinhood inclusion is gated on written characterization plus operational proof covering sequencer endpoints, no-public-mempool behavior, absence of Flashbots-style bundles, gas model, EIP-1559 semantics, SeaDrop-v1 compatibility, per-wallet simulation, durable reservations, sequencer/RPC correlation, recovery, and Ethereum finality. Positive characterization alone never enables execution.
 - **FR-STRAT-001** [P1]: All contract-specific logic lives behind `MintStrategy` (readDrop / buildCalldata / estimateGas / validateDrop). The engine contains zero contract-specific branching.
 - **FR-STRAT-002** [P1]: `SeaDropV1PublicStrategy` builds byte-identical `mintPublic(nftContract, feeRecipient, address(0), quantity)` calldata with fee recipient resolved from `getAllowedFeeRecipients` (fallback: OpenSea fee collector `0x0000a26b…Aa719`).
-- **FR-STRAT-003** [P2]: `RawCalldataStrategy`: operator supplies exact calldata + value; system validates selector sanity, decodes for display, simulates — but applies extra warnings (no semantic guarantees).
+- **FR-STRAT-003** [P3 backend/CLI]: `RawCalldataStrategy`: operator supplies exact calldata + value; system validates selector sanity, decodes for display, simulates — but applies extra warnings (no semantic guarantees). Phase 2 web and Telegram never accept transaction input.
 - **FR-STRAT-004** [P4]: Additional strategies (Manifold, thirdweb, custom) slot in without engine changes; each ships with its own fork-test fixtures.
 
 ### Wallets & Custody
@@ -277,8 +295,8 @@ IDs grouped by domain. `[P#]` = earliest phase.
 - **FR-WALLET-001** [P1]: Generate independent OS-RNG private keys; no mnemonic derivation; keys encrypted at rest (AES-256-GCM, scrypt-derived KEK), decrypted only in memory, explicit `zeroize()` on completion/error.
 - **FR-WALLET-002** [P1]: Bulk import of existing keys via encrypted archive import (never plaintext files left on disk).
 - **FR-WALLET-003** [P1]: Wallet list shows address, label, group, per-chain balances, last-audited timestamp. Raw key material is never displayable after creation.
-- **FR-WALLET-004** [P2]: Auto-fund from designated hub wallet with configurable amount; funding tx recorded; underfunded wallets flagged against a specific upcoming campaign's requirement (price×qty + gas ceiling + buffer).
-- **FR-WALLET-005** [P3]: Wallet groups + campaign assignment; readiness computed per (wallet, campaign).
+- **FR-WALLET-004** [P2 backend/CLI only]: Auto-fund from designated hub wallet with configurable amount; funding tx recorded; underfunded wallets flagged against a specific upcoming campaign's requirement (price×qty + gas ceiling + buffer). Phase 2 web and Telegram may display the funding/readiness result but cannot trigger funding.
+- **FR-WALLET-005** [P3]: Wallet groups + campaign assignment; readiness is computed per (wallet, campaign). Phase 2 may read existing campaign/drop associations and readiness records but does not create assignments.
 - **FR-CUSTODY-001** [P1]: Signing occurs only through the `Signer` interface; the engine never touches key bytes. A future KMS implementation (`sign(walletId, hash)` remotely) must drop in without engine changes.
 - **FR-CUSTODY-002** [P1]: Any code path that could serialize, log, or transmit key material fails tests (leak regression suite).
 
@@ -286,7 +304,7 @@ IDs grouped by domain. `[P#]` = earliest phase.
 
 - **FR-VALID-001** [P1]: Pre-flight gates before any submission: chain correctness, contract deployed, drop active window, price within configured bound, supply remaining, per-wallet limit respected, wallet funded (cost + gas ceiling + buffer), recipient valid.
 - **FR-VALID-002** [P1]: Each gate failure yields a typed, named error (taxonomy in `MintError`) — no generic strings surfaced to operators.
-- **FR-SIM-001** [P1]: Setup-time simulation (`eth_call` at latest state, repeated at T-minus checkpoints) per wallet or justified wallet class. Simulation failure blocks the affected wallet or campaign. There is no general override. The user may inspect the reason, exclude the affected wallet, or rerun simulation; only a separately approved future exception may change this rule.
+- **FR-SIM-001** [P1]: Setup-time simulation (`eth_call` at latest state, repeated at T-minus checkpoints) per wallet or justified wallet class. Simulation failure blocks the affected wallet or campaign. There is no general override. The P1 CLI or a separately approved future Backend flow may let the operator inspect the reason, exclude the affected wallet, or rerun simulation; Phase 2 web and Telegram expose inspection only.
 - **FR-SIM-002** [P1→P4]: No inline simulation on the hot path. At T-0 the only network calls are signing-local operations and submission.
 
 ### Execution
@@ -294,7 +312,7 @@ IDs grouped by domain. `[P#]` = earliest phase.
 - **FR-EXEC-001** [P1]: Fleet execution isolates failures per wallet (one wallet's nonce/error never blocks others); results aggregated per run.
 - **FR-EXEC-002** [P1]: Fees: generous `maxFeePerGas` cap set at prep; competition via `maxPriorityFeePerGas`; no base-fee refresh at fire; configurable replacement-bump ladder for stuck txs (same-nonce replacement).
 - **FR-EXEC-003** [P1]: Confirmation policy per chain profile. Ethereum uses confirmed settlement after its configured block policy. Robinhood uses `Submitted → Included → Posted to Ethereum → Ethereum final`; `Included` and `Posted to Ethereum` are not success, and the product reports success only at Ethereum finality. Reorg detection downgrades state and reconciles accounting.
-- **FR-EXEC-004** [P2]: Crash recovery: on boot, reconcile all in-flight submissions (pending? mined? dropped?) before accepting new work.
+- **FR-EXEC-004** [P3]: Crash recovery: on boot, reconcile all in-flight submissions (pending? mined? dropped?) before accepting new work. Phase 2 read-model jobs may recover projections, but they do not accept live execution work.
 - **FR-FIRE-001** [P3]: Fire lane = named group of wallets prepared together (funded, simulated, prewarmed) for one campaign; lane states: assembling → warmed → armed → firing → settled/aborted; lanes report aggregate progress.
 - **FR-FIRE-002** [P3]: Adaptive stop: lane aborts remaining wallets when sold-out, price change, per-wallet cap reached, or spend cap breached mid-flight.
 
@@ -309,8 +327,8 @@ IDs grouped by domain. `[P#]` = earliest phase.
 ### Calendar, Notifications, Analytics
 
 - **FR-CAL-001** [P2]: Mint calendar entries carry project, contract, chain, times, phases, price, supply, allowlist requirements, method, FCFS/public status, expected gas.
-- **FR-CAL-002** [P2]: Periodic sweep computes (wallet × upcoming campaign) eligibility/readiness matrix; surfaces "eligible and not yet minted" items prominently.
-- **FR-NOTIF-001** [P2]: Channel abstraction; Telegram first. Event catalog: execution started/succeeded/failed/aborted, kill-switch engaged, spend-cap threshold crossed, wallet underfunded for armed campaign, mint opening soon, eligibility found, high-score opportunity.
+- **FR-CAL-002** [P2]: Periodic sweep computes (wallet × upcoming campaign) eligibility/readiness matrix from existing campaign/drop associations; surfaces "eligible and not yet minted" items prominently. Assignment creation remains P3.
+- **FR-NOTIF-001** [P2]: Channel abstraction; Telegram first. Phase 2 delivery is outbound-only: each alert is idempotently linked to a persisted source event and canonical read record, carries redacted state/freshness copy, and records delivery status. Event catalog: readiness changed, execution started/succeeded/failed/aborted, kill-switch engaged, spend-cap threshold crossed, wallet underfunded for armed campaign, mint opening soon, eligibility found, high-score opportunity, eligibility deadline, blocked health, unresolved submission, and reorg detected. It accepts no commands, callbacks, approvals, arm requests, execution requests, or other mutation; delivery never proves transaction submission, inclusion, or finality.
 - **FR-NOTIF-002** [P3]: Telegram command surface: view readiness, view/run status, approve, pause, kill. Execution-approving commands require explicit confirm step and plain-language consequence summary.
 - **FR-ANLYT-001** [P5]: FIFO lot positions per acquisition; floor polling; unrealized/realized PnL; aggregates by wallet, campaign, project, signal source, gas strategy.
 - **FR-ANLYT-002** [P5]: False-positive ledger: opportunities scored ≥notify threshold that would have lost money — feeds scoring calibration.
@@ -337,7 +355,7 @@ Deliberately modest for a single-operator tool.
 - **Maintainability:** Monorepo, strict TS, no `any` escapes into domain types, strategies/broadcasters behind interfaces, unit + fork tests gate merges.
 - **Scalability:** Personal scale only: ≤~50 wallets, ≤~10 concurrent executions, thousands of rows/day. Any design that can't do this on a laptop + small VPS is over-engineered.
 - **Recovery:** Kill switch is the universal recovery primitive; spend caps bound worst-case damage between operator attention intervals.
-- **Data retention:** Executions, scores, and PnL retained indefinitely (small); raw mempool/watcher noise pruned after 30 days.
+- **Data retention:** Executions, scores, and PnL retained indefinitely (small); Phase 2 read-model projections and alert-delivery records retained for 30 days; audit events retained for 90 days; raw mempool/watcher noise pruned after 30 days unless a replay or audit requirement preserves a reference.
 
 ---
 
@@ -405,6 +423,11 @@ Model version string `v1-rules`; weights in config, every score persisted with i
 | Demand: supply remaining, mint velocity, phase scarcity | 10 | Drop + watcher |
 | Freshness: full points if <15min since discovery, linear decay to 0 at 6h | 10 | Clock |
 
+The six-hour freshness factor is a historical scoring input, not a Phase 2
+readiness or recommendation window. A discovery projection older than 15 minutes
+is `Stale`, remains inspectable, and cannot trigger a new reminder or imply a
+current recommendation until Backend refreshes it.
+
 **Risk penalties (subtract, floor 0):** unverified contract −30; deployer associated with prior scams −50; price > budget band −100 (i.e., block); simulation failure −100 (block); chain unverified −100 (block); spend-cap breach −100 (block); OpenSea-API-dependent data older than 10 min −10.
 
 **Thresholds:** `score ≥ 70` → auto-promotable to *proposal* (still operator-approved until Phase 5 earned-autonomy policy changes this); `40–69` → notify-only; `<40` → log-only. Confidence = min(1, sample_size/N₀) reported alongside score; low-confidence high-scores downgrade one band.
@@ -447,18 +470,18 @@ Each specialist receives this spec + the canonical `PRODUCT_DESIGN_SPEC.md` + th
 
 **Backend Engineer**
 - Orchestrator: scheduling (T-minus timers, drift-corrected to chain time), job queue, crash recovery/reconciliation (FR-EXEC-004), persistence schema for §10 entities, spend-ledger.
-- Notifications: channel abstraction + Telegram (FR-NOTIF-001/002) with confirm-gated commands.
+- Notifications: Phase 2 channel abstraction + outbound-only Telegram (FR-NOTIF-001); Phase 3 adds separately authenticated, confirm-gated commands (FR-NOTIF-002).
 - Wire Safety surfaces across processes (file kill switch, caps in store).
 - Expose a thin local API over Store for future dashboard/CLI parity. No multi-user concerns.
 
 **Frontend Engineer** (Phase 2 entry)
-- Phase 2: consumer-friendly intelligence, readiness, calendar, and alert views.
+- Phase 2: consumer-friendly, read-only intelligence, readiness, calendar, reminder, and alert views.
 - Phase 3: campaign, execution, fire-lane, and approval controls.
 - Phase 4: opportunity evidence and signal explanations.
 - Phase 5: complete overview, whale history, analytics, and historical exploration. All views are traceable to underlying records.
 
 **Product Designer**
-- Information architecture for those six views prioritized around the operator's core questions: "What should I fire at?", "Are my wallets ready?", "What just happened?", "What did it earn?" Opportunity card must show score breakdown + risk flags + replicability verdict. Telegram message templates for the alert catalog.
+- Information architecture for the Phase 2 read-only intelligence, readiness, calendar, reminder, and alert views, prioritized around the operator's core questions: "What should I fire at?", "Are my wallets ready?", and "What needs my attention?" Phase 4 adds evidence and replicability detail; Phase 5 adds earnings. Opportunity cards show available score breakdown and risk flags. Telegram message templates cover the outbound alert catalog.
 
 **DevOps Engineer**
 - Deployment topology: Windows dev box + one small always-on host for orchestrator; secrets handling (no plaintext keys at rest anywhere; backup/restore of encrypted keystore; rotation procedure).
@@ -536,7 +559,7 @@ Each specialist receives this spec + the canonical `PRODUCT_DESIGN_SPEC.md` + th
 1. Tracked wallets, upcoming mints, and candidate opportunities are visible with source time and plain-language explanations.
 2. Wallet-by-campaign eligibility and readiness is calculated and surfaced, including actionable blocked reasons.
 3. Deterministic scores persist their inputs and model version; hard safety gates cannot be bypassed by a score.
-4. Telegram alerts and consumer-friendly dashboard views deliver the defined discovery, readiness, and reminder experience.
+4. Read-only web views and outbound-only Telegram alerts deliver the defined discovery, readiness, calendar, and reminder experience. Critical alerts are sent immediately, non-critical reminders are grouped, and delivery is not execution proof. Phase 2 exposes no mutation.
 5. The Intelligence MVP does not enable Robinhood; chain enablement remains a separate operational release decision.
 
 **P3 — Validation, Preparation & Controlled Operations (exit)**
