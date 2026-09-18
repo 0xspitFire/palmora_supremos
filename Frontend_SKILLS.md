@@ -8,7 +8,7 @@ The Frontend Engineer implements W3's phased web experience over authoritative B
 
 ## Core responsibilities
 
-- Build Phase 2 intelligence, readiness, calendar, and alert views.
+- Build Phase 2 intelligence, readiness, calendar, reminder, alert, and read-only status views.
 - Build Phase 3 campaign, approval, fire-lane, and execution controls.
 - Build Phase 4 evidence, scoring, and replication-verdict views.
 - Build Phase 5 history, PnL, attribution, and analytics.
@@ -53,17 +53,18 @@ Receive UX from Product Designer, scope from Product Manager, data/commands from
 
 ## Known project-specific considerations
 
-- No frontend code exists; do not build broad UI before Phase 2/3 contracts are approved.
-- Web is for investigation and guided control; Telegram is for rapid alerts and narrow actions.
+- No frontend code exists; do not build Phase 2 UI until the accepted read-model contract and its dependency fixtures are delivered.
+- Phase 2 web is read-only investigation; guided control begins in Phase 3. Phase 2 Telegram is outbound alerts/reminders; narrow actions begin in Phase 3.
 - Copy must distinguish `Cancelled`, `Aborted`, and `Failed`.
 
 ## Dated refinements
 
-- 2026-09-14: During Phase 1, frontend delivery is limited to the proposed `mintbot.read-model/v1` contract; no web surface, browser chain access, signing, key access, or secret access is implemented.
+- 2026-09-17: During Phase 1, frontend delivery is limited to the accepted product/design `mintbot.read-model/v1` contract; no web surface, browser chain access, signing, key access, or secret access is implemented.
 - 2026-09-14: Future read models serialize ETH amounts as canonical base-unit strings with explicit asset/unit/decimals metadata; clients never infer money from JavaScript numbers or missing values.
 - 2026-09-14: Decision-relevant read-model fields carry provenance and freshness, while `Unknown`, `Stale`, `Blocked`, `Failed`, `Aborted`, and `Cancelled` remain distinct render states.
 - 2026-09-14: Scores express desirability only. Backend-owned safety gates, retryability, staged finality, reorg reconciliation, and Robinhood paid-mint blocks are never inferred or overridden by the client.
-- 2026-09-14: The Phase 2 contract handoff remains non-authoritative and is not eligible for frontend implementation integration until Lead, Backend, Database, Product, and Blockchain/CTO dependencies are accepted.
-- 2026-09-15: Phase 1 closure review against `origin/main` confirms no tracked web source or frontend-owned blocker; the approved CLI-only boundary remains intact.
+- 2026-09-17: Product Owner accepted the Phase 2 read-only web and outbound-only Telegram scope, including one local operator, 5-minute readiness freshness, 15-minute discovery/calendar freshness, immediate critical alerts, grouped reminders, 30-day read-model/alert retention, and 90-day audit retention.
+- 2026-09-17: The Phase 2 contract is an accepted product/design baseline but is not eligible for frontend implementation integration until Lead, Backend, Database, Blockchain/CTO, DevOps, and Notifications dependencies are accepted.
+- 2026-09-17: Baseline review against clean `origin/main@29d837c` confirms no tracked web source or frontend-owned blocker; the approved CLI-only boundary remains intact.
 - 2026-09-15: The normalized store may provide internal lifecycle evidence, but a future public read model still needs Backend-owned mapping for complete staged finality, reorg history, retryability, provenance, and redaction.
-- 2026-09-15: Product/Design Phase 2 dashboard wording and the current frontend plan's no-dashboard wording require Lead/PM resolution before UI implementation; they do not authorize Phase 1 UI work.
+- 2026-09-17: Product/Design and `PLAN_Frontend.md` now agree on Phase 2 read-only intelligence/readiness/calendar/reminder/status views and outbound-only Telegram; this does not authorize Phase 1 UI work or execution.

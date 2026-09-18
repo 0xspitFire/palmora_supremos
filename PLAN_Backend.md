@@ -16,18 +16,18 @@ Build the application operating shell around the engine: orchestration, durable 
 
 ### Phase 2: Orchestrator and operational shell
 
-- Implement one long-running orchestrator process with persistent jobs, T-minus scheduling against chain-time offset, idempotency keys, and bounded concurrency.
-- On boot, enter `Reconciling`; reconcile every in-flight transaction by wallet/nonce/hash before accepting new live work. Unknown is not silently failed or succeeded.
-- Add durable spend reservations covering worst-case mint value plus gas ceiling and buffer. Atomic reservation is required across workers and restarts; settle/release on authoritative outcome.
-- Wire file and programmatic kill switch into a shared cancellation model. Check before reservation, signing, and every wallet broadcast. Mark remaining work `Aborted`; preserve submitted work.
-- Add one-way Telegram channel with recorded delivery state for started, succeeded, failed, aborted, kill, cap, and underfunded events. Links target canonical run records.
+- Implement persistent read-only jobs for discovery, calendar, readiness, reminders, and alert projections; preserve snapshot identity, idempotency, bounded concurrency, freshness, and provenance across restart.
+- Add one-way Telegram channel with recorded delivery state for opportunity, readiness, opening, deadline, underfunded, started, succeeded, failed, aborted, kill, cap, blocked-health, unresolved-submission, and reorg events. Links target canonical read records.
+- Implement authoritative readiness as `(wallet, campaign)` for existing campaign/drop associations, combining chain, balance, eligibility, proof, constructibility, simulation freshness, and gas policy with field-level reasons; expose Phase 2 read-only readiness, calendar, reminder, alert, health, and run projections with Backend-owned snapshots, provenance, freshness, typed blockers, redaction, and the 5-minute/15-minute policy defaults. These projections never expose mutation routes. Assignment creation remains Phase 3.
 
 ### Phase 3: controlled operations
 
+- Implement the live-execution orchestrator: T-minus scheduling against chain-time offset, persistent execution jobs, restart reconciliation, and admission only after every in-flight submission is resolved or explicitly marked unknown.
+- Add durable spend reservations covering worst-case mint value plus gas ceiling and buffer. Atomic reservation is required across workers and restarts; settle/release on authoritative outcome.
+- Wire file and programmatic kill switch into a shared cancellation model. Check before reservation, signing, and every wallet broadcast. Mark remaining work `Aborted`; preserve submitted work.
 - Formalize Campaign and FireLane state machines. Separate proposal approval from `ARM LIVE CAMPAIGN`.
-- Implement readiness as `(wallet, campaign)`, combining chain, balance, eligibility, proof, constructibility, simulation freshness, and gas policy with field-level reasons.
+- Add operational campaign and FireLane views over the accepted Phase 2 readiness and calendar projections.
 - Add adaptive stops and typed retry permission. Retry is never generic; it is allowed only when persisted nonce, cap, and error state make it safe.
-- Add calendar registry and eligibility sweeps with source authority, verification time, expiry, and unknown distinct from ineligible.
 - Add two-way Telegram only after authenticated operator identity, scoped immutable IDs, replay protection, explicit second confirmation, consequence copy, and durable audit events.
 
 ### Phase 4-5
