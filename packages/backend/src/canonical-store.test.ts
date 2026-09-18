@@ -54,7 +54,13 @@ function campaignInput(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false
 }
 
 async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false): Promise<Campaign> {
-  return fixtureValue.application.createCampaign(campaignInput(chainId, paid));
+  const campaignValue = await fixtureValue.application.createCampaign(campaignInput(chainId, paid));
+  for (const [index, address] of [WALLET_ONE, WALLET_TWO].entries()) {
+    const walletId = `wallet-${chainId}-${index}`;
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${chainId}`, address, `test-key-${index}`, NOW);
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
+  }
+  return campaignValue;
 }
 
 async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = []): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
