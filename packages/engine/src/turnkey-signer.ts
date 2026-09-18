@@ -6,6 +6,7 @@ import {
   parseTransaction,
   recoverTransactionAddress,
   serializeTransaction,
+  decodeFunctionData,
   keccak256,
   toBytes,
   type Address,
@@ -27,7 +28,22 @@ export interface TurnkeyWalletMap {
   organizationId?: string;
   policyId?: string;
   policyDigest?: Hex;
+  policy?: TurnkeyPolicyBinding;
   wallets: TurnkeyWalletReference[];
+}
+
+export interface TurnkeyPolicyBinding {
+  chainId: 1;
+  to: Address;
+  functionSelector: `0x${string}`;
+  nftContract: Address;
+  feeRecipient: Address;
+  minterIfNotPayer: Address;
+  quantity: string;
+  maxValueWei: string;
+  maxGasLimit: string;
+  maxFeePerGas: string;
+  maxPriorityFeePerGas: string;
 }
 
 export interface TurnkeySecretConfig {
@@ -50,6 +66,7 @@ export interface TurnkeySignerClient {
   }): Promise<{ signedTransaction: string }>;
   getWhoami(input?: { organizationId?: string }): Promise<{ organizationId: string }>;
   getPolicies?(input: { organizationId: string }): Promise<{ policies: Array<{ policyId: string; effect?: string; condition?: string }> }>;
+  getPrivateKeys?(input: { organizationId: string }): Promise<{ privateKeys: Array<{ privateKeyId: string; privateKeyName?: string; addresses: Array<{ format?: string; address?: string }> }> }>;
 }
 
 export interface TurnkeyClient extends TurnkeySignerClient {
@@ -83,6 +100,7 @@ export interface TurnkeySignerOptions {
   wallets: readonly TurnkeyWalletReference[];
   policyId: string;
   policyDigest: Hex;
+  policy: TurnkeyPolicyBinding;
   client: TurnkeySignerClient;
   generateAppProofs?: boolean;
 }
@@ -94,6 +112,7 @@ export interface TurnkeyHealthReport {
   walletCount: number;
   policyId: string;
   policyDigest: Hex;
+  policy: TurnkeyPolicyBinding;
 }
 
 export function createTurnkeyClient(
@@ -182,6 +201,70 @@ function sameAddress(left: Address | null | undefined, right: Address): boolean 
   return left?.toLowerCase() === right.toLowerCase();
 }
 
+function validatePolicyBinding(value: unknown): TurnkeyPolicyBinding {
+  if (!value || typeof value !== 'object') throw new Error('TURNKEY_POLICY_BINDING_INVALID');
+  const policy = value as Partial<TurnkeyPolicyBinding>;
+  const addresses = [policy.to, policy.nftContract, policy.feeRecipient, policy.minterIfNotPayer];
+  const amounts = [policy.quantity, policy.maxValueWei, policy.maxGasLimit, policy.maxFeePerGas, policy.maxPriorityFeePerGas];
+  if (
+    policy.chainId !== 1
+    || !/^0x[0-9a-fA-F]{8}$/.test(policy.functionSelector ?? '')
+    || addresses.some((address) => typeof address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(address))
+    || amounts.some((amount) => typeof amount !== 'string' || !/^\d+$/.test(amount))
+  ) throw new Error('TURNKEY_POLICY_BINDING_INVALID');
+  return {
+    chainId: 1,
+    to: policy.to as Address,
+    functionSelector: policy.functionSelector as `0x${string}`,
+    nftContract: policy.nftContract as Address,
+    feeRecipient: policy.feeRecipient as Address,
+    minterIfNotPayer: policy.minterIfNotPayer as Address,
+    quantity: policy.quantity as string,
+    maxValueWei: policy.maxValueWei as string,
+    maxGasLimit: policy.maxGasLimit as string,
+    maxFeePerGas: policy.maxFeePerGas as string,
+    maxPriorityFeePerGas: policy.maxPriorityFeePerGas as string,
+  };
+}
+
+const SEA_DROP_ABI = [{
+  type: 'function',
+  name: 'mintPublic',
+  inputs: [
+    { name: 'nftContract', type: 'address' },
+    { name: 'feeRecipient', type: 'address' },
+    { name: 'minterIfNotPayer', type: 'address' },
+    { name: 'quantity', type: 'uint256' },
+  ],
+  outputs: [],
+  stateMutability: 'payable',
+}] as const;
+
+function validateIntentAgainstPolicy(intent: TransactionIntent, policy: TurnkeyPolicyBinding): void {
+  if (
+    intent.chainId !== policy.chainId
+    || !sameAddress(intent.to, policy.to)
+    || intent.value > BigInt(policy.maxValueWei)
+    || intent.gasLimit > BigInt(policy.maxGasLimit)
+    || intent.maxFeePerGas > BigInt(policy.maxFeePerGas)
+    || intent.maxPriorityFeePerGas > BigInt(policy.maxPriorityFeePerGas)
+    || !intent.data.toLowerCase().startsWith(policy.functionSelector.toLowerCase())
+  ) throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
+  try {
+    const decoded = decodeFunctionData({ abi: SEA_DROP_ABI, data: intent.data });
+    const [nftContract, feeRecipient, minterIfNotPayer, quantity] = decoded.args as readonly [Address, Address, Address, bigint];
+    if (
+      decoded.functionName !== 'mintPublic'
+      || !sameAddress(nftContract, policy.nftContract)
+      || !sameAddress(feeRecipient, policy.feeRecipient)
+      || !sameAddress(minterIfNotPayer, policy.minterIfNotPayer)
+      || quantity !== BigInt(policy.quantity)
+    ) throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
+  } catch {
+    throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
+  }
+}
+
 function validateWalletMap(value: unknown): TurnkeyWalletMap {
   if (!value || typeof value !== 'object') throw new Error('TURNKEY_WALLET_MAP_INVALID');
   const candidate = value as Partial<TurnkeyWalletMap>;
@@ -209,11 +292,13 @@ function validateWalletMap(value: unknown): TurnkeyWalletMap {
     addresses.add(address);
     signWith.add(wallet.signWith);
   }
+  const policy = validatePolicyBinding(candidate.policy);
   return {
     version: 1,
     ...(typeof candidate.organizationId === 'string' ? { organizationId: candidate.organizationId } : {}),
     policyId: candidate.policyId,
     policyDigest: candidate.policyDigest as Hex,
+    policy,
     wallets,
   };
 }
@@ -233,6 +318,7 @@ export class TurnkeySigner implements Signer {
   private readonly organizationId: string;
   private readonly policyId: string;
   private readonly policyDigest: Hex;
+  private readonly policy: TurnkeyPolicyBinding;
   private readonly wallets: TurnkeyWalletReference[];
   private readonly generateAppProofs: boolean;
 
@@ -243,6 +329,7 @@ export class TurnkeySigner implements Signer {
     this.organizationId = options.organizationId;
     this.policyId = options.policyId;
     this.policyDigest = options.policyDigest;
+    this.policy = { ...options.policy };
     this.wallets = options.wallets.map((wallet) => ({ ...wallet }));
     this.client = options.client;
     this.generateAppProofs = options.generateAppProofs ?? true;
@@ -252,12 +339,13 @@ export class TurnkeySigner implements Signer {
     const { organizationId, apiPublicKey, apiPrivateKey, walletMapPath: mapPath } = await readTurnkeySecretConfig(root, scope);
     const map = await readTurnkeyWalletMap(mapPath);
     if (map.organizationId && map.organizationId !== organizationId) throw new Error('TURNKEY_ORGANIZATION_MISMATCH');
-    if (!map.policyId || !map.policyDigest) throw new Error('TURNKEY_POLICY_REQUIRED');
+    if (!map.policyId || !map.policyDigest || !map.policy) throw new Error('TURNKEY_POLICY_REQUIRED');
     return new TurnkeySigner({
       organizationId,
       wallets: map.wallets,
       policyId: map.policyId,
       policyDigest: map.policyDigest,
+      policy: map.policy,
       client: createTurnkeyClient(organizationId, apiPublicKey, apiPrivateKey),
     });
   }
@@ -274,7 +362,7 @@ export class TurnkeySigner implements Signer {
     if (!wallet) throw new Error('TURNKEY_WALLET_NOT_FOUND');
     if (!sameAddress(intent.from, wallet.address)) throw new Error('TURNKEY_SIGNER_WALLET_MISMATCH');
     if (!this.policyId || intent.policyRef !== this.policyId) throw new Error('TURNKEY_POLICY_REFERENCE_MISMATCH');
-    if (intent.chainId !== 1) throw new Error('TURNKEY_CHAIN_BLOCKED');
+    validateIntentAgainstPolicy(intent, this.policy);
 
     const unsignedTransaction = serializeTransaction({
       type: 'eip1559',
@@ -344,6 +432,27 @@ export class TurnkeySigner implements Signer {
     const policies = await client.getPolicies({ organizationId: this.organizationId });
     const policy = policies.policies.find((candidate) => candidate.policyId === this.policyId);
     if (!policy || policy.effect !== 'EFFECT_ALLOW' || !policy.condition || keccak256(toBytes(policy.condition)) !== this.policyDigest) throw new Error('TURNKEY_POLICY_NOT_FOUND');
+    const condition = policy.condition.replace(/\s+/g, ' ').toLowerCase();
+    const requiredClauses = [
+      `eth.tx.chain_id == ${this.policy.chainId}`,
+      `eth.tx.to == '${this.policy.to.toLowerCase()}'`,
+      `eth.tx.value == ${this.policy.maxValueWei}`,
+      `eth.tx.gas <= ${this.policy.maxGasLimit}`,
+      `eth.tx.max_fee_per_gas <= ${this.policy.maxFeePerGas}`,
+      `eth.tx.max_priority_fee_per_gas <= ${this.policy.maxPriorityFeePerGas}`,
+      `eth.tx.function_signature == '${this.policy.functionSelector.toLowerCase()}'`,
+      `eth.tx.contract_call_args['nftcontract'] == '${this.policy.nftContract.toLowerCase()}'`,
+      `eth.tx.contract_call_args['feerecipient'] == '${this.policy.feeRecipient.toLowerCase()}'`,
+      `eth.tx.contract_call_args['minterifnotpayer'] == '${this.policy.minterIfNotPayer.toLowerCase()}'`,
+      `eth.tx.contract_call_args['quantity'] == ${this.policy.quantity}`,
+    ];
+    if (!requiredClauses.every((clause) => condition.includes(clause)) || !this.wallets.every((wallet) => condition.includes(wallet.address.toLowerCase()))) throw new Error('TURNKEY_POLICY_SEMANTICS_INVALID');
+    if (!client.getPrivateKeys) throw new Error('TURNKEY_KEY_METADATA_CLIENT_REQUIRED');
+    const keyMetadata = await client.getPrivateKeys({ organizationId: this.organizationId });
+    if (!this.wallets.every((wallet) => {
+      const key = keyMetadata.privateKeys.find((candidate) => candidate.privateKeyId === wallet.signWith);
+      return key?.addresses.some((candidate) => candidate.address?.toLowerCase() === wallet.address.toLowerCase()) === true;
+    })) throw new Error('TURNKEY_WALLET_REFERENCE_INVALID');
     return {
       status: 'ok',
       provider: 'turnkey',
@@ -351,6 +460,7 @@ export class TurnkeySigner implements Signer {
       walletCount: this.wallets.length,
       policyId: this.policyId,
       policyDigest: this.policyDigest,
+      policy: this.policy,
     };
   }
 

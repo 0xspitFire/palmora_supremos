@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { privateKeyToAccount } from 'viem/accounts';
-import { keccak256, toBytes, type Address, type Hex } from 'viem';
+import { encodeFunctionData, keccak256, parseAbi, toBytes, type Address, type Hex } from 'viem';
 import { describe, expect, it } from 'vitest';
 import { TurnkeySigner } from './turnkey-signer.js';
 
@@ -8,20 +8,29 @@ describe('TurnkeySigner', () => {
   it('validates the Turnkey-signed transaction boundary', async () => {
     const privateKey = `0x${randomBytes(32).toString('hex')}` as Hex;
     const account = privateKeyToAccount(privateKey);
+    const seaDrop = '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5' as Address;
+    const nft = '0x0000000000000000000000000000000000000002' as Address;
+    const feeRecipient = '0x0000000000000000000000000000000000000003' as Address;
+    const minterIfNotPayer = '0x0000000000000000000000000000000000000000' as Address;
+    const data = encodeFunctionData({
+      abi: parseAbi(['function mintPublic(address nftContract,address feeRecipient,address minterIfNotPayer,uint256 quantity) payable']),
+      functionName: 'mintPublic',
+      args: [nft, feeRecipient, minterIfNotPayer, 1n],
+    });
     const intent = {
       chainId: 1 as const,
       from: account.address,
-      to: '0x0000000000000000000000000000000000000001' as Address,
+      to: seaDrop,
       value: 0n,
-      data: '0x' as Hex,
+      data,
       nonce: 4,
       gasLimit: 21_000n,
-      maxFeePerGas: 2_000_000_000n,
+      maxFeePerGas: 1_000_000_000n,
       maxPriorityFeePerGas: 100_000_000n,
       policyRef: 'policy-test',
     };
     const signedTransaction = await account.signTransaction({ type: 'eip1559', ...intent, gas: intent.gasLimit });
-    const policyCondition = 'turnkey-policy-test';
+    const policyCondition = `eth.tx.chain_id == 1 && eth.tx.to == '${seaDrop.toLowerCase()}' && eth.tx.from in ['${account.address.toLowerCase()}'] && eth.tx.value == 0 && eth.tx.gas <= 21000 && eth.tx.max_fee_per_gas <= 1000000000 && eth.tx.max_priority_fee_per_gas <= 100000000 && eth.tx.function_signature == '0x161ac21f' && eth.tx.contract_call_args['nftContract'] == '${nft.toLowerCase()}' && eth.tx.contract_call_args['feeRecipient'] == '${feeRecipient.toLowerCase()}' && eth.tx.contract_call_args['minterIfNotPayer'] == '${minterIfNotPayer.toLowerCase()}' && eth.tx.contract_call_args['quantity'] == 1`;
     let observedSignWith = '';
     let observedType = '';
     const signer = new TurnkeySigner({
@@ -29,6 +38,19 @@ describe('TurnkeySigner', () => {
       wallets: [{ index: 0, address: account.address, signWith: 'turnkey-account-test' }],
       policyId: 'policy-test',
       policyDigest: keccak256(toBytes(policyCondition)),
+      policy: {
+        chainId: 1,
+        to: seaDrop,
+        functionSelector: '0x161ac21f',
+        nftContract: nft,
+        feeRecipient,
+        minterIfNotPayer,
+        quantity: '1',
+        maxValueWei: '0',
+        maxGasLimit: '21000',
+        maxFeePerGas: '1000000000',
+        maxPriorityFeePerGas: '100000000',
+      },
       client: {
         signTransaction: async (input) => {
           observedSignWith = input.signWith;
@@ -37,6 +59,7 @@ describe('TurnkeySigner', () => {
         },
         getWhoami: async () => ({ organizationId: 'org-test' }),
         getPolicies: async () => ({ policies: [{ policyId: 'policy-test', effect: 'EFFECT_ALLOW', condition: policyCondition }] }),
+        getPrivateKeys: async () => ({ privateKeys: [{ privateKeyId: 'turnkey-account-test', addresses: [{ format: 'ADDRESS_FORMAT_ETHEREUM', address: account.address }] }] }),
       },
     });
 
@@ -56,6 +79,19 @@ describe('TurnkeySigner', () => {
       wallets: [{ index: 0, address: account.address, signWith: account.address }],
       policyId: 'policy-test',
       policyDigest: `0x${'0'.repeat(64)}`,
+      policy: {
+        chainId: 1,
+        to: '0x0000000000000000000000000000000000000002',
+        functionSelector: '0x161ac21f',
+        nftContract: '0x0000000000000000000000000000000000000002',
+        feeRecipient: '0x0000000000000000000000000000000000000003',
+        minterIfNotPayer: '0x0000000000000000000000000000000000000000',
+        quantity: '1',
+        maxValueWei: '0',
+        maxGasLimit: '21000',
+        maxFeePerGas: '1',
+        maxPriorityFeePerGas: '1',
+      },
       client: {
         signTransaction: async () => ({ signedTransaction: '0x02' }),
         getWhoami: async () => ({ organizationId: 'org-test' }),
