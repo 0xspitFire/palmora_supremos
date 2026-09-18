@@ -245,6 +245,10 @@ const json = (value: unknown): string | null => {
   return encoded;
 };
 
+function backupReferenceExists(reference: string): boolean {
+  return existsSync(reference) || /^(s3|gs|b2|https?):\/\//i.test(reference);
+}
+
 function fingerprint(value: unknown): string {
   return createHash('sha256').update(json(value) ?? '').digest('hex');
 }
@@ -337,6 +341,7 @@ export class DurableRepository {
       }
       const wallet = this.db.prepare('SELECT chain_profile_id, address FROM wallet WHERE id = ?').get(record.walletId) as { chain_profile_id: string; address: string } | undefined;
       if (!wallet) throw new Error('wallet not found for transaction intent');
+      if (record.chainProfileId !== undefined && record.chainProfileId !== wallet.chain_profile_id) throw new Error('transaction intent chain does not match wallet');
       this.db.prepare('INSERT INTO transaction_intent (id, campaign_id, wallet_id, intent_class, to_address, value_wei, calldata, nonce, policy_snapshot_json, created_at, chain_profile_id, from_address, gas_limit_wei, max_fee_per_gas_wei, max_priority_fee_per_gas_wei, idempotency_key, request_id, request_fingerprint, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.campaignId, record.walletId, record.intentClass, record.toAddress, record.valueWei.toString(), record.calldata, record.nonce ?? null, json(record.policySnapshot), record.createdAt, record.chainProfileId ?? wallet.chain_profile_id, record.fromAddress ?? wallet.address, (record.gasLimitWei ?? 0n).toString(), (record.maxFeePerGasWei ?? 0n).toString(), (record.maxPriorityFeePerGasWei ?? 0n).toString(), record.idempotencyKey ?? null, record.requestId ?? null, requestFingerprint, record.runId ?? null);
     });
   }
@@ -360,11 +365,12 @@ export class DurableRepository {
     if (!Number.isInteger(record.sourceBlockNumber) || record.sourceBlockNumber < 0) throw new Error('simulation source block must be a non-negative integer');
     if (!Number.isInteger(record.freshnessSeconds) || record.freshnessSeconds < 0) throw new Error('simulation freshness must be a non-negative integer');
     const checkedAt = Date.parse(record.checkedAt);
-    if (!Number.isFinite(checkedAt) || checkedAt > Date.now() + 30_000) throw new Error('simulation checked time is invalid or in the future');
+    if (!Number.isFinite(checkedAt) || checkedAt > Date.now()) throw new Error('simulation checked time is invalid or in the future');
     this.immediate(() => {
       const campaign = this.db.prepare('SELECT ct.chain_profile_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id WHERE c.id = ?').get(record.campaignId) as { chain_profile_id: string } | undefined;
       const wallet = this.db.prepare('SELECT chain_profile_id FROM wallet WHERE id = ?').get(record.walletId) as { chain_profile_id: string } | undefined;
-      if (!campaign || !wallet || campaign.chain_profile_id !== wallet.chain_profile_id) throw new Error('simulation wallet and campaign identity mismatch');
+      const campaignWallet = this.db.prepare('SELECT enabled FROM campaign_wallet WHERE campaign_id = ? AND wallet_id = ?').get(record.campaignId, record.walletId) as { enabled: number } | undefined;
+      if (!campaign || !wallet || campaign.chain_profile_id !== wallet.chain_profile_id || campaignWallet?.enabled !== 1) throw new Error('simulation wallet and campaign identity mismatch');
       if (record.transactionIntentId !== undefined) {
         const intent = this.db.prepare('SELECT wallet_id, campaign_id, chain_profile_id FROM transaction_intent WHERE id = ?').get(record.transactionIntentId) as { wallet_id: string; campaign_id: string; chain_profile_id: string | null } | undefined;
         if (!intent || intent.wallet_id !== record.walletId || intent.campaign_id !== record.campaignId || (intent.chain_profile_id !== null && intent.chain_profile_id !== campaign.chain_profile_id)) throw new Error('simulation transaction intent identity mismatch');
@@ -422,6 +428,10 @@ export class DurableRepository {
     if (!profile || profile.chain_id !== record.chainId) throw new Error('chain verification identity mismatch');
     if (record.chainId === 4663 && record.sequencerEndpointReference !== 'https://sequencer.mainnet.chain.robinhood.com') throw new Error('Robinhood sequencer reference is not the approved endpoint');
     if (record.chainId === 4663 && !record.archiveEndpointReference?.startsWith('Rets/MINT_BOT_SECRETS.env')) throw new Error('Robinhood archive endpoint must remain a Rets/MINT_BOT_SECRETS.env reference');
+    if (record.status === 'verified') {
+      const evidence = record.evidence && typeof record.evidence === 'object' ? record.evidence as Record<string, unknown> : undefined;
+      if (!record.approvedBy || !record.approvedAt || !evidence || Object.keys(evidence).length === 0 || evidence.finalityPassed !== true) throw new Error('verified chain requires approved finality evidence');
+    }
     this.immediate(() => {
       const executionEnabled = record.executionEnabled ?? (record.status === 'execution_blocked' ? false : profile.execution_enabled === 1);
       if (record.status !== 'verified' && executionEnabled) throw new Error('execution can only remain enabled for a verified chain');
@@ -437,7 +447,7 @@ export class DurableRepository {
       const attempt = record.transactionAttemptId === undefined ? undefined : this.db.prepare('SELECT execution_id, chain_profile_id, tx_hash, from_address, nonce FROM transaction_attempt WHERE id = ?').get(record.transactionAttemptId) as { execution_id: string | null; chain_profile_id: string | null; tx_hash: string | null; from_address: string | null; nonce: number | null } | undefined;
       if (record.transactionAttemptId !== undefined && !attempt) throw new Error('transaction attempt not found for reconciliation');
       if (attempt && attempt.chain_profile_id !== null && attempt.chain_profile_id !== record.chainProfileId) throw new Error('reconciliation chain does not match attempt');
-      if (attempt && ((record.txHash !== undefined && record.txHash.toLowerCase() !== attempt.tx_hash?.toLowerCase()) || (record.fromAddress !== undefined && record.fromAddress.toLowerCase() !== attempt.from_address?.toLowerCase()) || (record.nonce !== undefined && record.nonce !== attempt.nonce))) throw new Error('reconciliation identity does not match attempt');
+      if (attempt && ((record.executionId !== undefined && record.executionId !== attempt.execution_id) || (record.txHash !== undefined && record.txHash.toLowerCase() !== attempt.tx_hash?.toLowerCase()) || (record.fromAddress !== undefined && record.fromAddress.toLowerCase() !== attempt.from_address?.toLowerCase()) || (record.nonce !== undefined && record.nonce !== attempt.nonce))) throw new Error('reconciliation identity does not match attempt');
       this.db.prepare('INSERT INTO reconciliation_record (id, chain_profile_id, transaction_attempt_id, tx_hash, from_address, nonce, state, checked_at, source, details_json, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.transactionAttemptId ?? null, record.txHash ?? attempt?.tx_hash ?? null, record.fromAddress ?? attempt?.from_address ?? null, record.nonce ?? attempt?.nonce ?? null, record.state, record.checkedAt, safeText(record.source, 'reconciliation source'), json(record.details ?? {}) ?? '{}', record.executionId ?? attempt?.execution_id ?? null);
     });
   }
@@ -515,7 +525,7 @@ export class DurableRepository {
   }
 
   public recordBackupRestoreEvidence(record: BackupRestoreEvidenceRecord): void {
-    if (record.outcome === 'passed' && (record.encryptionVerified !== true || record.integrityCheck !== 'ok')) throw new Error('passed backup evidence requires encryption and integrity verification');
+    if (record.outcome === 'passed' && (record.encryptionVerified !== true || record.integrityCheck !== 'ok' || !record.killSwitchEngaged || !backupReferenceExists(record.storeReference) || !backupReferenceExists(record.backupReference))) throw new Error('passed backup evidence requires encrypted, verified, kill-switched references');
     if (!/^[a-f0-9]{64}$/i.test(record.sha256)) throw new Error('backup evidence hash must be SHA-256');
     if (record.verificationSha256 !== undefined && record.verificationSha256.toLowerCase() !== record.sha256.toLowerCase()) throw new Error('backup verification hash mismatch');
     if (existsSync(record.backupReference)) {
@@ -525,6 +535,7 @@ export class DurableRepository {
     this.immediate(() => {
       const currentSchema = this.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null };
       if (record.outcome === 'passed' && currentSchema.version !== record.schemaVersion) throw new Error('backup evidence schema version is not current');
+      if (record.outcome === 'passed' && (!record.verificationSha256 || record.verificationSha256.toLowerCase() !== record.sha256.toLowerCase())) throw new Error('passed backup evidence requires verification hash');
       this.db.prepare('INSERT INTO backup_restore_evidence (id, store_reference, backup_reference, sha256, schema_version, operation, outcome, kill_switch_engaged, evidence_json, recorded_at, encryption_verified, integrity_check, verification_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, safeText(record.storeReference, 'backup store reference'), safeText(record.backupReference, 'backup reference'), record.sha256.toLowerCase(), record.schemaVersion, record.operation, record.outcome, record.killSwitchEngaged ? 1 : 0, json(record.evidence ?? {}) ?? '{}', record.recordedAt, record.encryptionVerified ? 1 : 0, record.integrityCheck ?? 'not_recorded', record.verificationSha256?.toLowerCase() ?? null);
     });
   }

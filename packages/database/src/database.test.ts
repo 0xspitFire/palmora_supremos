@@ -50,11 +50,13 @@ function campaignFixture(db: ReturnType<typeof openDatabase>, suffix: string, ch
   db.prepare('INSERT INTO collection (id, contract_id, name) VALUES (?, ?, ?)').run(collectionId, contractId, suffix);
   db.prepare('INSERT INTO "drop" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES (?, ?, ?, ?, ?)').run(dropId, collectionId, 'test', '0', '2026-01-01T00:00:00.000Z');
   db.prepare('INSERT INTO campaign (id, drop_id, state, created_at) VALUES (?, ?, ?, ?)').run(campaignId, dropId, 'draft', '2026-01-01T00:00:00.000Z');
+  if (chainProfileId === 'chain') db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignId, 'wallet', '2026-01-01T00:00:00.000Z');
   return campaignId;
 }
 
 function linkedExecutionFixture(db: ReturnType<typeof openDatabase>, campaignId: string, suffix: string, chainProfileId = 'chain', walletId = chainProfileId === 'chain' ? 'wallet' : `${chainProfileId}-wallet`, valueWei = 0n) {
   const repository = new DurableRepository(db);
+  db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignId, walletId, '2026-01-01T00:00:00.000Z');
   const intentId = `intent-${suffix}`;
   const executionId = `execution-${suffix}`;
   repository.saveIntent({ id: intentId, campaignId, walletId, intentClass: 'mint', toAddress: '0xdef', valueWei, calldata: '0x', chainProfileId, createdAt: '2026-01-01T00:00:00.000Z' });
@@ -306,7 +308,7 @@ describe('database migrations and spend reservations', () => {
     const repository = new DurableRepository(restored);
     repository.saveBackupPolicy({ id: 'backup-policy', approvalOwner: 'product-owner', approvedAt: '2026-01-01T00:00:00.000Z' });
     expect(restored.prepare('SELECT retention_days, encryption_required FROM backup_policy WHERE id = ?').get('backup-policy')).toEqual({ retention_days: 30, encryption_required: 1 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: 'temporary-store', backupReference: 'temporary-backup', sha256: verification.sha256, schemaVersion: verification.schemaVersion, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, encryptionVerified: true, integrityCheck: 'ok', recordedAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: destination, backupReference: 's3://test/backup', sha256: verification.sha256, schemaVersion: verification.schemaVersion, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: verification.sha256, evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:00.000Z' });
     restored.close();
     source.close();
     rmSync(directory, { recursive: true, force: true });
@@ -485,7 +487,7 @@ describe('database migrations and spend reservations', () => {
     const request = { id: 'admission-reservation', walletId: 'wallet', chainProfileId: 'chain', campaignId, ...execution, policyId: 'policy', mintPeriodId: `campaign:${campaignId}`, idempotencyKey: 'admission-key', freeMint: true, mintValueWei: 0n, l2ExecutionGasWei: 1n, l1DataGasWei: 1n, priorityFeeComponentWei: 1n };
     expect(() => reservations.reserveExecution(request)).toThrow('chain execution is not enabled or verified');
     const repository = new DurableRepository(db);
-    repository.recordChainVerification({ id: 'admission-verification', chainProfileId: 'chain', status: 'verified', chainId: 1, executionEnabled: true, checkedAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordChainVerification({ id: 'admission-verification', chainProfileId: 'chain', status: 'verified', chainId: 1, executionEnabled: true, approvedBy: 'product-owner', approvedAt: '2026-01-01T00:00:00.000Z', evidence: { finalityPassed: true, confirmationDepth: 2 }, checkedAt: '2026-01-01T00:00:00.000Z' });
     expect(reservations.reserveExecution(request)).toBe('reserved');
     expect(db.prepare('SELECT verification_status, execution_enabled FROM chain_profile WHERE id = ?').get('chain')).toEqual({ verification_status: 'verified', execution_enabled: 1 });
     db.close();
@@ -529,7 +531,7 @@ describe('database migrations and spend reservations', () => {
     repository.recordRetentionEvidence({ id: 'retention-evidence', policyId: 'raw-observation-30d', entityType: 'raw_observation', cutoffAt: '2026-01-01T00:00:00.000Z', rowsDeleted: 3, rowsRetained: 1, outcome: 'passed', recordedAt: '2026-01-01T00:00:01.000Z' });
     expect(db.prepare('SELECT entity_type, rows_deleted, rows_retained, outcome FROM retention_evidence WHERE id = ?').get('retention-evidence')).toEqual({ entity_type: 'raw_observation', rows_deleted: 3, rows_retained: 1, outcome: 'passed' });
     expect(db.prepare('SELECT retention_days, retain_indefinitely FROM retention_policy WHERE entity_type = ?').get('raw_observation')).toEqual({ retention_days: 30, retain_indefinitely: 0 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 'temporary-store', backupReference: 'temporary-backup', sha256: 'a'.repeat(64), schemaVersion: 15, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', recordedAt: '2026-01-01T00:00:02.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 15, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
     expect(db.prepare('SELECT encryption_verified, integrity_check FROM backup_restore_evidence WHERE id = ?').get('backup-evidence-integrity')).toEqual({ encryption_verified: 1, integrity_check: 'ok' });
     expect(() => repository.recordAuditEvent({ id: 'secret-audit', entityType: 'run', entityId: 'run', actor: 'test', reason: 'secret boundary', policySnapshot: { privateKey: 'not-written' }, occurredAt: '2026-01-01T00:00:03.000Z' })).toThrow('approved secret store');
     expect(() => db.prepare("UPDATE retention_evidence SET rows_deleted = 4 WHERE id = 'retention-evidence'").run()).toThrow('retention evidence is append-only');
@@ -580,7 +582,7 @@ describe('database migrations and spend reservations', () => {
     const repository = new DurableRepository(db);
     const campaignId = campaignFixture(db, 'fingerprint');
     expect(() => repository.saveIntent({ id: 'fingerprint-intent', campaignId, walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', requestFingerprint: 'not-a-computed-fingerprint', createdAt: '2026-01-01T00:00:00.000Z' })).toThrow(IdempotencyConflictError);
-    expect(() => repository.recordBackupRestoreEvidence({ id: 'forged-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 15, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' })).toThrow('passed backup evidence requires encryption');
+    expect(() => repository.recordBackupRestoreEvidence({ id: 'forged-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 15, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' })).toThrow('passed backup evidence requires encrypted');
     db.close();
   });
 
