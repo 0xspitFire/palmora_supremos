@@ -5,8 +5,10 @@ export type { ExecutionReservationRequest, ReservationRequest, ReservationStatus
 export { DurableRepository } from './repositories.js';
 export { IdempotencyConflictError } from './repositories.js';
 export type { AuditEventRecord, BackupPolicyRecord, ChainVerificationRecord, ExecutionRecord, ExecutionRunRecord, FeePolicyRecord, LifecycleEventRecord, ReceiptRecord, ReconciliationRecord, ReorgEventRecord, ReorgResolutionRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
+export type { AlertDeliveryRecord, AlertRecord, DomainEventRecord, FinalityObservationRecord, FreshnessObservationRecord, JobRecord, JobState, OpportunityEvidenceRecord, OpportunityGateCheckRecord, OpportunityRecord, OpportunityRiskRecord, OpportunityScoreRecord, ProvenanceRecord, ReadinessCheckRecord, ReadinessSnapshotRecord, SpendSummaryRecord, TrackedWalletRecord, WalletBalanceRecord, WalletMetadataRecord } from './phase2.js';
 export { ReadModels } from './read-models.js';
 export type { ActiveExecutionRow, ChainVerificationRow, DuplicateNonceIdentityRow, OpportunityEvidenceRow, OrphanReservationRow, PendingReconciliationRow, ReadinessRow, ReorgExposureRow, ReplacementExposureRow, StaleSimulationRow } from './read-models.js';
+export type { AlertRow, EthAmountView, EventRow, FinalityObservationView, FreshnessView, JobRow, OpportunityDetailRow, ProvenanceView, SourcedAmountView, SpendSummaryRow, WalletMetadataRow } from './phase2.js';
 export { computeRequestFingerprint } from './repositories.js';
 export { SqliteBackendStore } from './backend-store.js';
 export type { BackendStore } from './backend-store.js';
