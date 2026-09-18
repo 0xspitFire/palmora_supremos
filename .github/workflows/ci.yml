@@ -64,6 +64,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test -- --reporter=dot
+      - name: Clear stale gitleaks temp file
+        run: rm -f /tmp/gitleaks.tmp
       - name: Check for leaked secrets
         uses: gitleaks/gitleaks-action@v2
         env:
