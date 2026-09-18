@@ -119,9 +119,9 @@ export class ReadModels {
     const rows = this.db.prepare(`
       SELECT c.id AS campaign_id, w.id AS wallet_id, c.state AS campaign_state,
         (SELECT CASE COALESCE(e.lifecycle_state, CASE e.status WHEN 'eligible' THEN 'eligible' WHEN 'ineligible' THEN 'failed' ELSE 'unknown' END) WHEN 'eligible' THEN 'eligible' WHEN 'failed' THEN 'ineligible' WHEN 'skipped' THEN 'ineligible' WHEN 'unfunded' THEN 'ineligible' ELSE 'unknown' END FROM eligibility e WHERE e.campaign_id = c.id AND e.wallet_id = w.id AND (e.expires_at IS NULL OR e.expires_at >= ?) ORDER BY e.expires_at DESC, e.id DESC LIMIT 1) AS eligibility_status,
-        (SELECT s.outcome FROM simulation s JOIN transaction_intent i ON i.id = s.transaction_intent_id WHERE s.campaign_id = c.id AND s.wallet_id = w.id AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = c.id AND i2.wallet_id = w.id ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1) ORDER BY s.checked_at DESC, s.id DESC LIMIT 1) AS simulation_outcome,
-        (SELECT s.checked_at FROM simulation s JOIN transaction_intent i ON i.id = s.transaction_intent_id WHERE s.campaign_id = c.id AND s.wallet_id = w.id AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = c.id AND i2.wallet_id = w.id ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1) ORDER BY s.checked_at DESC, s.id DESC LIMIT 1) AS simulation_checked_at,
-        (SELECT s.freshness_seconds FROM simulation s JOIN transaction_intent i ON i.id = s.transaction_intent_id WHERE s.campaign_id = c.id AND s.wallet_id = w.id AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = c.id AND i2.wallet_id = w.id ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1) ORDER BY s.checked_at DESC, s.id DESC LIMIT 1) AS freshness_seconds,
+         (SELECT s.outcome FROM simulation s JOIN transaction_intent i ON i.id = s.transaction_intent_id WHERE s.campaign_id = c.id AND s.wallet_id = w.id AND s.checked_at <= ? AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = c.id AND i2.wallet_id = w.id ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1) ORDER BY s.checked_at DESC, s.id DESC LIMIT 1) AS simulation_outcome,
+         (SELECT s.checked_at FROM simulation s JOIN transaction_intent i ON i.id = s.transaction_intent_id WHERE s.campaign_id = c.id AND s.wallet_id = w.id AND s.checked_at <= ? AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = c.id AND i2.wallet_id = w.id ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1) ORDER BY s.checked_at DESC, s.id DESC LIMIT 1) AS simulation_checked_at,
+         (SELECT s.freshness_seconds FROM simulation s JOIN transaction_intent i ON i.id = s.transaction_intent_id WHERE s.campaign_id = c.id AND s.wallet_id = w.id AND s.checked_at <= ? AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = c.id AND i2.wallet_id = w.id ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1) ORDER BY s.checked_at DESC, s.id DESC LIMIT 1) AS freshness_seconds,
         (SELECT native_balance_wei FROM wallet_balance b WHERE b.wallet_id = w.id) AS native_balance_wei,
         (SELECT daily_cap_wei FROM spend_policy p WHERE p.wallet_id = w.id AND p.active = 1 ORDER BY p.rowid DESC LIMIT 1) AS daily_cap_wei
       FROM campaign c
@@ -132,7 +132,7 @@ export class ReadModels {
       JOIN wallet w ON w.id = cw.wallet_id AND w.chain_profile_id = ct.chain_profile_id
       WHERE c.id = ? AND c.state IN ('draft', 'validating', 'ready', 'armed', 'prepared')
       ORDER BY w.id
-    `).all(asOf.toISOString(), campaignId) as Array<{ campaign_id: string; wallet_id: string; campaign_state: string; eligibility_status: ReadinessRow['eligibilityStatus']; simulation_outcome: ReadinessRow['simulationOutcome']; simulation_checked_at: string | null; freshness_seconds: number | null; native_balance_wei: string | null; daily_cap_wei: string | null }>;
+    `).all(asOf.toISOString(), asOf.toISOString(), asOf.toISOString(), asOf.toISOString(), campaignId) as Array<{ campaign_id: string; wallet_id: string; campaign_state: string; eligibility_status: ReadinessRow['eligibilityStatus']; simulation_outcome: ReadinessRow['simulationOutcome']; simulation_checked_at: string | null; freshness_seconds: number | null; native_balance_wei: string | null; daily_cap_wei: string | null }>;
     return rows.map((row) => ({
       campaignId: row.campaign_id,
       walletId: row.wallet_id,
@@ -177,7 +177,27 @@ export class ReadModels {
   }
 
   public staleSimulations(asOf = new Date()): StaleSimulationRow[] {
-    const rows = this.db.prepare('SELECT simulation_id, wallet_id, campaign_id, transaction_intent_id, outcome, checked_at, freshness_seconds, source_block_number FROM recovery_stale_simulations WHERE julianday(checked_at) + (freshness_seconds / 86400.0) < julianday(?) ORDER BY checked_at, simulation_id').all(asOf.toISOString()) as Array<{ simulation_id: string; wallet_id: string; campaign_id: string; transaction_intent_id: string | null; outcome: StaleSimulationRow['outcome']; checked_at: string; freshness_seconds: number; source_block_number: number }>;
+    const rows = this.db.prepare(`
+      WITH params AS (
+        SELECT julianday(?) AS as_of
+      ), latest_intent AS (
+        SELECT i.*
+          FROM transaction_intent i
+         WHERE julianday(i.created_at) <= (SELECT as_of FROM params)
+           AND i.id = (SELECT i2.id FROM transaction_intent i2 WHERE i2.campaign_id = i.campaign_id AND i2.wallet_id = i.wallet_id AND julianday(i2.created_at) <= (SELECT as_of FROM params) ORDER BY i2.created_at DESC, i2.id DESC LIMIT 1)
+      ), latest_simulation AS (
+        SELECT s.*
+          FROM simulation s
+         WHERE julianday(s.checked_at) <= (SELECT as_of FROM params)
+           AND s.id = (SELECT s2.id FROM simulation s2 WHERE s2.campaign_id = s.campaign_id AND s2.wallet_id = s.wallet_id AND julianday(s2.checked_at) <= (SELECT as_of FROM params) ORDER BY s2.checked_at DESC, s2.id DESC LIMIT 1)
+      )
+      SELECT s.id AS simulation_id, s.wallet_id, s.campaign_id, s.transaction_intent_id, s.outcome, s.checked_at, s.freshness_seconds, s.source_block_number
+        FROM latest_simulation s
+        LEFT JOIN latest_intent i ON i.campaign_id = s.campaign_id AND i.wallet_id = s.wallet_id
+       WHERE (i.id IS NULL OR s.transaction_intent_id IS NULL OR s.transaction_intent_id = i.id)
+         AND julianday(s.checked_at) + (s.freshness_seconds / 86400.0) < (SELECT as_of FROM params)
+       ORDER BY s.checked_at, s.id
+    `).all(asOf.toISOString()) as Array<{ simulation_id: string; wallet_id: string; campaign_id: string; transaction_intent_id: string | null; outcome: StaleSimulationRow['outcome']; checked_at: string; freshness_seconds: number; source_block_number: number }>;
     return rows.map((row) => ({ simulationId: row.simulation_id, walletId: row.wallet_id, campaignId: row.campaign_id, transactionIntentId: row.transaction_intent_id, outcome: row.outcome, checkedAt: row.checked_at, freshnessSeconds: row.freshness_seconds, sourceBlockNumber: row.source_block_number }));
   }
 
