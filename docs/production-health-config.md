@@ -31,15 +31,113 @@ RUNTIME_PROBE_TTL_MS=120000
 SIGNER_HEALTH_URL=http://127.0.0.1:8787/health
 ```
 
-`STORE_PATH` must point to an existing migrated SQLite database with integrity,
-backup, and reconciliation evidence. `KILL_SWITCH_PATH` must be managed by the
-service owner. The health probe treats an engaged kill switch as not ready, so
-the service may only disarm it after all other checks pass.
+`STORE_PATH` must point to an existing canonical normalized SQLite database
+(schema version 15 or newer) with integrity, backup, and reconciliation
+evidence. `KILL_SWITCH_PATH` must be managed by the service owner. The health
+probe treats an engaged kill switch as not ready, so the service may only
+disarm it after all other checks pass.
+The probe reads normalized runtime and evidence tables; a legacy
+`backend_state` table is not a valid live store.
 
 `SIGNER_HEALTH_URL` is a required service boundary. A local encrypted signer
 without a health endpoint is not sufficient for unattended production use.
 KMS, HSM, or an explicitly approved host signer must own the final custody
 decision.
+
+## Turnkey signer profile
+
+Turnkey is the approved remote-signer provider for the initial production
+integration. It is accepted as HSM-equivalent secure-enclave custody for this
+profile. The API private key is a secret and must be injected only by the host
+secret manager. The organization, user, and wallet map are public metadata but
+must still remain outside git.
+
+```text
+MINT_BOT_CUSTODY=turnkey
+MINT_BOT_SECRET_ROOT=/home/Junayd/W3/Rets
+TURNKEY_SECRET_FILE=/home/Junayd/W3/Rets/turnkey.env
+TURNKEY_ORGANIZATION_ID=<host-configured>
+TURNKEY_API_PUBLIC_KEY=<host-configured>
+TURNKEY_API_PRIVATE_KEY=<secret-manager-only>
+TURNKEY_USER_ID=<host-configured>
+TURNKEY_WALLET_MAP_PATH=/home/Junayd/W3/Rets/turnkey-wallet-map.json
+# Optional until Turnkey Verifiable Cloud waitlist access is granted.
+TURNKEY_APP_NAME=<turnkey-verified-enclave-app-uuid>
+TURNKEY_ATTESTATION_ACTIVITY_ID=<approved-signing-activity-id>
+TURNKEY_ATTESTATION_PATH=/home/Junayd/W3/Rets/turnkey-attestation.json
+SIGNER_HEALTH_URL=http://127.0.0.1:8787/health
+```
+
+Start the supervised local signer health boundary only after the Turnkey
+organization, policy, and wallet map exist:
+
+```text
+pnpm build
+pnpm ops:turnkey-health
+```
+
+The wrapper checks Turnkey authentication and organization identity and returns
+only public readiness metadata. It does not return private keys or sign a
+transaction during health checks.
+
+The Product Owner has temporarily waived cryptographic Boot/App Proof evidence
+while Turnkey Verifiable Cloud access is pending. After Turnkey Verified is
+enabled and `TURNKEY_APP_NAME` is configured, retrieve and verify the latest
+Boot Proof against a completed signing activity:
+
+```text
+pnpm build
+pnpm ops:turnkey-attestation
+```
+
+The resulting proof bundle is stored outside git with owner-only permissions.
+The reference verifier checks the proof pair and does not by itself pin
+Turnkey's PCR measurements; a stricter PCR/QOS acceptance policy remains a
+Product Owner decision. The waiver is conditional and does not represent full
+production attestation completion.
+The current waiver record is retained outside git at
+`/home/Junayd/W3/Rets/turnkey-attestation-waiver.json` with owner-only
+permissions. It explicitly does not authorize live broadcasting.
+
+## Local wallet import
+
+For local dry-run testing only, existing `WALLET_ADD` and `ACC_KEY` env files can
+be converted into the encrypted CLI keystore without putting key material in
+the JSON metadata:
+
+```text
+node packages/cli/dist/index.js wallet import \
+  --input-dir /home/Junayd/W3/Rets/wallets \
+  --files w1.env,w2.env,w3.env \
+  --output ./Rets/wallets/wallets.json
+```
+
+The command requires a hidden interactive passphrase, validates each derived
+address, writes the AES-256-GCM file with owner-only permissions, and never
+prints the private keys. The selected file order becomes wallet indices
+`0..N-1`. This local keystore is not a substitute for KMS/HSM custody and must
+not be used to claim production readiness.
+
+The local testing waiver applies only to non-broadcast simulations. It does not
+authorize live signing, broadcasting, or a production Phase 1 exit.
+
+To migrate existing burner keys into Turnkey after the Product Owner has
+created the organization, API key, and importing user, use the explicit
+confirmation command below. The command sends only Turnkey-encrypted bundles;
+it writes a public address/key-reference map and never writes plaintext keys.
+
+```text
+node packages/cli/dist/index.js wallet import-turnkey \
+  --input-dir /home/Junayd/W3/Rets/wallets \
+  --files w1.env,w2.env,w3.env \
+  --policy-id <approved-turnkey-policy-id> \
+  --policy-digest <keccak256-of-policy-condition> \
+  --confirm
+```
+
+The command is intentionally not run automatically. Importing a key into a
+third-party signer is a custody change and cannot be rolled back by deleting
+the local source files.
 
 ## Phase 1 Ethereum profile
 
@@ -97,6 +195,7 @@ are path/configuration references, not secrets.
 - Choose the production secret-store file and approved RPC secret names.
 - Choose the production SQLite and backup locations.
 - Choose and approve the signer/KMS/HSM health endpoint and custody policy.
+- For Turnkey, create the dedicated organization, API key, user, and restricted signing policy.
 - Define kill-switch ownership, startup, disarm, incident, and rotation procedure.
 - Approve confirmation depth, reconciliation freshness, spend caps, burner funding, and live-fire limits.
 - Approve the Robinhood characterization fixture and archive block.
