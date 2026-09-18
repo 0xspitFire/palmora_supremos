@@ -1,4 +1,5 @@
 import type { SqliteDatabase } from './database.js';
+import { Phase2ReadModels, type AlertDeliveryState, type AlertRow, type EventRow, type FinalityObservationView, type JobRow, type OpportunityDetailRow, type SpendSummaryRecord, type SpendSummaryRow, type WalletMetadataRow } from './phase2.js';
 
 function policyDay(db: SqliteDatabase, walletId: string, asOf: Date): string {
   const row = db.prepare('SELECT timezone FROM spend_policy WHERE wallet_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(walletId) as { timezone: string } | undefined;
@@ -113,7 +114,8 @@ export interface ReplacementExposureRow {
 }
 
 export class ReadModels {
-  public constructor(private readonly db: SqliteDatabase) {}
+  private readonly phase2: Phase2ReadModels;
+  public constructor(private readonly db: SqliteDatabase) { this.phase2 = new Phase2ReadModels(db); }
 
   public readiness(campaignId: string, asOf = new Date()): ReadinessRow[] {
     const rows = this.db.prepare(`
@@ -195,4 +197,15 @@ export class ReadModels {
     const rows = this.db.prepare('SELECT o.id AS opportunity_id, o.fingerprint, o.disposition, o.score, o.freshness_at, COUNT(s.id) AS signal_count FROM opportunity o LEFT JOIN signal s ON s.opportunity_id = o.id GROUP BY o.id ORDER BY o.score DESC LIMIT ?').all(limit) as Array<{ opportunity_id: string; fingerprint: string; disposition: string; score: number | null; freshness_at: string | null; signal_count: number }>;
     return rows.map((row) => ({ opportunityId: row.opportunity_id, fingerprint: row.fingerprint, disposition: row.disposition, score: row.score, freshnessAt: row.freshness_at, signalCount: row.signal_count }));
   }
+
+  public wallets(asOf?: Date): WalletMetadataRow[] { return this.phase2.wallets(asOf); }
+  public wallet(walletId: string, asOf?: Date): WalletMetadataRow | null { return this.phase2.wallet(walletId, asOf); }
+  public jobs(state?: JobRow['state']): JobRow[] { return this.phase2.jobs(state); }
+  public dueJobs(asOf?: Date): JobRow[] { return this.phase2.dueJobs(asOf); }
+  public events(entityType?: string, entityId?: string): EventRow[] { return this.phase2.events(entityType, entityId); }
+  public alerts(state?: AlertDeliveryState): AlertRow[] { return this.phase2.alerts(state); }
+  public finalityHistory(executionId: string): FinalityObservationView[] { return this.phase2.finalityHistory(executionId); }
+  public readinessSnapshots(campaignId: string, walletId?: string): ReturnType<Phase2ReadModels['readinessSnapshots']> { return this.phase2.readinessSnapshots(campaignId, walletId); }
+  public spendSummaries(scopeType?: SpendSummaryRecord['scopeType'], scopeId?: string, asOf?: Date): SpendSummaryRow[] { return this.phase2.spendSummaries(scopeType, scopeId, asOf); }
+  public opportunityDetails(opportunityId: string, asOf?: Date): OpportunityDetailRow | null { return this.phase2.opportunityDetails(opportunityId, asOf); }
 }
