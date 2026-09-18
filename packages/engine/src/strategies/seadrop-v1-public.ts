@@ -107,23 +107,27 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
     // 3. Try to read total supply (some contracts don't implement this)
     let totalMinted = 0n;
     let maxTokenSupply = 0n;
+    let totalSupplyKnown = false;
+    let maxSupplyKnown = false;
     try {
-      const [supply, max] = await Promise.all([
-        client.readContract({
-          address: nftContract,
-          abi: ERC721_ABI,
-          functionName: 'totalSupply',
-        }),
-        client.readContract({
-          address: nftContract,
-          abi: ERC721_ABI,
-          functionName: 'maxSupply',
-        }).catch(() => 0n), // maxSupply is not standard, may not exist
-      ]);
-      totalMinted = supply;
-      maxTokenSupply = max;
+      totalMinted = await client.readContract({
+        address: nftContract,
+        abi: ERC721_ABI,
+        functionName: 'totalSupply',
+      });
+      totalSupplyKnown = true;
     } catch {
-      // totalSupply not available — not fatal, just can't check remaining supply
+      // totalSupply is optional — retain an explicit unknown supply fact.
+    }
+    try {
+      maxTokenSupply = await client.readContract({
+        address: nftContract,
+        abi: ERC721_ABI,
+        functionName: 'maxSupply',
+      });
+      maxSupplyKnown = true;
+    } catch {
+      // maxSupply is not standard — retain an explicit unknown upper bound.
     }
 
     return {
@@ -141,6 +145,8 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
         feeBps: publicDrop.feeBps,
         restrictFeeRecipients: publicDrop.restrictFeeRecipients,
         seaDropAddress: SEADROP_V1_ADDRESS,
+        totalSupplyKnown,
+        maxSupplyKnown,
       },
     };
   }
