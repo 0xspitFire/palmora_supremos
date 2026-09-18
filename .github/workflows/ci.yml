@@ -63,6 +63,8 @@ jobs:
       - run: pnpm ops:recovery-drill
       - run: pnpm typecheck
       - run: pnpm build
+      - name: Verify CI-safe orchestrator configuration
+        run: node scripts/service-config.mjs
       - run: pnpm test -- --reporter=dot
       - name: Clear stale gitleaks temp file
         run: rm -f /tmp/gitleaks.tmp
