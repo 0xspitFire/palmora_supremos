@@ -20,6 +20,8 @@ function emptyState(): BackendState {
     notificationOutbox: [],
     chainEvidence: [],
     simulations: [],
+    readiness: [],
+    jobs: [],
     runtime: { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational: { secretStoreReference: 'secret-store-value', storePath: '/sensitive/store.sqlite', signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW.toISOString(), observedAt: NOW.toISOString(), expiresAt: '2026-09-18T00:10:00.000Z' } },
     killed: false,
   };

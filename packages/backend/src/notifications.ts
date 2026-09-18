@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import { PHASE2_DEFAULTS } from './phase2-defaults.js';
 import type { EventRecord, NotificationOutboxRecord } from './types.js';
+import type { MetricsRegistry } from './observability.js';
 
 export interface NotificationMessage {
   eventId: string;
@@ -32,8 +33,20 @@ function sourceText(source: EventRecord, supplied?: string): string {
 
 export class NotificationDispatcher {
   private readonly active = new Set<string>();
+  private readonly now: () => Date;
+  private readonly metrics?: MetricsRegistry;
+  private readonly retentionDays: number;
 
-  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, private readonly now: () => Date = () => new Date()) {}
+  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, options: (() => Date) | { now?: () => Date; metrics?: MetricsRegistry; retentionDays?: number } = {}) {
+    if (typeof options === 'function') {
+      this.now = options;
+      this.retentionDays = Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
+    } else {
+      this.now = options.now ?? (() => new Date());
+      this.metrics = options.metrics;
+      this.retentionDays = options.retentionDays ?? Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
+    }
+  }
 
   /** Queue and deliver one event. Repeating an event is idempotent. */
   async dispatch(sourceEventId: string, text?: string): Promise<void> {
@@ -50,7 +63,7 @@ export class NotificationDispatcher {
           if (existing.text !== safeText) throw new Error('NOTIFICATION_IDEMPOTENCY_CONFLICT');
           return undefined;
         }
-        if (existing && existing.text !== safeText) throw new Error('NOTIFICATION_IDEMPOTENCY_CONFLICT');
+        if (existing?.state === 'delivered' && existing.text !== safeText) throw new Error('NOTIFICATION_IDEMPOTENCY_CONFLICT');
         const outbox = existing ?? {
           id: `notify_${source.id}`,
           sourceEventId: source.id,
@@ -70,6 +83,7 @@ export class NotificationDispatcher {
         return structuredClone(outbox);
       });
       if (!item) return;
+      this.metrics?.recordNotification('delivering');
       await this.sink.send({ eventId: item.id, ...(item.runId ? { runId: item.runId } : {}), type: item.type, text: item.text, ...(item.canonicalLink ? { canonicalLink: item.canonicalLink } : {}) });
       await this.store.transaction(state => {
         const delivered = state.notificationOutbox.find(entry => entry.id === item!.id);
@@ -79,6 +93,7 @@ export class NotificationDispatcher {
         delivered.lastError = undefined;
         state.events.push({ id: `evt_${randomUUID()}`, runId: delivered.runId, type: 'notification_delivered', at: this.now().toISOString(), data: { sourceEventId: delivered.sourceEventId, notificationId: delivered.id, notificationType: delivered.type } });
       });
+      this.metrics?.recordNotification('delivered');
     } catch (error) {
       if (item) {
         const safeError = redactNotificationText(error instanceof Error ? error.message : String(error)).slice(0, 500);
@@ -91,6 +106,7 @@ export class NotificationDispatcher {
           failed.lastError = safeError;
         });
       }
+      this.metrics?.recordNotification('failed');
       throw error;
     } finally {
       this.active.delete(sourceEventId);
@@ -111,7 +127,8 @@ export class NotificationDispatcher {
 
   /** Remove only delivered read-model alerts outside the approved retention window. */
   async prune(now = this.now()): Promise<void> {
-    const cutoff = now.getTime() - PHASE2_DEFAULTS.alertRetentionMs;
+    const retentionDays = Number.isSafeInteger(this.retentionDays) && this.retentionDays > 0 ? this.retentionDays : Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
+    const cutoff = now.getTime() - retentionDays * 86_400_000;
     await this.store.transaction(state => {
       state.notificationOutbox = state.notificationOutbox.filter(item => item.state !== 'delivered' || Date.parse(item.deliveredAt ?? item.createdAt) >= cutoff);
     });

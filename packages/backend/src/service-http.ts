@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { HealthService } from './health.js';
 import type { BackendStore } from './store.js';
-import type { OrchestratorService } from './orchestrator.js';
+import type { OrchestratorService } from './service-orchestrator.js';
 import { MetricsRegistry, redactError } from './observability.js';
 
 export interface ServiceHttpOptions {

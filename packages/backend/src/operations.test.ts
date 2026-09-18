@@ -6,7 +6,7 @@ import { AlertManager } from './alerts.js';
 import { JsonJobStore } from './job-store.js';
 import { MetricsRegistry, RedactedLogger } from './observability.js';
 import { NotificationDispatcher, type NotificationSink } from './notifications.js';
-import { OrchestratorService } from './orchestrator.js';
+import { OrchestratorService } from './service-orchestrator.js';
 import { loadServiceConfig } from './service-config.js';
 import { TelegramNotifier, type HostSecretStore, type TelegramFetcher } from './telegram.js';
 import { DurableStore } from './store.js';

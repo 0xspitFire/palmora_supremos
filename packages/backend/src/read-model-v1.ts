@@ -333,7 +333,7 @@ export interface AlertReadModel {
   readonly runId: string | null;
   readonly type: string;
   readonly text: string;
-  readonly state: 'pending' | 'delivering' | 'delivered';
+  readonly state: 'pending' | 'delivering' | 'delivered' | 'failed';
   readonly attempts: string;
   readonly createdAt: string;
   readonly deliveredAt: string | null;
