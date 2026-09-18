@@ -195,6 +195,8 @@ function emptyState(): BackendState {
     notificationOutbox: [],
     chainEvidence: [],
     simulations: [],
+    readiness: [],
+    jobs: [],
     runtime: structuredClone(EMPTY_RUNTIME),
     killed: false,
   };
@@ -405,6 +407,48 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.supportsReservationBoundaryFields = ['mint_class', 'fee_policy_id', 'fee_policy_version', 'fee_policy_snapshot_json'].every((column) => reservationColumns.has(column));
     this.supportsCampaignPeriods = Boolean(this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'campaign_period'").get());
     if (row.version >= 15 && (!this.supportsReservationBoundaryFields || !this.supportsCampaignPeriods)) throw new Error('NORMALIZED_SCHEMA_RESERVATION_CONTRACT_REQUIRED');
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS orchestrator_job (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        run_id TEXT,
+        campaign_id TEXT,
+        state TEXT NOT NULL,
+        scheduled_at TEXT NOT NULL,
+        target_at TEXT,
+        t_minus_ms INTEGER NOT NULL,
+        chain_time_offset_ms INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        request_digest TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL,
+        last_error TEXT,
+        next_attempt_at TEXT,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS orchestrator_readiness (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        wallet TEXT NOT NULL,
+        state TEXT NOT NULL,
+        fresh_until TEXT NOT NULL,
+        source_block TEXT,
+        source_block_hash TEXT,
+        observed_at TEXT,
+        blocking_reasons_json TEXT NOT NULL,
+        checks_json TEXT NOT NULL,
+        check_states_json TEXT,
+        provenance_json TEXT
+      )
+    `);
     this.opened = true;
   }
 
@@ -432,6 +476,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     state.notificationOutbox = this.readNotifications();
     state.chainEvidence = this.readChainEvidence();
     state.simulations = this.readSimulations();
+    state.readiness = this.readReadiness();
+    state.jobs = this.readJobs();
     state.runtime = this.readRuntime();
     state.killed = this.databaseStore.isKillSwitchEngaged();
     if (state.killed) state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILLED'])] };
@@ -668,7 +714,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const mintPriceWei = BigInt(row.mint_price_wei);
       const verification = mapChainVerification(row.verification_status ? { chain_id: row.chain_id, status: row.verification_status, checked_at: row.verification_checked_at ?? row.created_at, evidence_json: row.verification_evidence_json ?? '{}', sequencer_endpoint_reference: row.sequencer_endpoint_reference, archive_endpoint_reference: row.archive_endpoint_reference, feed_endpoint_reference: row.feed_endpoint_reference } : undefined, source?.chainVerification, this.now());
       const updated = this.db.prepare("SELECT MAX(occurred_at) AS at FROM state_transition WHERE entity_type = 'campaign' AND entity_id = ?").get(row.id) as { at: string | null };
-      return { id: row.id, state: backendCampaignState(row.state), chainId: row.chain_id as 1 | 4663, contract: row.address, strategy: row.strategy, quantity: source?.quantity ?? 1, dryRun: source?.dryRun ?? true, spendPolicy: mapSpendPolicy(source?.spendPolicy), createdAt: row.created_at, updatedAt: updated.at ?? row.created_at, ...(source?.broadcastMode ? { broadcastMode: source.broadcastMode } : {}), chainVerification: verification, mintPriceWei, feePolicy: this.readFeePolicy(row.chain_profile_id, mintPriceWei, source?.feePolicy) };
+      return { id: row.id, state: backendCampaignState(row.state), chainId: row.chain_id as 1 | 4663, contract: row.address, strategy: row.strategy, quantity: source?.quantity ?? 1, dryRun: source?.dryRun ?? true, spendPolicy: mapSpendPolicy(source?.spendPolicy), createdAt: row.created_at, updatedAt: updated.at ?? row.created_at, ...(source?.broadcastMode ? { broadcastMode: source.broadcastMode } : {}), ...(source?.openingAt ? { openingAt: source.openingAt } : {}), ...(source?.tMinusMs === undefined ? {} : { tMinusMs: source.tMinusMs }), chainVerification: verification, mintPriceWei, feePolicy: this.readFeePolicy(row.chain_profile_id, mintPriceWei, source?.feePolicy) };
     });
   }
 
@@ -739,7 +785,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const lifecycleAccounting = accountingRows.map((item) => decode<{ kind?: string; receiptId?: string; actualSpendWei?: string }>(item.policy_snapshot_json)).find((item) => item?.kind === 'receipt_accounting' && item.receiptId === row.id);
       const ledgerAmount = ledgerRows.reduce((total, item) => total + BigInt(item.amount_wei), 0n);
       const actualSpendWei = settled?.settled_amount_wei === null || settled?.settled_amount_wei === undefined ? ledgerRows.length > 0 ? ledgerAmount : lifecycleAccounting?.actualSpendWei === undefined ? undefined : BigInt(lifecycleAccounting.actualSpendWei) : BigInt(settled.settled_amount_wei);
-      return [{ id: row.id, executionId: row.execution_id, runId: row.run_id, transactionAttemptId: row.transaction_attempt_id, state, ...(finality ? { robinhoodFinality: finality } : {}), ...(row.block_number === null ? {} : { blockNumber: BigInt(row.block_number) }), ...(row.block_hash === null ? {} : { blockHash: row.block_hash }), ...(actualSpendWei === undefined ? {} : { actualSpendWei }), observedAt: row.observed_at } satisfies ReceiptRecord];
+      return [{ id: row.id, executionId: row.execution_id, runId: row.run_id, transactionAttemptId: row.transaction_attempt_id, state, ...(finality ? { robinhoodFinality: finality } : {}), ...(row.block_number === null ? {} : { blockNumber: BigInt(row.block_number) }), ...(row.block_hash === null ? {} : { blockHash: row.block_hash }), ...(row.gas_used === null ? {} : { gasUsed: BigInt(row.gas_used) }), ...(row.effective_gas_price === null ? {} : { effectiveGasPrice: BigInt(row.effective_gas_price) }), ...(actualSpendWei === undefined ? {} : { actualSpendWei }), observedAt: row.observed_at } satisfies ReceiptRecord];
     });
   }
 
@@ -770,8 +816,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readNotifications(): BackendState['notificationOutbox'] {
     const rows = this.db.prepare('SELECT id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at FROM notification ORDER BY created_at, id').all() as Array<{ id: string; event_key: string; idempotency_key: string; delivery_state: string; payload_json: string; created_at: string; delivered_at: string | null }>;
     return rows.map((row) => {
-      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string }>(row.payload_json) ?? {};
-      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}) };
+      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string; canonicalLink?: string; lastError?: string }>(row.payload_json) ?? {};
+      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : row.delivery_state === 'failed' || payload.lastError ? 'failed' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}), ...(payload.lastError ? { lastError: payload.lastError } : {}), ...(payload.canonicalLink ? { canonicalLink: payload.canonicalLink } : {}) };
     });
   }
 
@@ -797,6 +843,16 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return orphaned.count === 0 ? runtime : { ...runtime, startupState: 'Blocked', blockingReasons: [...new Set([...runtime.blockingReasons, 'ORPHANED_EXECUTION_RUN'])] };
   }
 
+  private readJobs(): BackendState['jobs'] {
+    const rows = this.db.prepare('SELECT id, kind, run_id, campaign_id, state, scheduled_at, target_at, t_minus_ms, chain_time_offset_ms, idempotency_key, request_digest, payload_json, attempts, max_attempts, last_error, next_attempt_at, lease_owner, lease_expires_at, started_at, completed_at, created_at, updated_at FROM orchestrator_job ORDER BY scheduled_at, id').all() as Array<{ id: string; kind: BackendState['jobs'][number]['kind']; run_id: string | null; campaign_id: string | null; state: BackendState['jobs'][number]['state']; scheduled_at: string; target_at: string | null; t_minus_ms: number; chain_time_offset_ms: number; idempotency_key: string; request_digest: string; payload_json: string; attempts: number; max_attempts: number; last_error: string | null; next_attempt_at: string | null; lease_owner: string | null; lease_expires_at: string | null; started_at: string | null; completed_at: string | null; created_at: string; updated_at: string }>;
+    return rows.map((row) => ({ id: row.id, kind: row.kind, ...(row.run_id ? { runId: row.run_id } : {}), ...(row.campaign_id ? { campaignId: row.campaign_id } : {}), state: row.state, scheduledAt: row.scheduled_at, ...(row.target_at ? { targetAt: row.target_at } : {}), tMinusMs: row.t_minus_ms, chainTimeOffsetMs: row.chain_time_offset_ms, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, payload: decode<Record<string, unknown>>(row.payload_json) ?? {}, attempts: row.attempts, maxAttempts: row.max_attempts, ...(row.last_error ? { lastError: row.last_error } : {}), ...(row.next_attempt_at ? { nextAttemptAt: row.next_attempt_at } : {}), ...(row.lease_owner ? { leaseOwner: row.lease_owner } : {}), ...(row.lease_expires_at ? { leaseExpiresAt: row.lease_expires_at } : {}), ...(row.started_at ? { startedAt: row.started_at } : {}), ...(row.completed_at ? { completedAt: row.completed_at } : {}), createdAt: row.created_at, updatedAt: row.updated_at }));
+  }
+
+  private readReadiness(): BackendState['readiness'] {
+    const rows = this.db.prepare('SELECT id, campaign_id, wallet, state, fresh_until, source_block, source_block_hash, observed_at, blocking_reasons_json, checks_json, check_states_json, provenance_json FROM orchestrator_readiness ORDER BY campaign_id, wallet, id').all() as Array<{ id: string; campaign_id: string; wallet: string; state: BackendState['readiness'][number]['state']; fresh_until: string; source_block: string | null; source_block_hash: string | null; observed_at: string | null; blocking_reasons_json: string; checks_json: string; check_states_json: string | null; provenance_json: string | null }>;
+    return rows.map((row) => ({ wallet: row.wallet, campaignId: row.campaign_id, state: row.state, freshUntil: row.fresh_until, ...(row.source_block === null ? {} : { sourceBlock: BigInt(row.source_block) }), ...(row.source_block_hash ? { sourceBlockHash: row.source_block_hash } : {}), ...(row.observed_at ? { observedAt: row.observed_at } : {}), blockingReasons: decode<string[]>(row.blocking_reasons_json) ?? [], checks: decode<Record<string, boolean>>(row.checks_json) ?? {}, ...(row.check_states_json ? { checkStates: decode<BackendState['readiness'][number]['checkStates']>(row.check_states_json) } : {}), ...(row.provenance_json ? { provenance: decode<BackendState['readiness'][number]['provenance']>(row.provenance_json) } : {}) }));
+  }
+
   private persistDelta(previous: BackendState, next: BackendState): void {
     for (const campaign of next.campaigns) this.persistCampaign(campaign, previous.campaigns.find((item) => item.id === campaign.id));
     for (const run of next.runs) this.persistRun(run, previous.runs.find((item) => item.id === run.id));
@@ -809,6 +865,17 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     for (const notification of next.notificationOutbox) this.persistNotification(notification, previous.notificationOutbox.find((item) => item.id === notification.id));
     for (const evidence of next.chainEvidence) this.persistChainEvidence(evidence, previous.chainEvidence.find((item) => item.id === evidence.id));
     for (const simulation of next.simulations) this.persistSimulation(simulation, previous.simulations.find((item) => item.id === simulation.id));
+    for (const readiness of next.readiness) this.persistReadiness(readiness, previous.readiness.find((item) => item.campaignId === readiness.campaignId && item.wallet.toLowerCase() === readiness.wallet.toLowerCase()));
+    for (const job of next.jobs) this.persistJob(job, previous.jobs.find((item) => item.id === job.id));
+    const nextJobIds = new Set(next.jobs.map((item) => item.id));
+    for (const job of previous.jobs) if (!nextJobIds.has(job.id)) this.db.prepare('DELETE FROM orchestrator_job WHERE id = ?').run(job.id);
+    const nextNotificationIds = new Set(next.notificationOutbox.map((item) => item.id));
+    for (const notification of previous.notificationOutbox) if (!nextNotificationIds.has(notification.id)) this.db.prepare('DELETE FROM notification WHERE id = ?').run(notification.id);
+    const nextReadinessIds = new Set(next.readiness.map((item) => `readiness_${digest(`${item.campaignId ?? ''}:${item.wallet.toLowerCase()}`)}`));
+    for (const readiness of previous.readiness) {
+      const id = `readiness_${digest(`${readiness.campaignId ?? ''}:${readiness.wallet.toLowerCase()}`)}`;
+      if (!nextReadinessIds.has(id)) this.db.prepare('DELETE FROM orchestrator_readiness WHERE id = ?').run(id);
+    }
     if (encode(previous.runtime) !== encode(next.runtime)) this.persistRuntime(next.runtime);
     if (!previous.killed && next.killed) this.databaseStore.setKillSwitch(true, this.actor, this.now());
   }
@@ -895,7 +962,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const attempt = receipt.transactionAttemptId ? this.db.prepare('SELECT id FROM transaction_attempt WHERE id = ? AND execution_id = ?').get(receipt.transactionAttemptId, receipt.executionId) as { id: string } | undefined : this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(receipt.executionId) as { id: string } | undefined;
     if (!attempt || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined) throw new Error('RECEIPT_PERSISTENCE_FACTS_REQUIRED');
     const chainId = chain.chain_id;
-    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'reverted', blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, finalityStage: canonicalReceiptFinalityStage(chainId, receipt.state, receipt.robinhoodFinality), finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
+    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'reverted', blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, ...(receipt.gasUsed === undefined ? {} : { gasUsed: receipt.gasUsed }), ...(receipt.effectiveGasPrice === undefined ? {} : { effectiveGasPrice: receipt.effectiveGasPrice }), finalityStage: canonicalReceiptFinalityStage(chainId, receipt.state, receipt.robinhoodFinality), finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
     this.transitionExecutionSafe(receipt.executionId, receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'failed', `receipt ${receipt.state}`);
   }
 
@@ -914,12 +981,35 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private persistNotification(notification: BackendState['notificationOutbox'][number], prior: BackendState['notificationOutbox'][number] | undefined): void {
-    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts });
+    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts, ...(notification.canonicalLink ? { canonicalLink: notification.canonicalLink } : {}), ...(notification.lastError ? { lastError: notification.lastError } : {}) });
     if (!prior) {
-      this.db.prepare("INSERT INTO notification (id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(notification.id, notification.sourceEventId, notification.id, notification.state === 'delivered' ? 'delivered' : 'pending', payload, notification.createdAt, notification.deliveredAt ?? null);
+      this.db.prepare("INSERT INTO notification (id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at) VALUES (?, ?, ?, 'pending', ?, ?, NULL)").run(notification.id, notification.sourceEventId, notification.id, payload, notification.createdAt);
+      if (notification.state === 'failed') this.db.prepare("UPDATE notification SET delivery_state = 'failed', payload_json = ? WHERE id = ?").run(payload, notification.id);
+      if (notification.state === 'delivered') {
+        this.db.prepare("UPDATE notification SET delivery_state = 'sent', payload_json = ? WHERE id = ?").run(payload, notification.id);
+        this.db.prepare("UPDATE notification SET delivery_state = 'delivered', payload_json = ?, delivered_at = ? WHERE id = ?").run(payload, notification.deliveredAt ?? null, notification.id);
+      }
       return;
     }
-    if (prior.state !== notification.state || prior.attempts !== notification.attempts || prior.deliveredAt !== notification.deliveredAt) this.db.prepare('UPDATE notification SET delivery_state = ?, payload_json = ?, delivered_at = ? WHERE id = ?').run(notification.state === 'delivered' ? 'delivered' : 'pending', payload, notification.deliveredAt ?? null, notification.id);
+    if (prior.state === notification.state && prior.attempts === notification.attempts && prior.deliveredAt === notification.deliveredAt && prior.lastError === notification.lastError) return;
+    const current = this.db.prepare('SELECT delivery_state FROM notification WHERE id = ?').get(notification.id) as { delivery_state: string } | undefined;
+    if (!current) throw new Error('NOTIFICATION_OUTBOX_NOT_FOUND');
+    const target = notification.state === 'delivered' ? 'delivered' : notification.state === 'failed' ? 'failed' : notification.state === 'delivering' ? 'queued' : 'pending';
+    if (target === 'delivered') {
+      if (current.delivery_state === 'pending' || current.delivery_state === 'queued') this.db.prepare("UPDATE notification SET delivery_state = 'sent', payload_json = ? WHERE id = ?").run(payload, notification.id);
+      if (current.delivery_state !== 'delivered') this.db.prepare("UPDATE notification SET delivery_state = 'delivered', payload_json = ?, delivered_at = ? WHERE id = ?").run(payload, notification.deliveredAt ?? null, notification.id);
+      return;
+    }
+    if (target === 'queued' && current.delivery_state === 'failed') {
+      this.db.prepare("UPDATE notification SET delivery_state = 'queued', payload_json = ?, delivered_at = NULL WHERE id = ?").run(payload, notification.id);
+      return;
+    }
+    if (target === 'failed') {
+      if (current.delivery_state !== 'failed') this.db.prepare("UPDATE notification SET delivery_state = 'failed', payload_json = ?, delivered_at = NULL WHERE id = ?").run(payload, notification.id);
+      else this.db.prepare('UPDATE notification SET payload_json = ? WHERE id = ?').run(payload, notification.id);
+      return;
+    }
+    this.db.prepare('UPDATE notification SET payload_json = ? WHERE id = ?').run(payload, notification.id);
   }
 
   private persistChainEvidence(evidence: ChainEvidenceRecord, prior: ChainEvidenceRecord | undefined): void {
@@ -942,6 +1032,28 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const wallet = this.ensureWallet(graph.id, simulation.wallet, this.readCampaigns().find((item) => item.id === simulation.campaignId) as Campaign);
     const freshnessSeconds = Math.max(0, Math.floor((Date.parse(simulation.expiresAt) - Date.parse(simulation.checkedAt)) / 1000));
     this.databaseStore.recordSimulation({ id: simulation.id, walletId: wallet.walletId, campaignId: simulation.campaignId, sourceBlockNumber: Number(simulation.sourceBlock), sourceBlockHash: simulation.sourceBlockHash, checkedAt: simulation.checkedAt, freshnessSeconds, outcome: simulation.success ? 'pass' : 'fail', toolVersion: 'backend-phase1', details: { inputDigest: simulation.inputDigest, ...(simulation.gasEstimate === undefined ? {} : { gasEstimate: simulation.gasEstimate.toString() }), worstCaseFeeWei: simulation.worstCaseFeeWei.toString() } });
+  }
+
+  private persistJob(job: BackendState['jobs'][number], prior: BackendState['jobs'][number] | undefined): void {
+    const payload = encode(job.payload);
+    if (!prior) {
+      this.db.prepare('INSERT INTO orchestrator_job (id, kind, run_id, campaign_id, state, scheduled_at, target_at, t_minus_ms, chain_time_offset_ms, idempotency_key, request_digest, payload_json, attempts, max_attempts, last_error, next_attempt_at, lease_owner, lease_expires_at, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(job.id, job.kind, job.runId ?? null, job.campaignId ?? null, job.state, job.scheduledAt, job.targetAt ?? null, job.tMinusMs, job.chainTimeOffsetMs, job.idempotencyKey, job.requestDigest, payload, job.attempts, job.maxAttempts, job.lastError ?? null, job.nextAttemptAt ?? null, job.leaseOwner ?? null, job.leaseExpiresAt ?? null, job.startedAt ?? null, job.completedAt ?? null, job.createdAt, job.updatedAt);
+      return;
+    }
+    if (prior.idempotencyKey !== job.idempotencyKey || prior.requestDigest !== job.requestDigest || prior.kind !== job.kind) throw new Error('JOB_IDENTITY_CONFLICT');
+    if (encode(prior) === encode(job)) return;
+    this.db.prepare('UPDATE orchestrator_job SET state = ?, scheduled_at = ?, target_at = ?, t_minus_ms = ?, chain_time_offset_ms = ?, payload_json = ?, attempts = ?, max_attempts = ?, last_error = ?, next_attempt_at = ?, lease_owner = ?, lease_expires_at = ?, started_at = ?, completed_at = ?, updated_at = ? WHERE id = ?').run(job.state, job.scheduledAt, job.targetAt ?? null, job.tMinusMs, job.chainTimeOffsetMs, payload, job.attempts, job.maxAttempts, job.lastError ?? null, job.nextAttemptAt ?? null, job.leaseOwner ?? null, job.leaseExpiresAt ?? null, job.startedAt ?? null, job.completedAt ?? null, job.updatedAt, job.id);
+  }
+
+  private persistReadiness(readiness: BackendState['readiness'][number], prior: BackendState['readiness'][number] | undefined): void {
+    const id = `readiness_${digest(`${readiness.campaignId ?? ''}:${readiness.wallet.toLowerCase()}`)}`;
+    const values = [id, readiness.campaignId ?? '', readiness.wallet, readiness.state, readiness.freshUntil, readiness.sourceBlock?.toString() ?? null, readiness.sourceBlockHash ?? null, readiness.observedAt ?? null, encode(readiness.blockingReasons), encode(readiness.checks), readiness.checkStates === undefined ? null : encode(readiness.checkStates), readiness.provenance === undefined ? null : encode(readiness.provenance)];
+    if (!prior) {
+      this.db.prepare('INSERT INTO orchestrator_readiness (id, campaign_id, wallet, state, fresh_until, source_block, source_block_hash, observed_at, blocking_reasons_json, checks_json, check_states_json, provenance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(...values);
+      return;
+    }
+    if (encode(prior) === encode(readiness)) return;
+    this.db.prepare('UPDATE orchestrator_readiness SET state = ?, fresh_until = ?, source_block = ?, source_block_hash = ?, observed_at = ?, blocking_reasons_json = ?, checks_json = ?, check_states_json = ?, provenance_json = ? WHERE id = ?').run(readiness.state, readiness.freshUntil, readiness.sourceBlock?.toString() ?? null, readiness.sourceBlockHash ?? null, readiness.observedAt ?? null, encode(readiness.blockingReasons), encode(readiness.checks), readiness.checkStates === undefined ? null : encode(readiness.checkStates), readiness.provenance === undefined ? null : encode(readiness.provenance), id);
   }
 
   private persistRuntime(runtime: BackendState['runtime']): void {

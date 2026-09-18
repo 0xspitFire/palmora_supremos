@@ -6,8 +6,11 @@ export { CanonicalStoreBridge, PHASE1_ZERO_ADMISSION_BUFFERS, canonicalReceiptFi
 export type { CanonicalAdmissionInput, CanonicalAdmissionResult, CanonicalExecutionStore, PreparedExecution } from './canonical-store.js';
 export { SpendLedger } from './spend-ledger.js';
 export { ReadinessService } from './readiness.js';
-export { NotificationDispatcher } from './notifications.js';
+export { NotificationDispatcher, OneWayNotificationDispatcher, redactNotificationText } from './notifications.js';
+export type { NotificationMessage, NotificationSink } from './notifications.js';
 export { ExecutionCoordinator } from './coordinator.js';
+export { Orchestrator, ExecutionOrchestrator, BackendOrchestrator } from './orchestrator.js';
+export type { OrchestratorOptions, OrchestratorStatus, ScheduleExecutionInput, ScheduleJobInput, TickResult } from './orchestrator.js';
 export { BackendApplication } from './application.js';
 export type { CampaignInput, CommandResponse } from './application.js';
 export { normalizeError } from './errors.js';
@@ -15,7 +18,7 @@ export type { BackendErrorCode, NormalizedError } from './errors.js';
 export { APPROVED_KEYSTORE_REFERENCE, MAINNET_SECRET_FILE_REFERENCE, assertSafeConfig } from './config.js';
 export type { BackendConfig, SecretReference, SecretStore } from './config.js';
 export { ReadModelService } from './read-model.js';
-export type { RunReadModel } from './read-model.js';
+export type { RunReadModel, AlertProjection, CalendarProjection, FinalityProjection, HomeProjection, ReadinessProjection, ReadModelSeverity, SystemHealthProjection, WalletReadinessProjection } from './read-model.js';
 export { Phase2ReadModelService, ReadModelV1Service, READ_MODEL_CONTRACT, READ_MODEL_VERSION } from './read-model-v1.js';
 export type {
   AlertReadModel,
@@ -48,6 +51,8 @@ export type {
   WalletReadinessRow,
   ReconciliationReadModel,
 } from './read-model-v1.js';
+export { ReadOnlyApi, ReadModelApi } from './api.js';
+export type { ReadOnlyApiRequest, ReadOnlyApiResponse } from './api.js';
 export { normalizeTotalFeeBudget } from './fees.js';
 export type { FeeBudgetInput } from './fees.js';
 export { resolveWalletPath } from './keystore-path.js';
@@ -60,3 +65,5 @@ export { DeploymentReadinessService } from './deployment-readiness.js';
 export { RuntimeReadinessService } from './runtime-readiness.js';
 export { validateOpsHealthEnvironment } from './ops-health-harness.js';
 export type { OpsHealthEnvironment, OpsHealthValidation } from './ops-health-harness.js';
+export { PHASE2_DEFAULTS } from './phase2-defaults.js';
+export type { ImmediateAlertType } from './phase2-defaults.js';
