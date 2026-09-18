@@ -255,6 +255,9 @@ describe('CanonicalStoreBridge', () => {
         state.campaigns.push(campaignValue);
         state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational: { secretStoreReference: 'TEST_OPERATOR', storePath: 'state.sqlite', signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' } };
       });
+      const walletId = `wallet-${ETHEREUM}-0`;
+      value.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${ETHEREUM}`, WALLET_ONE, 'test-key-0', NOW);
+      value.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
       const persisted = value.store.snapshot().campaigns.find((item) => item.id === campaignValue.id);
       if (!persisted) throw new Error('campaign missing');
       await value.store.transaction((state) => { state.simulations.push({ id: 'simulation-daily-arm', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(persisted), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 34n }); });
