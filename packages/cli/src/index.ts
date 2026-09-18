@@ -8,7 +8,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { createTurnkeyClient, generateAndEncryptWallets, importAndEncryptWallets, importPrivateKeyToTurnkey, readTurnkeySecretConfig, readTurnkeyWalletMap } from '@mint-bot/engine';
 import type { WalletImportRecord } from '@mint-bot/engine';
-import type { TurnkeyWalletMap } from '@mint-bot/engine';
+import type { TurnkeyPolicyBinding, TurnkeyWalletMap } from '@mint-bot/engine';
 import { configuredSecretRoot, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
 import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
@@ -99,6 +99,30 @@ async function writeTurnkeyJson(path: string, value: unknown): Promise<void> {
   } finally {
     await unlink(temporaryPath).catch(() => undefined);
   }
+}
+
+async function readTurnkeyPolicyBinding(secretRoot: string): Promise<TurnkeyPolicyBinding> {
+  let evidence: unknown;
+  try {
+    evidence = JSON.parse(await readOwnerOnlyText(join(secretRoot, 'turnkey-policy.json'), 'TURNKEY_POLICY_EVIDENCE_INVALID')) as unknown;
+  } catch {
+    throw new Error('TURNKEY_POLICY_EVIDENCE_REQUIRED');
+  }
+  const value = evidence as Partial<TurnkeyPolicyBinding> & { smartContractAddress?: string; targetNft?: string; feeRecipient?: string; quantity?: number };
+  if (!value.smartContractAddress || !value.targetNft || !value.feeRecipient || value.quantity !== 1) throw new Error('TURNKEY_POLICY_EVIDENCE_INVALID');
+  return {
+    chainId: 1,
+    to: value.smartContractAddress as Address,
+    functionSelector: '0x161ac21f',
+    nftContract: value.targetNft as Address,
+    feeRecipient: value.feeRecipient as Address,
+    minterIfNotPayer: '0x0000000000000000000000000000000000000000',
+    quantity: '1',
+    maxValueWei: '0',
+    maxGasLimit: '250000',
+    maxFeePerGas: '1000000000',
+    maxPriorityFeePerGas: '100000000',
+  };
 }
 
 interface TurnkeyImportJournalEntry {
@@ -249,6 +273,8 @@ const cli = yargs(hideBin(process.argv))
           const policyDigest = args.policyDigest as Hex;
           const addresses = records.map((record) => record.address);
           if (!/^0x[0-9a-fA-F]{64}$/.test(policyDigest)) throw new Error('TURNKEY_POLICY_DIGEST_INVALID');
+          if (new Set(names).size !== names.length || new Set(addresses.map((address) => address.toLowerCase())).size !== addresses.length) throw new Error('TURNKEY_IMPORT_DUPLICATE_INPUT');
+          const policy = await readTurnkeyPolicyBinding(secretRoot);
           if (await pathExists(output)) {
             const existing = await readTurnkeyWalletMap(output);
             const sameMap = existing.organizationId === organizationId
@@ -301,6 +327,7 @@ const cli = yargs(hideBin(process.argv))
             organizationId,
             policyId: args.policyId,
             policyDigest,
+            policy,
             wallets,
           });
           await unlink(journalPath).catch(() => undefined);
