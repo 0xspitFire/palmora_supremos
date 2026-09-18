@@ -412,6 +412,21 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.db.close();
   }
 
+  /** Prune transient notification rows while retaining immutable audit events. */
+  public pruneNotificationsBefore(cutoff: Date): number {
+    this.ensureOpen();
+    if (Number.isNaN(cutoff.getTime())) throw new Error('NOTIFICATION_RETENTION_CUTOFF_INVALID');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.db.prepare('DELETE FROM notification WHERE created_at < ?').run(cutoff.toISOString());
+      this.db.exec('COMMIT');
+      return result.changes;
+    } catch (error) {
+      if (this.db.inTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   public capabilities(): StoreCapabilities {
     return { durable: this.durable, atomicAcrossProcesses: true };
   }
@@ -770,8 +785,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readNotifications(): BackendState['notificationOutbox'] {
     const rows = this.db.prepare('SELECT id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at FROM notification ORDER BY created_at, id').all() as Array<{ id: string; event_key: string; idempotency_key: string; delivery_state: string; payload_json: string; created_at: string; delivered_at: string | null }>;
     return rows.map((row) => {
-      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string }>(row.payload_json) ?? {};
-      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}) };
+      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string; retentionUntil?: string }>(row.payload_json) ?? {};
+      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}), ...(payload.retentionUntil ? { retentionUntil: payload.retentionUntil } : {}) };
     });
   }
 
@@ -914,7 +929,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private persistNotification(notification: BackendState['notificationOutbox'][number], prior: BackendState['notificationOutbox'][number] | undefined): void {
-    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts });
+    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts, ...(notification.retentionUntil ? { retentionUntil: notification.retentionUntil } : {}) });
     if (!prior) {
       this.db.prepare("INSERT INTO notification (id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(notification.id, notification.sourceEventId, notification.id, notification.state === 'delivered' ? 'delivered' : 'pending', payload, notification.createdAt, notification.deliveredAt ?? null);
       return;

@@ -89,8 +89,10 @@ part of this evidence.
   `ETHEREUM_SEADROP_MINT_VALUE_WEI`.
 - Branch protection needs repository-admin verification; see
   `docs/branch-protection-evidence.md`.
-- A long-running Backend orchestrator entrypoint is still required before any
-  service can be enabled; see `docs/service-evidence.md`.
+- Phase 2 now provides a long-running orchestrator entrypoint and unit/config
+  templates, but host provisioning, startup reconciliation evidence, and human
+  safety approvals remain required before any service can be enabled; see
+  `docs/service-evidence.md`.
 - The exact Vitest startup failure is `Unexpected "<<" in JSON` at
   `../../../package.json`; no attempt was made to repair the resolved
   `/home/Junayd/W3/MintBot/package.json`.
