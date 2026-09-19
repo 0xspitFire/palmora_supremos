@@ -48,11 +48,11 @@ Make CI gates green, package Anvil, validate Ethereum/Base profiles, keep Robinh
 
 ### Phase 2
 
-Deploy the persistent orchestrator and SQLite store, add restart recovery, backups/restore, WAL tests, Telegram one-way delivery, endpoint metrics, and disk/log rotation. Exit only after an unattended scheduled run survives a mid-flight process kill.
+Deploy the persistent read-model jobs and SQLite store, add projection restart recovery, backups/restore, WAL tests, one-way Telegram delivery, the authenticated `mintbot.read-model/v1` transport for read-only intelligence/readiness/calendar/reminder/status views, endpoint metrics, and disk/log rotation. Preserve the 5-minute/15-minute freshness and 30-day/90-day retention policies without exposing secrets. Exit when read-only projections survive process restart and critical delivery remains idempotent; Phase 2 does not authorize unattended mint execution.
 
 ### Phase 3+
 
-Add operational command authentication and replay protection, calendar/opportunity services, and richer read surfaces only as their roadmap gates open. Do not provision infrastructure for dashboard, ML, or high-scale indexing before usage justifies it.
+Add the live-execution restart/reconciliation drill, operational command authentication and replay protection, Phase 3 control routes, and richer read surfaces only as their roadmap gates open. Do not provision infrastructure for ML or high-scale indexing before usage justifies it.
 
 ## Challenges and decisions
 

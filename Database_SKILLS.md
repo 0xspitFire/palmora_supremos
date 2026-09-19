@@ -76,3 +76,9 @@ Receive entities from Product Manager, architecture from CTO/Lead, and event fac
 - File-backed databases must report WAL, migrations are serialized under one writer lock, and current migration checksums/object sets are required for backup verification. Raw observation pruning is policy-driven and records measured retention evidence.
 - The accepted Backend canonical-store path uses the normalized repository boundary; `BackendStateRepository` remains a legacy compatibility/test adapter only, is not an approved live authority, and must not be extended with new state fields or operational credentials. Lead must keep the legacy adapter off live paths until it can be removed safely.
 - Run-level `request_id` values may repeat across wallets in the accepted canonical bridge; wallet-scoped intent/reservation uniqueness and wallet-specific idempotency keys preserve multi-wallet admission without weakening run-level identity.
+
+### 2026-09-18 — Phase 2 durable read-model foundation
+
+- Migration `016_phase2_read_models.sql` adds durable jobs/events, normalized provenance and freshness observations, wallet metadata source columns, append-only readiness/opportunity evidence/finality observations, alert delivery state, and exact-string spend-summary snapshots. Existing intents, attempts, receipts, reservations, ledgers, and lifecycle/audit facts remain authoritative.
+- Product defaults are encoded as readiness freshness `300` seconds, discovery/calendar freshness `900` seconds, alert/read-model retention `30` days, and Phase 2 event/audit retention `90` days. Retention is policy-driven and never silently deletes immutable evidence.
+- `phase2.ts` is the repository/read-query boundary. Job leases are recoverable after restart; idempotency keys reject payload conflicts; read projections omit wallet key references, raw provider payloads, and secret-like fields; monetary values cross the read boundary as canonical decimal strings.

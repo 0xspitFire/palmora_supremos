@@ -1,6 +1,9 @@
 import type { SqliteDatabase } from './database.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import { Phase2Repository } from './phase2.js';
+import type { AlertDeliveryRecord, AlertRecord, DomainEventRecord, FinalityObservationRecord, FreshnessObservationRecord, JobRecord, OpportunityEvidenceRecord, OpportunityGateCheckRecord, OpportunityRecord, OpportunityRiskRecord, OpportunityScoreRecord, ProvenanceRecord, ReadinessSnapshotRecord, SpendSummaryRecord, TrackedWalletRecord, WalletBalanceRecord, WalletMetadataRecord } from './phase2.js';
+export type { AlertDeliveryRecord, AlertRecord, DomainEventRecord, FinalityObservationRecord, FreshnessObservationRecord, JobRecord, JobState, OpportunityEvidenceRecord, OpportunityGateCheckRecord, OpportunityRecord, OpportunityRiskRecord, OpportunityScoreRecord, ProvenanceRecord, ReadinessCheckRecord, ReadinessSnapshotRecord, SpendSummaryRecord, TrackedWalletRecord, WalletBalanceRecord, WalletMetadataRecord } from './phase2.js';
 
 export class IdempotencyConflictError extends Error {
   public constructor() { super('idempotency key was reused with a different request fingerprint'); }
@@ -290,7 +293,8 @@ function runFingerprint(record: ExecutionRunRecord): string {
 }
 
 export class DurableRepository {
-  public constructor(private readonly db: SqliteDatabase) {}
+  private readonly phase2: Phase2Repository;
+  public constructor(private readonly db: SqliteDatabase) { this.phase2 = new Phase2Repository(db); }
 
   private immediate<T>(operation: () => T): T {
     if (this.db.inTransaction) return operation();
@@ -563,4 +567,31 @@ export class DurableRepository {
       this.recordAuditEvent(audit);
     });
   }
+
+  public saveWalletMetadata(record: WalletMetadataRecord): void { this.phase2.saveWalletMetadata(record); }
+  public recordWalletBalance(record: WalletBalanceRecord): void { this.phase2.recordWalletBalance(record); }
+  public setTrackedWallet(record: TrackedWalletRecord): void { this.phase2.setTrackedWallet(record); }
+  public recordProvenance(record: ProvenanceRecord): void { this.phase2.recordProvenance(record); }
+  public recordFreshness(record: FreshnessObservationRecord): void { this.phase2.recordFreshness(record); }
+  public saveJob(record: JobRecord): void { this.phase2.saveJob(record); }
+  public recoverExpiredJobs(at?: Date): number { return this.phase2.recoverExpiredJobs(at); }
+  public claimJob(id: string, leaseOwner: string, leaseExpiresAt: string, at?: Date): JobRecord | null { return this.phase2.claimJob(id, leaseOwner, leaseExpiresAt, at); }
+  public completeJob(id: string, leaseOwner?: string, at?: Date): void { this.phase2.completeJob(id, leaseOwner, at); }
+  public failJob(id: string, error: string, leaseOwner?: string, at?: Date): void { this.phase2.failJob(id, error, leaseOwner, at); }
+  public retryJob(id: string, scheduledAt: string, at?: Date): void { this.phase2.retryJob(id, scheduledAt, at); }
+  public appendEvent(record: DomainEventRecord): string { return this.phase2.appendEvent(record); }
+  public recordReadiness(record: ReadinessSnapshotRecord): void { this.phase2.recordReadiness(record); }
+  public saveOpportunity(record: OpportunityRecord): void { this.phase2.saveOpportunity(record); }
+  public recordOpportunityEvidence(record: OpportunityEvidenceRecord): void { this.phase2.recordOpportunityEvidence(record); }
+  public recordOpportunityScore(record: OpportunityScoreRecord): void { this.phase2.recordOpportunityScore(record); }
+  public recordOpportunityRisk(record: OpportunityRiskRecord): void { this.phase2.recordOpportunityRisk(record); }
+  public recordOpportunityGateCheck(record: OpportunityGateCheckRecord): void { this.phase2.recordOpportunityGateCheck(record); }
+  public enqueueAlert(record: AlertRecord): AlertDeliveryRecord { return this.phase2.enqueueAlert(record); }
+  public claimAlertDelivery(id: string, at?: Date): AlertDeliveryRecord | null { return this.phase2.claimAlertDelivery(id, at); }
+  public completeAlertDelivery(id: string, at?: Date): void { this.phase2.completeAlertDelivery(id, at); }
+  public failAlertDelivery(id: string, error: string, nextAttemptAt?: string, at?: Date): void { this.phase2.failAlertDelivery(id, error, nextAttemptAt, at); }
+  public retryAlertDelivery(id: string, nextAttemptAt: string, at?: Date): void { this.phase2.retryAlertDelivery(id, nextAttemptAt, at); }
+  public deadLetterAlertDelivery(id: string, at?: Date): void { this.phase2.deadLetterAlertDelivery(id, at); }
+  public recordFinalityObservation(record: FinalityObservationRecord): void { this.phase2.recordFinalityObservation(record); }
+  public refreshSpendSummary(scopeType: SpendSummaryRecord['scopeType'], scopeId: string, options?: { usageDate?: string; walletId?: string; campaignId?: string; sourceVersion?: string; asOf?: string }): SpendSummaryRecord { return this.phase2.refreshSpendSummary(scopeType, scopeId, options); }
 }

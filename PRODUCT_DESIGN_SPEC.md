@@ -27,6 +27,28 @@ Use plain language in primary screens, alerts, confirmations, and Product Owner 
 
 Web delivery is therefore incremental. Phase 2 provides intelligence and readiness views, Phase 3 provides operational controls, Phase 4 provides opportunity investigation, and Phase 5 provides the complete dashboard and analytics.
 
+### Phase 2 Scope Lock
+
+Phase 2 web is read-only and read-model driven. Its surfaces are:
+
+- Home/attention: attention items, readiness counts, opportunity and calendar highlights, reminders, and redacted system health.
+- Opportunities: evidence-backed summaries and detail with score, confidence/sample coverage, risks, gate, and freshness. The safe primary action is `Inspect`.
+- Wallet readiness: per-wallet, per-campaign checks, costs, blockers, and freshness. A row is not ready unless the authoritative required checks pass.
+- Calendar and reminders: source authority, verification time, expiry, phase/deadline, price estimate, supply, and eligibility summary.
+- Alerts and status: persisted alert delivery state plus read-only run, transaction, reconciliation, and health status.
+
+Phase 2 web and Telegram do not approve, promote, arm, run, pause, kill,
+exclude, fund, validate, retry, sign, broadcast, or mutate policy. Those
+controls belong to Phase 3 and must use a separately accepted Backend mutation
+contract. A refresh or canonical link is a read operation, not a mutation.
+
+Phase 2 defaults approved by the Product Owner are one local operator, five
+minutes for readiness freshness, fifteen minutes for discovery and calendar
+freshness, immediate critical alerts, grouped non-critical reminders,
+thirty-day read-model and alert-delivery retention, and ninety-day audit-event
+retention. The active policy version and source time are visible when these
+defaults affect a decision.
+
 ## Audience And Interaction Rules
 
 - Use everyday words such as “network connection,” “estimated network cost,” “waiting for confirmation,” and “not ready.”
@@ -35,7 +57,7 @@ Web delivery is therefore incremental. Phase 2 provides intelligence and readine
 - Separate “what the system knows” from “what it expects.” Never present an estimate as a guarantee.
 - Make `Dry run`, `Approval required`, `Live`, and `Blocked` visually distinct.
 - A recommendation never authorizes spending. Safety and eligibility gates remain separate from scores.
-- Failed simulation is a hard block. Offer `View reason`, `Exclude wallet`, or `Run check again`; do not offer a general force option.
+- Failed simulation is a hard block. Phase 2 shows `View reason`; `Exclude wallet` and `Run check again` are guidance for a future Backend flow, not active Phase 2 controls. Never offer a general force option.
 - Use `Cancelled` for user cancellation before active execution, `Aborted` for safety, kill-switch, or adaptive stops, and `Failed` for technical or execution inability.
 
 ## Canonical Status Language
@@ -95,19 +117,32 @@ Prioritize “What needs my attention?” followed by “Which opportunity looks
 
 ### Opportunity View
 
-Show the project, network, opening time, price, confidence, evidence, risks, wallet readiness, and recommended next action. The primary action is `Inspect`, not `Execute`. A score can create a proposal, but cannot bypass a blocked gate.
+Show the project, network, opening time, price, confidence, evidence, risks, wallet readiness, and recommended next action. The primary action is `Inspect`, not `Execute`. A score may qualify an item for a future proposal, but Phase 2 does not create or promote that proposal and cannot bypass a blocked gate.
 
 ### Wallet Readiness
 
 Readiness is always tied to a specific mint. Show whether each wallet is funded, eligible, checked, and ready. Explain missing requirements in ordinary language.
 
-### Campaign And Execution View
+### Campaign And Execution View (Phase 3)
 
 Show total wallets, ready wallets, estimated cost, limits, current state, and what happens next. Group results by state instead of overwhelming users with a large technical table. When one wallet fails, clearly say that other wallets continued.
 
 ### Telegram
 
-Telegram is for alerts, reminders, compact status, and narrowly scoped confirmed actions. It never displays keys or secrets and never treats delivery of an alert as proof of execution. Deep investigation belongs in the web experience.
+In Phase 2, Telegram is an outbound-only channel for alerts, reminders, and
+compact status. Critical alerts are sent immediately; non-critical reminders
+are grouped. It accepts no commands, callbacks, approvals, arm requests, or
+execution requests. Every message links to a read-only canonical record, never
+displays keys or secrets, and never treats delivery as proof of execution.
+Narrowly scoped confirmed actions are a Phase 3+ concern. Deep investigation
+belongs in the web experience.
+
+At minimum, kill-switch, cap, blocked-health, unresolved-submission, reorg,
+execution-failed, and execution-aborted events are critical. Execution-status
+alerts default to immediate delivery. Readiness-change, opportunity, eligibility, opening,
+deadline, and ordinary underfunded events are grouped reminders unless Backend
+marks them critical. Each message preserves the source event, current state,
+freshness, and canonical read link.
 
 ## Robinhood Blocked State
 
@@ -127,3 +162,5 @@ The current blocker is operational, not compatibility. SeaDrop compatibility and
 - Every live action shows wallet count, estimated cost, limits, check age, and consequences before confirmation.
 - Consumer wording is the default; advanced technical details are optional.
 - Phase 2 intelligence surfaces must not imply that the Execution Foundation is the product MVP.
+- Phase 2 web resources are `GET`-only and expose no active mutation control; Phase 3 controls are omitted or labeled unavailable.
+- Phase 2 Telegram is outbound-only, records delivery state, links to read-only records, sends critical alerts immediately, groups non-critical reminders, and never serves as execution proof.
