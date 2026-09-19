@@ -778,8 +778,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readNotifications(): BackendState['notificationOutbox'] {
     const rows = this.db.prepare('SELECT id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at FROM notification ORDER BY created_at, id').all() as Array<{ id: string; event_key: string; idempotency_key: string; delivery_state: string; payload_json: string; created_at: string; delivered_at: string | null }>;
     return rows.map((row) => {
-      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string; canonicalLink?: string; lastError?: string }>(row.payload_json) ?? {};
-      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : row.delivery_state === 'failed' || payload.lastError ? 'failed' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}), ...(payload.lastError ? { lastError: payload.lastError } : {}), ...(payload.canonicalLink ? { canonicalLink: payload.canonicalLink } : {}) };
+      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string; retentionUntil?: string; deliveryLeaseUntil?: string; nextAttemptAt?: string; canonicalLink?: string; lastError?: string }>(row.payload_json) ?? {};
+      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : row.delivery_state === 'failed' || payload.lastError ? 'failed' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}), ...(payload.retentionUntil ? { retentionUntil: payload.retentionUntil } : {}), ...(payload.deliveryLeaseUntil ? { deliveryLeaseUntil: payload.deliveryLeaseUntil } : {}), ...(payload.nextAttemptAt ? { nextAttemptAt: payload.nextAttemptAt } : {}), ...(payload.lastError ? { lastError: payload.lastError } : {}), ...(payload.canonicalLink ? { canonicalLink: payload.canonicalLink } : {}) };
     });
   }
 
@@ -954,7 +954,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private persistNotification(notification: BackendState['notificationOutbox'][number], prior: BackendState['notificationOutbox'][number] | undefined): void {
-    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts, ...(notification.canonicalLink ? { canonicalLink: notification.canonicalLink } : {}), ...(notification.lastError ? { lastError: notification.lastError } : {}) });
+    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts, ...(notification.retentionUntil ? { retentionUntil: notification.retentionUntil } : {}), ...(notification.deliveryLeaseUntil ? { deliveryLeaseUntil: notification.deliveryLeaseUntil } : {}), ...(notification.nextAttemptAt ? { nextAttemptAt: notification.nextAttemptAt } : {}), ...(notification.canonicalLink ? { canonicalLink: notification.canonicalLink } : {}), ...(notification.lastError ? { lastError: notification.lastError } : {}) });
     if (!prior) {
       this.db.prepare("INSERT INTO notification (id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at) VALUES (?, ?, ?, 'pending', ?, ?, NULL)").run(notification.id, notification.sourceEventId, notification.id, payload, notification.createdAt);
       if (notification.state === 'failed') this.db.prepare("UPDATE notification SET delivery_state = 'failed', payload_json = ? WHERE id = ?").run(payload, notification.id);
@@ -964,7 +964,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       }
       return;
     }
-    if (prior.state === notification.state && prior.attempts === notification.attempts && prior.deliveredAt === notification.deliveredAt && prior.lastError === notification.lastError) return;
+    if (prior.state === notification.state && prior.attempts === notification.attempts && prior.deliveredAt === notification.deliveredAt && prior.retentionUntil === notification.retentionUntil && prior.deliveryLeaseUntil === notification.deliveryLeaseUntil && prior.nextAttemptAt === notification.nextAttemptAt && prior.lastError === notification.lastError) return;
     const current = this.db.prepare('SELECT delivery_state FROM notification WHERE id = ?').get(notification.id) as { delivery_state: string } | undefined;
     if (!current) throw new Error('NOTIFICATION_OUTBOX_NOT_FOUND');
     const target = notification.state === 'delivered' ? 'delivered' : notification.state === 'failed' ? 'failed' : notification.state === 'delivering' ? 'queued' : 'pending';

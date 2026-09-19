@@ -40,19 +40,22 @@ export class NotificationDispatcher {
   private readonly retentionDays: number;
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
+  private readonly leaseMs: number;
 
-  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, options: (() => Date) | { now?: () => Date; metrics?: MetricsRegistry; retentionDays?: number; retryBaseMs?: number; retryMaxMs?: number } = {}) {
+  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, options: (() => Date) | { now?: () => Date; metrics?: MetricsRegistry; retentionDays?: number; leaseMs?: number; retryBaseMs?: number; retryMaxMs?: number } = {}) {
     if (typeof options === 'function') {
       this.now = options;
       this.retentionDays = Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
       this.retryBaseMs = 1_000;
       this.retryMaxMs = 60_000;
+      this.leaseMs = 30_000;
     } else {
       this.now = options.now ?? (() => new Date());
       this.metrics = options.metrics;
       this.retentionDays = options.retentionDays ?? Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
       this.retryBaseMs = options.retryBaseMs ?? 1_000;
       this.retryMaxMs = options.retryMaxMs ?? 60_000;
+      this.leaseMs = options.leaseMs ?? 30_000;
     }
   }
 
@@ -66,11 +69,13 @@ export class NotificationDispatcher {
         const source = state.events.find(event => event.id === sourceEventId);
         if (!source) throw new Error('NOTIFICATION_SOURCE_EVENT_NOT_FOUND');
         const safeText = sourceText(source, text);
-        const existing = state.notificationOutbox.find(entry => entry.sourceEventId === sourceEventId);
-        if (existing?.state === 'delivered') {
-          return undefined;
-        }
-        const outbox = existing ?? {
+      const existing = state.notificationOutbox.find(entry => entry.sourceEventId === sourceEventId);
+      if (existing?.state === 'delivered') {
+        return undefined;
+      }
+      if (existing?.deliveryLeaseUntil && Date.parse(existing.deliveryLeaseUntil) > this.now().getTime()) return undefined;
+      const createdAt = this.now().toISOString();
+      const outbox = existing ?? {
           id: `notify_${source.id}`,
           sourceEventId: source.id,
           ...(source.runId ? { runId: source.runId } : {}),
@@ -78,7 +83,8 @@ export class NotificationDispatcher {
           text: safeText,
           state: 'pending' as const,
           attempts: 0,
-          createdAt: this.now().toISOString(),
+          createdAt,
+          retentionUntil: new Date(Date.parse(createdAt) + this.retentionDays * 86_400_000).toISOString(),
           ...(canonicalRunLink(source.runId) ? { canonicalLink: canonicalRunLink(source.runId) } : {}),
         };
         if (!existing) state.notificationOutbox.push(outbox);
@@ -86,6 +92,7 @@ export class NotificationDispatcher {
         outbox.attempts += 1;
         outbox.lastError = undefined;
         outbox.nextAttemptAt = undefined;
+        outbox.deliveryLeaseUntil = new Date(Date.parse(createdAt) + this.leaseMs).toISOString();
         return structuredClone(outbox);
       });
       if (!item) return;
@@ -97,6 +104,8 @@ export class NotificationDispatcher {
         delivered.state = 'delivered';
         delivered.deliveredAt = this.now().toISOString();
         delivered.lastError = undefined;
+        delivered.deliveryLeaseUntil = undefined;
+        delivered.nextAttemptAt = undefined;
         state.events.push({ id: `evt_${randomUUID()}`, runId: delivered.runId, type: 'notification_delivered', at: this.now().toISOString(), data: { sourceEventId: delivered.sourceEventId, notificationId: delivered.id, notificationType: delivered.type } });
       });
       this.metrics?.recordNotification('delivered');
@@ -108,9 +117,10 @@ export class NotificationDispatcher {
           // Normalized SQLite projects the process-local `delivering` lease
           // as pending/queued, so accept both representations here.
           if (!failed || !['delivering', 'pending'].includes(failed.state)) return;
-           failed.state = 'failed';
-           failed.lastError = safeError;
-           failed.nextAttemptAt = new Date(this.now().getTime() + Math.min(this.retryMaxMs, this.retryBaseMs * Math.max(1, 2 ** Math.min(8, failed.attempts)))).toISOString();
+          failed.state = 'failed';
+          failed.deliveryLeaseUntil = undefined;
+          failed.lastError = safeError;
+          failed.nextAttemptAt = new Date(this.now().getTime() + Math.min(this.retryMaxMs, this.retryBaseMs * Math.max(1, 2 ** Math.min(8, failed.attempts)))).toISOString();
         });
       }
       this.metrics?.recordNotification('failed');
