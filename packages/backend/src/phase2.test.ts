@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { ReadOnlyApi } from './api.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { NotificationDispatcher } from './notifications.js';
@@ -20,19 +20,17 @@ function readyState(store: DurableStore, runs: RunRecord[]): Promise<void> { ret
 function engine(overrides: Partial<EngineAdapter> = {}): EngineAdapter { return { prepare: async () => emptyPrepared, execute: async () => ({ ...emptyPrepared, state: 'Confirmed' }), reconcile: async () => ({ result: 'unknown' as const, attempts: [], receipts: [] }), ...overrides }; }
 
 describe('Phase 2 backend operational shell', () => {
-  it('persists T-minus jobs and replays an idempotent schedule key', async () => {
+  it('persists read-only T-minus jobs and replays an idempotent schedule key', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mint-phase2-jobs-'));
     const file = join(directory, 'jobs.json');
     try {
       const first = new DurableStore(file);
       await first.open();
-      const firstRun = run('run-scheduled');
-      await readyState(first, [firstRun]);
       const coordinator = new ExecutionCoordinator(first, engine());
       const orchestrator = new Orchestrator(first, coordinator, { now: () => new Date(NOW), chainTimeOffsetMs: 2_000 });
-      const job = await orchestrator.scheduleRun({ runId: firstRun.id, wallets: ['Wallet-A'], openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' });
+      const job = await orchestrator.schedule({ kind: 'health', openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' });
       expect(job.scheduledAt).toBe('2026-09-18T00:00:05.000Z');
-      expect(await orchestrator.scheduleRun({ runId: firstRun.id, wallets: ['Wallet-A'], openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' })).toMatchObject({ id: job.id });
+      expect(await orchestrator.schedule({ kind: 'health', openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' })).toMatchObject({ id: job.id });
       const second = new DurableStore(file);
       await second.open();
       expect(second.snapshot().jobs).toHaveLength(1);
@@ -40,27 +38,12 @@ describe('Phase 2 backend operational shell', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('keeps execution bounded and isolates a failed scheduled job', async () => {
+  it('rejects live execution scheduling in Phase 2', async () => {
     const store = new DurableStore();
-    const runs = [run('run-a'), run('run-b'), run('run-c')];
-    await readyState(store, runs);
-    let active = 0;
-    let peak = 0;
-    const prepare = vi.fn(async ({ runId }: { runId: string }) => {
-      active += 1;
-      peak = Math.max(peak, active);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      active -= 1;
-      if (runId === 'run-b') throw new Error('wallet failure');
-      return emptyPrepared;
-    });
-    const orchestrator = new Orchestrator(store, new ExecutionCoordinator(store, engine({ prepare })), { maxConcurrency: 2, now: () => new Date(NOW) });
-    for (const item of runs) await orchestrator.scheduleRun({ runId: item.id, wallets: ['wallet-a'], idempotencyKey: `schedule-${item.id}` });
-    await orchestrator.tick();
-    await orchestrator.tick();
-    expect(peak).toBeLessThanOrEqual(2);
-    expect(store.snapshot().jobs.filter((job) => job.state === 'succeeded')).toHaveLength(2);
-    expect(store.snapshot().jobs.filter((job) => job.state === 'failed')).toHaveLength(1);
+    const liveRun = { ...run('run-live'), mode: 'live' as const };
+    await readyState(store, [liveRun]);
+    const orchestrator = new Orchestrator(store, new ExecutionCoordinator(store, engine()), { now: () => new Date(NOW) });
+    await expect(orchestrator.scheduleRun({ runId: liveRun.id, wallets: ['wallet-a'], idempotencyKey: 'live-job' })).rejects.toThrow('PHASE2_LIVE_MODE_DISABLED');
   });
 
   it('blocks recovered submitted work until boot reconciliation is authoritative', async () => {

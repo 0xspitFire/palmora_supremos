@@ -774,7 +774,7 @@ export class Phase2ReadModelService {
   private reconciliationReadModel(record: ReconciliationRecord): ReconciliationReadModel {
     const provenance = [reconciliationProvenance(record)];
     const state: ReconciliationReadModel['state'] = record.result === 'confirmed' || record.result === 'soft' || record.result === 'posted' ? 'matched' : record.result === 'failed' ? 'ambiguous' : record.result === 'final' ? 'final' : record.result === 'unknown' ? 'unresolved' : record.result;
-    return { id: record.id, state, observedAt: record.observedAt, reason: record.reason ?? null, retry: DENIED_RETRY, provenance };
+    return { id: record.id, state, observedAt: record.observedAt, reason: safeReadModelText(record.reason), retry: DENIED_RETRY, provenance };
   }
 
   private walletExecutionResults(context: ProjectionContext, attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], reconciliations: readonly ReconciliationRecord[]): readonly WalletExecutionResult[] {
@@ -882,6 +882,12 @@ function evidenceProvenance(evidence: BackendState['chainEvidence'][number]): Pr
 function simulationProvenance(simulation: SimulationEvidenceRecord): Provenance { return { kind: 'simulation', recordId: simulation.id, observedAt: simulation.checkedAt, sourceBlockNumber: simulation.sourceBlock.toString(), sourceBlockHash: simulation.sourceBlockHash, policyVersion: 'read-model-v1' }; }
 function reconciliationProvenance(record: ReconciliationRecord): Provenance { return { kind: 'reconciliation', recordId: record.id, observedAt: record.observedAt, policyVersion: 'read-model-v1' }; }
 function storeProvenance(recordId: string, observedAt: string): Provenance { return { kind: 'backend_store', recordId, observedAt: validIso(observedAt) ?? new Date(0).toISOString(), policyVersion: 'read-model-v1' }; }
+
+function safeReadModelText(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  if (/(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token|calldata|raw(?:[_-]?transaction)?)/i.test(value) || /https?:\/\/[^\s/]+(?::[^\s/@]+)?@[^\s]+/i.test(value) || /0x[0-9a-f]{64}/i.test(value)) return '[REDACTED]';
+  return value.length > 500 ? `${value.slice(0, 497)}...` : value;
+}
 
 function sourcedAmount(value: bigint | null, kind: SourcedAmount['kind'], freshness: Freshness, provenance: readonly Provenance[]): SourcedAmount {
   if (value === null || value < 0n) return { amount: null, kind: 'unknown', freshness, provenance };

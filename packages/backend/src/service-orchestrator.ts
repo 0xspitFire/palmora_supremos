@@ -180,7 +180,7 @@ export class OrchestratorService {
   private async runJob(job: ScheduledJob): Promise<void> {
     try {
       if (job.mode !== 'dry-run' || this.options.dryRunOnly !== true) throw new Error('PHASE2_LIVE_MODE_DISABLED');
-      const result = await this.application.command('execute', { runId: job.runId, wallets: [...job.wallets], idempotencyKey: `scheduled:${job.id}` });
+      const result = await this.application.command('dry-run', { runId: job.runId, wallets: [...job.wallets], idempotencyKey: `scheduled:${job.id}` });
       const outcome = result.state === 'Failed' ? 'failed' : result.state === 'Aborted' ? 'blocked' : 'succeeded';
       await this.options.jobs.update(job.id, { state: outcome, ...(outcome !== 'succeeded' ? { lastError: outcome === 'failed' ? 'RUN_FAILED' : 'RUN_ABORTED' } : {}), completedAt: this.now().toISOString() });
     } catch (error) {
