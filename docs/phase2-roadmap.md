@@ -83,15 +83,15 @@ source set:
 
 | Workstream | Phase 2 outcome | Primary owner |
 |---|---|---|
-| Durable runtime | One long-running orchestrator with persistent jobs, chain-time-aware T-minus scheduling, bounded concurrency, idempotency, and boot-time reconciliation before new live work | Backend |
-| Durable store | SQLite/WAL as the default candidate, subject to Windows and Linux-host locking, migration, backup, restore, corruption, and restart tests; wallets metadata, thin campaign/job records, executions, events, attempts, simulations, eligibility, opportunities, notifications, and spend ledger/reservations | Database |
+| Durable runtime | One long-running orchestrator with canonical SQLite-backed scheduler jobs, chain-time-aware T-minus scheduling, bounded concurrency, idempotency, and boot-time reconciliation before any live-readiness claim | Backend |
+| Durable store | SQLite/WAL as the canonical Phase 2 scheduler store, subject to Windows and Linux-host locking, migration, backup, restore, corruption, and restart tests; wallets metadata, thin campaign/job records, executions, events, attempts, simulations, eligibility, opportunities, notifications, and spend ledger/reservations | Database |
 | Safety continuity | Atomic worst-case spend reservations, settlement/release, shared kill-switch cancellation, and preservation of already-submitted work across process boundaries | Backend + Database + Blockchain |
 | Intelligence | Tracked-wallet ingestion, observation deduplication, candidate Opportunity records with evidence, deterministic `v1-rules` scoring, confidence/sample coverage, risk flags, and freshness | Backend + Blockchain + Database |
 | Calendar/readiness | Upcoming-mint records and per-wallet/per-mint eligibility/readiness with typed checks, source time, expiry, provenance, actionable blockers, 5-minute readiness freshness, and 15-minute discovery/calendar freshness | Backend + Blockchain + Database |
 | Read model/API | Accepted version of `mintbot.read-model/v1`; authoritative snapshot envelope, cursor reads, canonical states, amounts as decimal base-unit strings, freshness, provenance, retry policy, finality/reorg history, safe issues, and allowlist redaction | Backend + Database |
 | Web | Read-only Home, opportunity, calendar, readiness, run/transaction, alert, and health views backed only by the accepted read model; consumer copy with optional advanced detail | Product Designer + Frontend |
 | Telegram | One-way alerts for execution and safety outcomes, underfunding, openings, eligibility, and high-score opportunities; immediate kill/cap/failed/blocked alerts; grouped started/succeeded/underfunded reminders; idempotent delivery records and canonical links | Backend + DevOps |
-| Observability/operations | Run IDs, endpoint and queue metrics, reconciliation age, freshness/error indicators, log rotation, backup/restore evidence, and safe health summaries | DevOps + Backend |
+| Observability/operations | Run IDs, endpoint and queue metrics, reconciliation age, freshness/error indicators, backup status freshness, verified-restore status, log rotation, and safe health summaries | DevOps + Backend |
 
 The Phase 2 web resource set is the proposal in the read-model contract:
 
@@ -107,6 +107,23 @@ The Phase 2 web resource set is the proposal in the read-model contract:
 These paths remain proposals until the contract gate accepts their final wire
 names. A displayed “next action” may explain a future CLI/Backend action, but
 Phase 2 web exposes only inspection or read-model refresh behavior.
+
+### 3.1.1 Runtime Mode and Spend Projection
+
+The Phase 2 service is local dry-run-only. It may exercise canonical SQLite
+scheduler jobs, restart recovery, kill-switch handling, read-model projection,
+and redacted notification fixtures without signing, broadcasting, mutating live
+nonce state, or claiming a mint succeeded. Live readiness is a separate,
+evidence-only status until the Phase 1 and Product Owner live gates pass; it is
+not a permission to run live work through Phase 2 web, Telegram, or read-model
+endpoints.
+
+Read-only `GET` projections may include spend summaries in Home and Run views
+or another separately accepted `v1` read resource. They must distinguish
+`reserved`/pending exposure from `settled`/actual spend, include an
+authoritative server `asOf` timestamp and freshness, and never infer settled
+spend from a reservation, receipt hash, notification, or client clock. Missing
+or stale values render `Unknown`/`Unavailable` rather than zero.
 
 ### 3.2 Explicitly Out of Scope
 
@@ -186,6 +203,9 @@ Deliverables:
   submitted work is preserved and unresolved work is not silently failed.
 - Backup/restore and cross-platform WAL/locking evidence on the development
   box and target host.
+- Health/read-model backup status includes last successful backup, last verified
+  restore, age/freshness, and reconciliation state. A stale, missing, or
+  unverified backup blocks any live-readiness claim.
 - Retention jobs and documented classes for the approved 30-day read-model/
   alert window and 90-day operational-audit window; immutable source facts
   required for safety and financial reconstruction are not pruned by these
@@ -193,7 +213,8 @@ Deliverables:
 
 Exit evidence: migration/restart/reservation tests pass; a process kill cannot
 create an orphaned submission or double reservation; the orchestrator does not
-sign and the client does not become a safety boundary.
+sign; verified restore completes before reconciliation; and the client does
+not become a safety boundary.
 
 ### M2 — Chain Facts, Readiness Inputs, and Status Mapping
 
@@ -209,13 +230,18 @@ Deliverables:
   reconciliation.
 - Canonical mapping for `Prepared`, `Submitted`, `Included`, `Posted to
   Ethereum`, `Ethereum final`, `Replaced`, `Reorged`, `Failed`, `Aborted`, and
-  `Unknown`; intermediate Robinhood stages never mean success.
+  `Unknown`; intermediate Robinhood stages never mean success. Ethereum
+  `Confirmed` settles only when its configured confirmation policy and persisted
+  depth evidence pass; when a chain policy requires `Ethereum final`, that
+  mapping must also be non-premature.
 - `RawCalldataStrategy` only if still required by the Phase 2 engine plan, and
   only behind the existing Backend/CLI safety path; it is not a web feature.
 
 Exit evidence: Backend can consume authoritative facts without deriving chain
-truth in the browser; stale, unknown, failed-simulation, reorg, and Robinhood
-blocked fixtures are available.
+truth in the browser; stale, unknown, failed-simulation, reorg, premature
+Ethereum-confirmed, and Robinhood-blocked fixtures are available. A premature
+`Confirmed` fact cannot settle an execution, and soft/posted/unknown/reorg
+history remains reconstructable.
 
 ### M3 — Read-Model Contract Fixtures and Implementation Readiness
 
@@ -284,6 +310,9 @@ Deliverables:
 - Plain-language messages with canonical run/opportunity/readiness links and
   explicit status/freshness; delivery never claims execution success. Retain
   alert and delivery projections for the approved 30-day window.
+- Telegram transport is Backend-owned HTTPS through the approved proxy/egress
+  boundary, with redaction tests for payloads, links, errors, and delivery
+  telemetry. The browser never calls Telegram directly.
 - No command parser, callback handler, approval route, live-arm action, secret,
   key, credential, raw error, or raw transaction in Telegram.
 
@@ -319,17 +348,18 @@ reorg, staged finality, abort, failure, and redaction.
 **Owners:** Engineering Lead, all specialists, Product Owner
 **Dependencies:** M1-M6 and every acceptance criterion in §8.
 
-Demonstrate the complete bounded slice:
+Demonstrate the complete bounded local dry-run slice:
 
 ```text
 stored chain/event facts -> readiness/opportunity/calendar projections
--> scheduled Backend job -> restart/reconciliation -> canonical run record
+-> canonical SQLite scheduler job -> restart/reconciliation -> canonical run record
 -> one-way Telegram alert + read-only web projection
 ```
 
-No step adds a browser or Telegram mutation path. The release candidate is
-eligible for Phase 2 Product Owner acceptance only after the validation matrix
-and evidence packet are complete.
+No step signs, broadcasts, or adds a browser/Telegram mutation path. Live
+readiness remains a separate evidence packet and Product Owner decision; the
+release candidate is eligible for Phase 2 acceptance only after the local
+dry-run, backup/restore, reconciliation, and read-model validation gates pass.
 
 ## 6. Ownership and Responsibilities
 
@@ -356,6 +386,33 @@ and evidence packet are complete.
 | PO-RH: Separate chain decision | Keep Robinhood execution disabled until archive replay, negative paths, per-wallet simulation, durable reservations, sequencer/RPC correlation, duplicate/restart reconciliation, finality observation, and bounded rehearsal all pass | P2 acceptance never changes 4663 enablement; paid Robinhood remains blocked pending value/exposure policy |
 | PO-5: Phase 3 entry | Separately authorize mutating command contracts, authenticated operator identity, replay protection, explicit confirmations, Campaign/FireLane controls, and first operational web views | P2 completion is not permission to implement or merge Phase 3 controls |
 
+### 7.1 Phase 2 Gate Matrix
+
+The matrix is an acceptance plan, not a completion claim. Every status remains
+open until the named owner supplies redacted evidence and the Product Owner
+accepts the applicable gate.
+
+| Gate | Backend | Database | DevOps | Blockchain/CTO | Product Owner | Status |
+|---|---|---|---|---|---|---|
+| Dry-run service and read-only API | Enforce dry-run-only Phase 2 service, GET-only routes, no mutation endpoints, and Backend-owned retry/permission | Provide snapshot-consistent read models and reserved/settled/asOf fields | Serve through authenticated HTTPS/proxy boundary without browser chain access | Supply chain facts; no client RPC or signer path | Approve local dry-run scope and no web/Telegram authority | Open: contract fixtures required |
+| Canonical SQLite scheduler | Schedule idempotent jobs and reconcile on restart before any live-readiness claim | Own SQLite/WAL schema, migrations, reservations, and durable job/event identity | Prove Windows/Linux locking and host restart behavior | Supply chain-time/finality inputs with source metadata | Accept store decision and local operating mode | Open: cross-platform evidence required |
+| Backup, restore, and reconciliation | Block readiness when backup/restore/reconciliation is stale, missing, or unresolved | Verify restore reconstructs reservations, attempts, and audit/source facts | Publish backup age, last verified restore, and freshness in health | Reconcile by hash/nonce and preserve reorg/unknown history | Witness restore/recovery evidence before any live approval | Blocked until verified evidence |
+| Custody provider and signer health | Keep orchestration signing-free and require the approved Signer boundary | Store only wallet identifiers/key references; never raw key bytes | Supply provider health without exposing provider values | Prove signer-interface use, custody-provider status, zeroization, and health failure behavior | Approve custody provider/policy and capital threshold | Open: provider and signer evidence required |
+| Safety policy and kill switch | Enforce caps, kill admission checkpoints, dry-run default, and typed retry policy | Make reservations/caps atomic and restart-safe | Prove sentinel/config health and alerting | Preserve submitted work and typed execution facts | Approve caps, burner policy, and kill consequences | Open: policy/recovery evidence required |
+| Ethereum finality | Never project settled/success from premature `Confirmed`; require configured depth and clear reconciliation | Persist confirmation count, required stage, provenance, and downgrade history | Alert on stale reconciliation/finality observers | Own confirmation-depth and canonical finality evidence | Reject premature or zero-confirmation settlement claims | Blocked until depth fixtures pass |
+| Secret hygiene and recovery | Redact errors/read models/notifications and never accept client secrets | Exclude key material from ordinary rows/backups and test restore redaction | Run secret scans, encrypted backup/restore, rotation and revocation drills | Prove no raw account/key access and document heap/zeroization limits | Approve recovery/rotation policy; no secret values in review artifacts | Open: redaction, rotation, and heap evidence required |
+| Telegram safety | Send one-way events through redacted dispatcher; delivery is not execution proof | Persist per-event delivery/idempotency records | Own HTTPS/proxy/egress, TLS, health, and redaction telemetry | Telegram never supplies chain truth | Approve immediate/grouped copy and no commands | Open: transport and delivery evidence required |
+| Read-only spend summary | Expose GET-only `reserved`, `settled`/actual, available, `asOf`, and freshness; never infer values client-side | Make reservation/settlement facts atomic and query-consistent | Protect transport and retain safe health evidence | Provide actual chain spend/finality facts | Approve ETH/estimate vocabulary and stale behavior | Open: fixtures and as-of tests required |
+| Robinhood and paid-mint block | Refuse disabled/unverified execution and expose blocked status only | Persist verification/status evidence without an enable flag | Keep disabled configuration and alerts fail-closed | Maintain characterization-only evidence and staged finality | Separate PO-RH decision; no Phase 2 enablement | Blocked by policy |
+
+### 7.2 Local Dry-Run Versus Live Readiness
+
+| Mode | Allowed in this Phase 2 service | Required evidence | Release meaning |
+|---|---|---|---|
+| Local dry-run | Scheduler jobs, read-model projections, restart/kill handling, reservation simulation, redacted Telegram fixtures, and UI contract fixtures; no signing, broadcast, live nonce mutation, or success claim | Deterministic fixtures, restart/reconciliation, reservation, redaction, transport, and read-model tests | May prove orchestration and presentation behavior only |
+| Live readiness | Redacted status of gates, freshness, backup/restore, signer/custody health, confirmation depth, reconciliation, and PO decisions | Complete Phase 1 evidence plus the gate matrix; every unresolved item remains blocking | Evidence/status only; it does not authorize Phase 2 service execution |
+| Live execution | Not exposed by Phase 2 web, Telegram, or `mintbot.read-model/v1` | Separate Product Owner authorization and the existing approved execution path | Outside this roadmap's service scope |
+
 ## 8. Phase 2 Acceptance Criteria
 
 All criteria require persisted evidence, not screenshots or a notification by
@@ -376,25 +433,32 @@ itself.
    safety/permission gates are separate, and no score can authorize a command.
 4. **Read-only web experience.** The accepted `mintbot.read-model/v1` projection
    powers consumer-friendly intelligence, readiness, calendar, alert, run, and
-   health views. The client uses only typed server data and exposes no browser
-   RPC, signer, database, mutation, or optimistic-success path.
+   health views. All Phase 2 routes are `GET`-only, and any spend summary
+   distinguishes reserved from settled/actual values with authoritative
+   `asOf` and freshness. The client uses only typed server data and exposes no
+   browser RPC, signer, database, mutation, or optimistic-success path.
 5. **One-way Telegram.** The defined event catalog is delivered through an
    idempotent, retry-aware channel with recorded delivery state and canonical
    links. Kill/cap/failed/blocked events are immediate; started/succeeded/
    underfunded events are grouped reminders with per-event records retained.
    Telegram contains no secrets and does not represent delivery as proof of
    execution; no command or callback can mutate a run.
-6. **Unattended recovery.** A scheduled mint job runs through the approved
-   Backend/Engine path, survives a mid-flight process restart, reconciles every
-   in-flight submission before new work, preserves partial wallet results, and
-   cannot double-reserve or overspend pending exposure. The resulting state is
-   reported through the canonical record and Telegram.
+6. **Local dry-run and recovery.** A canonical SQLite scheduler job runs in
+   local dry-run mode, never signs/broadcasts or mutates live nonce state,
+   survives a mid-flight process restart, reconciles every in-flight record
+   before new work, preserves partial wallet results, and cannot double-reserve
+   or overspend pending exposure. The resulting state is reported through the
+   canonical record and Telegram. Live readiness remains a separate evidence
+   and Product Owner gate.
 7. **Wire safety.** Every amount round-trips as a canonical decimal base-unit
-   string with explicit asset/unit/scale and estimate/reservation/actual kind.
-   Every decision-relevant fact has observation time, expiry/freshness, and
-   provenance. Snapshot consistency, cursor behavior, redaction, staged
+    string with explicit asset/unit/scale and estimate/reservation/actual kind.
+    Every decision-relevant fact has observation time, expiry/freshness, and
+    provenance. Snapshot consistency, cursor behavior, redaction, staged
     finality, reorg history, abort/cancel/fail/unknown distinctions, and Backend
-    retry policy are testable.
+    retry policy are testable. Ethereum `Confirmed` cannot become settled until
+    the configured confirmation depth is met and persisted; a zero or missing
+    confirmation count is not finality evidence. No settled/minted projection
+    is allowed while reconciliation is unresolved, stale, or reorged.
 8. **Approved freshness and retention.** Readiness uses a five-minute
    freshness window; discovery and calendar use fifteen minutes. Read-model
    and alert projections are retained for 30 days, and operational audit
@@ -414,6 +478,11 @@ itself.
     introduce secrets, credentials, key material, raw signed transactions, or
     raw calldata into source, storage projections, web, Telegram, logs, or
     fixtures.
+12. **Custody and recovery evidence.** Custody-provider policy, signer health,
+    secret hygiene, rotation/revocation, zeroization and heap-limit evidence,
+    verified restore, and reconciliation gates are recorded. Any unresolved
+    item blocks live-readiness claims and remains visibly unresolved to the
+    Product Owner.
 
 ## 9. Validation and Evidence Plan
 
@@ -435,8 +504,13 @@ Run from a clean checkout with the lockfile and pinned toolchain:
   for a release claim
 - `pnpm ops:policy`
 - `pnpm ops:secret-boundary`
+- `pnpm ops:redact-log`
 - `pnpm ops:negative-cases`
 - `pnpm ops:health`
+- `pnpm ops:turnkey-health`
+- `pnpm ops:turnkey-attestation`
+- `pnpm ops:environment`
+- `pnpm ops:clean-checkout`
 - `pnpm ops:backup`
 - `pnpm ops:restore-check`
 - `pnpm ops:recovery-drill`
@@ -450,10 +524,13 @@ must be attached to the release candidate.
 |---|---|---|
 | Store | Forward/reapply migrations, foreign keys/uniqueness/checks, query plans, WAL locking on Windows and Linux host, atomic reservation races, UTC cap boundaries, backup restore, retention protection for audit facts | Database |
 | Orchestrator | Chain-time scheduling, idempotency, bounded concurrency, crash after submission/before receipt, boot reconciliation, unknown outcome handling, kill/cap admission, no double-spend, partial results | Backend + Database |
-| Blockchain facts | Per-wallet simulation/readiness evidence, typed drop/chain failures, source block/freshness, replacement/reorg/finality mapping, explicit Robinhood blocked fixtures, no browser chain access | Blockchain + CTO |
-| Read model | Envelope/snapshot consistency, cursor reads, string-safe amounts, provenance/expiry, stale/unknown/partial/unavailable behavior, score/gate separation, retry policy, finality history, allowlist redaction | Backend + Database |
+| Dry-run/live boundary | Local Phase 2 service signs nothing, broadcasts nothing, does not mutate nonce state, and keeps live readiness evidence separate from execution permission | Backend + Blockchain + DevOps |
+| Custody/signer | Approved custody-provider status, signer-interface-only access, health failure, zeroization, redaction, rotation/revocation, and documented heap-limit evidence | Blockchain + Backend + DevOps |
+| Backup/recovery | Backup age/freshness, verified restore, restart reconstruction, clear reconciliation gate, kill-switch consequences, and no live-readiness claim while unresolved | Database + DevOps + Backend |
+| Blockchain facts | Per-wallet simulation/readiness evidence, typed drop/chain failures, source block/freshness, configured Ethereum confirmation-depth enforcement (including premature `Confirmed` rejection), replacement/reorg/finality mapping, explicit Robinhood blocked fixtures, no browser chain access | Blockchain + CTO + Backend |
+| Read model | Envelope/snapshot consistency, cursor reads, string-safe amounts, reserved versus settled spend, authoritative `asOf`, provenance/expiry, stale/unknown/partial/unavailable behavior, score/gate separation, retry policy, finality history, allowlist redaction | Backend + Database |
 | Intelligence | Tracked-wallet dedupe, opportunity evidence, deterministic score thresholds, low-confidence handling, `N0` unknown display, calendar authority/expiry, readiness matrix | Backend + Database + Product |
-| Telegram | Event catalog, idempotency, retries, delivery records, canonical links, redaction, alert-not-proof wording, absence of commands/callback mutations | Backend + DevOps + Designer |
+| Telegram | HTTPS/proxy transport, event catalog, idempotency, retries, delivery records, canonical links, redaction, alert-not-proof wording, absence of commands/callback mutations | Backend + DevOps + Designer |
 | Web | Typed GET-only client, canonical labels, blocker/next-action grammar, no optimistic success, no secrets/RPC/database/signer access, responsive/accessibility, stale/partial/reorg/abort/unknown workflows | Frontend + Designer |
 | Integrated slice | Schedule -> process kill/restart -> reconcile -> persist -> read model -> Telegram link, plus clean health/backup/recovery evidence | Engineering Lead + all owners |
 
@@ -531,6 +608,11 @@ models.
 | A12 | The Phase 2 need for `RawCalldataStrategy` must be confirmed against the current engine plan | Blockchain + Backend at M2 | If needed, deliver backend/CLI-only with full safety gates; never widen web/Telegram authority |
 | A13 | Currency display configuration and data coverage for estimates are not finalized | Product + Backend at PO-3 | Show ETH and clearly marked estimates; do not claim profitability or substitute missing values |
 | A14 | Product Owner approved 30-day read-model/alert and 90-day operational-audit defaults, while source plans require indefinite retention of execution, attempt, simulation, score, evidence, PnL, and some audit facts; purgeable projections versus immutable reconstruction facts must be classified explicitly | Database + Product + Lead at M1/PO-2 | Do not enable purge jobs or claim retention compliance until the classification and supersession decision are recorded |
+| A15 | Integration audit found that an upstream Ethereum `Confirmed` fact can be mapped to `ethereum_final` with zero persisted confirmations; the corrective contract must carry configured depth and preserve soft/posted/unknown/reorg history | Backend + Database + Blockchain at M2/M3 | Blocks settlement/read-model release until premature confirmation is rejected and depth evidence is tested |
+| A16 | Phase 2 service dry-run-only behavior and the separate live-readiness evidence packet are not yet witnessed end-to-end | Backend + DevOps + Lead/PO at M0/M7 | Do not claim live readiness or expose an execution path from web, Telegram, or `mintbot.read-model/v1` |
+| A17 | Custody provider selection/policy, signer health, rotation/revocation, and heap/zeroization evidence are not complete | Blockchain + DevOps + PO at M0/PO-4 | Live-readiness claims remain blocked; no capital or live signer path is authorized |
+| A18 | Backup freshness, verified restore, and post-restore reconciliation evidence are not complete on every target environment | Database + DevOps + Backend at M1/PO-4 | A stale/unverified backup or unresolved reconciliation blocks release readiness |
+| A19 | Read-only spend summary field names, `asOf` semantics, and reserved-versus-settled fixtures require final contract-owner acceptance | Backend + Database + Product at M3/PO-2 | Web cannot show spend totals or infer settlement until fixtures are accepted |
 
 Until these assumptions are closed, the release candidate must fail closed and
 label affected data partial, stale, unknown, or unavailable as appropriate.
@@ -543,6 +625,8 @@ label affected data partial, stale, unknown, or unavailable as appropriate.
 - [ ] P1 prerequisite and all M1-M7 evidence are attached.
 - [ ] Read model contract and fixtures are accepted; every resource remains
   `GET`-only and redacted.
+- [ ] Phase 2 service is local dry-run-only; live readiness is a separate,
+  redacted evidence packet and no web/Telegram/read-model execution path exists.
 - [ ] Web intelligence/readiness views are read-only, responsive, accessible,
   and truthful for all required states.
 - [ ] Five-minute readiness and fifteen-minute discovery/calendar freshness
@@ -553,6 +637,14 @@ label affected data partial, stale, unknown, or unavailable as appropriate.
   jobs are tested, with immutable source-fact retention classification recorded.
 - [ ] Unattended scheduled work survives restart and reconciles before new
   work; reservations, caps, kill, and partial outcomes are durable.
+- [ ] Backup age/freshness, verified restore, and post-restore reconciliation
+  are green; stale or unresolved states block readiness.
+- [ ] Ethereum confirmation depth and canonical finality evidence prevent
+  premature `Confirmed`/settled projections, including during reorg/unknown
+  states.
+- [ ] Custody provider, signer health, secret hygiene, rotation/revocation,
+  zeroization/heap, and recovery evidence are recorded or remain explicitly
+  blocking.
 - [ ] Robinhood execution remains disabled and paid Robinhood remains blocked.
 - [ ] No Phase 3 command, control, or authorization surface is present.
 
