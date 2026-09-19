@@ -207,6 +207,11 @@ export interface BroadcastOptions {
 }
 
 /** Immutable unsigned transaction intent. No signer or private key is retained. */
+export interface TransactionAccessListItem {
+  readonly address: Address;
+  readonly storageKeys: readonly Hex[];
+}
+
 export interface TransactionIntent {
   readonly chainId: SupportedChainId;
   readonly from: Address;
@@ -217,6 +222,8 @@ export interface TransactionIntent {
   readonly gasLimit: bigint;
   readonly maxFeePerGas: bigint;
   readonly maxPriorityFeePerGas: bigint;
+  /** Canonical EIP-2930 access list; policy may require this to be empty. */
+  readonly accessList?: readonly TransactionAccessListItem[];
   readonly campaignId?: string;
   readonly runId?: string;
   readonly policyRef?: string;

@@ -6,9 +6,9 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { type Address, type Hex, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { createTurnkeyClient, generateAndEncryptWallets, importAndEncryptWallets, importPrivateKeyToTurnkey, readTurnkeySecretConfig, readTurnkeyWalletMap } from '@mint-bot/engine';
+import { canonicalPolicyDigest, createTurnkeyClient, generateAndEncryptWallets, importAndEncryptWallets, importPrivateKeyToTurnkey, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyPolicyAst, validateTurnkeyWalletMap } from '@mint-bot/engine';
 import type { WalletImportRecord } from '@mint-bot/engine';
-import type { TurnkeyPolicyBinding, TurnkeyWalletMap } from '@mint-bot/engine';
+import type { TurnkeyWalletMap } from '@mint-bot/engine';
 import { configuredSecretRoot, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
 import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
@@ -43,6 +43,14 @@ function walletImportRoot(value: string | undefined): string {
   return candidate;
 }
 
+function turnkeyPolicyPath(value: string | undefined): string {
+  const secretRoot = resolve(configuredSecretRoot(runtimeRoot));
+  const candidate = resolve(value ?? join(secretRoot, 'turnkey-policy.json'));
+  const outside = relative(secretRoot, candidate);
+  if (outside === '..' || outside.startsWith(`..${sep}`) || isAbsolute(outside)) throw new Error('Turnkey policy must remain under the configured secret root');
+  return candidate;
+}
+
 function turnkeyMapPath(value: string | undefined): string {
   const secretRoot = resolve(configuredSecretRoot(runtimeRoot));
   const candidate = resolve(value ?? join(secretRoot, 'turnkey-wallet-map.json'));
@@ -51,11 +59,13 @@ function turnkeyMapPath(value: string | undefined): string {
   return candidate;
 }
 
-async function writeTurnkeyWalletMap(path: string, map: TurnkeyWalletMap): Promise<void> {
+async function writeTurnkeyWalletMap(path: string, map: unknown): Promise<void> {
+  // Never persist a map that lacks the exact policy/provider/key scope required by the signer.
+  const validated = validateTurnkeyWalletMap(map);
   await ensureParent(path);
   const temporaryPath = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
   try {
-    await writeFile(temporaryPath, JSON.stringify(map, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    await writeFile(temporaryPath, JSON.stringify(validated, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     await rename(temporaryPath, path);
   } finally {
     await unlink(temporaryPath).catch(() => undefined);
@@ -99,30 +109,6 @@ async function writeTurnkeyJson(path: string, value: unknown): Promise<void> {
   } finally {
     await unlink(temporaryPath).catch(() => undefined);
   }
-}
-
-async function readTurnkeyPolicyBinding(secretRoot: string): Promise<TurnkeyPolicyBinding> {
-  let evidence: unknown;
-  try {
-    evidence = JSON.parse(await readOwnerOnlyText(join(secretRoot, 'turnkey-policy.json'), 'TURNKEY_POLICY_EVIDENCE_INVALID')) as unknown;
-  } catch {
-    throw new Error('TURNKEY_POLICY_EVIDENCE_REQUIRED');
-  }
-  const value = evidence as Partial<TurnkeyPolicyBinding> & { smartContractAddress?: string; targetNft?: string; feeRecipient?: string; quantity?: number };
-  if (!value.smartContractAddress || !value.targetNft || !value.feeRecipient || value.quantity !== 1) throw new Error('TURNKEY_POLICY_EVIDENCE_INVALID');
-  return {
-    chainId: 1,
-    to: value.smartContractAddress as Address,
-    functionSelector: '0x161ac21f',
-    nftContract: value.targetNft as Address,
-    feeRecipient: value.feeRecipient as Address,
-    minterIfNotPayer: '0x0000000000000000000000000000000000000000',
-    quantity: '1',
-    maxValueWei: '0',
-    maxGasLimit: '250000',
-    maxFeePerGas: '1000000000',
-    maxPriorityFeePerGas: '100000000',
-  };
 }
 
 interface TurnkeyImportJournalEntry {
@@ -258,23 +244,32 @@ const cli = yargs(hideBin(process.argv))
     .option('input-dir', { type: 'string', default: DEFAULT_WALLET_IMPORT_ROOT })
     .option('files', { type: 'string', demandOption: true, description: 'Comma-separated .env basenames' })
     .option('map-output', { type: 'string' })
+    .option('policy-ast', { type: 'string', demandOption: true, description: 'Owner-only path to the exact approved canonical policy AST' })
     .option('policy-id', { type: 'string', demandOption: true })
     .option('policy-digest', { type: 'string', demandOption: true, description: 'Keccak-256 digest of the approved Turnkey policy condition' })
     .option('confirm', { type: 'boolean', default: false }), async (args) => {
       try {
         if (!args.confirm) throw new Error('TURNKEY_IMPORT_REQUIRES_CONFIRM');
         const root = walletImportRoot(args.inputDir);
-        const records = await readWalletImportRecords(root, args.files);
+        let records: WalletImportRecord[] = [];
         try {
           const names = args.files.split(',').map((name) => name.trim()).filter(Boolean);
           const secretRoot = configuredSecretRoot(runtimeRoot);
-          const { organizationId, userId, apiPublicKey, apiPrivateKey } = await readTurnkeySecretConfig(secretRoot);
+          const { organizationId, userId, environment, apiPublicKey, apiPrivateKey } = await readTurnkeySecretConfig(secretRoot);
           const output = turnkeyMapPath(args.mapOutput);
+          const policyPath = turnkeyPolicyPath(args.policyAst);
+          let policy: ReturnType<typeof validateTurnkeyPolicyAst>;
+          try {
+            policy = validateTurnkeyPolicyAst(JSON.parse(await readOwnerOnlyText(policyPath, 'TURNKEY_POLICY_AST_PERMISSIONS_REQUIRED')) as unknown);
+          } catch {
+            throw new Error('TURNKEY_POLICY_AST_REQUIRED');
+          }
           const policyDigest = args.policyDigest as Hex;
-          const addresses = records.map((record) => record.address);
           if (!/^0x[0-9a-fA-F]{64}$/.test(policyDigest)) throw new Error('TURNKEY_POLICY_DIGEST_INVALID');
-          if (new Set(names).size !== names.length || new Set(addresses.map((address) => address.toLowerCase())).size !== addresses.length) throw new Error('TURNKEY_IMPORT_DUPLICATE_INPUT');
-          const policy = await readTurnkeyPolicyBinding(secretRoot);
+          if (policy.scope.organizationId !== organizationId || policy.scope.userId !== userId || policy.scope.environment !== environment || policy.scope.policyId !== args.policyId || canonicalPolicyDigest(policy).toLowerCase() !== policyDigest.toLowerCase()) throw new Error('TURNKEY_POLICY_PROVIDER_BINDING_INVALID');
+          records = await readWalletImportRecords(root, args.files);
+          const addresses = records.map((record) => record.address);
+          if (policy.transaction.from.length !== addresses.length || policy.transaction.from.some((address, index) => address.toLowerCase() !== addresses[index]!.toLowerCase())) throw new Error('TURNKEY_POLICY_WALLET_SCOPE_INVALID');
           if (await pathExists(output)) {
             const existing = await readTurnkeyWalletMap(output);
             const sameMap = existing.organizationId === organizationId
@@ -316,7 +311,7 @@ const cli = yargs(hideBin(process.argv))
               name: `mintbot-${names[index]!.replace(/\.env$/i, '')}`,
               address: record.address,
               privateKey: record.privateKey,
-            });
+            }, { organizationId, userId, environment });
             entry.status = 'imported';
             entry.signWith = imported.signWith;
             wallets.push({ ...imported, index });
@@ -325,6 +320,8 @@ const cli = yargs(hideBin(process.argv))
           await writeTurnkeyWalletMap(output, {
             version: 1,
             organizationId,
+            userId,
+            environment,
             policyId: args.policyId,
             policyDigest,
             policy,
