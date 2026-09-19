@@ -5,13 +5,14 @@ import { ReadModels } from './read-models.js';
 
 function fixture() {
   const db = openDatabase();
-  db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, verification_status, execution_enabled, created_at) VALUES ('chain', 1, 'Ethereum', '[]', 2, 'verified', 1, '2026-01-01T00:00:00.000Z')").run();
+  db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, verification_status, verification_evidence_json, verification_approved_by, verification_approved_at, execution_enabled, created_at) VALUES ('chain', 1, 'Ethereum', '[]', 2, 'verified', '{\"fixture\":\"approved\"}', 'fixture', '2025-12-31T00:00:00.000Z', 1, '2026-01-01T00:00:00.000Z')").run();
   db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('wallet', 'chain', '0xabc', 'kms://wallet', '2026-01-01T00:00:00.000Z')").run();
   db.prepare("INSERT INTO spend_policy (id, wallet_id, daily_cap_wei, version, active) VALUES ('policy', 'wallet', '1000000000000000000', 'v1', 1)").run();
   db.prepare("INSERT INTO contract (id, chain_profile_id, address, kind) VALUES ('contract', 'chain', '0xcontract', 'nft')").run();
   db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection', 'contract', 'Collection')").run();
   db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop', 'collection', 'fcfs', '0', '2026-01-01T00:00:00.000Z')").run();
   db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign', 'drop', 'draft', '2026-01-01T00:00:00.000Z')").run();
+  db.prepare("INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES ('campaign', 'wallet', 1, '2026-01-01T00:00:00.000Z')").run();
   return db;
 }
 
@@ -45,6 +46,19 @@ describe('Phase 2 durable read model', () => {
     db.close();
   });
 
+  it('fails closed on unapproved chains, stale simulation bounds, and disabled membership', () => {
+    const db = fixture();
+    const repository = new DurableRepository(db);
+    db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES ('unapproved-chain', 2, 'Test', '[]', 1, '2026-01-01T00:00:00.000Z')").run();
+    expect(() => repository.recordChainVerification({ id: 'unapproved-check', chainProfileId: 'unapproved-chain', status: 'verified', chainId: 2, executionEnabled: true, checkedAt: '2026-01-01T00:00:00.000Z' })).toThrow('substantive evidence');
+    expect(() => db.prepare("UPDATE chain_profile SET verification_status = 'verified', execution_enabled = 1 WHERE id = 'unapproved-chain'").run()).toThrow('approval evidence');
+    expect(() => repository.recordSimulation({ id: 'too-fresh', walletId: 'wallet', campaignId: 'campaign', sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('between five minutes');
+    expect(() => repository.recordSimulation({ id: 'future-simulation', walletId: 'wallet', campaignId: 'campaign', sourceBlockNumber: 1, checkedAt: '2099-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('future');
+    db.prepare("UPDATE campaign_wallet SET enabled = 0 WHERE campaign_id = 'campaign' AND wallet_id = 'wallet'").run();
+    expect(() => repository.recordReadiness({ id: 'disabled-readiness', campaignId: 'campaign', walletId: 'wallet', state: 'failed', decision: 'blocked', nextAction: 'Inspect', checkedAt: '2026-01-01T00:00:00.000Z' })).toThrow('enabled campaign wallet membership');
+    db.close();
+  });
+
   it('rejects secret-like metadata and redacts custody references from reads', () => {
     const db = fixture();
     const repository = new DurableRepository(db);
@@ -74,6 +88,19 @@ describe('Phase 2 durable read model', () => {
     repository.recordFinalityObservation({ id: 'finality-soft', executionId: 'execution-finality', chainProfileId: 'chain', stage: 'soft', settlementReached: false, observedAt: '2026-01-01T00:01:00.000Z' });
     repository.recordFinalityObservation({ id: 'finality-final', executionId: 'execution-finality', chainProfileId: 'chain', stage: 'ethereum_final', settlementReached: true, observedAt: '2026-01-01T00:02:00.000Z' });
     expect(new ReadModels(db).finalityHistory('execution-finality').map((item) => item.stage)).toEqual(['soft', 'ethereum_final']);
+    db.close();
+  });
+
+  it('requires reconciliation identity, policy version, and source evidence', () => {
+    const db = fixture();
+    const repository = new DurableRepository(db);
+    repository.saveIntent({ id: 'intent-reconcile', campaignId: 'campaign', walletId: 'wallet', intentClass: 'mint', toAddress: '0xcontract', valueWei: 0n, calldata: '0x', chainProfileId: 'chain', createdAt: '2026-01-01T00:00:00.000Z' });
+    repository.saveExecution({ id: 'execution-reconcile', campaignId: 'campaign', walletId: 'wallet', transactionIntentId: 'intent-reconcile', state: 'prepared', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordAttempt({ id: 'attempt-reconcile', transactionIntentId: 'intent-reconcile', executionId: 'execution-reconcile', endpoint: 'test', responseClass: 'accepted', txHash: '0xreconcile', nonce: 1, attemptedAt: '2026-01-01T00:00:01.000Z' });
+    expect(() => repository.recordReconciliation({ id: 'missing-evidence', chainProfileId: 'chain', transactionAttemptId: 'attempt-reconcile', txHash: '0xreconcile', fromAddress: '0xabc', nonce: 1, state: 'matched', source: 'test', checkedAt: '2026-01-01T00:00:02.000Z' })).toThrow('policy version and source evidence');
+    expect(() => repository.recordReconciliation({ id: 'wrong-identity', chainProfileId: 'chain', transactionAttemptId: 'attempt-reconcile', txHash: '0xother', fromAddress: '0xabc', nonce: 1, state: 'matched', source: 'test', policyVersion: 'reconciliation-v1', details: { sourceEvidence: 'attempt' }, checkedAt: '2026-01-01T00:00:02.000Z' })).toThrow('identity does not match');
+    repository.recordReconciliation({ id: 'valid-reconciliation', chainProfileId: 'chain', transactionAttemptId: 'attempt-reconcile', executionId: 'execution-reconcile', txHash: '0xreconcile', fromAddress: '0xabc', nonce: 1, state: 'matched', source: 'test', policyVersion: 'reconciliation-v1', details: { sourceEvidence: 'attempt' }, checkedAt: '2026-01-01T00:00:02.000Z' });
+    expect(db.prepare('SELECT policy_version, state FROM reconciliation_record WHERE id = ?').get('valid-reconciliation')).toEqual({ policy_version: 'reconciliation-v1', state: 'matched' });
     db.close();
   });
 

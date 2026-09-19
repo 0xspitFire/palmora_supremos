@@ -605,7 +605,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const identity = this.executionIdentity(input.executionId);
     if (!identity) throw new Error('EXECUTION_CHAIN_REQUIRED');
     if (this.db.prepare('SELECT id FROM reconciliation_record WHERE id = ?').get(input.id)) return;
-    this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, ...(input.transactionAttemptId ? { transactionAttemptId: input.transactionAttemptId } : {}), ...(input.txHash ? { txHash: input.txHash } : {}), fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, details: input.details ?? {}, executionId: input.executionId });
+    this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, ...(input.transactionAttemptId ? { transactionAttemptId: input.transactionAttemptId } : {}), ...(input.txHash ? { txHash: input.txHash } : {}), fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, policyVersion: 'phase2-reconciliation-v1', details: input.details && Object.keys(input.details).length > 0 ? input.details : { sourceEvidence: input.source }, executionId: input.executionId });
   }
 
   public async admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult> {
@@ -914,6 +914,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const id = this.intentRowId(intent.id, wallet);
       if (this.db.prepare('SELECT id FROM transaction_intent WHERE id = ?').get(id)) continue;
       const policyId = this.ensureSpendPolicy(canonicalWallet.walletId, campaign);
+       this.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaign.id, canonicalWallet.walletId, intent.createdAt);
        const record: TransactionIntentRecord = { id, campaignId: campaign.id, walletId: canonicalWallet.walletId, intentClass: 'mint', toAddress: campaign.contract, valueWei: campaign.mintPriceWei * BigInt(campaign.quantity), calldata: '0x', chainProfileId: graph.chainProfileId, fromAddress: wallet, gasLimitWei: campaign.spendPolicy.gasCeilingWei, maxFeePerGasWei: campaign.feePolicy.totalFeeBudgetWei ?? 0n, maxPriorityFeePerGasWei: campaign.feePolicy.configuredPriorityFeeWei, idempotencyKey: `${intent.id}:${wallet.toLowerCase()}`, requestId: intent.id, runId: intent.runId, policySnapshot: policySnapshot(campaign, this.runFor(intent.runId), intent), createdAt: intent.createdAt };
       this.databaseStore.saveIntent(record);
       this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'transaction_intent', entityId: id, newState: 'prepared', actor: this.actor, source: 'backend', reason: 'immutable intent persisted before action', policyVersion: 'phase1', occurredAt: intent.createdAt });
@@ -970,6 +971,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (prior) return;
     const run = this.runFor(record.runId);
     const intent = run ? this.intentFor(record.attemptId) : undefined;
+    // Unknown reconciliation results remain visible in backend state but do
+    // not become canonical evidence without transaction identity.
+    if (!record.attemptId || !intent?.hash || intent.nonce === undefined) return;
     const profile = run ? this.chainProfileForCampaign(run.campaignId) : undefined;
     if (!profile) throw new Error('CHAIN_PROFILE_REQUIRED');
     this.databaseStore.recordReconciliation({ id: record.id, chainProfileId: profile.id, ...(record.attemptId ? { transactionAttemptId: this.attemptIdForExecution(record.attemptId) } : {}), ...(record.reason ? { details: { reason: record.reason } } : {}), state: databaseReconciliationState(record.result), checkedAt: record.observedAt, source: 'backend-reconcile', ...(intent ? { fromAddress: intent.wallet } : {}), ...(intent?.nonce === undefined ? {} : { nonce: intent.nonce }), ...(intent?.hash ? { txHash: intent.hash } : {}), ...(record.attemptId ? { executionId: record.attemptId } : {}) });
@@ -1030,6 +1034,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const graph = this.chainProfileForCampaign(simulation.campaignId);
     if (!graph) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
     const wallet = this.ensureWallet(graph.id, simulation.wallet, this.readCampaigns().find((item) => item.id === simulation.campaignId) as Campaign);
+    this.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(simulation.campaignId, wallet.walletId, simulation.checkedAt);
     const freshnessSeconds = Math.max(0, Math.floor((Date.parse(simulation.expiresAt) - Date.parse(simulation.checkedAt)) / 1000));
     this.databaseStore.recordSimulation({ id: simulation.id, walletId: wallet.walletId, campaignId: simulation.campaignId, sourceBlockNumber: Number(simulation.sourceBlock), sourceBlockHash: simulation.sourceBlockHash, checkedAt: simulation.checkedAt, freshnessSeconds, outcome: simulation.success ? 'pass' : 'fail', toolVersion: 'backend-phase1', details: { inputDigest: simulation.inputDigest, ...(simulation.gasEstimate === undefined ? {} : { gasEstimate: simulation.gasEstimate.toString() }), worstCaseFeeWei: simulation.worstCaseFeeWei.toString() } });
   }
