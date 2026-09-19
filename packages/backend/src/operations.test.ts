@@ -72,12 +72,13 @@ describe('phase 2 operations', () => {
       requestedBody = init?.body ?? '';
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
     };
-    const notifier = new TelegramNotifier({ secretStore: store, apiBaseUrl: 'http://127.0.0.1:9', fetcher });
+    const notifier = new TelegramNotifier({ secretStore: store, apiBaseUrl: 'http://127.0.0.1:9', approvedProxy: 'http://127.0.0.1:9', fetcher });
     await notifier.send({ eventId: 'event-1', type: 'started', text: 'safe status' });
     expect(requestedUrl).toContain('/bottest-token-not-for-output/sendMessage');
     expect(requestedBody).toContain('-100123');
     expect(requestedBody).not.toContain('test-token-not-for-output');
     expect(await notifier.health()).toEqual({ status: 'ok', provider: 'telegram' });
+    expect(() => new TelegramNotifier({ secretStore: store, apiBaseUrl: 'http://external.invalid', fetcher })).toThrow('TELEGRAM_HTTPS_OR_APPROVED_PROXY_REQUIRED');
   });
 
   it('deduplicates and retries notifications while redacting persisted text', async () => {
@@ -86,13 +87,17 @@ describe('phase 2 operations', () => {
     await store.transaction((state) => { state.events.push({ id: 'event-1', type: 'run_started', runId: 'run-1', at: new Date().toISOString(), data: {} }); });
     let sends = 0;
     const sink: NotificationSink = { send: async () => { sends += 1; if (sends === 1) throw new Error('temporary provider error'); } };
-    const dispatcher = new NotificationDispatcher(store, sink);
+    let now = new Date('2026-01-01T00:00:00.000Z');
+    const dispatcher = new NotificationDispatcher(store, sink, { now: () => now, retryBaseMs: 1_000, retryMaxMs: 1_000 });
     await expect(dispatcher.dispatch('event-1', 'provider value 0x' + 'a'.repeat(64))).rejects.toThrow('temporary provider error');
+    now = new Date('2026-01-01T00:00:01.001Z');
     await dispatcher.dispatch('event-1', 'ignored retry text');
     const item = store.snapshot().notificationOutbox[0];
     expect(sends).toBe(2);
     expect(item?.state).toBe('delivered');
     expect(item?.text).not.toContain('0x' + 'a'.repeat(64));
+    await Promise.all([dispatcher.dispatch('event-1', 'duplicate-a'), dispatcher.dispatch('event-1', 'duplicate-b')]);
+    expect(sends).toBe(2);
   });
 
   it('groups reminders and emits immediate kill alerts with durable dedupe', async () => {

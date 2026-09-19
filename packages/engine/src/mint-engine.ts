@@ -796,7 +796,8 @@ export class MintEngine {
             source: 'broadcast',
             details: { reason: redactProviderError(error instanceof Error ? error.message : String(error)) },
           });
-          throw error;
+          if (error instanceof MintError) throw new MintError(error.type, redactProviderError(error.message), error.walletIndex);
+          throw new MintError(MintErrorType.PROVIDER_UNAVAILABLE, redactProviderError(error instanceof Error ? error.message : String(error)), walletIndex);
         }
         this.checkKill();
         const attemptIdByResultIndex = new Map<number, string>();

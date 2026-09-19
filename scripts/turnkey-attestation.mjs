@@ -1,5 +1,5 @@
+import { dirname, resolve } from 'node:path';
 import { lstat, rename, unlink, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { verify } from '../packages/engine/node_modules/@turnkey/crypto/dist/index.js';
 import { createTurnkeyClient, readTurnkeySecretConfig } from '../packages/engine/dist/index.js';
 
@@ -8,6 +8,14 @@ const config = await readTurnkeySecretConfig(secretRoot);
 if (!config.appName) throw new Error('TURNKEY_APP_NAME_REQUIRED');
 if (!config.attestationActivityId) throw new Error('TURNKEY_ATTESTATION_ACTIVITY_REQUIRED');
 const output = resolve(config.attestationPath ?? resolve(secretRoot, 'turnkey-attestation.json'));
+let parent = dirname(output);
+while (true) {
+  const entry = await lstat(parent);
+  if (entry.isSymbolicLink()) throw new Error('TURNKEY_ATTESTATION_PARENT_SYMLINK');
+  const next = dirname(parent);
+  if (next === parent) break;
+  parent = next;
+}
 const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
 
 const activitiesResponse = await client.getActivities({ organizationId: config.organizationId, paginationOptions: { limit: '100' } });

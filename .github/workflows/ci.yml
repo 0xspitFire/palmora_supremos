@@ -65,6 +65,8 @@ jobs:
       - run: pnpm build
       - name: Verify CI-safe orchestrator configuration
         run: node scripts/service-config.mjs
+      - name: Report unresolved human operations evidence
+        run: pnpm ops:evidence
       - run: pnpm test -- --reporter=dot
       - name: Clear stale gitleaks temp file
         run: rm -f /tmp/gitleaks.tmp
