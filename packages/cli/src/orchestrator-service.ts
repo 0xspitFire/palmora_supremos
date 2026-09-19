@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import {
   AlertManager,
   CanonicalStoreBridge,
-  JsonJobStore,
+  CanonicalJobStore,
   loadHostSecretStore,
   loadServiceConfig,
   MetricsRegistry,
@@ -68,7 +68,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     metrics.set('mintbot_notification_up', 0);
   }
   const alerts = new AlertManager(runtime.store, dispatcher, metrics, { policy: { retentionDays: config.alertRetentionDays }, ...(config.canonicalUrlBase ? { canonicalUrlBase: config.canonicalUrlBase } : {}) });
-  const jobs = new JsonJobStore(config.jobsPath);
+  const jobs = new CanonicalJobStore(runtime.store);
   const orchestrator = new OrchestratorService(runtime.store, runtime.application, runtime.coordinator, {
     jobs,
     schedulerIntervalMs: config.schedulerIntervalMs,
