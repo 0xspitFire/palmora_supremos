@@ -68,7 +68,7 @@ describe('database migrations and spend reservations', () => {
   it('applies migrations idempotently and enables integrity pragmas', () => {
     const db = fixture();
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 15 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 16 });
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(db.pragma('journal_mode', { simple: true })).toBe('memory');
     expect(() => db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('other', 'chain', '0xABC', 'kms://other', '2026-01-01T00:00:00.000Z')").run()).toThrow();
@@ -102,7 +102,7 @@ describe('database migrations and spend reservations', () => {
       worker.once('error', (error: Error) => resolve(`error:${error.message}`));
     });
     const results = await Promise.all([run(), run()]);
-    expect(results.sort()).toEqual(['15', '15']);
+    expect(results.sort()).toEqual(['16', '16']);
     rmSync(directory, { recursive: true, force: true });
   });
 
@@ -285,12 +285,12 @@ describe('database migrations and spend reservations', () => {
     const destination = join(directory, 'state.sqlite');
     await backupDatabase(source, destination);
     const verification = verifyBackup(destination);
-    expect(verification.schemaVersion).toBe(15);
+    expect(verification.schemaVersion).toBe(16);
     expect(verification.integrityCheck).toBe('ok');
     expect(verification.foreignKeyViolations).toBe(0);
     const restoredDestination = join(directory, 'restored.sqlite');
     const restoredVerification = await restoreDatabase(destination, restoredDestination);
-    expect(restoredVerification).toMatchObject({ schemaVersion: 15, integrityCheck: 'ok', foreignKeyViolations: 0 });
+    expect(restoredVerification).toMatchObject({ schemaVersion: 16, integrityCheck: 'ok', foreignKeyViolations: 0 });
     const staleDestination = join(directory, 'stale.sqlite');
     copyFileSync(destination, staleDestination);
     const staleDb = new BetterSqlite3(staleDestination);
@@ -300,9 +300,9 @@ describe('database migrations and spend reservations', () => {
     const missingReadModelDestination = join(directory, 'missing-read-model.sqlite');
     copyFileSync(destination, missingReadModelDestination);
     const missingReadModelDb = new BetterSqlite3(missingReadModelDestination);
-    missingReadModelDb.exec('DROP VIEW recovery_stale_simulations');
+    missingReadModelDb.exec('DROP TABLE readiness_snapshot');
     missingReadModelDb.close();
-    expect(() => verifyBackup(missingReadModelDestination)).toThrow('backup is missing required object: recovery_stale_simulations');
+    expect(() => verifyBackup(missingReadModelDestination)).toThrow('backup is missing required object: readiness_snapshot');
     const restored = openDatabase(destination);
     expect(restored.prepare('SELECT COUNT(*) AS count FROM audit_event').get()).toEqual({ count: 1 });
     const repository = new DurableRepository(restored);
@@ -403,7 +403,7 @@ describe('database migrations and spend reservations', () => {
     const db = legacyFixture();
     migrate(db);
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 15 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 16 });
     expect(db.prepare('SELECT reserved_amount_wei, request_fingerprint FROM spend_reservation WHERE id = ?').get('legacy-reservation')).toMatchObject({ reserved_amount_wei: '10' });
     expect(db.prepare('SELECT execution_enabled, success_finality_stage FROM chain_profile WHERE id = ?').get('legacy-chain')).toEqual({ execution_enabled: 0, success_finality_stage: 'ethereum_final' });
     db.close();
@@ -531,7 +531,7 @@ describe('database migrations and spend reservations', () => {
     repository.recordRetentionEvidence({ id: 'retention-evidence', policyId: 'raw-observation-30d', entityType: 'raw_observation', cutoffAt: '2026-01-01T00:00:00.000Z', rowsDeleted: 3, rowsRetained: 1, outcome: 'passed', recordedAt: '2026-01-01T00:00:01.000Z' });
     expect(db.prepare('SELECT entity_type, rows_deleted, rows_retained, outcome FROM retention_evidence WHERE id = ?').get('retention-evidence')).toEqual({ entity_type: 'raw_observation', rows_deleted: 3, rows_retained: 1, outcome: 'passed' });
     expect(db.prepare('SELECT retention_days, retain_indefinitely FROM retention_policy WHERE entity_type = ?').get('raw_observation')).toEqual({ retention_days: 30, retain_indefinitely: 0 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 15, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 16, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
     expect(db.prepare('SELECT encryption_verified, integrity_check FROM backup_restore_evidence WHERE id = ?').get('backup-evidence-integrity')).toEqual({ encryption_verified: 1, integrity_check: 'ok' });
     expect(() => repository.recordAuditEvent({ id: 'secret-audit', entityType: 'run', entityId: 'run', actor: 'test', reason: 'secret boundary', policySnapshot: { privateKey: 'not-written' }, occurredAt: '2026-01-01T00:00:03.000Z' })).toThrow('approved secret store');
     expect(() => db.prepare("UPDATE retention_evidence SET rows_deleted = 4 WHERE id = 'retention-evidence'").run()).toThrow('retention evidence is append-only');
@@ -582,7 +582,7 @@ describe('database migrations and spend reservations', () => {
     const repository = new DurableRepository(db);
     const campaignId = campaignFixture(db, 'fingerprint');
     expect(() => repository.saveIntent({ id: 'fingerprint-intent', campaignId, walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', requestFingerprint: 'not-a-computed-fingerprint', createdAt: '2026-01-01T00:00:00.000Z' })).toThrow(IdempotencyConflictError);
-    expect(() => repository.recordBackupRestoreEvidence({ id: 'forged-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 15, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' })).toThrow('passed backup evidence requires encrypted');
+    expect(() => repository.recordBackupRestoreEvidence({ id: 'forged-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 16, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' })).toThrow('passed backup evidence requires encrypted');
     db.close();
   });
 
