@@ -113,7 +113,7 @@ describe('Phase 2 backend operational shell', () => {
     const currentRun = run('run-redaction');
     await readyState(store, [currentRun]);
     await store.transaction((state) => {
-      state.runtime.operational = { secretStoreReference: 'TOP_SECRET', storePath: '/secret/path', signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' };
+      state.runtime.operational = { secretStoreReference: 'TOP_SECRET', storePath: '/secret/path', custody: { provider: 'turnkey', providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-test-policy', policyDigest: `0x${'1'.repeat(64)}`, policyStatus: 'approved', healthStatus: 'healthy', attestationStatus: 'verified', evidenceId: 'custody-evidence-1', observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' }, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' };
       state.attempts.push({ id: 'attempt-redaction', executionId: 'execution-redaction', runId: currentRun.id, wallet: 'wallet-a', nonce: 1, hash: `0x${'b'.repeat(64)}`, endpoint: 'https://user:password@provider.invalid', redactedError: 'privateKey=secret calldata=0xdead', state: 'Failed', createdAt: NOW, updatedAt: NOW });
     });
     const response = new ReadModelService(store, () => new Date(NOW)).getRunEnvelope(currentRun.id, 'redaction-request');
