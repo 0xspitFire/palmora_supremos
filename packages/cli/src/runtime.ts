@@ -75,5 +75,5 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   });
   const coordinator = new ExecutionCoordinator(store, actualEngine);
   await coordinator.start();
-  return { store, coordinator, application: new BackendApplication(store, coordinator), walletRoot: resolveWalletPath(projectRoot) };
+  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true' }), walletRoot: resolveWalletPath(projectRoot) };
 }
