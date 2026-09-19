@@ -19,6 +19,15 @@ export interface ScheduledJob {
   completedAt?: string;
 }
 
+export interface ScheduledJobStore {
+  open(): Promise<void>;
+  list(): Promise<ScheduledJob[]>;
+  put(input: Omit<ScheduledJob, 'state' | 'attempts' | 'createdAt' | 'updatedAt'> & Partial<Pick<ScheduledJob, 'state' | 'attempts' | 'createdAt' | 'updatedAt'>>): Promise<ScheduledJob>;
+  claimDue(now?: Date, limit?: number): Promise<ScheduledJob[]>;
+  update(id: string, patch: Partial<Pick<ScheduledJob, 'state' | 'lastError' | 'completedAt' | 'updatedAt' | 'executeAt'>>): Promise<ScheduledJob>;
+  recoverRunning(): Promise<number>;
+}
+
 interface JobFile {
   version: 1;
   jobs: ScheduledJob[];
@@ -60,7 +69,7 @@ function encode(file: JobFile): string {
  * runs, reservations, and transaction facts; this file only makes timers
  * restartable without adding a second lifecycle implementation to the DB.
  */
-export class JsonJobStore {
+export class JsonJobStore implements ScheduledJobStore {
   private state: JobFile = { version: 1, jobs: [] };
   private opened = false;
   private queue: Promise<void> = Promise.resolve();

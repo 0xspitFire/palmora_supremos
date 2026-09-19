@@ -23,6 +23,7 @@ const encryptionKey = randomBytes(32).toString('hex');
 try {
   const database = new Database(store);
   try {
+    database.pragma('journal_mode = WAL');
     database.exec("CREATE TABLE recovery_probe (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO recovery_probe VALUES (1, 'durable');");
   } finally {
     database.close();

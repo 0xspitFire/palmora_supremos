@@ -41,12 +41,13 @@ export async function configuredWallets(projectRoot: string, localWalletFile: st
   }
 }
 
-export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>): Promise<CliRuntime> {
+export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean } = {}): Promise<CliRuntime> {
   const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, ...(turnkeyCustodyEnabled() ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
-  const turnkeyConfig = turnkeyCustodyEnabled() ? await readTurnkeySecretConfig(secretRoot) : undefined;
+  const custodyEnabled = runtimeOptions.allowTurnkey !== false && turnkeyCustodyEnabled();
+  const turnkeyConfig = custodyEnabled ? await readTurnkeySecretConfig(secretRoot) : undefined;
   const turnkeyMap = turnkeyConfig ? await readTurnkeyWalletMap(turnkeyConfig.walletMapPath) : undefined;
   if (turnkeyConfig && !turnkeyMap?.policyId) throw new Error('TURNKEY_POLICY_REQUIRED');
   const turnkeyOptions: Partial<Omit<MintEngineAdapterOptions, 'getState'>> = turnkeyConfig && turnkeyMap ? {
@@ -74,6 +75,6 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     settleComponents: adapterOptions?.settleComponents ?? ((reservationId, components) => store.settleExecutionComponents(reservationId, components)),
   });
   const coordinator = new ExecutionCoordinator(store, actualEngine);
-  await coordinator.start();
-  return { store, coordinator, application: new BackendApplication(store, coordinator), walletRoot: resolveWalletPath(projectRoot) };
+  if (runtimeOptions.startCoordinator !== false) await coordinator.start();
+  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true' }), walletRoot: resolveWalletPath(projectRoot) };
 }

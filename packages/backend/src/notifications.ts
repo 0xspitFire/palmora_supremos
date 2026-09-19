@@ -18,9 +18,10 @@ export interface NotificationSink { send(message: NotificationMessage): Promise<
 const SENSITIVE_VALUE = /(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token|authorization|calldata|raw(?:[_-]?transaction)?|provider[_-]?payload)\s*[:=]\s*[^,\s]+/gi;
 const CREDENTIAL_URL = /https?:\/\/[^\s/]+(?::[^\s/@]+)?@[^\s/]+[^\s]*/gi;
 const RAW_HEX_VALUE = /0x[0-9a-f]{64}/gi;
+const JSON_SECRET_VALUE = /["'](?:api[_-]?key|token|secret|authorization|calldata|raw[_-]?transaction)["']\s*:\s*["'][^"']*["']/gi;
 
 export function redactNotificationText(value: string): string {
-  return value.replace(SENSITIVE_VALUE, (match) => `${match.slice(0, match.search(/[:=]/))}=[REDACTED]`).replace(CREDENTIAL_URL, '[endpoint]').replace(RAW_HEX_VALUE, '[REDACTED]');
+  return value.replace(SENSITIVE_VALUE, (match) => `${match.slice(0, match.search(/[:=]/))}=[REDACTED]`).replace(JSON_SECRET_VALUE, '[REDACTED]').replace(CREDENTIAL_URL, '[endpoint]').replace(RAW_HEX_VALUE, '[REDACTED]');
 }
 
 function canonicalRunLink(runId: string | undefined): string | undefined {
@@ -37,15 +38,21 @@ export class NotificationDispatcher {
   private readonly now: () => Date;
   private readonly metrics?: MetricsRegistry;
   private readonly retentionDays: number;
+  private readonly retryBaseMs: number;
+  private readonly retryMaxMs: number;
 
-  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, options: (() => Date) | { now?: () => Date; metrics?: MetricsRegistry; retentionDays?: number } = {}) {
+  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, options: (() => Date) | { now?: () => Date; metrics?: MetricsRegistry; retentionDays?: number; retryBaseMs?: number; retryMaxMs?: number } = {}) {
     if (typeof options === 'function') {
       this.now = options;
       this.retentionDays = Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
+      this.retryBaseMs = 1_000;
+      this.retryMaxMs = 60_000;
     } else {
       this.now = options.now ?? (() => new Date());
       this.metrics = options.metrics;
       this.retentionDays = options.retentionDays ?? Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
+      this.retryBaseMs = options.retryBaseMs ?? 1_000;
+      this.retryMaxMs = options.retryMaxMs ?? 60_000;
     }
   }
 
@@ -61,7 +68,6 @@ export class NotificationDispatcher {
         const safeText = sourceText(source, text);
         const existing = state.notificationOutbox.find(entry => entry.sourceEventId === sourceEventId);
         if (existing?.state === 'delivered') {
-          if (existing.text !== safeText) throw new Error('NOTIFICATION_IDEMPOTENCY_CONFLICT');
           return undefined;
         }
         const outbox = existing ?? {
@@ -102,8 +108,9 @@ export class NotificationDispatcher {
           // Normalized SQLite projects the process-local `delivering` lease
           // as pending/queued, so accept both representations here.
           if (!failed || !['delivering', 'pending'].includes(failed.state)) return;
-          failed.state = 'failed';
-          failed.lastError = safeError;
+           failed.state = 'failed';
+           failed.lastError = safeError;
+           failed.nextAttemptAt = new Date(this.now().getTime() + Math.min(this.retryMaxMs, this.retryBaseMs * Math.max(1, 2 ** Math.min(8, failed.attempts)))).toISOString();
         });
       }
       this.metrics?.recordNotification('failed');
@@ -121,7 +128,8 @@ export class NotificationDispatcher {
 
   /** Deliver pending/failed records after a process restart. */
   async dispatchPending(): Promise<void> {
-    const pending = this.store.snapshot().notificationOutbox.filter(item => item.state !== 'delivered');
+    const now = this.now();
+    const pending = this.store.snapshot().notificationOutbox.filter(item => item.state !== 'delivered' && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= now.getTime()));
     for (const item of pending) await this.dispatch(item.sourceEventId, item.text);
   }
 

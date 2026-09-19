@@ -3,6 +3,11 @@ import { dirname } from 'node:path';
 
 const SENSITIVE_KEY = /(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|secret|token|authorization|api[_-]?key|chat[_-]?id|raw(?:tx|_transaction)|calldata|payload)/i;
 const SENSITIVE_VALUE = /(?:Bearer|Basic)\s+\S+|-----BEGIN [^-]+PRIVATE KEY-----|https?:\/\/[^\s/]+\/bot[^\s/?]+/gi;
+const CREDENTIAL_URL = /(https?:\/\/|wss?:\/\/)([^\s:@/]+):([^\s@/]+)@/gi;
+const QUERY_SECRET = /([?&](?:token|key|secret|signature|authorization|api[_-]?key)=[^&#\s]+)/gi;
+const CALLDATA_VALUE = /((?:calldata|raw[_-]?(?:tx|transaction)|input|data)\s*[:=]\s*)(0x[0-9a-f]+)/gi;
+const KEY_VALUE = /((?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|secret|token|credential|authorization|api[_-]?key)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi;
+const PROVIDER_URL = /(?:https?|wss?):\/\/[^\s]+(?:\/rpc\b|\/v\d+\b|\/api\b|\/graphql\b|[?&](?:api[_-]?key|token)=)[^\s]*/gi;
 const HEX_SECRET = /0x[0-9a-f]{64,}/gi;
 
 /**
@@ -23,7 +28,7 @@ export function redactRecord(value: unknown, key = '', seen = new WeakSet<object
 }
 
 export function redactText(value: string): string {
-  return value.replace(SENSITIVE_VALUE, '[REDACTED]').replace(HEX_SECRET, '[REDACTED]').slice(0, 2_000);
+  return value.replace(CREDENTIAL_URL, '$1[REDACTED]@[REDACTED]').replace(QUERY_SECRET, '$1[REDACTED]').replace(PROVIDER_URL, '[PROVIDER_URL_REDACTED]').replace(CALLDATA_VALUE, '$1[REDACTED]').replace(KEY_VALUE, '$1[REDACTED]').replace(SENSITIVE_VALUE, '[REDACTED]').replace(HEX_SECRET, '[REDACTED]').slice(0, 2_000);
 }
 
 export function redactError(error: unknown): { name: string; message: string } {

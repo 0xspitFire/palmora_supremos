@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import {
   parseTransaction,
   recoverTransactionAddress,
@@ -141,6 +141,7 @@ function pathWithin(root: string, candidate: string): boolean {
 async function readOwnerOnlyFile(path: string, errorCode: string): Promise<string> {
   let handle;
   try {
+    await assertNoSymlinkParents(path, errorCode);
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const file = await handle.stat();
     if (!file.isFile() || (file.mode & 0o077) !== 0) throw new Error(errorCode);
@@ -153,8 +154,25 @@ async function readOwnerOnlyFile(path: string, errorCode: string): Promise<strin
   }
 }
 
+async function assertNoSymlinkParents(path: string, errorCode: string): Promise<void> {
+  let current = dirname(resolve(path));
+  while (true) {
+    try {
+      const entry = await lstat(current);
+      if (entry.isSymbolicLink()) throw new Error(errorCode);
+    } catch (error) {
+      if (error instanceof Error && error.message === errorCode) throw error;
+      if (!(error instanceof Error) || !('code' in error) || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(errorCode);
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+}
+
 export async function readTurnkeySecretConfig(root = 'Rets', scope: SecretScope = 'mainnet'): Promise<TurnkeySecretConfig> {
   const secretRoot = resolve(root);
+  await assertNoSymlinkParents(resolve(secretRoot, '.path-check'), 'TURNKEY_SECRET_PATH_INVALID');
   const defaultName = scope === 'mainnet' ? 'turnkey.env' : 'turnkey-testnet.env';
   const path = expandPath(process.env.TURNKEY_SECRET_FILE ?? resolve(secretRoot, defaultName));
   if (scope !== 'mainnet' && basename(path) === 'turnkey.env') throw new Error('TURNKEY_SCOPE_FILE_INVALID');

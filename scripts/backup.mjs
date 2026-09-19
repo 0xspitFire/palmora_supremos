@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -17,10 +17,16 @@ if (retentionDays !== 30) throw new Error('Encrypted backup retention must be ex
 if (!process.env.BACKUP_ENCRYPTION_KEY) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
 
 await mkdir(destinationRoot, { recursive: true });
+const sourceMetadata = await lstat(source);
+if (!sourceMetadata.isFile() || sourceMetadata.isSymbolicLink()) throw new Error('STORE_PATH_MUST_BE_REGULAR_FILE');
+const destinationMetadata = await lstat(destinationRoot);
+if (!destinationMetadata.isDirectory() || destinationMetadata.isSymbolicLink()) throw new Error('BACKUP_DIR_MUST_BE_REGULAR_DIRECTORY');
 const temporary = resolve(destinationRoot, `.${basename(source)}.${process.pid}.snapshot.tmp`);
 const target = resolve(destinationRoot, `${basename(source)}.${new Date().toISOString().replaceAll(':', '-')}.snapshot.enc`);
 const database = new Database(source, { readonly: true, fileMustExist: true });
 try {
+  if (database.pragma('journal_mode', { simple: true }) !== 'wal') throw new Error('SQLITE_WAL_REQUIRED');
+  if (database.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('SQLITE_INTEGRITY_CHECK_FAILED');
   await database.backup(temporary);
 } finally {
   database.close();
@@ -34,15 +40,23 @@ try {
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const header = Buffer.from('MINTBOT1', 'ascii');
   const authTag = cipher.getAuthTag();
-  await writeFile(target, Buffer.concat([header, iv, authTag, ciphertext]), { mode: 0o600 });
+  const encrypted = Buffer.concat([header, iv, authTag, ciphertext]);
+  const encryptedTemporary = `${target}.${process.pid}.tmp`;
+  await writeFile(encryptedTemporary, encrypted, { encoding: null, mode: 0o600, flag: 'wx' });
+  await rename(encryptedTemporary, target);
 } finally {
   await rm(temporary, { force: true });
 }
 await access(target);
 const checksum = createHash('sha256').update(await readFile(target)).digest('hex');
-await writeFile(`${target}.sha256`, `${checksum}  ${basename(target)}\n`, { mode: 0o600 });
+const checksumPath = `${target}.sha256`;
+const checksumTemporary = `${checksumPath}.${process.pid}.tmp`;
+await writeFile(checksumTemporary, `${checksum}  ${basename(target)}\n`, { mode: 0o600, flag: 'wx' });
+await rename(checksumTemporary, checksumPath);
 if (statusPath) {
   await mkdir(dirname(resolve(statusPath)), { recursive: true, mode: 0o700 });
-  await writeFile(statusPath, `${JSON.stringify({ status: 'ok', operation: 'backup', file: basename(target), sha256: checksum, encrypted: true, retentionDays, recordedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+  const statusTemporary = `${resolve(statusPath)}.${process.pid}.tmp`;
+  await writeFile(statusTemporary, `${JSON.stringify({ status: 'ok', operation: 'backup', file: basename(target), sha256: checksum, encrypted: true, retentionDays, recordedAt: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
+  await rename(statusTemporary, resolve(statusPath));
 }
 console.log(JSON.stringify({ status: 'ok', file: basename(target), sha256: checksum, encrypted: true, retentionDays }));

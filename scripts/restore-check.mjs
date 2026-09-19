@@ -1,4 +1,4 @@
-import { access, constants, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, constants, readFile, rm, writeFile } from 'node:fs/promises';
 import { createDecipheriv, createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { basename, dirname, resolve } from 'node:path';
@@ -25,9 +25,12 @@ const decipher = createDecipheriv('aes-256-gcm', key, iv);
 decipher.setAuthTag(authTag);
 const restoredPath = resolve(dirname(snapshot), `.${basename(snapshot)}.${process.pid}.restore.tmp`);
 try {
-  await writeFile(restoredPath, Buffer.concat([decipher.update(ciphertext), decipher.final()]));
+  await writeFile(restoredPath, Buffer.concat([decipher.update(ciphertext), decipher.final()]), { mode: 0o600, flag: 'wx' });
+  await chmod(restoredPath, 0o600);
   const database = new Database(restoredPath, { readonly: true, fileMustExist: true });
   try {
+    const journalMode = database.pragma('journal_mode', { simple: true });
+    if (journalMode !== 'wal') throw new Error('Restored SQLite WAL mode check failed');
     const integrity = database.pragma('integrity_check', { simple: true });
     if (integrity !== 'ok') throw new Error('Restored SQLite integrity check failed');
   } finally {

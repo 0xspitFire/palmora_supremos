@@ -21,6 +21,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/mint-bot /var/log/mint-bot
 UMask=0077
+LimitCORE=0
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true

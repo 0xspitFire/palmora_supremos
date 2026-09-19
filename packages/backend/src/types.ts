@@ -6,7 +6,7 @@ export type ChainVerificationStatus = 'unverified' | 'characterizing' | 'verifie
 export type StartupState = 'Cold' | 'Reconciling' | 'Ready' | 'Blocked';
 export type RobinhoodNegativeCase = 'revert' | 'sold_out' | 'price_drift' | 'insufficient_funds' | 'quantity_limit' | 'stale_phase' | 'fee_recipient' | 'kill' | 'cap';
 export type CommandName = 'resolve' | 'validate' | 'prepare' | 'simulate' | 'dry-run' | 'approve' | 'arm' | 'run' | 'execute' | 'summary' | 'fund' | 'reconcile' | 'health' | 'kill';
-export type JobKind = 'execute' | 'reconcile' | 'notification' | 'health';
+export type JobKind = 'execute' | 'reconcile' | 'notification' | 'health' | 'phase2';
 export type JobState = 'scheduled' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
 export type CheckOutcome = 'pass' | 'fail' | 'unknown' | 'stale';
 
@@ -76,7 +76,7 @@ export interface RunRecord { id: string; intentId: string; campaignId: string; m
 export interface IntentRecord { id: string; runId: string; campaignId: string; campaignSnapshot: Campaign; wallets: readonly string[]; policy: SpendPolicy; feePolicy: FeePolicy; chainVerification: ChainVerification; simulationIds: readonly string[]; evidenceAt: string; createdAt: string; }
 export interface AttemptRecord { id: string; executionId: string; runId: string; wallet: string; nonce?: number; hash?: string; endpoint?: string; redactedError?: string; replacementOfId?: string; state: ExecutionState; robinhoodFinality?: RobinhoodFinality; createdAt: string; updatedAt: string; }
 export interface ReconciliationRecord { id: string; runId: string; attemptId?: string; result: ReconciliationResult; observedAt: string; reason?: string; }
-export interface ReceiptRecord { id: string; executionId: string; runId: string; transactionAttemptId?: string; state: ExecutionState; robinhoodFinality?: RobinhoodFinality; blockNumber?: bigint; blockHash?: string; gasUsed?: bigint; effectiveGasPrice?: bigint; actualSpendWei?: bigint; observedAt: string; }
+export interface ReceiptRecord { id: string; executionId: string; runId: string; transactionAttemptId?: string; state: ExecutionState; finalityStage?: 'soft' | 'posted' | 'ethereum_final'; robinhoodFinality?: RobinhoodFinality; blockNumber?: bigint; blockHash?: string; gasUsed?: bigint; effectiveGasPrice?: bigint; actualSpendWei?: bigint; observedAt: string; }
 export interface Reservation { id: string; runId: string; campaignId: string; chainId?: 1 | 4663; wallet: string; amountWei: bigint; actualAmountWei?: bigint; accountingDate: string; status: 'reserved' | 'settled' | 'released' | 'reorged'; createdAt: string; updatedAt: string; }
 export interface ReadinessCheck {
   wallet: string;

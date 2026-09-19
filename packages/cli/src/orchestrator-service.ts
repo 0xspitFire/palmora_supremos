@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import {
   AlertManager,
   CanonicalStoreBridge,
-  JsonJobStore,
+  CanonicalJobStore,
   loadHostSecretStore,
   loadServiceConfig,
   MetricsRegistry,
@@ -28,26 +28,39 @@ async function incrementRestartCounter(path: string): Promise<number> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   let current = 0;
   try {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink() || !metadata.isFile() || (metadata.mode & 0o077) !== 0) throw new Error('RESTART_COUNTER_PERMISSIONS_INVALID');
     const parsed = Number.parseInt(await readFile(path, 'utf8'), 10);
     if (Number.isSafeInteger(parsed) && parsed >= 0) current = parsed;
-  } catch { /* First start or a rotated counter starts at zero. */ }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'RESTART_COUNTER_PERMISSIONS_INVALID') throw error;
+    if (!(error instanceof Error) || !('code' in error) || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   const next = current + 1;
-  await writeFile(path, `${next}\n`, { encoding: 'utf8', mode: 0o600 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, `${next}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await rename(temporary, path);
   return next;
 }
 
 /** Start the supervised local/host service without accepting control commands. */
 export async function startOrchestratorService(environment: NodeJS.ProcessEnv = process.env): Promise<RunningOrchestratorService> {
   const config = loadServiceConfig(environment, process.cwd());
+  process.env.MINT_BOT_PHASE2_READ_ONLY = 'true';
   const logger = new RedactedLogger({ destination: config.logPath, maxBytes: config.logMaxBytes, maxFiles: config.logMaxFiles });
   logger.info({ event: 'service_configured', config: summarizeServiceConfig(config) }, 'orchestrator service configured');
   if (config.requireStartupKillSwitch && !(await pathKillSwitchProbe(config.killSwitchPath))) throw new Error('STARTUP_KILL_SWITCH_REQUIRED');
 
   const runtime = await createCliRuntime(config.projectRoot, undefined, config.statePath, {
-    secretRoot: configuredSecretRoot(config.projectRoot),
+    ...(config.mode === 'host' ? { secretRoot: configuredSecretRoot(config.projectRoot) } : {}),
     killSwitchFile: config.killSwitchPath,
     logFile: config.logPath,
-  });
+  }, { allowTurnkey: config.mode === 'host', startCoordinator: config.mode === 'host' });
+  if (config.mode === 'dry-run') {
+    await runtime.store.transaction((state) => {
+      state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED'])] };
+    });
+  }
   const metrics = new MetricsRegistry();
   metrics.set('mintbot_process_up', 0);
   const restartCount = await incrementRestartCounter(config.restartCounterPath);
@@ -59,7 +72,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const secrets = await loadHostSecretStore(config.secretStorePath);
     logger.registerSecret(secrets.get(config.telegramTokenName) ?? '');
     logger.registerSecret(secrets.get(config.telegramChatIdName) ?? '');
-    notifier = new TelegramNotifier({ secretStore: secrets, tokenName: config.telegramTokenName, chatIdName: config.telegramChatIdName, apiBaseUrl: config.telegramApiBaseUrl });
+    notifier = new TelegramNotifier({ secretStore: secrets, tokenName: config.telegramTokenName, chatIdName: config.telegramChatIdName, apiBaseUrl: config.telegramApiBaseUrl, ...(config.telegramApprovedProxy ? { approvedProxy: config.telegramApprovedProxy } : {}) });
     dispatcher = new NotificationDispatcher(runtime.store, notifier, { metrics, retentionDays: config.alertRetentionDays });
     const telegramHealth = await notifier.health();
     metrics.set('mintbot_notification_up', telegramHealth.status === 'ok' ? 1 : 0);
@@ -68,7 +81,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     metrics.set('mintbot_notification_up', 0);
   }
   const alerts = new AlertManager(runtime.store, dispatcher, metrics, { policy: { retentionDays: config.alertRetentionDays }, ...(config.canonicalUrlBase ? { canonicalUrlBase: config.canonicalUrlBase } : {}) });
-  const jobs = new JsonJobStore(config.jobsPath);
+  const jobs = new CanonicalJobStore(runtime.store);
   const orchestrator = new OrchestratorService(runtime.store, runtime.application, runtime.coordinator, {
     jobs,
     schedulerIntervalMs: config.schedulerIntervalMs,

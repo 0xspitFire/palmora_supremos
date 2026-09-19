@@ -2,7 +2,7 @@ import { access, readFile } from 'node:fs/promises';
 import type { BackendApplication } from './application.js';
 import type { ExecutionCoordinator } from './coordinator.js';
 import type { BackendStore } from './store.js';
-import { JsonJobStore, type ScheduledJob } from './job-store.js';
+import type { ScheduledJobStore, ScheduledJob } from './job-store.js';
 import { MetricsRegistry, type RedactedLogger } from './observability.js';
 import { AlertManager } from './alerts.js';
 
@@ -14,7 +14,7 @@ export interface ScheduleInput {
   mode: 'dry-run' | 'live';
 }
 export interface OrchestratorOptions {
-  jobs: JsonJobStore;
+  jobs: ScheduledJobStore;
   schedulerIntervalMs?: number;
   reconciliationIntervalMs?: number;
   maxConcurrentJobs?: number;
@@ -25,6 +25,7 @@ export interface OrchestratorOptions {
   metrics?: MetricsRegistry;
   alerts?: AlertManager;
   backupStatusPath?: string;
+  backupMaxAgeMs?: number;
 }
 export interface OrchestratorStatus {
   running: boolean;
@@ -59,6 +60,7 @@ export class OrchestratorService {
   private ticking = false;
   private jobsSnapshot: ScheduledJob[] = [];
   private lastBackupObservation?: string;
+  private lastBackupRecordedAt?: number;
 
   public constructor(private readonly store: BackendStore, private readonly application: BackendApplication, private readonly coordinator: Pick<ExecutionCoordinator, 'start' | 'reconcile'> & Partial<Pick<ExecutionCoordinator, 'kill'>>, private readonly options: OrchestratorOptions) {
     this.schedulerIntervalMs = options.schedulerIntervalMs ?? 1_000;
@@ -121,7 +123,7 @@ export class OrchestratorService {
     try {
       await this.observeBackupStatus();
       this.recordReconciliationMetrics();
-      if (this.options.backupStatusPath && this.lastBackupObservation !== 'ok') {
+      if (this.options.backupStatusPath && (this.lastBackupObservation !== 'ok' || this.lastBackupRecordedAt === undefined || this.now().getTime() - this.lastBackupRecordedAt > (this.options.backupMaxAgeMs ?? 30 * 86_400_000))) {
         await this.store.transaction((state) => {
           state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'BACKUP_NOT_READY'])] };
         });
@@ -163,6 +165,7 @@ export class OrchestratorService {
       const fingerprint = `${status.status ?? 'unknown'}:${status.recordedAt ?? ''}`;
       if (fingerprint === this.lastBackupObservation) return;
       this.lastBackupObservation = fingerprint;
+      this.lastBackupRecordedAt = Number.isFinite(recordedAt) ? recordedAt : undefined;
       this.metrics.recordBackup(status.status === 'ok' ? 'ok' : 'failed', Number.isFinite(recordedAt) ? recordedAt / 1_000 : undefined);
     } catch {
       if (this.lastBackupObservation === 'missing') return;

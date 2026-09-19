@@ -42,7 +42,7 @@ export interface OpportunityDetailRow { id: string; chainProfileId: string; chai
 function encode(value: unknown): string {
   const normalize = (item: unknown): unknown => typeof item === 'bigint' ? item.toString() : Array.isArray(item) ? item.map(normalize) : item !== null && typeof item === 'object' ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, normalize(entry)])) : item;
   const result = JSON.stringify(normalize(value)) ?? '{}';
-  if (/(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token)\s*:/i.test(result) || /https?:\/\/[^\s/]+(?::[^\s/@]+)?@[^\s]+/i.test(result) || /0x[0-9a-f]{64}/i.test(result)) throw new Error('secret-like or raw provider values must remain outside read models');
+  if (/(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token)\s*:/i.test(result) || /["'](?:api[_-]?key|token|secret|authorization|calldata|raw[_-]?transaction)["']\s*:/i.test(result) || /https?:\/\/[^\s/]+(?::[^\s/@]+)?@[^\s]+/i.test(result) || /0x[0-9a-f]{64}/i.test(result)) throw new Error('secret-like or raw provider values must remain outside read models');
   return result;
 }
 function text(value: string | undefined, label: string): string | null {
@@ -108,7 +108,7 @@ export class Phase2Repository {
           : scopeType === 'period'
             ? ['mint_period_id = ?', options.usageDate ?? scopeId]
             : ['usage_date = ?', options.usageDate ?? scopeId];
-    const rows = this.db.prepare(`SELECT status, amount_wei, reserved_amount_wei, settled_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, settled_mint_value_wei, settled_l2_execution_gas_wei, settled_l1_data_gas_wei, settled_priority_fee_component_wei FROM spend_reservation WHERE ${filter[0]}`).all(filter[1]) as Array<{
+    const rows = this.db.prepare(`SELECT status, amount_wei, reserved_amount_wei, settled_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, settled_mint_value_wei, settled_l2_execution_gas_wei, settled_l1_data_gas_wei, settled_priority_fee_component_wei FROM spend_reservation WHERE ${filter[0]} AND created_at <= ?`).all(filter[1], options.asOf ?? new Date().toISOString()) as Array<{
       status: string;
       amount_wei: string;
       reserved_amount_wei: string | null;
@@ -124,7 +124,7 @@ export class Phase2Repository {
     }>;
     const total = (field: 'reservedAmountWei' | 'settledAmountWei' | 'mintValueWei' | 'l2ExecutionGasWei' | 'l1DataGasWei' | 'priorityFeeComponentWei'): string => rows.reduce((sum, row) => {
       const value = field === 'reservedAmountWei' ? row.reserved_amount_wei ?? row.amount_wei
-        : field === 'settledAmountWei' ? row.settled_amount_wei ?? row.amount_wei
+        : field === 'settledAmountWei' ? row.settled_amount_wei ?? '0'
           : field === 'mintValueWei' ? row.status === 'settled' ? row.settled_mint_value_wei ?? '0' : row.mint_value_wei
             : field === 'l2ExecutionGasWei' ? row.status === 'settled' ? row.settled_l2_execution_gas_wei ?? '0' : row.l2_execution_gas_wei
               : field === 'l1DataGasWei' ? row.status === 'settled' ? row.settled_l1_data_gas_wei ?? '0' : row.l1_data_gas_wei

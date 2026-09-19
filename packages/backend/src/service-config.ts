@@ -20,6 +20,7 @@ export interface OrchestratorServiceConfig {
   telegramTokenName: string;
   telegramChatIdName: string;
   telegramApiBaseUrl: string;
+  telegramApprovedProxy?: string;
   bindHost: string;
   port: number;
   schedulerIntervalMs: number;
@@ -72,7 +73,7 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
   const telegramEnabled = bool(env, 'MINT_BOT_TELEGRAM_ENABLED', false);
   if (telegramEnabled && !secretStorePath) throw new Error('TELEGRAM_SECRET_STORE_REQUIRED');
   const telegramApiBaseUrl = value(env, 'MINT_BOT_TELEGRAM_API_BASE_URL') ?? 'https://api.telegram.org';
-  if (!telegramApiBaseUrl.startsWith('https://') && value(env, 'MINT_BOT_APPROVED_TELEGRAM_PROXY') !== 'true') throw new Error('TELEGRAM_HTTPS_REQUIRED');
+  if (!telegramApiBaseUrl.startsWith('https://')) throw new Error('TELEGRAM_HTTPS_REQUIRED');
   const bindHost = value(env, 'MINT_BOT_BIND_HOST') ?? '127.0.0.1';
   if (bindHost !== '127.0.0.1' && bindHost !== '::1' && bindHost !== 'localhost') throw new Error('BIND_HOST_MUST_BE_LOOPBACK');
   const port = integer(env, 'MINT_BOT_HEALTH_PORT', integer(env, 'MINT_BOT_HTTP_PORT', 8780, 0), 0);
@@ -96,6 +97,7 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
     telegramTokenName: value(env, 'MINT_BOT_TELEGRAM_TOKEN_NAME') ?? 'TG_BOT_TOKEN',
     telegramChatIdName: value(env, 'MINT_BOT_TELEGRAM_CHAT_ID_NAME') ?? 'TG_CHAT_ID',
     telegramApiBaseUrl,
+    telegramApprovedProxy: value(env, 'MINT_BOT_APPROVED_TELEGRAM_PROXY'),
     bindHost,
     port,
     schedulerIntervalMs: integer(env, 'MINT_BOT_SCHEDULER_INTERVAL_MS', 1_000, 100),
