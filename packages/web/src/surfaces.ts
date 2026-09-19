@@ -7,7 +7,6 @@ import type {
   Finality,
   HomeReadModel,
   OpportunityReadModel,
-  OutcomeReason,
   ReadinessReadModel,
   ReadinessRow,
   ReadModelEnvelope,
@@ -30,10 +29,8 @@ import {
   renderGate,
   renderIssues,
   renderProvenance,
-  renderTime,
   safeIdentifier,
   safeActionLabel,
-  safePath,
   safeText,
   stateClass,
   validIntegerString,
@@ -51,7 +48,7 @@ function surface<T>(
   const body = envelope.data === null
     ? `<div class="empty-state">No ${safeText(title.toLowerCase())} projection is available.</div>`
     : content(envelope.data);
-  return `<section id="${stateClass(id)}" class="surface" aria-labelledby="${headingId}"><header class="surface-header"><p class="eyebrow">Read-only projection</p><h2 id="${headingId}">${safeText(title)}</h2><p>${safeText(description)}</p></header>${notice}${body}${renderIssues(envelope.issues, `${stateClass(id)}-issues`)}</section>`;
+  return `<section id="${stateClass(id)}" class="surface" aria-labelledby="${headingId}"><header class="surface-header"><p class="eyebrow">Read-only projection</p><h2 id="${headingId}">${safeText(title)}</h2><p>${safeText(description)}</p><p class="metric-meta">As of ${formatTime(envelope.generatedAt)}; snapshot ${safeIdentifier(envelope.snapshot.id)}.</p></header>${notice}${body}${renderIssues(envelope.issues, `${stateClass(id)}-issues`)}</section>`;
 }
 
 function emptyState(message: string): string {
@@ -87,10 +84,10 @@ function renderCounts(summary: {
   return `<div class="readiness-counts" aria-label="Readiness counts">${values.map(([key, label, value]) => `<div class="metric-card" id="${stateClass(idPrefix)}-${key}"><span class="metric-label">${safeText(label)}</span><strong>${formatInteger(value)}</strong></div>`).join('')}</div>`;
 }
 
-function renderAttention(item: AttentionItem): string {
-  const id = `attention-${item.id}`;
-  const action = item.nextAction === 'Inspect' ? inspectLink(id) : safeAction(item.nextAction);
-  return `<article id="${stateClass(id)}" class="attention-card"><div class="section-heading"><h3>${safeIdentifier(item.subjectId)}</h3>${renderBadge(item.severity, item.severity)}</div><p><strong>${safeText(item.state)}</strong> - ${safeText(item.reason)}</p><p>${renderFreshness(item.freshness)}</p><div class="card-footer">${action}</div>${renderProvenance(item.provenance)}</article>`;
+function renderAttention(item: AttentionItem, index: number): string {
+  const id = `attention-${index}-${item.code}`;
+  const action = item.safeAction === 'Inspect' ? inspectLink(id) : safeAction(item.safeAction);
+  return `<article id="${stateClass(id)}" class="attention-card"><div class="section-heading"><h3>${safeText(item.code)}</h3>${renderBadge(item.severity, item.severity)}</div><p>${safeText(item.message)}</p><p class="next-action">${item.retryable ? 'Backend marked this read as retryable.' : 'No safe retry is supplied.'}</p><div class="card-footer">${action}</div>${renderProvenance(item.provenance ? [item.provenance] : [])}</article>`;
 }
 
 function renderOpportunity(opportunity: OpportunityReadModel, idPrefix = ''): string {
@@ -116,18 +113,25 @@ function renderEvidenceRows(rows: OpportunityReadModel['evidence']): string {
 }
 
 function renderCalendarEntry(entry: CalendarEntry, idPrefix = ''): string {
-  const title = entry.project.name ?? entry.project.collection ?? 'Upcoming mint';
+  const title = entry.project.name ?? 'Upcoming mint';
   const id = `${idPrefix}calendar-${entry.id}`;
   const eligibility = entry.eligibility;
-  return `<article id="${stateClass(id)}" class="calendar-card"><div class="section-heading"><h3>${safeText(title)}</h3>${renderBadge(entry.verificationStatus, safeText(entry.verificationStatus))}</div><p>${safeText(entry.chain.name)}; source authority ${safeText(entry.sourceAuthority.replaceAll('_', ' '))}; method ${safeText(entry.method)}</p><div class="metric-grid">${renderTime(entry.opening, 'Opens')}${renderTime(entry.closing, 'Closes')}${renderAmount(entry.price, 'Mint price')}${renderAmount(entry.expectedGas, 'Expected gas')}</div><div class="metric-grid"><div class="metric"><span class="metric-label">Supply</span><strong>${formatInteger(entry.supply)}</strong></div><div class="metric"><span class="metric-label">Per-wallet limit</span><strong>${formatInteger(entry.perWalletLimit)}</strong></div><div class="metric"><span class="metric-label">Access</span><strong>${safeText(entry.access)}</strong></div><div class="metric"><span class="metric-label">Last verified</span><strong>${formatTime(entry.lastVerifiedAt)}</strong></div></div><div class="card"><h4>Wallet summary</h4><p>Eligible ${formatInteger(eligibility.eligible)}; ineligible ${formatInteger(eligibility.ineligible)}; unknown ${formatInteger(eligibility.unknown)}; ready ${formatInteger(eligibility.ready)}; stale ${formatInteger(eligibility.stale)}.</p><p class="next-action">A source time is not an on-chain guarantee. Stale entries cannot claim readiness.</p></div><div class="card-footer">${inspectLink(id)}<span class="next-action">Primary action: Inspect.</span></div>${renderFreshness(entry.freshness)}${renderProvenance(entry.provenance)}</article>`;
+  const opening = { value: entry.openingAt, freshness: entry.freshness, provenance: entry.provenance };
+  const closing = { value: entry.closingAt, freshness: entry.freshness, provenance: entry.provenance };
+  return `<article id="${stateClass(id)}" class="calendar-card"><div class="section-heading"><h3>${safeText(title)}</h3>${renderBadge(entry.verification.decision, entry.verification.decision === 'permitted' ? 'Recorded checks pass' : entry.verification.decision === 'blocked' ? 'Blocked' : 'Unknown')}</div><p>${safeText(entry.chain.name)}; source authority ${safeText(entry.sourceAuthority.replaceAll('_', ' '))}; method ${safeText(entry.method)}</p><div class="metric-grid">${renderSourcedTime(opening, 'Opens')}${renderSourcedTime(closing, 'Closes')}${renderAmount(entry.price, 'Mint price')}${renderQuantity(entry.expectedGas, 'Expected gas')}</div><div class="metric-grid">${renderQuantity(entry.supply, 'Supply')}${renderQuantity(entry.perWalletLimit, 'Per-wallet limit')}<div class="metric"><span class="metric-label">Access</span><strong>${safeText(entry.publicStatus)}</strong></div></div><div class="card"><h4>Wallet summary</h4><p>Total ${formatInteger(eligibility.total)}; ineligible ${formatInteger(eligibility.ineligible)}; unknown ${formatInteger(eligibility.unknown)}; ready ${formatInteger(eligibility.ready)}; stale ${formatInteger(eligibility.stale)}.</p><p class="next-action">A source time is not an on-chain guarantee. Stale entries cannot claim readiness.</p></div>${renderGate(entry.verification, 'Calendar verification', `${stateClass(id)}-verification`)}<div class="card-footer">${inspectLink(id)}<span class="next-action">Primary action: Inspect.</span></div>${renderFreshness(entry.freshness)}${renderProvenance(entry.provenance)}</article>`;
 }
 
 function renderAlert(alert: AlertReadModel, idPrefix = ''): string {
   const id = `${idPrefix}alert-${alert.id}`;
-  const path = safePath(alert.canonicalPath);
-  const destination = path === null ? '' : `<a class="inspect-link" href="${path}">Inspect</a>`;
-  const delivery = alert.state === 'pending' || alert.state === 'delivering' || alert.state === 'delivered' || alert.state === 'failed' ? alert.state : 'unknown';
-  return `<article id="${stateClass(id)}" class="alert-card"><div class="section-heading"><h3>${safeText(alert.type)}</h3>${renderBadge(delivery, safeText(delivery))}</div><p>${safeText(alert.message)}</p><p class="metric-meta">Created ${formatTime(alert.createdAt)}; delivered ${formatTime(alert.deliveredAt)}</p><p class="next-action">Alert delivery is not proof that a mint settled.</p><div class="card-footer">${destination || safeAction(alert.nextAction)}</div>${renderFreshness(alert.freshness)}${renderProvenance(alert.provenance)}</article>`;
+  return `<article id="${stateClass(id)}" class="alert-card"><div class="section-heading"><h3>${safeText(alert.type)}</h3>${renderBadge(alert.state, safeText(alert.state))}</div><p>${safeText(alert.text)}</p><p class="metric-meta">Created ${formatTime(alert.createdAt)}; delivered ${formatTime(alert.deliveredAt)}; attempts ${formatInteger(alert.attempts)}.</p><p class="metric-meta">Source event ${safeIdentifier(alert.sourceEventId)}; run ${safeIdentifier(alert.runId)}.</p><p class="next-action">Alert delivery is not proof that a mint settled.</p>${renderFreshness(alert.freshness)}${renderProvenance(alert.provenance)}</article>`;
+}
+
+function renderSourcedTime(time: { value: string | null; freshness: CalendarEntry['freshness']; provenance: CalendarEntry['provenance'] }, label: string): string {
+  return `<div class="metric"><span class="metric-label">${safeText(label)}</span><strong>${formatTime(time.value)}</strong><span class="metric-meta">${renderFreshness(time.freshness)}</span></div>`;
+}
+
+function renderQuantity(quantity: { value: string | null; freshness: CalendarEntry['freshness'] }, label: string): string {
+  return `<div class="metric"><span class="metric-label">${safeText(label)}</span><strong>${formatInteger(quantity.value)}</strong><span class="metric-meta">${renderFreshness(quantity.freshness)}</span></div>`;
 }
 
 function renderHealthModel(health: SystemHealth, idPrefix: string): string {
@@ -150,11 +154,6 @@ function renderReadinessRow(row: ReadinessRow): string {
   const failedSimulation = row.checks.some((check) => check.code === 'simulated' && check.outcome === 'fail');
   const note = failedSimulation ? 'Simulation failed; this wallet is blocked. Inspect the reason or use a future Backend validation flow.' : decision === 'Ready' ? 'Recorded checks pass; this is not a guaranteed mint.' : 'Resolve the recorded blocker before relying on readiness.';
   return `<tr tabindex="0"><td data-label="Wallet"><strong>${safeText(row.wallet.label ?? 'Wallet')}</strong><br><code>${safeIdentifier(row.wallet.address)}</code></td><td data-label="Decision">${renderBadge(decision, decision)}<br>${renderBadge(state, state)}</td><td data-label="Checks"><ul class="check-list">${row.checks.length > 0 ? row.checks.map((check) => `<li>${renderBadge(check.outcome, check.outcome)} ${safeText(check.code)}</li>`).join('') : '<li>Unknown</li>'}</ul></td><td data-label="Cost"><div class="metric-grid">${renderAmount(row.cost.mintValue, 'Mint')}${renderAmount(row.cost.executionGas, 'Execution gas')}${renderAmount(row.cost.dataPostingGas, 'Data posting gas')}${renderAmount(row.cost.priorityFeeComponent, 'Priority fee')}${renderAmount(row.cost.estimatedTotal, 'Estimated total')}${renderAmount(row.cost.balance, 'Balance')}</div></td><td data-label="Blocker"><p>${safeText(blockerText)}</p><p class="next-action">${safeText(note)}</p><p>Next safe action: ${safeAction(row.nextAction)}</p>${renderFreshness(row.freshness)}</td></tr>`;
-}
-
-function renderOutcomeReason(reason: OutcomeReason | null | undefined): string {
-  if (!reason) return '';
-  return `<section class="card outcome-reason"><div class="section-heading"><h3>Outcome</h3>${renderBadge(reason.label, reason.label)}</div><p>${safeText(reason.label)} - ${safeText(reason.message)}</p><p>Submitted work: ${safeText(reason.submittedWork)}; actor: ${safeText(reason.actor)}; occurred ${formatTime(reason.occurredAt)}.</p><p>Next safe action: ${safeAction(reason.retry.safeAction)}</p></section>`;
 }
 
 function finalityStage(finality: Finality): Finality['stage'] {
@@ -224,15 +223,15 @@ export function renderHome(envelope: ReadModelEnvelope<HomeReadModel>): string {
 }
 
 export function renderReadiness(envelope: ReadModelEnvelope<ReadinessReadModel>): string {
-  return surface('readiness', 'Wallet readiness', 'Readiness is tied to one campaign and one wallet. Unknown, stale, and blocked checks are never presented as ready.', envelope, (data) => `<section class="card">${data.campaign ? `<div class="section-heading"><h3>Campaign ${safeIdentifier(data.campaign.id)}</h3>${renderBadge(data.campaign.state, data.campaign.state)}</div><p>Chain ${safeIdentifier(data.campaign.chainId)}; contract ${safeIdentifier(data.campaign.contract)}; quantity ${formatInteger(data.campaign.quantity)}.</p>${renderGate(data.campaign.gate, 'Campaign safety gate', 'readiness-campaign')}` : emptyState('Campaign identity is unavailable.')}${renderCounts(data.summary, 'readiness-summary')}</section><section class="table-wrap"><table class="responsive-table readiness-table"><caption>Wallet-by-campaign readiness matrix</caption><thead><tr><th scope="col">Wallet</th><th scope="col">Decision</th><th scope="col">Checks</th><th scope="col">Cost and balance</th><th scope="col">Blocker and next step</th></tr></thead><tbody>${data.rows.length > 0 ? data.rows.map(renderReadinessRow).join('') : '<tr><td colspan="5">No wallet readiness rows were supplied.</td></tr>'}</tbody></table></section>`);
+  return surface('readiness', 'Wallet readiness', 'Readiness is tied to one campaign and one wallet. Unknown, stale, and blocked checks are never presented as ready. Totals are not inferred in the browser.', envelope, (data) => `<section class="card"><p>${data.length === 1 ? 'One wallet row' : `${data.length} wallet rows`} were returned by the Backend projection. Home readiness counts remain the authoritative summary.</p></section><section class="table-wrap"><table class="responsive-table readiness-table"><caption>Wallet-by-campaign readiness matrix</caption><thead><tr><th scope="col">Wallet</th><th scope="col">Decision</th><th scope="col">Checks</th><th scope="col">Cost and balance</th><th scope="col">Blocker and next step</th></tr></thead><tbody>${data.length > 0 ? data.map(renderReadinessRow).join('') : '<tr><td colspan="5">No wallet readiness rows were supplied.</td></tr>'}</tbody></table></section>`);
 }
 
 export function renderCalendar(envelope: ReadModelEnvelope<CalendarReadModel>): string {
-  return surface('calendar', 'Mint calendar', 'Upcoming records include source authority, verification time, and server-provided freshness. A calendar time is not a guarantee.', envelope, (data) => data.entries.length > 0 ? `<div class="surface-grid">${data.entries.map((entry) => renderCalendarEntry(entry)).join('')}</div>` : emptyState('No calendar records were supplied.'));
+  return surface('calendar', 'Mint calendar', 'Upcoming records include source authority, verification time, and server-provided freshness. A calendar time is not a guarantee.', envelope, (data) => data.length > 0 ? `<div class="surface-grid">${data.map((entry) => renderCalendarEntry(entry)).join('')}</div>` : emptyState('No calendar records were supplied.'));
 }
 
 export function renderAlerts(envelope: ReadModelEnvelope<AlertsReadModel>): string {
-  return surface('alerts', 'Reminders and alerts', 'Persisted Backend notifications help with attention and timing. Delivery never proves that a transaction settled.', envelope, (data) => data.alerts.length > 0 ? `<div class="surface-grid">${data.alerts.map((alert) => renderAlert(alert)).join('')}</div>` : emptyState('No alert records were supplied.'));
+  return surface('alerts', 'Reminders and alerts', 'Persisted Backend notifications help with attention and timing. Delivery never proves that a transaction settled.', envelope, (data) => data.length > 0 ? `<div class="surface-grid">${data.map((alert) => renderAlert(alert)).join('')}</div>` : emptyState('No alert records were supplied.'));
 }
 
 export function renderHealth(envelope: ReadModelEnvelope<SystemHealth>): string {
@@ -243,6 +242,6 @@ export function renderRun(envelope: ReadModelEnvelope<RunReadModel>): string {
   return surface('run', 'Run status', 'Run records preserve dry-run, partial, unknown, reorg, and staged finality outcomes. This view is read-only.', envelope, (data) => {
     const outcome = data.run.outcome === 'dry_run_completed' ? 'Dry run completed' : data.run.outcome === 'not_started' ? 'Not started' : data.run.outcome === 'partial' ? 'Partial' : data.run.outcome === 'settled' ? 'Settled' : 'Unknown';
     const mode = data.run.mode === 'dry-run' ? 'Dry run' : data.run.mode === 'live' ? 'Live' : 'Unknown';
-    return `<section class="card"><div class="section-heading"><h3>Run ${safeIdentifier(data.run.id)}</h3>${renderBadge(outcome, outcome)}</div><p>Mode: ${renderBadge(mode, mode)}; campaign ${safeIdentifier(data.run.campaignId)}; state ${renderBadge(data.run.state, data.run.state)}.</p><p>${mode === 'Dry run' ? 'No transaction is claimed from this preparation record.' : 'Live records remain subject to Backend reconciliation and finality.'}</p>${renderOutcomeReason(data.run.reason)}</section><section class="card"><h3>Wallet outcomes</h3>${data.walletResults.length > 0 ? `<div class="table-wrap"><table class="responsive-table"><caption>Per-wallet results</caption><thead><tr><th scope="col">Wallet</th><th scope="col">State</th><th scope="col">Finality</th><th scope="col">Reason</th><th scope="col">Retry policy</th></tr></thead><tbody>${data.walletResults.map(renderWalletResult).join('')}</tbody></table></div>` : emptyState('No wallet outcomes were supplied.')}</section><section class="card"><h3>Attempts</h3>${data.attempts.length > 0 ? `<ul class="attention-list">${data.attempts.map(renderAttempt).join('')}</ul>` : emptyState('No transaction attempt records were supplied.')}</section><section class="card"><h3>Receipts and finality</h3>${data.receipts.length > 0 ? `<ul class="attention-list">${data.receipts.map(renderReceipt).join('')}</ul>` : emptyState('No receipt records were supplied.')}</section><section class="card"><h3>Reconciliation</h3>${renderReconciliation(data)}</section><section class="timeline-section"><h3>Timeline</h3>${renderTimeline(data.events)}</section>`;
+    return `<section class="card"><div class="section-heading"><h3>Run ${safeIdentifier(data.run.id)}</h3>${renderBadge(outcome, outcome)}</div><p>Mode: ${renderBadge(mode, mode)}; campaign ${safeIdentifier(data.run.campaignId)}; state ${renderBadge(data.run.state, data.run.state)}.</p><p>${mode === 'Dry run' ? 'No transaction is claimed from this preparation record.' : 'Live records remain subject to Backend reconciliation and finality.'}</p></section><section class="card"><h3>Wallet outcomes</h3>${data.walletResults.length > 0 ? `<div class="table-wrap"><table class="responsive-table"><caption>Per-wallet results</caption><thead><tr><th scope="col">Wallet</th><th scope="col">State</th><th scope="col">Finality</th><th scope="col">Reason</th><th scope="col">Retry policy</th></tr></thead><tbody>${data.walletResults.map(renderWalletResult).join('')}</tbody></table></div>` : emptyState('No wallet outcomes were supplied.')}</section><section class="card"><h3>Attempts</h3>${data.attempts.length > 0 ? `<ul class="attention-list">${data.attempts.map(renderAttempt).join('')}</ul>` : emptyState('No transaction attempt records were supplied.')}</section><section class="card"><h3>Receipts and finality</h3>${data.receipts.length > 0 ? `<ul class="attention-list">${data.receipts.map(renderReceipt).join('')}</ul>` : emptyState('No receipt records were supplied.')}</section><section class="card"><h3>Reconciliation</h3>${renderReconciliation(data)}</section><section class="timeline-section"><h3>Timeline</h3>${renderTimeline(data.events)}</section>`;
   });
 }
