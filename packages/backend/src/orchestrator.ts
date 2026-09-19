@@ -139,6 +139,7 @@ export class Orchestrator {
     const run = input.runId ? initial.runs.find((candidate) => candidate.id === input.runId) : undefined;
     if (kind === 'execute' && !run) throw new Error('RUN_NOT_FOUND');
     if (input.runId && !run) throw new Error('RUN_NOT_FOUND');
+    if (run && run.mode === 'live') throw new Error('PHASE2_LIVE_MODE_DISABLED');
     const campaignId = input.campaignId ?? run?.campaignId;
     const target = input.targetAt ?? input.openingAt;
     const targetAt = target === undefined ? undefined : iso(target);

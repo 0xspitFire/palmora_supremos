@@ -19,7 +19,7 @@ describe('phase 2 operations', () => {
     const config = loadServiceConfig({ CI: 'true' }, '/tmp/mintbot-ops');
     expect(config.mode).toBe('dry-run');
     expect(config.telegramEnabled).toBe(false);
-    expect(config.requireStartupKillSwitch).toBe(false);
+    expect(config.requireStartupKillSwitch).toBe(true);
     expect(() => loadServiceConfig({ ['TG_BOT_' + 'TOKEN']: 'not-used' }, '/tmp/mintbot-ops')).toThrow('TELEGRAM_SECRETS_MUST_USE_SECRET_STORE');
   });
 

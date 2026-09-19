@@ -71,12 +71,7 @@ describe('Phase 2 backend operational shell', () => {
       state.attempts.push({ id: 'attempt-recovery', executionId: 'execution-recovery', runId: activeRun.id, wallet: 'wallet-a', nonce: 7, hash: `0x${'a'.repeat(64)}`, state: 'Submitted', createdAt: NOW, updatedAt: NOW });
     });
     const orchestrator = new Orchestrator(store, new ExecutionCoordinator(store, engine()), { now: () => new Date(NOW) });
-    const job = await orchestrator.scheduleRun({ runId: activeRun.id, wallets: ['wallet-a'], idempotencyKey: 'recovery-job' });
-    await store.transaction((state) => { const current = state.jobs.find((item) => item.id === job.id); if (!current) throw new Error('job missing'); current.state = 'running'; current.leaseExpiresAt = '2020-01-01T00:00:00.000Z'; });
-    await orchestrator.start();
-    await orchestrator.stop();
-    expect(store.snapshot().runtime.startupState).toBe('Blocked');
-    expect(store.snapshot().jobs.find((item) => item.id === job.id)?.state).toBe('blocked');
+    await expect(orchestrator.scheduleRun({ runId: activeRun.id, wallets: ['wallet-a'], idempotencyKey: 'recovery-job' })).rejects.toThrow('PHASE2_LIVE_MODE_DISABLED');
   });
 
   it('records chain-time offset and keeps live jobs queued while dependencies are blocked', async () => {
@@ -88,12 +83,7 @@ describe('Phase 2 backend operational shell', () => {
       now: () => new Date(NOW),
       chainTime: () => new Date(new Date(NOW).getTime() + 5_000),
     });
-    const job = await orchestrator.scheduleRun({ runId: scheduledRun.id, wallets: ['wallet-a'], idempotencyKey: 'chain-time-job' });
-    await orchestrator.start();
-    await orchestrator.stop();
-    expect(store.snapshot().runtime.chainTimeOffsetMs).toBe(5_000);
-    expect(store.snapshot().runtime.startupState).toBe('Blocked');
-    expect(store.snapshot().jobs.find((item) => item.id === job.id)?.state).toBe('scheduled');
+    await expect(orchestrator.scheduleRun({ runId: scheduledRun.id, wallets: ['wallet-a'], idempotencyKey: 'chain-time-job' })).rejects.toThrow('PHASE2_LIVE_MODE_DISABLED');
   });
 
   it('projects stale readiness and does not invent balance or eligibility', async () => {

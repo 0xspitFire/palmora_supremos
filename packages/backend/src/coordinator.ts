@@ -191,7 +191,7 @@ export class ExecutionCoordinator {
         state.reconciliations.push({ id: `rec_${randomUUID()}`, runId: run.id, result: update.result, observedAt: new Date().toISOString(), ...(update.reason ? { reason: update.reason } : {}) });
          if (currentRun.state === 'Aborted') {
            // A kill aborts new admissions but never erases submitted facts.
-         } else if ((update.result === 'confirmed' && intent.campaignSnapshot.chainId === 1) || update.result === 'final') {
+        } else if (update.result === 'final') {
           if (currentRun.state === 'Armed') this.transition(currentRun, 'Active');
           if (currentRun.state === 'Active') this.transition(currentRun, 'Completed');
         } else if (update.result === 'soft' || update.result === 'posted') {
