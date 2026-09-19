@@ -340,6 +340,7 @@ export class MintEngine {
           chainId: 1,
           currentBlockNumber: () => publicClient.getBlockNumber(),
           receiptBlockHash: async (hash: Hash) => (await publicClient.getTransactionReceipt({ hash })).blockHash,
+          canonicalBlockHash: async (blockNumber: bigint) => (await publicClient.getBlock({ blockNumber })).hash,
         }, chainConfig.confirmationDepth)
         : undefined);
       const receiptWatcher = new ReceiptWatcherImpl(publicClient, {

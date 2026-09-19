@@ -15,6 +15,8 @@ const emptyState = (): BackendState => ({
   notificationOutbox: [],
   chainEvidence: [],
   simulations: [],
+  readiness: [],
+  jobs: [],
   runtime: {
     startupState: 'Cold',
     blockingReasons: ['RECONCILIATION_REQUIRED'],
@@ -39,7 +41,9 @@ export class SqliteStateStore implements BackendStore {
 
   public async open(): Promise<void> {
     this.repository.initialize();
-    if (!this.repository.read<BackendState>()) this.repository.write(emptyState());
+    const current = this.repository.read<BackendState>();
+    if (!current) this.repository.write(emptyState());
+    else if (!current.jobs || !current.readiness) this.repository.write({ ...emptyState(), ...current, jobs: current.jobs ?? [], readiness: current.readiness ?? [] });
   }
 
   public close(): void {
@@ -51,7 +55,8 @@ export class SqliteStateStore implements BackendStore {
   }
 
   public snapshot(): BackendState {
-    return this.repository.read<BackendState>() ?? emptyState();
+    const state = this.repository.read<BackendState>() ?? emptyState();
+    return { ...emptyState(), ...state, jobs: state.jobs ?? [], readiness: state.readiness ?? [] };
   }
 
   public transaction<T>(mutate: (state: BackendState) => T): Promise<T> {

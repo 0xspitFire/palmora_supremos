@@ -7,6 +7,7 @@ import { BackendApplication } from './application.js';
 import { canonicalReceiptFinalityStage, CanonicalStoreBridge, type CanonicalAdmissionInput } from './canonical-store.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { campaignInputDigest } from './evidence.js';
+import { NotificationDispatcher } from './notifications.js';
 import { DurableStore } from './store.js';
 import type { AttemptRecord, Campaign, ChainEvidenceRecord, EngineAdapter, FeePolicy, IntentRecord, RunRecord } from './types.js';
 
@@ -54,12 +55,23 @@ function campaignInput(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false
 }
 
 async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false): Promise<Campaign> {
-  return fixtureValue.application.createCampaign(campaignInput(chainId, paid));
+  const campaignValue = await fixtureValue.application.createCampaign(campaignInput(chainId, paid));
+  for (const [index, address] of [WALLET_ONE, WALLET_TWO].entries()) {
+    const walletId = `wallet-${chainId}-${index}`;
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${chainId}`, address, `test-key-${index}`, NOW);
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
+  }
+  return campaignValue;
 }
 
 async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = []): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
   const run: RunRecord = { id: `run-${campaignValue.id}`, intentId: `intent-${campaignValue.id}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
   const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [...simulationIds], evidenceAt: NOW, createdAt: NOW };
+  for (const [index, address] of wallets.entries()) {
+    const walletId = `wallet-${campaignValue.chainId}-${index}`;
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${campaignValue.chainId}`, address, `test-key-${index}`, NOW);
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
+  }
   await fixtureValue.store.transaction((state) => { state.runs.push(run); state.intents.push(intent); });
   const persistedRun = fixtureValue.store.snapshot().runs.find((item) => item.id === run.id);
   if (!persistedRun) throw new Error('run missing');
@@ -244,6 +256,9 @@ describe('CanonicalStoreBridge', () => {
         state.campaigns.push(campaignValue);
         state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational: { secretStoreReference: 'TEST_OPERATOR', storePath: 'state.sqlite', signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' } };
       });
+      const walletId = `wallet-${ETHEREUM}-0`;
+      value.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${ETHEREUM}`, WALLET_ONE, 'test-key-0', NOW);
+      value.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
       const persisted = value.store.snapshot().campaigns.find((item) => item.id === campaignValue.id);
       if (!persisted) throw new Error('campaign missing');
       await value.store.transaction((state) => { state.simulations.push({ id: 'simulation-daily-arm', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(persisted), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 34n }); });
@@ -426,6 +441,23 @@ describe('CanonicalStoreBridge', () => {
       await value.store.transaction((state) => { state.simulations.push({ id: 'simulation-1', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: 'input', success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: NOW, expiresAt: '2026-09-14T15:00:00.000Z', worstCaseFeeWei: 34n }); });
       expect(value.store.snapshot().notificationOutbox[0]?.id).toBe('notification-1');
       expect(value.store.snapshot().simulations[0]?.id).toBe('simulation-1');
+    } finally { await close(value); }
+  });
+
+  it('retries a failed notification through the normalized delivery state machine', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      await value.store.transaction((state) => { state.events.push({ id: 'notification-event', type: 'run_failed', at: NOW, data: {} }); });
+      let failures = 1;
+      const sent: string[] = [];
+      const dispatcher = new NotificationDispatcher(value.store, { send: async ({ eventId }) => { if (failures-- > 0) throw new Error('provider payload=secret'); sent.push(eventId); } }, () => new Date(NOW));
+      await expect(dispatcher.dispatch('notification-event', 'failed')).rejects.toThrow('provider payload=secret');
+      expect(value.db.prepare('SELECT delivery_state, payload_json FROM notification WHERE id = ?').get('notify_notification-event')).toMatchObject({ delivery_state: 'failed' });
+      expect(value.store.snapshot().notificationOutbox[0]?.state).toBe('failed');
+      await dispatcher.dispatch('notification-event', 'failed');
+      await dispatcher.dispatch('notification-event', 'failed');
+      expect(sent).toEqual(['notify_notification-event']);
+      expect(value.store.snapshot().notificationOutbox[0]?.state).toBe('delivered');
     } finally { await close(value); }
   });
 
