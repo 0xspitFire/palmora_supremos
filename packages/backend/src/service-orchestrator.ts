@@ -73,7 +73,7 @@ export class OrchestratorService {
 
   public async schedule(input: ScheduleInput): Promise<ScheduledJob> {
     if (!input.id || !input.runId || input.wallets.length === 0) throw new Error('SCHEDULED_JOB_IDENTITY_INVALID');
-    if (input.mode === 'live' && this.options.dryRunOnly) throw new Error('LIVE_MODE_DISABLED');
+    if (input.mode !== 'dry-run' || this.options.dryRunOnly !== true) throw new Error('PHASE2_LIVE_MODE_DISABLED');
     return this.options.jobs.put({ id: input.id, runId: input.runId, wallets: input.wallets, executeAt: input.executeAt, mode: input.mode });
   }
 
@@ -121,6 +121,12 @@ export class OrchestratorService {
     try {
       await this.observeBackupStatus();
       this.recordReconciliationMetrics();
+      if (this.options.backupStatusPath && this.lastBackupObservation !== 'ok') {
+        await this.store.transaction((state) => {
+          state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'BACKUP_NOT_READY'])] };
+        });
+        return;
+      }
       const killed = this.store.snapshot().killed || (this.options.killSwitchProbe ? await this.options.killSwitchProbe() : false);
       const capacity = Math.max(0, this.maxConcurrentJobs - this.cachedJobs().filter((job) => job.state === 'running').length);
       if (killed) {
@@ -173,8 +179,8 @@ export class OrchestratorService {
 
   private async runJob(job: ScheduledJob): Promise<void> {
     try {
-      if (job.mode === 'live' && this.options.dryRunOnly) throw new Error('LIVE_MODE_DISABLED');
-      const result = await this.application.command('execute', { runId: job.runId, wallets: [...job.wallets], idempotencyKey: `scheduled:${job.id}` });
+      if (job.mode !== 'dry-run' || this.options.dryRunOnly !== true) throw new Error('PHASE2_LIVE_MODE_DISABLED');
+      const result = await this.application.command('dry-run', { runId: job.runId, wallets: [...job.wallets], idempotencyKey: `scheduled:${job.id}` });
       const outcome = result.state === 'Failed' ? 'failed' : result.state === 'Aborted' ? 'blocked' : 'succeeded';
       await this.options.jobs.update(job.id, { state: outcome, ...(outcome !== 'succeeded' ? { lastError: outcome === 'failed' ? 'RUN_FAILED' : 'RUN_ABORTED' } : {}), completedAt: this.now().toISOString() });
     } catch (error) {

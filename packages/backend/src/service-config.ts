@@ -58,19 +58,21 @@ function path(env: NodeJS.ProcessEnv, key: string, fallback: string, root: strin
 export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectRoot = process.cwd()): OrchestratorServiceConfig {
   if (value(env, 'TG_BOT_TOKEN') !== undefined || value(env, 'TG_CHAT_ID') !== undefined) throw new Error('TELEGRAM_SECRETS_MUST_USE_SECRET_STORE');
   const root = resolve(projectRoot);
-  const modeValue = value(env, 'MINT_BOT_SERVICE_MODE') ?? (value(env, 'MINT_BOT_MODE') === 'host' ? 'host' : 'dry-run');
-  if (modeValue !== 'dry-run' && modeValue !== 'host') throw new Error('MINT_BOT_SERVICE_MODE_INVALID');
-  const mode = modeValue as ServiceMode;
-  const statePath = path(env, 'MINT_BOT_STATE_PATH', value(env, 'STORE_PATH') ?? (mode === 'host' ? '/var/lib/mint-bot/mintbot.sqlite' : '.runtime/ci/mintbot.sqlite'), root);
-  const backupDir = path(env, 'MINT_BOT_BACKUP_DIR', mode === 'host' ? '/var/lib/mint-bot/backups' : '.runtime/ci/backups', root);
-  const logPath = path(env, 'MINT_BOT_LOG_PATH', value(env, 'MINT_BOT_LOG_FILE') ?? (mode === 'host' ? '/var/log/mint-bot/orchestrator.log' : '.runtime/ci/orchestrator.log'), root);
-  const jobsPath = path(env, 'MINT_BOT_JOBS_PATH', mode === 'host' ? '/var/lib/mint-bot/orchestrator-jobs.json' : '.runtime/ci/orchestrator-jobs.json', root);
-  const killSwitchPath = path(env, 'KILL_SWITCH_PATH', mode === 'host' ? '/var/lib/mint-bot/killswitch' : '.runtime/ci/killswitch', root);
-  const restartCounterPath = path(env, 'MINT_BOT_RESTART_COUNTER_PATH', mode === 'host' ? '/var/lib/mint-bot/restarts' : '.runtime/ci/restarts', root);
+  const modeValue = value(env, 'MINT_BOT_SERVICE_MODE') ?? 'dry-run';
+  if (modeValue !== 'dry-run') throw new Error('PHASE2_DRY_RUN_ONLY');
+  const mode: ServiceMode = 'dry-run';
+  const statePath = path(env, 'MINT_BOT_STATE_PATH', value(env, 'STORE_PATH') ?? '.runtime/ci/mintbot.sqlite', root);
+  const backupDir = path(env, 'MINT_BOT_BACKUP_DIR', '.runtime/ci/backups', root);
+  const logPath = path(env, 'MINT_BOT_LOG_PATH', value(env, 'MINT_BOT_LOG_FILE') ?? '.runtime/ci/orchestrator.log', root);
+  const jobsPath = path(env, 'MINT_BOT_JOBS_PATH', '.runtime/ci/orchestrator-jobs.json', root);
+  const killSwitchPath = path(env, 'KILL_SWITCH_PATH', '.runtime/ci/killswitch', root);
+  const restartCounterPath = path(env, 'MINT_BOT_RESTART_COUNTER_PATH', '.runtime/ci/restarts', root);
   const secretStorePath = value(env, 'SECRET_STORE_PATH');
   if (secretStorePath && !isAbsolute(secretStorePath)) throw new Error('SECRET_STORE_PATH_MUST_BE_ABSOLUTE');
   const telegramEnabled = bool(env, 'MINT_BOT_TELEGRAM_ENABLED', false);
   if (telegramEnabled && !secretStorePath) throw new Error('TELEGRAM_SECRET_STORE_REQUIRED');
+  const telegramApiBaseUrl = value(env, 'MINT_BOT_TELEGRAM_API_BASE_URL') ?? 'https://api.telegram.org';
+  if (!telegramApiBaseUrl.startsWith('https://') && value(env, 'MINT_BOT_APPROVED_TELEGRAM_PROXY') !== 'true') throw new Error('TELEGRAM_HTTPS_REQUIRED');
   const bindHost = value(env, 'MINT_BOT_BIND_HOST') ?? '127.0.0.1';
   if (bindHost !== '127.0.0.1' && bindHost !== '::1' && bindHost !== 'localhost') throw new Error('BIND_HOST_MUST_BE_LOOPBACK');
   const port = integer(env, 'MINT_BOT_HEALTH_PORT', integer(env, 'MINT_BOT_HTTP_PORT', 8780, 0), 0);
@@ -88,12 +90,12 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
     logMaxBytes: integer(env, 'MINT_BOT_LOG_MAX_BYTES', 10 * 1024 * 1024, 1_024),
     logMaxFiles: integer(env, 'MINT_BOT_LOG_MAX_FILES', 5, 1),
     killSwitchPath,
-    requireStartupKillSwitch: bool(env, 'MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH', mode === 'host'),
-    telegramEnabled: mode === 'host' && telegramEnabled,
+    requireStartupKillSwitch: bool(env, 'MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH', true),
+    telegramEnabled,
     ...(secretStorePath ? { secretStorePath } : {}),
     telegramTokenName: value(env, 'MINT_BOT_TELEGRAM_TOKEN_NAME') ?? 'TG_BOT_TOKEN',
     telegramChatIdName: value(env, 'MINT_BOT_TELEGRAM_CHAT_ID_NAME') ?? 'TG_CHAT_ID',
-    telegramApiBaseUrl: value(env, 'MINT_BOT_TELEGRAM_API_BASE_URL') ?? 'https://api.telegram.org',
+    telegramApiBaseUrl,
     bindHost,
     port,
     schedulerIntervalMs: integer(env, 'MINT_BOT_SCHEDULER_INTERVAL_MS', 1_000, 100),
