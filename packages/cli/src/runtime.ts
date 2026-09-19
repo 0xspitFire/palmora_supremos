@@ -42,12 +42,12 @@ export async function configuredWallets(projectRoot: string, localWalletFile: st
 }
 
 export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean } = {}): Promise<CliRuntime> {
-  const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, ...(turnkeyCustodyEnabled() ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
+  const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
+  const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
-  const custodyEnabled = runtimeOptions.allowTurnkey !== false && turnkeyCustodyEnabled();
-  const turnkeyConfig = custodyEnabled ? await readTurnkeySecretConfig(secretRoot) : undefined;
+  const turnkeyConfig = useTurnkey ? await readTurnkeySecretConfig(secretRoot) : undefined;
   const turnkeyMap = turnkeyConfig ? await readTurnkeyWalletMap(turnkeyConfig.walletMapPath) : undefined;
   if (turnkeyConfig && !turnkeyMap?.policyId) throw new Error('TURNKEY_POLICY_REQUIRED');
   const turnkeyOptions: Partial<Omit<MintEngineAdapterOptions, 'getState'>> = turnkeyConfig && turnkeyMap ? {
