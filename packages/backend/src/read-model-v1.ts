@@ -730,7 +730,7 @@ export class Phase2ReadModelService {
     const projectedReceipts = receipts.map(receipt => this.receiptReadModel(context, receipt, attempts));
     const projectedReconciliations = reconciliations.map(item => this.reconciliationReadModel(item));
     const walletResults = this.walletExecutionResults(context, attempts, receipts, reconciliations);
-    const outcome = run.mode === 'dry-run' && ['Completed', 'Failed'].includes(run.state) ? 'dry_run_completed' : run.state === 'Completed' && receipts.every(receipt => receipt.state === 'Confirmed' && (campaign.chainId !== 4663 || receipt.robinhoodFinality === 'final')) ? 'settled' : attempts.length > 0 || receipts.length > 0 ? 'partial' : run.state === 'Armed' ? 'not_started' : 'unknown';
+    const outcome = run.mode === 'dry-run' && ['Completed', 'Failed'].includes(run.state) ? 'dry_run_completed' : run.state === 'Completed' && reconciliations.every(item => ['confirmed', 'final'].includes(item.result)) && receipts.every(receipt => campaign.chainId === 1 ? receipt.finalityStage === 'ethereum_final' : receipt.robinhoodFinality === 'final') ? 'settled' : attempts.length > 0 || receipts.length > 0 ? 'partial' : run.state === 'Armed' ? 'not_started' : 'unknown';
     const freshness = aggregateFreshness([campaignFreshness(context, campaign), ...receipts.map(receipt => classifyFreshness(receipt.observedAt, null, context.now, context.freshnessPolicyVersion)), ...reconciliations.map(item => classifyFreshness(item.observedAt, null, context.now, context.freshnessPolicyVersion))]);
     const issues = [...reconciliations.filter(item => item.result === 'unknown' || item.result === 'reorged').map(item => issue(item.result === 'reorged' ? 'REORG_RECONCILIATION_REQUIRED' : 'RECONCILIATION_UNRESOLVED', item.result === 'reorged' ? 'A reorg observation requires reconciliation before any retry or accounting conclusion.' : 'The authoritative transaction outcome is unresolved.', 'blocking', 'Wait for reconciliation', reconciliationProvenance(item)))];
     const data: RunReadModelV1 = {
@@ -764,7 +764,7 @@ export class Phase2ReadModelService {
   private receiptReadModel(context: ProjectionContext, receipt: ReceiptRecord, attempts: readonly AttemptRecord[]): TransactionReceiptReadModel {
     const attempt = attempts.find(item => item.id === receipt.transactionAttemptId);
     const provenance = [storeProvenance(`receipt:${receipt.id}`, receipt.observedAt)];
-    const stage = receipt.robinhoodFinality === 'soft' ? 'soft' : receipt.robinhoodFinality === 'posted' ? 'posted' : receipt.robinhoodFinality === 'final' ? 'ethereum_final' : receipt.state === 'Confirmed' ? 'confirmed' : 'unknown';
+    const stage = receipt.finalityStage ?? (receipt.robinhoodFinality === 'soft' ? 'soft' : receipt.robinhoodFinality === 'posted' ? 'posted' : receipt.robinhoodFinality === 'final' ? 'ethereum_final' : 'unknown');
     const finality = finalityModel(context, stage, receipt.state === 'Confirmed' && (receipt.robinhoodFinality === 'final' || receipt.robinhoodFinality === undefined), receipt.observedAt, provenance, receipt.state === 'Reorged' ? 'Receipt was downgraded after a canonicality change.' : undefined);
     const freshness = classifyFreshness(receipt.observedAt, null, context.now, context.freshnessPolicyVersion);
     const amount = receipt.actualSpendWei === undefined ? null : sourcedAmount(receipt.actualSpendWei, 'actual', freshness, provenance);

@@ -15,9 +15,10 @@ export interface SummaryCommandInput { runId?: string; }
 export interface FundCommandInput { runId?: string; wallets?: string[]; }
 export type TypedCommandInput = ApprovalCommandInput | ArmCommandInput | RunCommandInput | SummaryCommandInput | FundCommandInput | { reason?: string; idempotencyKey?: string };
 export class BackendApplication {
-  constructor(private readonly store: BackendStore, private readonly coordinator: ExecutionCoordinator) {}
+  constructor(private readonly store: BackendStore, private readonly coordinator: ExecutionCoordinator, private readonly options: { phase2ReadOnly?: boolean } = {}) {}
   async command<T = unknown>(name: CommandName, input: Record<string, unknown> = {}): Promise<CommandResponse<T>> {
     const now = new Date().toISOString();
+    if (this.options.phase2ReadOnly === true && ['approve', 'arm', 'run', 'execute', 'fund', 'kill'].includes(name)) throw new Error('PHASE2_MUTATION_DISABLED');
     if (name === 'health') { const health = new HealthService(this.store).check(); return { id: 'health', state: health.state, nextAction: health.ready ? 'Monitor health' : 'Resolve blocking reasons', createdAt: now, retryable: false, data: health as T }; }
     if (name === 'kill') { const reason = String(input.reason ?? 'operator kill'); await this.coordinator.kill(reason); return { id: 'kill', state: 'Aborted', nextAction: 'Reconcile submitted work', createdAt: now, retryable: false }; }
     if (name === 'reconcile') { await this.coordinator.reconcile(); return { id: String(input.idempotencyKey ?? 'reconcile'), state: 'Reconciled', nextAction: 'Inspect run records', createdAt: now, retryable: false }; }

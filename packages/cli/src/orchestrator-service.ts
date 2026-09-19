@@ -39,6 +39,7 @@ async function incrementRestartCounter(path: string): Promise<number> {
 /** Start the supervised local/host service without accepting control commands. */
 export async function startOrchestratorService(environment: NodeJS.ProcessEnv = process.env): Promise<RunningOrchestratorService> {
   const config = loadServiceConfig(environment, process.cwd());
+  process.env.MINT_BOT_PHASE2_READ_ONLY = 'true';
   const logger = new RedactedLogger({ destination: config.logPath, maxBytes: config.logMaxBytes, maxFiles: config.logMaxFiles });
   logger.info({ event: 'service_configured', config: summarizeServiceConfig(config) }, 'orchestrator service configured');
   if (config.requireStartupKillSwitch && !(await pathKillSwitchProbe(config.killSwitchPath))) throw new Error('STARTUP_KILL_SWITCH_REQUIRED');

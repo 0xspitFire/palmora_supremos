@@ -18,9 +18,10 @@ export interface NotificationSink { send(message: NotificationMessage): Promise<
 const SENSITIVE_VALUE = /(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token|authorization|calldata|raw(?:[_-]?transaction)?|provider[_-]?payload)\s*[:=]\s*[^,\s]+/gi;
 const CREDENTIAL_URL = /https?:\/\/[^\s/]+(?::[^\s/@]+)?@[^\s/]+[^\s]*/gi;
 const RAW_HEX_VALUE = /0x[0-9a-f]{64}/gi;
+const JSON_SECRET_VALUE = /["'](?:api[_-]?key|token|secret|authorization|calldata|raw[_-]?transaction)["']\s*:\s*["'][^"']*["']/gi;
 
 export function redactNotificationText(value: string): string {
-  return value.replace(SENSITIVE_VALUE, (match) => `${match.slice(0, match.search(/[:=]/))}=[REDACTED]`).replace(CREDENTIAL_URL, '[endpoint]').replace(RAW_HEX_VALUE, '[REDACTED]');
+  return value.replace(SENSITIVE_VALUE, (match) => `${match.slice(0, match.search(/[:=]/))}=[REDACTED]`).replace(JSON_SECRET_VALUE, '[REDACTED]').replace(CREDENTIAL_URL, '[endpoint]').replace(RAW_HEX_VALUE, '[REDACTED]');
 }
 
 function canonicalRunLink(runId: string | undefined): string | undefined {
