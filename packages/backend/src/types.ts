@@ -6,7 +6,7 @@ export type ChainVerificationStatus = 'unverified' | 'characterizing' | 'verifie
 export type StartupState = 'Cold' | 'Reconciling' | 'Ready' | 'Blocked';
 export type RobinhoodNegativeCase = 'revert' | 'sold_out' | 'price_drift' | 'insufficient_funds' | 'quantity_limit' | 'stale_phase' | 'fee_recipient' | 'kill' | 'cap';
 export type CommandName = 'resolve' | 'validate' | 'prepare' | 'simulate' | 'dry-run' | 'approve' | 'arm' | 'run' | 'execute' | 'summary' | 'fund' | 'reconcile' | 'health' | 'kill';
-export type JobKind = 'execute' | 'reconcile' | 'notification' | 'health';
+export type JobKind = 'execute' | 'reconcile' | 'notification' | 'health' | 'phase2';
 export type JobState = 'scheduled' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
 export type CheckOutcome = 'pass' | 'fail' | 'unknown' | 'stale';
 

@@ -2,7 +2,7 @@ import { access, readFile } from 'node:fs/promises';
 import type { BackendApplication } from './application.js';
 import type { ExecutionCoordinator } from './coordinator.js';
 import type { BackendStore } from './store.js';
-import { JsonJobStore, type ScheduledJob } from './job-store.js';
+import type { ScheduledJobStore, ScheduledJob } from './job-store.js';
 import { MetricsRegistry, type RedactedLogger } from './observability.js';
 import { AlertManager } from './alerts.js';
 
@@ -14,7 +14,7 @@ export interface ScheduleInput {
   mode: 'dry-run' | 'live';
 }
 export interface OrchestratorOptions {
-  jobs: JsonJobStore;
+  jobs: ScheduledJobStore;
   schedulerIntervalMs?: number;
   reconciliationIntervalMs?: number;
   maxConcurrentJobs?: number;
