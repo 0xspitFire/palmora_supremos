@@ -20,6 +20,7 @@ export interface OrchestratorServiceConfig {
   telegramTokenName: string;
   telegramChatIdName: string;
   telegramApiBaseUrl: string;
+  telegramApprovedProxy?: string;
   bindHost: string;
   port: number;
   schedulerIntervalMs: number;
@@ -96,6 +97,7 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
     telegramTokenName: value(env, 'MINT_BOT_TELEGRAM_TOKEN_NAME') ?? 'TG_BOT_TOKEN',
     telegramChatIdName: value(env, 'MINT_BOT_TELEGRAM_CHAT_ID_NAME') ?? 'TG_CHAT_ID',
     telegramApiBaseUrl,
+    telegramApprovedProxy: value(env, 'MINT_BOT_APPROVED_TELEGRAM_PROXY'),
     bindHost,
     port,
     schedulerIntervalMs: integer(env, 'MINT_BOT_SCHEDULER_INTERVAL_MS', 1_000, 100),
