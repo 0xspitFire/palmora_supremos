@@ -141,6 +141,12 @@ template is `ops/wsl/mint-bot.env.example`. Start with
 `MINT_BOT_SERVICE_MODE=dry-run`, and do not enable live mode based on a green
 health or Telegram result.
 
+In `dry-run` mode the service does not read Turnkey secret files, wallet maps,
+attestation files, live signer clients, or external RPC configuration; it marks
+external reconciliation blocked until a host profile explicitly enables it.
+Telegram requires HTTPS. A non-HTTPS endpoint is accepted only when it exactly
+matches an explicitly configured loopback approved proxy reference.
+
 ### Required human inputs
 
 1. Choose and provision the unprivileged host account, working directory, and
@@ -178,6 +184,18 @@ template with temporary paths, run `pnpm ops:service-config`, then run
 `pnpm typecheck`, `pnpm test`, and (after a build) `pnpm ops:orchestrator`. The
 orchestrator command is a supervised process and should be stopped by SIGTERM;
 it is not a live execution test.
+
+### Evidence gates
+
+`pnpm ops:evidence` reports whether non-secret references have been supplied for
+the recovery drill, key rotation/revocation, heap/core-dump policy,
+backup/restore, and service supervision. It deliberately reports
+`humanEvidenceComplete: false`; references are not owner artifacts and cannot
+mark a live or production gate complete. Set
+`MINT_BOT_ENFORCE_OPS_EVIDENCE=true` only in a human-controlled acceptance job
+to fail when any reference is missing. The service unit sets `LimitCORE=0` and
+uses bounded redacted logs; host owners must still provide rotation/revocation,
+recovery, backup/restore, and restart evidence.
 
 ## Logs and retention
 

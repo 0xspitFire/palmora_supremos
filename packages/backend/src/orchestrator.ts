@@ -5,6 +5,7 @@ import type { BackendStore } from './store.js';
 import { JsonJobStore, type ScheduledJob } from './job-store.js';
 import { MetricsRegistry, type RedactedLogger } from './observability.js';
 import { AlertManager } from './alerts.js';
+import { normalizeError } from './errors.js';
 
 export interface ScheduleInput {
   id: string;
@@ -90,7 +91,7 @@ export class OrchestratorService {
       try {
         await this.coordinator.start();
       } catch (error) {
-        this.options.logger?.error({ error }, 'orchestrator_reconciliation_failed');
+        this.options.logger?.error({ error: normalizeError(error) }, 'orchestrator_reconciliation_failed');
         await this.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'RECONCILIATION_FAILED'])] }; });
       }
     }
@@ -128,7 +129,7 @@ export class OrchestratorService {
           state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILL_SWITCH_ENGAGED'])] };
         });
         try { await this.options.alerts?.kill('KILL_SWITCH_ENGAGED'); }
-        catch (error) { this.options.logger?.warn({ error }, 'kill_switch_alert_delivery_failed'); }
+        catch (error) { this.options.logger?.warn({ error: normalizeError(error) }, 'kill_switch_alert_delivery_failed'); }
         for (const job of await this.options.jobs.list()) if (job.state === 'scheduled' && job.mode === 'live') await this.options.jobs.update(job.id, { state: 'blocked', lastError: 'KILL_SWITCH_ENGAGED' });
         this.jobsSnapshot = await this.options.jobs.list();
         return;
@@ -146,7 +147,7 @@ export class OrchestratorService {
   private async reconcile(): Promise<void> {
     if (!this.running || this.store.snapshot().killed) return;
     try { await this.coordinator.reconcile(); }
-    catch (error) { this.options.logger?.error({ error }, 'orchestrator_periodic_reconciliation_failed'); }
+    catch (error) { this.options.logger?.error({ error: normalizeError(error) }, 'orchestrator_periodic_reconciliation_failed'); }
   }
 
   private async observeBackupStatus(): Promise<void> {
@@ -178,8 +179,9 @@ export class OrchestratorService {
       const outcome = result.state === 'Failed' ? 'failed' : result.state === 'Aborted' ? 'blocked' : 'succeeded';
       await this.options.jobs.update(job.id, { state: outcome, ...(outcome !== 'succeeded' ? { lastError: outcome === 'failed' ? 'RUN_FAILED' : 'RUN_ABORTED' } : {}), completedAt: this.now().toISOString() });
     } catch (error) {
-      await this.options.jobs.update(job.id, { state: 'blocked', lastError: error instanceof Error ? error.message : String(error), completedAt: this.now().toISOString() });
-      this.options.logger?.error({ jobId: job.id, error }, 'scheduled_job_failed');
+      const normalized = normalizeError(error);
+      await this.options.jobs.update(job.id, { state: 'blocked', lastError: normalized.message, completedAt: this.now().toISOString() });
+      this.options.logger?.error({ jobId: job.id, error: normalized }, 'scheduled_job_failed');
     }
     this.jobsSnapshot = await this.options.jobs.list();
   }

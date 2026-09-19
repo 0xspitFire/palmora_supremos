@@ -7,6 +7,12 @@ import type { Address } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 
 export interface CliRuntime { store: BackendStore; coordinator: ExecutionCoordinator; application: BackendApplication; walletRoot: string; }
+export interface CliRuntimeOptions {
+  /** Keep local/CI service startup independent of Turnkey files and clients. */
+  allowTurnkey?: boolean;
+  /** The supervised service may defer external reconciliation until explicitly enabled. */
+  startCoordinator?: boolean;
+}
 
 export type CustodyMode = 'local' | 'turnkey';
 
@@ -41,12 +47,13 @@ export async function configuredWallets(projectRoot: string, localWalletFile: st
   }
 }
 
-export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>): Promise<CliRuntime> {
-  const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, ...(turnkeyCustodyEnabled() ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
+export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: CliRuntimeOptions = {}): Promise<CliRuntime> {
+  const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
+  const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
-  const turnkeyConfig = turnkeyCustodyEnabled() ? await readTurnkeySecretConfig(secretRoot) : undefined;
+  const turnkeyConfig = useTurnkey ? await readTurnkeySecretConfig(secretRoot) : undefined;
   const turnkeyMap = turnkeyConfig ? await readTurnkeyWalletMap(turnkeyConfig.walletMapPath) : undefined;
   if (turnkeyConfig && !turnkeyMap?.policyId) throw new Error('TURNKEY_POLICY_REQUIRED');
   const turnkeyOptions: Partial<Omit<MintEngineAdapterOptions, 'getState'>> = turnkeyConfig && turnkeyMap ? {
@@ -74,6 +81,6 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     settleComponents: adapterOptions?.settleComponents ?? ((reservationId, components) => store.settleExecutionComponents(reservationId, components)),
   });
   const coordinator = new ExecutionCoordinator(store, actualEngine);
-  await coordinator.start();
+  if (runtimeOptions.startCoordinator ?? true) await coordinator.start();
   return { store, coordinator, application: new BackendApplication(store, coordinator), walletRoot: resolveWalletPath(projectRoot) };
 }

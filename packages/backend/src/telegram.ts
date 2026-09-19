@@ -8,7 +8,7 @@ export interface TelegramCredentials { token: string; chatId: string; }
 export interface TelegramFetcherResponse { ok: boolean; status: number; json(): Promise<unknown>; }
 export type TelegramFetcher = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<TelegramFetcherResponse>;
 export interface TelegramHealth { status: 'ok' | 'failed'; provider: 'telegram'; reason?: string; }
-export interface TelegramNotifierOptions { secretStore: HostSecretStore; tokenName?: string; chatIdName?: string; apiBaseUrl?: string; fetcher?: TelegramFetcher; timeoutMs?: number; }
+export interface TelegramNotifierOptions { secretStore: HostSecretStore; tokenName?: string; chatIdName?: string; apiBaseUrl?: string; approvedProxy?: string; fetcher?: TelegramFetcher; timeoutMs?: number; }
 
 function parseStore(source: string): Map<string, string> {
   const values = new Map<string, string>();
@@ -29,6 +29,14 @@ export async function loadHostSecretStore(path: string): Promise<HostSecretStore
   const absolutePath = resolve(path);
   const approvedFiles = new Set(['MINT_BOT_SECRETS', 'MINT_BOT_SECRETS.env', 'TEST_BOT', 'TEST_BOT.env', 'archive-rpc.env', 'turnkey.env']);
   if (basename(dirname(absolutePath)) !== 'Rets' || !approvedFiles.has(basename(absolutePath))) throw new Error('SECRET_STORE_FILE_NOT_APPROVED');
+  let parent = dirname(absolutePath);
+  while (true) {
+    const parentMetadata = await lstat(parent);
+    if (parentMetadata.isSymbolicLink() || !parentMetadata.isDirectory()) throw new Error('SECRET_STORE_PARENT_INVALID');
+    const next = dirname(parent);
+    if (next === parent) break;
+    parent = next;
+  }
   const metadata = await lstat(absolutePath);
   if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error('SECRET_STORE_FILE_PERMISSIONS_INVALID');
   const values = parseStore(await readFile(absolutePath, 'utf8'));
@@ -55,7 +63,14 @@ export class TelegramNotifier implements NotificationSink {
   public constructor(options: TelegramNotifierOptions) {
     this.config = credentials(options);
     this.fetcher = options.fetcher ?? (globalThis.fetch as unknown as TelegramFetcher);
-    this.apiBaseUrl = (options.apiBaseUrl ?? 'https://api.telegram.org').replace(/\/$/, '');
+    const apiBaseUrl = (options.apiBaseUrl ?? 'https://api.telegram.org').replace(/\/$/, '');
+    let endpoint: URL;
+    try { endpoint = new URL(apiBaseUrl); } catch { throw new Error('TELEGRAM_API_BASE_URL_INVALID'); }
+    if (endpoint.protocol !== 'https:') {
+      if (!options.approvedProxy || options.approvedProxy !== apiBaseUrl) throw new Error('TELEGRAM_HTTPS_OR_APPROVED_PROXY_REQUIRED');
+      if (endpoint.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname)) throw new Error('TELEGRAM_APPROVED_PROXY_MUST_BE_LOOPBACK');
+    }
+    this.apiBaseUrl = apiBaseUrl;
     this.timeoutMs = options.timeoutMs ?? 5_000;
   }
 

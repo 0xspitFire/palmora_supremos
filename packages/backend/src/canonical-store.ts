@@ -785,8 +785,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readNotifications(): BackendState['notificationOutbox'] {
     const rows = this.db.prepare('SELECT id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at FROM notification ORDER BY created_at, id').all() as Array<{ id: string; event_key: string; idempotency_key: string; delivery_state: string; payload_json: string; created_at: string; delivered_at: string | null }>;
     return rows.map((row) => {
-      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string; retentionUntil?: string }>(row.payload_json) ?? {};
-      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}), ...(payload.retentionUntil ? { retentionUntil: payload.retentionUntil } : {}) };
+      const payload = decode<{ runId?: string; type?: string; text?: string; attempts?: number; sourceEventId?: string; retentionUntil?: string; nextAttemptAt?: string; deliveryLeaseUntil?: string; lastError?: string }>(row.payload_json) ?? {};
+      return { id: row.id, sourceEventId: payload.sourceEventId ?? row.event_key, ...(payload.runId ? { runId: payload.runId } : {}), type: payload.type ?? row.event_key, text: payload.text ?? '', state: row.delivery_state === 'delivered' || row.delivery_state === 'sent' ? 'delivered' : 'pending', attempts: payload.attempts ?? 0, createdAt: row.created_at, ...(row.delivered_at ? { deliveredAt: row.delivered_at } : {}), ...(payload.retentionUntil ? { retentionUntil: payload.retentionUntil } : {}), ...(payload.nextAttemptAt ? { nextAttemptAt: payload.nextAttemptAt } : {}), ...(payload.deliveryLeaseUntil ? { deliveryLeaseUntil: payload.deliveryLeaseUntil } : {}), ...(payload.lastError ? { lastError: payload.lastError } : {}) };
     });
   }
 
@@ -929,12 +929,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private persistNotification(notification: BackendState['notificationOutbox'][number], prior: BackendState['notificationOutbox'][number] | undefined): void {
-    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts, ...(notification.retentionUntil ? { retentionUntil: notification.retentionUntil } : {}) });
+    const payload = encode({ sourceEventId: notification.sourceEventId, ...(notification.runId ? { runId: notification.runId } : {}), type: notification.type, text: notification.text, attempts: notification.attempts, ...(notification.retentionUntil ? { retentionUntil: notification.retentionUntil } : {}), ...(notification.nextAttemptAt ? { nextAttemptAt: notification.nextAttemptAt } : {}), ...(notification.deliveryLeaseUntil ? { deliveryLeaseUntil: notification.deliveryLeaseUntil } : {}), ...(notification.lastError ? { lastError: notification.lastError } : {}) });
     if (!prior) {
       this.db.prepare("INSERT INTO notification (id, event_key, idempotency_key, delivery_state, payload_json, created_at, delivered_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(notification.id, notification.sourceEventId, notification.id, notification.state === 'delivered' ? 'delivered' : 'pending', payload, notification.createdAt, notification.deliveredAt ?? null);
       return;
     }
-    if (prior.state !== notification.state || prior.attempts !== notification.attempts || prior.deliveredAt !== notification.deliveredAt) this.db.prepare('UPDATE notification SET delivery_state = ?, payload_json = ?, delivered_at = ? WHERE id = ?').run(notification.state === 'delivered' ? 'delivered' : 'pending', payload, notification.deliveredAt ?? null, notification.id);
+    if (prior.state !== notification.state || prior.attempts !== notification.attempts || prior.deliveredAt !== notification.deliveredAt || prior.nextAttemptAt !== notification.nextAttemptAt || prior.deliveryLeaseUntil !== notification.deliveryLeaseUntil || prior.lastError !== notification.lastError) this.db.prepare('UPDATE notification SET delivery_state = ?, payload_json = ?, delivered_at = ? WHERE id = ?').run(notification.state === 'delivered' ? 'delivered' : 'pending', payload, notification.deliveredAt ?? null, notification.id);
   }
 
   private persistChainEvidence(evidence: ChainEvidenceRecord, prior: ChainEvidenceRecord | undefined): void {
