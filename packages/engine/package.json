@@ -10,12 +10,14 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "viem": "^2.27.0",
-    "pino": "^9.6.0"
+    "@turnkey/crypto": "2.13.0",
+    "@turnkey/sdk-server": "8.5.0",
+    "pino": "^9.6.0",
+    "viem": "^2.27.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^3.0.0"
   }
 }

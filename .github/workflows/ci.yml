@@ -20,10 +20,6 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.19.1
-          cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.8.1
@@ -41,17 +37,13 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.19.1
-          cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.8.1
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
-      - name: Install SQLite backup tool
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes sqlite3
+      - name: Verify SQLite backup tool
+        run: sqlite3 --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm ops:clean-checkout
       - run: pnpm lint
@@ -86,10 +78,6 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.19.1
-          cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.8.1
@@ -110,17 +98,13 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.19.1
-          cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.8.1
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
       - name: Build production image
-        run: docker build --tag mint-bot:ci .
+        run: docker build --network=host --tag mint-bot:ci .
       - name: Verify fail-closed container health
         shell: bash
         run: |
@@ -140,10 +124,6 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.19.1
-          cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.8.1
@@ -164,10 +144,6 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.19.1
-          cache: pnpm
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.8.1

@@ -27,7 +27,12 @@ export type SecretName =
   | 'BASE_SEQUENCER_URL'
   | 'FLASHBOTS_KEY_PATH'
   | 'WALLET_KEYSTORE_PATH'
-  | 'TEST_WALLET_ADDR';
+  | 'TEST_WALLET_ADDR'
+  | 'TURNKEY_ORGANIZATION_ID'
+  | 'TURNKEY_API_PUBLIC_KEY'
+  | 'TURNKEY_API_PRIVATE_KEY'
+  | 'TURNKEY_USER_ID'
+  | 'TURNKEY_WALLET_MAP_PATH';
 
 export type SecretScope = 'mainnet' | 'testnet';
 
