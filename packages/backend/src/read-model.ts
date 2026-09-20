@@ -289,7 +289,7 @@ export class ReadModelService {
     for (const [name, ready] of Object.entries(state.runtime.dependencies)) if (!ready) blockers.push(issue(`${name.toUpperCase()}_NOT_READY`, 'blocking', `${name} dependency is not ready`, false, name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
     const operational = state.runtime.operational;
     if (operational) {
-      if (operational.signerReady === false) blockers.push(issue('SIGNER_NOT_READY', 'blocking', 'The configured signer is not ready', false, 'Inspect'));
+      if (operational.signerReady !== true) blockers.push(issue('SIGNER_NOT_READY', 'blocking', 'The configured signer is not ready', false, 'Inspect'));
       if (!operational.notificationReady) blockers.push(issue('NOTIFICATIONS_NOT_READY', 'blocking', 'Notification delivery is not ready', false, 'Inspect'));
       if (operational.chainVerification !== 'verified') blockers.push(issue('CHAIN_VERIFICATION_REQUIRED', 'blocking', 'Chain verification is not current', false, 'Refresh read model'));
       if (Number.isFinite(Date.parse(operational.expiresAt)) && Date.parse(operational.expiresAt) <= Date.parse(checkedAt)) blockers.push(issue('OPERATIONAL_READINESS_STALE', 'blocking', 'Operational readiness evidence is stale', false, 'Refresh read model'));

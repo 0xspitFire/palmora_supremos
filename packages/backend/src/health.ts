@@ -20,6 +20,7 @@ export class HealthService {
     else {
       if (!operational.secretStoreReference) reasons.push('SECRET_STORE_REFERENCE_REQUIRED');
       if (!operational.storePath) reasons.push('STORE_PATH_REQUIRED');
+      if (operational.signerReady !== true) reasons.push('SIGNER_NOT_READY');
       if (operational.killSwitchEngaged) reasons.push('KILL_SWITCH_ENGAGED');
       if (!operational.notificationReady) reasons.push('NOTIFICATION_NOT_READY');
       if (operational.chainVerification !== 'verified') reasons.push('CHAIN_VERIFICATION_REQUIRED');
