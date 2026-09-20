@@ -124,25 +124,83 @@ values, secret-store values, private material, or passphrases.
 
 ## Service supervision
 
-Phase 1 has no long-running Backend orchestrator entrypoint, so no service may
-be enabled for live execution yet. The eventual single-host service must run
-as a dedicated unprivileged account with `NoNewPrivileges`, a restrictive
-`UMask`, persistent state and encrypted-keystore mounts, UTC/NTP validation,
-restart-on-failure, and a startup kill switch. It must expose the health probe
-without accepting readiness booleans and must stop admission until startup
-reconciliation succeeds. Service evidence is a redacted unit definition,
-restart/kill/reconcile drill output, and a rollback record; absence of the
-orchestrator entrypoint remains a blocker.
+Phase 2 now includes a supervised, outbound-notification-only orchestrator
+entrypoint at `packages/cli/dist/orchestrator-service.js` (the source launcher
+is `scripts/orchestrator.mjs`). It persists the SQLite database in WAL mode,
+persists restartable scheduler state in `MINT_BOT_JOBS_PATH`, reconciles before
+scheduled work, and exposes loopback-only `/livez`, `/readyz`, `/health`,
+`/status`, and `/metrics` endpoints. The service does not accept HTTP control
+commands, handle wallet keys, sign transactions, or broadcast transactions.
 
-Watcher logs must be structured JSON, redacted before persistence, rotated with
-a bounded disk budget, and separated from durable audit facts. Alert on
-process loss, stale reconciliation, endpoint degradation, disk pressure,
-backup failure, kill-switch state, cap hits, and notification disconnects.
+The checked-in `ops/systemd/mint-bot.service` is a local WSL/host unit template,
+not an installation or a production-readiness claim. It runs as an unprivileged
+user, requires a startup kill-switch file, restarts on failure, keeps state and
+logs on persistent paths, and leaves all existing Backend safety gates intact.
+The dry-run CI configuration is `ops/ci/mint-bot.env`; the non-secret local WSL
+template is `ops/wsl/mint-bot.env.example`. Start with
+`MINT_BOT_SERVICE_MODE=dry-run`, and do not enable live mode based on a green
+health or Telegram result.
+
+In `dry-run` mode the service does not read Turnkey secret files, wallet maps,
+attestation files, live signer clients, or external RPC configuration; it marks
+external reconciliation blocked until a host profile explicitly enables it.
+Telegram requires HTTPS. A non-HTTPS endpoint is accepted only when it exactly
+matches an explicitly configured loopback approved proxy reference.
+
+### Required human inputs
+
+1. Choose and provision the unprivileged host account, working directory, and
+   persistent state/log/backup directories; set ownership and restrictive
+   `UMask`/file permissions.
+2. Create and keep engaged `KILL_SWITCH_PATH` before starting the service, and
+   define the human-controlled procedure for removing it only after the
+   applicable safety gates and approvals have passed.
+3. Configure the host secret manager to provide `SECRET_STORE_PATH` containing
+   the existing `TG_BOT_TOKEN` and `TG_CHAT_ID` names. Values must not be placed
+   in repository files, unit files, arguments, CI variables, logs, or backups.
+4. Provide the RPC/signer references required by the existing runtime and the
+   host-only method for injecting `BACKUP_ENCRYPTION_KEY` into the backup unit.
+5. Choose the loopback health port, NTP/time source, encrypted-backup destination,
+   retention/restore owner, and incident escalation recipients.
+6. Obtain the explicit human approvals and evidence required by the existing
+   execution gates before any live-spend request. Phase 2 does not grant that
+   approval and is not production/live readiness evidence.
+
+### Observability and recovery
+
+Structured JSON logs are redacted before stdout/file persistence and rotate at
+`MINT_BOT_LOG_MAX_BYTES` with `MINT_BOT_LOG_MAX_FILES` bounded files. The
+`MINT_BOT_RESTART_COUNTER_PATH` file backs the `mintbot_process_restarts_total`
+metric across process restarts. The backup job writes a status-only record to
+`BACKUP_STATUS_PATH`; its basename, checksum, encryption state, retention, and
+timestamp are observable without exposing the backup key. Metrics include queue
+depth, endpoint outcomes/latency classes, notification delivery, disk/log size,
+reconciliation, backup, and process state. Alert conditions cover process loss,
+stale reconciliation, endpoint degradation, disk pressure, backup failure,
+kill-switch/cap blocks, and notification disconnects.
+
+For a local dry-run smoke check, create the kill-switch file, use the CI env
+template with temporary paths, run `pnpm ops:service-config`, then run
+`pnpm typecheck`, `pnpm test`, and (after a build) `pnpm ops:orchestrator`. The
+orchestrator command is a supervised process and should be stopped by SIGTERM;
+it is not a live execution test.
+
+### Evidence gates
+
+`pnpm ops:evidence` reports whether non-secret references have been supplied for
+the recovery drill, key rotation/revocation, heap/core-dump policy,
+backup/restore, and service supervision. It deliberately reports
+`humanEvidenceComplete: false`; references are not owner artifacts and cannot
+mark a live or production gate complete. Set
+`MINT_BOT_ENFORCE_OPS_EVIDENCE=true` only in a human-controlled acceptance job
+to fail when any reference is missing. The service unit sets `LimitCORE=0` and
+uses bounded redacted logs; host owners must still provide rotation/revocation,
+recovery, backup/restore, and restart evidence.
 
 ## Logs and retention
 
 Use structured JSON logs with run, campaign, wallet, execution, and transaction
-identifiers. Redact calldata, private material, provider tokens, and Telegram
-payloads. Rotate watcher logs with a disk bound while retaining durable audit
-facts and release metadata (chain profile, strategy, policy schema, and
-dependency versions).
+identifiers only where those identifiers are safe. Redact calldata, private
+material, provider tokens, Telegram credentials, and Telegram payloads. Rotate
+watcher logs with a disk bound while retaining durable audit facts and release
+metadata (chain profile, strategy, policy schema, and dependency versions).

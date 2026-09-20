@@ -63,7 +63,13 @@ jobs:
       - run: pnpm ops:recovery-drill
       - run: pnpm typecheck
       - run: pnpm build
+      - name: Verify CI-safe orchestrator configuration
+        run: node scripts/service-config.mjs
+      - name: Report unresolved human operations evidence
+        run: pnpm ops:evidence
       - run: pnpm test -- --reporter=dot
+      - name: Clear stale gitleaks temp file
+        run: rm -f /tmp/gitleaks.tmp
       - name: Check for leaked secrets
         uses: gitleaks/gitleaks-action@v2
         env:

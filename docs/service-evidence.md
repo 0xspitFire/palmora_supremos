@@ -1,11 +1,16 @@
 # Service And Host Evidence
 
-## Phase 1 Status
+## Phase 2 Status
 
-**Status:** not enabled. The current tree has no long-running Backend
-orchestrator entrypoint, so installing a service would create a supervised
-process that cannot perform the required startup reconciliation or scheduling.
-No live execution eligibility is implied.
+**Status:** operational scaffolding prepared, not enabled. The tree now contains
+`packages/cli/src/orchestrator-service.ts`, a durable scheduler, loopback health
+and metrics endpoints, redacted rotating logs, encrypted-backup status output,
+and the outbound-only Telegram notifier. The checked-in unit/config templates
+are proposals for local WSL/host provisioning; no production/live readiness or
+execution-gate approval is implied.
+
+The service remains blocked until the host contract below is supplied and the
+existing safety gates, startup reconciliation, and human approvals are accepted.
 
 ## Required Host Contract
 
@@ -32,12 +37,13 @@ names. A health or notification result is not transaction execution evidence.
 
 ## Backup Timer Contract
 
-The eventual host timer must invoke `pnpm ops:backup` with explicit state and
+The checked-in host timer template invokes `pnpm ops:backup` with explicit state and
 backup paths, retain encrypted snapshots for exactly 30 days, and preserve the
 checksum sidecar. The encryption key is injected by the host secret mechanism
 only for the process lifetime. A corresponding restore drill must verify the
 checksum, encryption header, SQLite integrity, schema version, engaged kill
 switch, and post-restore chain reconciliation in an isolated host.
 
-No service, timer, host credential, or resolved secret value is present in this
-repository. Provisioning and acceptance remain Lead/Product Owner gates.
+No resolved host credential or secret value is present in this repository; the
+checked-in service/timer files are non-secret templates only. Provisioning and
+acceptance remain Lead/Product Owner gates.

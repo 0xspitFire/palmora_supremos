@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { ReadOnlyApi } from './api.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { NotificationDispatcher } from './notifications.js';
@@ -20,19 +20,17 @@ function readyState(store: DurableStore, runs: RunRecord[]): Promise<void> { ret
 function engine(overrides: Partial<EngineAdapter> = {}): EngineAdapter { return { prepare: async () => emptyPrepared, execute: async () => ({ ...emptyPrepared, state: 'Confirmed' }), reconcile: async () => ({ result: 'unknown' as const, attempts: [], receipts: [] }), ...overrides }; }
 
 describe('Phase 2 backend operational shell', () => {
-  it('persists T-minus jobs and replays an idempotent schedule key', async () => {
+  it('persists read-only T-minus jobs and replays an idempotent schedule key', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mint-phase2-jobs-'));
     const file = join(directory, 'jobs.json');
     try {
       const first = new DurableStore(file);
       await first.open();
-      const firstRun = run('run-scheduled');
-      await readyState(first, [firstRun]);
       const coordinator = new ExecutionCoordinator(first, engine());
       const orchestrator = new Orchestrator(first, coordinator, { now: () => new Date(NOW), chainTimeOffsetMs: 2_000 });
-      const job = await orchestrator.scheduleRun({ runId: firstRun.id, wallets: ['Wallet-A'], openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' });
+      const job = await orchestrator.schedule({ kind: 'health', openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' });
       expect(job.scheduledAt).toBe('2026-09-18T00:00:05.000Z');
-      expect(await orchestrator.scheduleRun({ runId: firstRun.id, wallets: ['Wallet-A'], openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' })).toMatchObject({ id: job.id });
+      expect(await orchestrator.schedule({ kind: 'health', openingAt: '2026-09-18T00:00:10.000Z', tMinusMs: 3_000, idempotencyKey: 'schedule-once' })).toMatchObject({ id: job.id });
       const second = new DurableStore(file);
       await second.open();
       expect(second.snapshot().jobs).toHaveLength(1);
@@ -40,27 +38,12 @@ describe('Phase 2 backend operational shell', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('keeps execution bounded and isolates a failed scheduled job', async () => {
+  it('rejects live execution scheduling in Phase 2', async () => {
     const store = new DurableStore();
-    const runs = [run('run-a'), run('run-b'), run('run-c')];
-    await readyState(store, runs);
-    let active = 0;
-    let peak = 0;
-    const prepare = vi.fn(async ({ runId }: { runId: string }) => {
-      active += 1;
-      peak = Math.max(peak, active);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      active -= 1;
-      if (runId === 'run-b') throw new Error('wallet failure');
-      return emptyPrepared;
-    });
-    const orchestrator = new Orchestrator(store, new ExecutionCoordinator(store, engine({ prepare })), { maxConcurrency: 2, now: () => new Date(NOW) });
-    for (const item of runs) await orchestrator.scheduleRun({ runId: item.id, wallets: ['wallet-a'], idempotencyKey: `schedule-${item.id}` });
-    await orchestrator.tick();
-    await orchestrator.tick();
-    expect(peak).toBeLessThanOrEqual(2);
-    expect(store.snapshot().jobs.filter((job) => job.state === 'succeeded')).toHaveLength(2);
-    expect(store.snapshot().jobs.filter((job) => job.state === 'failed')).toHaveLength(1);
+    const liveRun = { ...run('run-live'), mode: 'live' as const };
+    await readyState(store, [liveRun]);
+    const orchestrator = new Orchestrator(store, new ExecutionCoordinator(store, engine()), { now: () => new Date(NOW) });
+    await expect(orchestrator.scheduleRun({ runId: liveRun.id, wallets: ['wallet-a'], idempotencyKey: 'live-job' })).rejects.toThrow('PHASE2_LIVE_MODE_DISABLED');
   });
 
   it('blocks recovered submitted work until boot reconciliation is authoritative', async () => {
@@ -71,12 +54,7 @@ describe('Phase 2 backend operational shell', () => {
       state.attempts.push({ id: 'attempt-recovery', executionId: 'execution-recovery', runId: activeRun.id, wallet: 'wallet-a', nonce: 7, hash: `0x${'a'.repeat(64)}`, state: 'Submitted', createdAt: NOW, updatedAt: NOW });
     });
     const orchestrator = new Orchestrator(store, new ExecutionCoordinator(store, engine()), { now: () => new Date(NOW) });
-    const job = await orchestrator.scheduleRun({ runId: activeRun.id, wallets: ['wallet-a'], idempotencyKey: 'recovery-job' });
-    await store.transaction((state) => { const current = state.jobs.find((item) => item.id === job.id); if (!current) throw new Error('job missing'); current.state = 'running'; current.leaseExpiresAt = '2020-01-01T00:00:00.000Z'; });
-    await orchestrator.start();
-    await orchestrator.stop();
-    expect(store.snapshot().runtime.startupState).toBe('Blocked');
-    expect(store.snapshot().jobs.find((item) => item.id === job.id)?.state).toBe('blocked');
+    await expect(orchestrator.scheduleRun({ runId: activeRun.id, wallets: ['wallet-a'], idempotencyKey: 'recovery-job' })).rejects.toThrow('PHASE2_LIVE_MODE_DISABLED');
   });
 
   it('records chain-time offset and keeps live jobs queued while dependencies are blocked', async () => {
@@ -88,12 +66,7 @@ describe('Phase 2 backend operational shell', () => {
       now: () => new Date(NOW),
       chainTime: () => new Date(new Date(NOW).getTime() + 5_000),
     });
-    const job = await orchestrator.scheduleRun({ runId: scheduledRun.id, wallets: ['wallet-a'], idempotencyKey: 'chain-time-job' });
-    await orchestrator.start();
-    await orchestrator.stop();
-    expect(store.snapshot().runtime.chainTimeOffsetMs).toBe(5_000);
-    expect(store.snapshot().runtime.startupState).toBe('Blocked');
-    expect(store.snapshot().jobs.find((item) => item.id === job.id)?.state).toBe('scheduled');
+    await expect(orchestrator.scheduleRun({ runId: scheduledRun.id, wallets: ['wallet-a'], idempotencyKey: 'chain-time-job' })).rejects.toThrow('PHASE2_LIVE_MODE_DISABLED');
   });
 
   it('projects stale readiness and does not invent balance or eligibility', async () => {

@@ -73,7 +73,8 @@ function iso(value: string | Date): string {
 
 function assertSafePayload(value: unknown, path = 'payload'): void {
   if (value === undefined) return;
-  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return;
+  if (typeof value === 'string') { if (/^0x[0-9a-f]{64}$/i.test(value)) throw new Error('JOB_PAYLOAD_PRIVATE_KEY_REJECTED'); return; }
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return;
   if (typeof value === 'bigint') throw new Error('JOB_PAYLOAD_MUST_BE_JSON_SAFE');
   if (Array.isArray(value)) {
     for (const [index, item] of value.entries()) assertSafePayload(item, `${path}[${index}]`);
@@ -134,11 +135,12 @@ export class Orchestrator {
     if (!input.idempotencyKey) throw new Error('JOB_IDEMPOTENCY_KEY_REQUIRED');
     assertSafePayload(input.payload);
     if (input.chainTimeOffsetMs === undefined && this.options.chainTime) await this.observeChainTime();
-    const kind = input.kind ?? 'execute';
+    const kind = input.kind ?? 'health';
     const initial = this.store.snapshot();
     const run = input.runId ? initial.runs.find((candidate) => candidate.id === input.runId) : undefined;
     if (kind === 'execute' && !run) throw new Error('RUN_NOT_FOUND');
     if (input.runId && !run) throw new Error('RUN_NOT_FOUND');
+    if (run && run.mode === 'live') throw new Error('PHASE2_LIVE_MODE_DISABLED');
     const campaignId = input.campaignId ?? run?.campaignId;
     const target = input.targetAt ?? input.openingAt;
     const targetAt = target === undefined ? undefined : iso(target);
@@ -164,13 +166,8 @@ export class Orchestrator {
     });
   }
 
-  public scheduleRun(input: ScheduleExecutionInput): Promise<ScheduledJobRecord> {
-    const runId = input.runId;
-    if (!runId) return Promise.reject(new Error('RUN_ID_REQUIRED'));
-    const wallets = input.wallets ?? [];
-    const target = input.targetAt ?? input.openingAt;
-    const targetKey = target === undefined ? 'immediate' : iso(target);
-    return this.schedule({ ...input, kind: 'execute', idempotencyKey: input.idempotencyKey ?? `execute:${runId}:${wallets.map((wallet) => wallet.toLowerCase()).sort().join(',')}:${targetKey}:${input.tMinusMs ?? 0}` });
+  public scheduleRun(_input: ScheduleExecutionInput): Promise<ScheduledJobRecord> {
+    return Promise.reject(new Error('PHASE2_LIVE_MODE_DISABLED'));
   }
 
   public enqueue(input: ScheduleJobInput): Promise<ScheduledJobRecord> { return this.schedule(input); }

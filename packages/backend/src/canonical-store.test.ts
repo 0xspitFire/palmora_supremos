@@ -55,12 +55,23 @@ function campaignInput(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false
 }
 
 async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false): Promise<Campaign> {
-  return fixtureValue.application.createCampaign(campaignInput(chainId, paid));
+  const campaignValue = await fixtureValue.application.createCampaign(campaignInput(chainId, paid));
+  for (const [index, address] of [WALLET_ONE, WALLET_TWO].entries()) {
+    const walletId = `wallet-${chainId}-${index}`;
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${chainId}`, address, `test-key-${index}`, NOW);
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
+  }
+  return campaignValue;
 }
 
 async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = []): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
   const run: RunRecord = { id: `run-${campaignValue.id}`, intentId: `intent-${campaignValue.id}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
   const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [...simulationIds], evidenceAt: NOW, createdAt: NOW };
+  for (const [index, address] of wallets.entries()) {
+    const walletId = `wallet-${campaignValue.chainId}-${index}`;
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${campaignValue.chainId}`, address, `test-key-${index}`, NOW);
+    fixtureValue.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
+  }
   await fixtureValue.store.transaction((state) => { state.runs.push(run); state.intents.push(intent); });
   const persistedRun = fixtureValue.store.snapshot().runs.find((item) => item.id === run.id);
   if (!persistedRun) throw new Error('run missing');
@@ -245,6 +256,9 @@ describe('CanonicalStoreBridge', () => {
         state.campaigns.push(campaignValue);
         state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational: { secretStoreReference: 'TEST_OPERATOR', storePath: 'state.sqlite', custody: { provider: 'turnkey', providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-test-policy', policyDigest: `0x${'1'.repeat(64)}`, policyStatus: 'approved', healthStatus: 'healthy', attestationStatus: 'verified', evidenceId: 'custody-evidence-1', observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' }, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' } };
       });
+      const walletId = `wallet-${ETHEREUM}-0`;
+      value.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run(walletId, `profile-${ETHEREUM}`, WALLET_ONE, 'test-key-0', NOW);
+      value.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
       const persisted = value.store.snapshot().campaigns.find((item) => item.id === campaignValue.id);
       if (!persisted) throw new Error('campaign missing');
       await value.store.transaction((state) => { state.simulations.push({ id: 'simulation-daily-arm', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(persisted), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 34n }); });

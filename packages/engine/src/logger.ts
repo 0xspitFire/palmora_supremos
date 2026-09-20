@@ -53,6 +53,14 @@ export function createLogger(
 
   return pino({
     level,
+    redact: {
+      paths: [
+        '**.privateKey', '**.mnemonic', '**.seed', '**.passphrase', '**.password',
+        '**.token', '**.authorization', '**.apiKey', '**.calldata', '**.rawTx',
+        '**.rawTransaction', '**.payload', '**.providerUrl', '**.endpointUrl',
+      ],
+      censor: '[REDACTED]',
+    },
     transport: {
       targets,
     },

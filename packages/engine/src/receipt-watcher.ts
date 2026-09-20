@@ -95,7 +95,7 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
                 ? this.options.finalityPolicy.stages[0]!
                 : this.options.finalityPolicy.settlementStage
             );
-            if (observation && 'canonical' in observation && !observation.canonical) {
+            if (observation && 'canonical' in observation && observation.canonical === false) {
               throw new ReceiptReorgedError(txHash, receipt.blockNumber);
             }
             if ((observation && !observation.ready) || finalityStage !== this.options.finalityPolicy.settlementStage) {

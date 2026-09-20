@@ -74,7 +74,7 @@ export {
 export { LocalEncryptedSigner, generateAndEncryptWallets, importAndEncryptWallets, zeroizePrivateKeyArray } from './signer.js';
 export type { WalletImportRecord } from './signer.js';
 export { TurnkeySigner, createTurnkeyClient, readTurnkeySecretConfig, readTurnkeyWalletMap } from './turnkey-signer.js';
-export type { TurnkeyClient, TurnkeyHealthReport, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
+export type { TurnkeyClient, TurnkeyHealthReport, TurnkeyPolicyBinding, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
 export { importPrivateKeyToTurnkey } from './turnkey-import.js';
 export type { TurnkeyImportClient, TurnkeyPrivateKeyImport } from './turnkey-import.js';
 
@@ -86,6 +86,41 @@ export { ReceiptWatcherImpl } from './receipt-watcher.js';
 export { ReceiptReorgedError, ReceiptTimeoutError } from './receipt-watcher.js';
 export { EthereumFinalityObserver, RobinhoodFinalityObserver } from './finality-observer.js';
 export type { FinalityObserver, FinalityObservation, FinalitySources, RobinhoodFinalitySources } from './finality-observer.js';
+
+// Read-only Phase 2 chain facts
+export {
+  ChainFactsReader,
+  appendReceiptObservation,
+  classifyFreshness,
+  detectReorg,
+  DEFAULT_CHAIN_FACT_FRESHNESS,
+  ETHEREUM_CHAIN_FINALITY,
+  L2_CHAIN_FINALITY,
+} from './chain-facts.js';
+export type {
+  ChainFact,
+  ChainFactAvailability,
+  ChainFactErrorCode,
+  ChainFactKind,
+  ChainFactProvenance,
+  ChainFactsFreshnessPolicy,
+  ChainFactsReaderOptions,
+  ChainHead,
+  ChainLog,
+  ChainLogFilter,
+  ChainDropFact,
+  DropPhase,
+  DropSupplyFact,
+  WalletChainFact,
+  ChainReceiptFact,
+  ReceiptFactStatus,
+  ChainFinalityFact,
+  ReorgFact,
+  ReceiptObservationHistory,
+  ReceiptReadResult,
+  FactFreshness,
+  FreshnessStatus,
+} from './chain-facts.js';
 
 // Safety
 export { KillSwitch, SpendTracker } from './safety.js';

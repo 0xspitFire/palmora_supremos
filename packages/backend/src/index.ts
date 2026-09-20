@@ -18,7 +18,39 @@ export type { BackendErrorCode, NormalizedError } from './errors.js';
 export { APPROVED_KEYSTORE_REFERENCE, MAINNET_SECRET_FILE_REFERENCE, assertSafeConfig } from './config.js';
 export type { BackendConfig, SecretReference, SecretStore } from './config.js';
 export { ReadModelService } from './read-model.js';
-export type { AlertProjection, CalendarProjection, EthAmount, FinalityProjection, GateCheck, GateSummary, HomeProjection, ReadinessProjection, ReadModelAvailability, ReadModelEnvelope, ReadModelIssue, ReadModelSeverity, RetryPolicy, RunProjection, RunReadModel, SourcedAmount, SystemHealthProjection, WalletReadinessProjection } from './read-model.js';
+export type { RunReadModel, AlertProjection, CalendarProjection, FinalityProjection, HomeProjection, ReadinessProjection, ReadModelSeverity, SystemHealthProjection, WalletReadinessProjection } from './read-model.js';
+export { Phase2ReadModelService, ReadModelV1Service, READ_MODEL_CONTRACT, READ_MODEL_VERSION } from './read-model-v1.js';
+export type {
+  AlertReadModel,
+  CalendarEntry,
+  CampaignSummary,
+  CheckOutcome,
+  EthAmount,
+  FinalityReadModel,
+  Freshness,
+  GateCheck,
+  GateSummary,
+  HomeReadModel,
+  OpportunityReadModel,
+  OutcomeReason,
+  ProjectionRequest,
+  Provenance,
+  ReadModelAvailability,
+  ReadModelEnvelope,
+  ReadModelIssue,
+  ReadinessSummary,
+  RetryPolicy,
+  SafeAction,
+  SourcedAmount,
+  SourcedQuantity,
+  SystemHealthReadModel,
+  TimelineEvent,
+  TransactionAttemptReadModel,
+  TransactionReceiptReadModel,
+  WalletExecutionResult,
+  WalletReadinessRow,
+  ReconciliationReadModel,
+} from './read-model-v1.js';
 export { ReadOnlyApi, ReadModelApi } from './api.js';
 export type { ReadOnlyApiRequest, ReadOnlyApiResponse } from './api.js';
 export { normalizeTotalFeeBudget } from './fees.js';
@@ -37,3 +69,18 @@ export { PHASE2_DEFAULTS } from './phase2-defaults.js';
 export type { ImmediateAlertType } from './phase2-defaults.js';
 export { assertCustodyReadiness, assertLiveOperationalReadiness } from './custody.js';
 export type { ApprovedCustodyProvider, CustodyAttestationStatus, CustodyHealthStatus, CustodyPolicyBinding, CustodyPolicyStatus, CustodyProvider, CustodyReadiness } from './custody.js';
+export { AlertManager, DEFAULT_ALERT_POLICY, DEFAULT_ALERT_THRESHOLDS, evaluateOperationalAlerts } from './alerts.js';
+export type { AlertInput, AlertKind, AlertPolicy, AlertPriority, AlertThresholds, OperationalAlert, OperationalSnapshot } from './alerts.js';
+export { JsonJobStore } from './job-store.js';
+export type { ScheduledJob, ScheduledJobState, ScheduledJobStore } from './job-store.js';
+export { CanonicalJobStore } from './canonical-job-store.js';
+export { MetricsRegistry, RedactedLogger, redactError, redactRecord, redactText, safeLabel } from './observability.js';
+export type { LogLevel, LogWriterOptions } from './observability.js';
+export { loadServiceConfig, summarizeServiceConfig } from './service-config.js';
+export type { OrchestratorServiceConfig, ServiceConfigSummary, ServiceMode } from './service-config.js';
+export { OrchestratorService, pathKillSwitchProbe } from './service-orchestrator.js';
+export type { ScheduleInput } from './service-orchestrator.js';
+export { TelegramNotifier, loadHostSecretStore, telegramAlertText } from './telegram.js';
+export type { HostSecretStore, TelegramCredentials, TelegramFetcher, TelegramFetcherResponse, TelegramHealth, TelegramNotifierOptions } from './telegram.js';
+export { ServiceHttpServer } from './service-http.js';
+export type { ServiceHttpOptions } from './service-http.js';

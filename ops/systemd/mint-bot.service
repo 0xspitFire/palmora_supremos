@@ -1,0 +1,31 @@
+[Unit]
+Description=MintBot supervised orchestrator (dry-run by default)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mintbot
+Group=mintbot
+WorkingDirectory=/opt/mint-bot/current
+EnvironmentFile=/etc/mint-bot/mint-bot.env
+ExecStartPre=/usr/bin/test -f /var/lib/mint-bot/killswitch
+ExecStart=/usr/bin/node /opt/mint-bot/current/packages/cli/dist/orchestrator-service.js
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=5min
+StartLimitBurst=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/mint-bot /var/log/mint-bot
+UMask=0077
+LimitCORE=0
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target

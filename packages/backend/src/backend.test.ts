@@ -71,8 +71,8 @@ describe('backend Phase 1 blockers', () => {
   });
 
   it('redacts sensitive errors and does not retry unknown policy failures', () => {
-    const error = normalizeError(new Error('privateKey=secret calldata=0xdeadbeef'));
-    expect(error.message).toBe('privateKey=[REDACTED] calldata=[REDACTED]'); expect(error.retryable).toBe(false);
+    const error = normalizeError(new Error('privateKey=secret calldata=0xdeadbeef provider=https://user:pass@example.invalid/rpc?api_key=hidden'));
+    expect(error.message).toBe('privateKey=[REDACTED] calldata=[REDACTED] provider=[PROVIDER_URL_REDACTED]'); expect(error.retryable).toBe(false);
   });
 
   it('creates one immutable intent for an idempotent dry-run arm', async () => {
