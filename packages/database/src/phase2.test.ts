@@ -125,6 +125,15 @@ describe('Phase 2 durable read model', () => {
     const summary = repository.refreshSpendSummary('wallet', 'wallet', { asOf: '2026-01-01T00:00:03.000Z' });
     expect(summary.reservedAmountWei).toBe('123456789012345678901234567890');
     expect(new ReadModels(db).spendSummaries('wallet', 'wallet')[0]?.reservedAmount.amount?.value).toBe('123456789012345678901234567890');
+    expect(() => db.prepare("UPDATE spend_summary SET as_of = '2026-01-02T00:00:00.000Z' WHERE id = ?").run(summary.id)).toThrow('append-only snapshots');
+    db.close();
+  });
+
+  it('uses canonical job/readiness tables behind compatibility views', () => {
+    const db = fixture();
+    expect(db.prepare("SELECT type FROM sqlite_master WHERE name = 'orchestrator_job'").get()).toEqual({ type: 'view' });
+    expect(db.prepare("SELECT type FROM sqlite_master WHERE name = 'orchestrator_readiness'").get()).toEqual({ type: 'view' });
+    expect(db.prepare("SELECT type FROM sqlite_master WHERE type = 'table' AND name IN ('orchestrator_job', 'orchestrator_readiness')").all()).toEqual([]);
     db.close();
   });
 });

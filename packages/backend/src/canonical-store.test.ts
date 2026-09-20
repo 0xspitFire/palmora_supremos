@@ -81,6 +81,14 @@ async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: re
 }
 
 describe('CanonicalStoreBridge', () => {
+  it('fails closed when the normalized database is below migration 15', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      value.db.prepare('DELETE FROM schema_migrations WHERE version >= 15').run();
+      await expect(new CanonicalStoreBridge(value.db, { now: () => new Date(NOW) }).open()).rejects.toThrow('NORMALIZED_SCHEMA_VERSION_REQUIRED');
+    } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
+  });
+
   it('does not infer Robinhood Ethereum-finality from an L2 confirmation', () => {
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed')).toBe('unknown');
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'soft')).toBe('soft');
@@ -374,12 +382,12 @@ describe('CanonicalStoreBridge', () => {
         },
         reconcile: async () => ({ result: 'unknown', attempts: [], receipts: [] }),
       };
-      await new ExecutionCoordinator(value.store, engine).execute(prepared.run.id, [WALLET_ONE]);
+      await expect(new ExecutionCoordinator(value.store, engine).execute(prepared.run.id, [WALLET_ONE])).rejects.toThrow('settlement requires enabled-chain finality');
       const snapshot = value.store.snapshot();
       const reservation = snapshot.reservations.find((item) => item.runId === prepared.run.id);
-      expect(reservation?.status).toBe('settled');
-      expect(reservation?.actualAmountWei).toBe(17n);
-      expect(snapshot.receipts.find((item) => item.id === 'provider-receipt')?.actualSpendWei).toBe(17n);
+      expect(reservation?.status).toBe('reserved');
+      expect(reservation?.actualAmountWei).toBeUndefined();
+      expect(snapshot.receipts.find((item) => item.id === 'provider-receipt')).toBeUndefined();
     } finally { await close(value); }
   });
 

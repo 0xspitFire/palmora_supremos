@@ -400,55 +400,14 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public async open(): Promise<void> {
     const row = this.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null };
-    if (row.version === null || row.version < 14) throw new Error('NORMALIZED_SCHEMA_VERSION_REQUIRED');
+    if (row.version === null || row.version < 15) throw new Error('NORMALIZED_SCHEMA_VERSION_REQUIRED');
     const backendState = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backend_state'").get() as { name: string } | undefined;
     if (backendState) throw new Error('JSON_BACKEND_STATE_MUST_NOT_BE_LIVE');
     const reservationColumns = new Set((this.db.prepare('PRAGMA table_info(spend_reservation)').all() as Array<{ name: string }>).map((column) => column.name));
     this.supportsReservationBoundaryFields = ['mint_class', 'fee_policy_id', 'fee_policy_version', 'fee_policy_snapshot_json'].every((column) => reservationColumns.has(column));
     this.supportsCampaignPeriods = Boolean(this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'campaign_period'").get());
     if (row.version >= 15 && (!this.supportsReservationBoundaryFields || !this.supportsCampaignPeriods)) throw new Error('NORMALIZED_SCHEMA_RESERVATION_CONTRACT_REQUIRED');
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS orchestrator_job (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        run_id TEXT,
-        campaign_id TEXT,
-        state TEXT NOT NULL,
-        scheduled_at TEXT NOT NULL,
-        target_at TEXT,
-        t_minus_ms INTEGER NOT NULL,
-        chain_time_offset_ms INTEGER NOT NULL,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        request_digest TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER NOT NULL,
-        last_error TEXT,
-        next_attempt_at TEXT,
-        lease_owner TEXT,
-        lease_expires_at TEXT,
-        started_at TEXT,
-        completed_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS orchestrator_readiness (
-        id TEXT PRIMARY KEY,
-        campaign_id TEXT NOT NULL,
-        wallet TEXT NOT NULL,
-        state TEXT NOT NULL,
-        fresh_until TEXT NOT NULL,
-        source_block TEXT,
-        source_block_hash TEXT,
-        observed_at TEXT,
-        blocking_reasons_json TEXT NOT NULL,
-        checks_json TEXT NOT NULL,
-        check_states_json TEXT,
-        provenance_json TEXT
-      )
-    `);
+    if (!this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'orchestrator_job'").get() || !this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'orchestrator_readiness'").get()) throw new Error('CANONICAL_ORCHESTRATOR_VIEWS_REQUIRED');
     this.opened = true;
   }
 
@@ -857,10 +816,10 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     for (const campaign of next.campaigns) this.persistCampaign(campaign, previous.campaigns.find((item) => item.id === campaign.id));
     for (const run of next.runs) this.persistRun(run, previous.runs.find((item) => item.id === run.id));
     for (const intent of next.intents) this.persistIntent(intent, previous.intents.find((item) => item.id === intent.id));
-    for (const reservation of next.reservations) this.persistReservation(reservation, previous.reservations.find((item) => item.id === reservation.id));
     for (const attempt of next.attempts) this.persistAttempt(attempt, previous.attempts.find((item) => item.id === attempt.id));
     for (const receipt of next.receipts) this.persistReceipt(receipt, previous.receipts.find((item) => item.id === receipt.id));
     for (const reconciliation of next.reconciliations) this.persistReconciliation(reconciliation, previous.reconciliations.find((item) => item.id === reconciliation.id));
+    for (const reservation of next.reservations) this.persistReservation(reservation, previous.reservations.find((item) => item.id === reservation.id));
     for (const event of next.events) this.persistEvent(event, previous.events.find((item) => item.id === event.id));
     for (const notification of next.notificationOutbox) this.persistNotification(notification, previous.notificationOutbox.find((item) => item.id === notification.id));
     for (const evidence of next.chainEvidence) this.persistChainEvidence(evidence, previous.chainEvidence.find((item) => item.id === evidence.id));
