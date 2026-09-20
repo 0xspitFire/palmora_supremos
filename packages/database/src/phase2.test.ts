@@ -158,7 +158,9 @@ describe('Phase 2 durable read model', () => {
     expect(db.prepare("SELECT wallet_id, state, decision FROM readiness_snapshot WHERE id = 'compat-readiness'").get()).toEqual({ wallet_id: 'wallet', state: 'ready', decision: 'ready' });
     db.prepare("UPDATE orchestrator_readiness SET state = 'Blocked', observed_at = '2026-01-01T00:01:00.000Z' WHERE id = 'compat-readiness'").run();
     expect(db.prepare("SELECT COUNT(*) AS count FROM readiness_snapshot WHERE campaign_id = 'campaign'").get()).toEqual({ count: 2 });
-    expect(() => db.prepare("DELETE FROM orchestrator_readiness WHERE id = 'compat-readiness'").run()).toThrow('append-only');
+    expect(db.prepare("SELECT state FROM orchestrator_readiness WHERE campaign_id = 'campaign' AND wallet = '0xabc'").get()).toEqual({ state: 'blocked' });
+    db.prepare("DELETE FROM orchestrator_readiness WHERE id = 'compat-readiness'").run();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM orchestrator_readiness WHERE campaign_id = 'campaign' AND wallet = '0xabc'").get()).toEqual({ count: 0 });
     db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES ('raw-chain', 3, 'Raw', '[]', 1, '2026-01-01T00:00:00.000Z')").run();
     expect(() => db.prepare("UPDATE chain_profile SET verification_status = 'verified', verification_evidence_json = '\"x\"', verification_approved_by = 'operator', verification_approved_at = '2026-01-01T00:00:00.000Z', execution_enabled = 1 WHERE id = 'raw-chain'").run()).toThrow('substantive finality evidence');
     expect(() => db.prepare("INSERT INTO backup_restore_evidence (id, store_reference, backup_reference, sha256, schema_version, operation, outcome, kill_switch_engaged, evidence_json, recorded_at, encryption_verified, integrity_check) VALUES ('raw-forged-backup', 'store', 'backup', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 19, 'verification', 'passed', 0, '{}', '2026-01-01T00:00:00.000Z', 0, 'not_recorded')").run()).toThrow('incomplete');

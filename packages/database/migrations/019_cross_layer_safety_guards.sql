@@ -6,8 +6,15 @@ DROP TRIGGER orchestrator_readiness_update;
 DROP TRIGGER orchestrator_readiness_delete;
 DROP VIEW orchestrator_readiness;
 
+CREATE TABLE readiness_compat_tombstone (
+  campaign_id TEXT NOT NULL,
+  wallet_id TEXT NOT NULL REFERENCES wallet(id),
+  deleted_at TEXT NOT NULL,
+  PRIMARY KEY (campaign_id, wallet_id)
+);
+
 CREATE VIEW orchestrator_readiness AS
-SELECT r.id,
+SELECT CASE WHEN instr(r.id, ':update:') > 0 THEN substr(r.id, 1, instr(r.id, ':update:') - 1) ELSE r.id END AS id,
        r.campaign_id,
        COALESCE(w.address, r.wallet_id) AS wallet,
        COALESCE(r.canonical_state, CASE r.state WHEN 'failed' THEN 'blocked' ELSE r.state END) AS state,
@@ -20,7 +27,16 @@ SELECT r.id,
        r.check_states_json,
        r.provenance_json
   FROM readiness_snapshot r
-  LEFT JOIN wallet w ON w.id = r.wallet_id;
+  LEFT JOIN wallet w ON w.id = r.wallet_id
+ WHERE NOT EXISTS (
+   SELECT 1 FROM readiness_compat_tombstone t
+    WHERE t.campaign_id = r.campaign_id AND t.wallet_id = r.wallet_id
+ )
+   AND NOT EXISTS (
+     SELECT 1 FROM readiness_snapshot newer
+      WHERE newer.campaign_id = r.campaign_id AND newer.wallet_id = r.wallet_id
+        AND (newer.checked_at > r.checked_at OR (newer.checked_at = r.checked_at AND newer.id > r.id))
+   );
 
 CREATE TRIGGER orchestrator_readiness_insert
 INSTEAD OF INSERT ON orchestrator_readiness
@@ -28,6 +44,9 @@ BEGIN
   SELECT CASE WHEN NOT EXISTS (
     SELECT 1 FROM wallet w WHERE lower(w.address) = lower(NEW.wallet) OR w.id = NEW.wallet
   ) THEN RAISE(ABORT, 'orchestrator readiness wallet not found') END;
+  DELETE FROM readiness_compat_tombstone
+   WHERE campaign_id = NEW.campaign_id
+     AND wallet_id = (SELECT w.id FROM wallet w WHERE lower(w.address) = lower(NEW.wallet) OR w.id = NEW.wallet LIMIT 1);
   INSERT INTO readiness_snapshot (id, campaign_id, wallet_id, canonical_state, state,
                                   decision, next_action, checked_at, expires_at, fresh_until,
                                   source_block, source_block_number, source_block_hash,
@@ -63,6 +82,9 @@ BEGIN
   SELECT CASE WHEN NOT EXISTS (
     SELECT 1 FROM wallet w WHERE lower(w.address) = lower(NEW.wallet) OR w.id = NEW.wallet
   ) THEN RAISE(ABORT, 'orchestrator readiness wallet not found') END;
+  DELETE FROM readiness_compat_tombstone
+   WHERE campaign_id = NEW.campaign_id
+     AND wallet_id = (SELECT w.id FROM wallet w WHERE lower(w.address) = lower(NEW.wallet) OR w.id = NEW.wallet LIMIT 1);
   INSERT INTO readiness_snapshot (id, campaign_id, wallet_id, canonical_state, state,
                                   decision, next_action, checked_at, expires_at, fresh_until,
                                   source_block, source_block_number, source_block_hash,
@@ -95,7 +117,11 @@ END;
 CREATE TRIGGER orchestrator_readiness_delete
 INSTEAD OF DELETE ON orchestrator_readiness
 BEGIN
-  SELECT RAISE(ABORT, 'readiness snapshots are append-only');
+  INSERT OR REPLACE INTO readiness_compat_tombstone (campaign_id, wallet_id, deleted_at)
+  SELECT OLD.campaign_id, w.id, CURRENT_TIMESTAMP
+    FROM wallet w
+   WHERE lower(w.address) = lower(OLD.wallet) OR w.id = OLD.wallet
+   LIMIT 1;
 END;
 
 DROP TRIGGER reservation_settlement_finality_guard;
@@ -156,7 +182,7 @@ WHEN NOT EXISTS (
 )
  OR (NEW.transaction_attempt_id IS NOT NULL AND NOT EXISTS (
    SELECT 1 FROM transaction_attempt a
-    WHERE a.id = NEW.transaction_attempt_id AND (a.execution_id IS NULL OR a.execution_id = NEW.execution_id)
+     WHERE a.id = NEW.transaction_attempt_id AND a.execution_id = NEW.execution_id
  ))
  OR (NEW.transaction_receipt_id IS NOT NULL AND NOT EXISTS (
    SELECT 1
@@ -166,6 +192,15 @@ WHEN NOT EXISTS (
       AND (NEW.transaction_attempt_id IS NULL OR a.id = NEW.transaction_attempt_id)
  ))
 BEGIN SELECT RAISE(ABORT, 'finality evidence identity does not match execution chain'); END;
+
+CREATE TRIGGER reconciliation_evidence_guard
+BEFORE INSERT ON reconciliation_record
+WHEN NEW.policy_version IS NULL
+  OR length(trim(NEW.policy_version)) = 0
+  OR json_valid(NEW.details_json) = 0
+  OR json_type(NEW.details_json) <> 'object'
+  OR length(trim(NEW.details_json)) <= 2
+BEGIN SELECT RAISE(ABORT, 'reconciliation requires policy and source evidence'); END;
 
 CREATE TRIGGER chain_verification_substantive_guard
 BEFORE INSERT ON chain_verification

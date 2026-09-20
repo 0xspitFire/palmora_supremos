@@ -488,6 +488,7 @@ export class DurableRepository {
       if (!profile) throw new Error('chain profile not found for reorg event');
       const attempt = record.transactionAttemptId === undefined ? undefined : this.db.prepare('SELECT execution_id, chain_profile_id, tx_hash, from_address, nonce FROM transaction_attempt WHERE id = ?').get(record.transactionAttemptId) as { execution_id: string | null; chain_profile_id: string | null; tx_hash: string | null; from_address: string | null; nonce: number | null } | undefined;
       if (record.transactionAttemptId !== undefined && !attempt) throw new Error('transaction attempt not found for reorg event');
+      if (record.executionId !== undefined && record.transactionAttemptId === undefined) throw new Error('reorg event requires transaction attempt identity');
       if (attempt?.chain_profile_id !== null && attempt?.chain_profile_id !== undefined && attempt.chain_profile_id !== record.chainProfileId) throw new Error('reorg event chain does not match attempt');
       if (record.executionId !== undefined && attempt?.execution_id !== record.executionId) throw new Error('reorg event execution does not match attempt');
       if (record.transactionAttemptId !== undefined && (!attempt?.tx_hash || !attempt.from_address || attempt.nonce === null)) throw new Error('reorg event requires transaction identity facts');
