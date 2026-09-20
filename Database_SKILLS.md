@@ -87,3 +87,7 @@ Receive entities from Product Manager, architecture from CTO/Lead, and event fac
 
 - Migration `017_cto_invariant_guards.sql` requires substantive approval evidence before verified/enabled chain admission, enforces five-minute-to-24-hour simulation freshness and non-future observations, and guards campaign-wallet chain/membership identity at the SQLite boundary.
 - Reconciliation now requires transaction hash, sender, nonce, matching attempt/execution identity, policy version, and non-empty source evidence. Passed backup evidence requires existing store/backup/restore/off-host paths, an active retention policy, encryption/integrity proof, and an engaged kill switch.
+
+### 2026-09-20 — Independent-review cross-layer corrections
+
+- Migration `019_cross_layer_safety_guards.sql` makes orchestrator readiness compatibility writes append-only and wallet-ID aware, permits settlement from final reconciliation evidence, binds finality observations to execution identity, and closes raw-SQL bypasses for chain approval, backup evidence, and campaign-wallet updates.

@@ -560,11 +560,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   public async persistEngineReconciliation(record: unknown): Promise<void> {
     this.ensureOpen();
     const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; fromAddress?: string; nonce?: number; state?: string; source?: string; details?: Record<string, unknown>; checkedAt?: string };
-    if (!input.id || !input.executionId || !input.fromAddress || input.nonce === undefined || !input.state || !input.source || !input.checkedAt) throw new Error('LIFECYCLE_RECONCILIATION_FACTS_REQUIRED');
+    if (!input.id || !input.executionId || !input.transactionAttemptId || !input.txHash || !input.fromAddress || input.nonce === undefined || !input.state || !input.source || !input.checkedAt) throw new Error('LIFECYCLE_RECONCILIATION_FACTS_REQUIRED');
     const identity = this.executionIdentity(input.executionId);
     if (!identity) throw new Error('EXECUTION_CHAIN_REQUIRED');
     if (this.db.prepare('SELECT id FROM reconciliation_record WHERE id = ?').get(input.id)) return;
-    this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, ...(input.transactionAttemptId ? { transactionAttemptId: input.transactionAttemptId } : {}), ...(input.txHash ? { txHash: input.txHash } : {}), fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, policyVersion: 'phase2-reconciliation-v1', details: input.details && Object.keys(input.details).length > 0 ? input.details : { sourceEvidence: input.source }, executionId: input.executionId });
+    this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, transactionAttemptId: input.transactionAttemptId, txHash: input.txHash, fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, policyVersion: 'phase2-reconciliation-v1', details: input.details && Object.keys(input.details).length > 0 ? input.details : { sourceEvidence: input.source }, executionId: input.executionId });
   }
 
   public async admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult> {
@@ -935,7 +935,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (!record.attemptId || !intent?.hash || intent.nonce === undefined) return;
     const profile = run ? this.chainProfileForCampaign(run.campaignId) : undefined;
     if (!profile) throw new Error('CHAIN_PROFILE_REQUIRED');
-    this.databaseStore.recordReconciliation({ id: record.id, chainProfileId: profile.id, ...(record.attemptId ? { transactionAttemptId: this.attemptIdForExecution(record.attemptId) } : {}), ...(record.reason ? { details: { reason: record.reason } } : {}), state: databaseReconciliationState(record.result), checkedAt: record.observedAt, source: 'backend-reconcile', ...(intent ? { fromAddress: intent.wallet } : {}), ...(intent?.nonce === undefined ? {} : { nonce: intent.nonce }), ...(intent?.hash ? { txHash: intent.hash } : {}), ...(record.attemptId ? { executionId: record.attemptId } : {}) });
+    this.databaseStore.recordReconciliation({ id: record.id, chainProfileId: profile.id, transactionAttemptId: this.attemptIdForExecution(record.attemptId), txHash: intent.hash, fromAddress: intent.wallet, nonce: intent.nonce, state: databaseReconciliationState(record.result), checkedAt: record.observedAt, source: 'backend-reconcile', policyVersion: 'phase2-reconciliation-v1', details: record.reason ? { sourceEvidence: record.reason } : { sourceEvidence: 'backend-reconcile' }, executionId: record.attemptId });
   }
 
   private persistEvent(event: EventRecord, prior: EventRecord | undefined): void {

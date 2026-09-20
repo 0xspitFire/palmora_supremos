@@ -490,10 +490,11 @@ export class DurableRepository {
       if (record.transactionAttemptId !== undefined && !attempt) throw new Error('transaction attempt not found for reorg event');
       if (attempt?.chain_profile_id !== null && attempt?.chain_profile_id !== undefined && attempt.chain_profile_id !== record.chainProfileId) throw new Error('reorg event chain does not match attempt');
       if (record.executionId !== undefined && attempt?.execution_id !== record.executionId) throw new Error('reorg event execution does not match attempt');
+      if (record.transactionAttemptId !== undefined && (!attempt?.tx_hash || !attempt.from_address || attempt.nonce === null)) throw new Error('reorg event requires transaction identity facts');
       const evidence = json(record.evidence ?? {}) ?? '{}';
       this.db.prepare('INSERT INTO reorg_event (id, chain_profile_id, transaction_attempt_id, old_block_hash, new_block_hash, previous_finality_stage, new_finality_stage, detected_at, evidence_json, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.transactionAttemptId ?? null, record.oldBlockHash ?? null, record.newBlockHash ?? null, record.previousFinalityStage, record.newFinalityStage, record.detectedAt, evidence, record.executionId ?? attempt?.execution_id ?? null);
       if (record.transactionAttemptId !== undefined) {
-        this.db.prepare('INSERT INTO reconciliation_record (id, chain_profile_id, transaction_attempt_id, tx_hash, from_address, nonce, state, checked_at, source, details_json, execution_id) VALUES (?, ?, ?, ?, ?, ?, \'reorged\', ?, \'reorg-event\', ?, ?)').run(`${record.id}:reconciliation`, record.chainProfileId, record.transactionAttemptId, attempt?.tx_hash ?? null, attempt?.from_address ?? null, attempt?.nonce ?? null, record.detectedAt, evidence, record.executionId ?? attempt?.execution_id ?? null);
+         this.db.prepare("INSERT INTO reconciliation_record (id, chain_profile_id, transaction_attempt_id, tx_hash, from_address, nonce, state, checked_at, source, details_json, execution_id, policy_version) VALUES (?, ?, ?, ?, ?, ?, 'reorged', ?, 'reorg-event', ?, ?, 'phase2-reconciliation-v1')").run(`${record.id}:reconciliation`, record.chainProfileId, record.transactionAttemptId, attempt?.tx_hash, attempt?.from_address, attempt?.nonce, record.detectedAt, json({ sourceEvidence: record.evidence ?? {}, reorgEventId: record.id }) ?? '{}', record.executionId ?? attempt?.execution_id ?? null);
       }
     });
   }
