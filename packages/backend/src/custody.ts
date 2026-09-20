@@ -70,6 +70,7 @@ export function assertLiveOperationalReadiness(
   expected?: CustodyPolicyBinding,
 ): void {
   if (!operational) throw new Error('RUNTIME_READINESS_REQUIRED');
+  if (operational.signerReady === false) throw new Error('SIGNER_NOT_READY');
   assertCustodyReadiness(operational.custody, now, expected);
   if (operational.killSwitchEngaged) throw new Error('KILL_SWITCH_ENGAGED');
   if (!operational.notificationReady) throw new Error('NOTIFICATION_NOT_READY');
