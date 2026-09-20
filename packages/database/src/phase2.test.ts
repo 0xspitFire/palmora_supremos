@@ -50,7 +50,7 @@ describe('Phase 2 durable read model', () => {
     const db = fixture();
     const repository = new DurableRepository(db);
     db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES ('unapproved-chain', 2, 'Test', '[]', 1, '2026-01-01T00:00:00.000Z')").run();
-    expect(() => repository.recordChainVerification({ id: 'unapproved-check', chainProfileId: 'unapproved-chain', status: 'verified', chainId: 2, executionEnabled: true, checkedAt: '2026-01-01T00:00:00.000Z' })).toThrow('substantive evidence');
+    expect(() => repository.recordChainVerification({ id: 'unapproved-check', chainProfileId: 'unapproved-chain', status: 'verified', chainId: 2, executionEnabled: true, checkedAt: '2026-01-01T00:00:00.000Z' })).toThrow('approved finality evidence');
     expect(() => db.prepare("UPDATE chain_profile SET verification_status = 'verified', execution_enabled = 1 WHERE id = 'unapproved-chain'").run()).toThrow('approval evidence');
     expect(() => repository.recordSimulation({ id: 'too-fresh', walletId: 'wallet', campaignId: 'campaign', sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('between five minutes');
     expect(() => repository.recordSimulation({ id: 'future-simulation', walletId: 'wallet', campaignId: 'campaign', sourceBlockNumber: 1, checkedAt: '2099-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('future');

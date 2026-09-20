@@ -558,10 +558,6 @@ export class DurableRepository {
     if (record.outcome === 'passed' && (record.encryptionVerified !== true || record.integrityCheck !== 'ok' || !record.killSwitchEngaged || !backupReferenceExists(record.storeReference) || !backupReferenceExists(record.backupReference))) throw new Error('passed backup evidence requires encrypted, verified, kill-switched references');
     if (!/^[a-f0-9]{64}$/i.test(record.sha256)) throw new Error('backup evidence hash must be SHA-256');
     if (record.verificationSha256 !== undefined && record.verificationSha256.toLowerCase() !== record.sha256.toLowerCase()) throw new Error('backup verification hash mismatch');
-    if (record.outcome === 'passed') {
-      if (!record.killSwitchEngaged) throw new Error('passed backup evidence requires kill switch engagement');
-      if (!existsSync(record.storeReference) || !existsSync(record.backupReference)) throw new Error('passed backup evidence requires existing store and backup paths');
-    }
     if (existsSync(record.backupReference)) {
       const actualHash = createHash('sha256').update(readFileSync(record.backupReference)).digest('hex');
       if (actualHash !== record.sha256.toLowerCase()) throw new Error('backup evidence hash does not match backup');

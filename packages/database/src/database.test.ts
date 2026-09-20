@@ -541,7 +541,6 @@ describe('database migrations and spend reservations', () => {
     expect(db.prepare('SELECT encryption_verified, integrity_check FROM backup_restore_evidence WHERE id = ?').get('backup-evidence-integrity')).toEqual({ encryption_verified: 1, integrity_check: 'ok' });
     expect(() => repository.recordAuditEvent({ id: 'secret-audit', entityType: 'run', entityId: 'run', actor: 'test', reason: 'secret boundary', policySnapshot: { privateKey: 'not-written' }, occurredAt: '2026-01-01T00:00:03.000Z' })).toThrow('approved secret store');
     expect(() => db.prepare("UPDATE retention_evidence SET rows_deleted = 4 WHERE id = 'retention-evidence'").run()).toThrow('retention evidence is append-only');
-    rmSync(evidenceDirectory, { recursive: true, force: true });
     db.close();
   });
 
@@ -615,7 +614,7 @@ describe('database migrations and spend reservations', () => {
     const futureSimulationCampaignId = campaignFixture(db, 'stale-as-of-future');
     const futureIntent = linkedExecutionFixture(db, futureSimulationCampaignId, 'stale-as-of-future').intentId;
     const historicalCheckedAt = new Date(Date.now() - 7200 * 1000).toISOString();
-    new DurableRepository(db).recordSimulation({ id: 'stale-as-of-old-simulation', walletId: 'wallet', campaignId: futureSimulationCampaignId, transactionIntentId: futureIntent, sourceBlockNumber: 1, checkedAt: historicalCheckedAt, freshnessSeconds: 1, outcome: 'pass', toolVersion: 'test' });
+    new DurableRepository(db).recordSimulation({ id: 'stale-as-of-old-simulation', walletId: 'wallet', campaignId: futureSimulationCampaignId, transactionIntentId: futureIntent, sourceBlockNumber: 1, checkedAt: historicalCheckedAt, freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' });
     new DurableRepository(db).recordSimulation({ id: 'stale-as-of-future-simulation', walletId: 'wallet', campaignId: futureSimulationCampaignId, transactionIntentId: futureIntent, sourceBlockNumber: 2, checkedAt: new Date(Date.parse(historicalCheckedAt) + 3600 * 1000).toISOString(), freshnessSeconds: 3600, outcome: 'pass', toolVersion: 'test' });
     expect(models.staleSimulations(new Date(Date.parse(historicalCheckedAt) + 1800 * 1000))).toMatchObject([{ simulationId: 'stale-as-of-old-simulation' }]);
     db.close();
@@ -627,10 +626,10 @@ describe('database migrations and spend reservations', () => {
     const otherCampaignId = campaignFixture(db, 'simulation-identity-other');
     const { intentId } = linkedExecutionFixture(db, campaignId, 'simulation-identity');
     const repository = new DurableRepository(db);
-    expect(() => repository.recordSimulation({ id: 'simulation-campaign-mismatch', walletId: 'wallet', campaignId: otherCampaignId, transactionIntentId: intentId, sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation transaction intent identity mismatch');
-    expect(() => repository.recordSimulation({ id: 'simulation-invalid-block', walletId: 'wallet', campaignId, sourceBlockNumber: -1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation source block must be a non-negative integer');
-    expect(() => repository.recordSimulation({ id: 'simulation-invalid-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: 'not-a-date', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
-    expect(() => repository.recordSimulation({ id: 'simulation-future-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: new Date(Date.now() + 60_000).toISOString(), freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
+    expect(() => repository.recordSimulation({ id: 'simulation-campaign-mismatch', walletId: 'wallet', campaignId: otherCampaignId, transactionIntentId: intentId, sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation does not match transaction intent');
+    expect(() => repository.recordSimulation({ id: 'simulation-invalid-block', walletId: 'wallet', campaignId, sourceBlockNumber: -1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation source block must be a non-negative integer');
+    expect(() => repository.recordSimulation({ id: 'simulation-invalid-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: 'not-a-date', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
+    expect(() => repository.recordSimulation({ id: 'simulation-future-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: new Date(Date.now() + 60_000).toISOString(), freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
     db.close();
   });
 });
