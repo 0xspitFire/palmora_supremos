@@ -15,6 +15,9 @@ RUN --mount=type=cache,id=mintbot-pnpm-store,target=/pnpm/store \
     && pnpm install --offline --frozen-lockfile
 RUN pnpm build
 RUN CI=1 pnpm prune --prod
+# Recreate workspace production links after pruning; the runtime copies the
+# package-local links alongside the shared pnpm store.
+RUN pnpm install --offline --prod --frozen-lockfile
 
 FROM node:20.19.1-bookworm-slim
 ENV NODE_ENV=production
