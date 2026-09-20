@@ -81,6 +81,26 @@ describe('Phase 2 backend operational shell', () => {
     expect(response.data?.rows[0]?.cost.balance).toBeNull();
   });
 
+  it('does not settle a completed Ethereum run until receipt finality is authoritative', async () => {
+    const store = new DurableStore();
+    const completedCampaign = { ...campaign, dryRun: false, state: 'Completed' as const };
+    const completedRun = { ...run('run-finality'), mode: 'live' as const, state: 'Completed' as const };
+    await store.transaction((state) => {
+      state.campaigns.push(completedCampaign);
+      state.runs.push(completedRun);
+      state.attempts.push({ id: 'attempt-finality', executionId: 'execution-finality', runId: completedRun.id, wallet: 'wallet-a', nonce: 8, hash: `0x${'c'.repeat(64)}`, state: 'Confirmed', createdAt: NOW, updatedAt: NOW });
+      state.receipts.push({ id: 'receipt-finality', executionId: 'execution-finality', runId: completedRun.id, transactionAttemptId: 'attempt-finality', state: 'Confirmed', blockNumber: 20n, blockHash: `0x${'d'.repeat(64)}`, observedAt: NOW });
+    });
+    const service = new ReadModelService(store, () => new Date(NOW));
+    const pending = service.getRunEnvelope(completedRun.id, 'finality-pending');
+    expect(pending.data?.run.outcome).toBe('partial');
+    expect(pending.data?.walletResults[0]?.finality).toMatchObject({ requiredStage: 'confirmed', stage: 'unknown', settlementReached: false });
+    await store.transaction((state) => { state.receipts[0]!.finalityStage = 'ethereum_final'; });
+    const settled = service.getRunEnvelope(completedRun.id, 'finality-settled');
+    expect(settled.data?.run.outcome).toBe('settled');
+    expect(settled.data?.walletResults[0]?.finality).toMatchObject({ requiredStage: 'confirmed', stage: 'confirmed', settlementReached: true });
+  });
+
   it('redacts operational secrets from GET projections', async () => {
     const store = new DurableStore();
     const currentRun = run('run-redaction');

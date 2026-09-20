@@ -112,11 +112,22 @@ function snapshotId(state: BackendState): string {
   return `snapshot_${createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24)}`;
 }
 
-function wireFinality(chainId: 1 | 4663, attempt: AttemptRecord | undefined, observedAt: string | null, now: Date, downgradeReason?: string): FinalityProjection {
-  const stage: FinalityProjection['stage'] = chainId === 4663 ? attempt?.robinhoodFinality === 'final' ? 'ethereum_final' : attempt?.robinhoodFinality ?? 'unknown' : attempt?.state === 'Confirmed' ? 'confirmed' : 'unknown';
+function wireFinality(chainId: 1 | 4663, attempt: AttemptRecord | undefined, receipt: BackendState['receipts'][number] | undefined, observedAt: string | null, now: Date, downgradeReason?: string): FinalityProjection {
+  const stage: FinalityProjection['stage'] = chainId === 4663
+    ? attempt?.state === 'Reorged' || receipt?.state === 'Reorged'
+      ? 'unknown'
+      : receipt?.finalityStage === 'ethereum_final' || attempt?.robinhoodFinality === 'final'
+        ? 'ethereum_final'
+        : receipt?.finalityStage === 'posted' || attempt?.robinhoodFinality === 'posted'
+          ? 'posted'
+          : receipt?.finalityStage === 'soft' || attempt?.robinhoodFinality === 'soft'
+            ? 'soft'
+            : 'unknown'
+    : attempt?.state === 'Confirmed' && receipt?.state === 'Confirmed' && receipt.finalityStage === 'ethereum_final' ? 'confirmed' : 'unknown';
   const requiredStage = chainId === 4663 ? 'ethereum_final' : 'confirmed';
   const freshness = observedAt ? calculateFreshness(observedAt, new Date(Date.parse(observedAt) + PHASE2_DEFAULTS.readinessFreshnessMs).toISOString(), now) : unknownFreshness();
-  return { stage, requiredStage, settlementReached: stage === requiredStage, observedAt, freshness, provenance: attempt && observedAt ? [{ kind: 'reconciliation', recordId: attempt.id, observedAt }] : [], ...(downgradeReason ? { downgradeReason: safeMessage(downgradeReason) } : {}) };
+  const settlementReached = stage === requiredStage && attempt?.state === 'Confirmed' && receipt?.state === 'Confirmed';
+  return { stage, requiredStage, settlementReached, observedAt, freshness, provenance: attempt && observedAt ? [{ kind: 'reconciliation', recordId: attempt.id, observedAt }] : [], ...(downgradeReason ? { downgradeReason: safeMessage(downgradeReason) } : {}) };
 }
 
 function chainGate(campaign: Campaign, now: Date): GateSummary {
@@ -230,25 +241,27 @@ export class ReadModelService {
       const walletAttempts = attempts.filter((attempt) => attempt.wallet.toLowerCase() === wallet.toLowerCase());
       const latest = walletAttempts.at(-1);
       const finalReceipt = latest ? receipts.find((receipt) => receipt.executionId === latest.executionId && receipt.state === 'Confirmed') : undefined;
-      const finality = latest ? wireFinality(campaign.chainId, latest, finalReceipt?.observedAt ?? latest.updatedAt, this.now()) : null;
-      const success = Boolean(latest && ((campaign.chainId === 1 && latest.state === 'Confirmed') || (campaign.chainId === 4663 && latest.robinhoodFinality === 'final')));
+      const finality = latest ? wireFinality(campaign.chainId, latest, finalReceipt, finalReceipt?.observedAt ?? latest.updatedAt, this.now()) : null;
+      const success = finality?.settlementReached === true;
       return { walletId: wallet, address: wallet, state: success ? 'Minted' : latest?.state === 'Failed' ? 'Failed' : latest ? 'Executing' : 'Unknown', attemptIds: walletAttempts.map((item) => item.id), finality, retry: retryNone(success ? 'SETTLED' : latest?.state === 'Reorged' ? 'RECONCILIATION_REQUIRED' : 'NO_SAFE_RETRY', success ? 'Settlement is recorded' : 'Outcome remains controlled by the Backend', success ? 'Inspect' : latest?.state === 'Reorged' ? 'Wait for reconciliation' : 'No safe action'), freshness };
     });
     const attemptProjection = attempts.map((attempt) => {
       const receipt = receipts.find((item) => item.executionId === attempt.executionId);
-      const finality = wireFinality(campaign.chainId, attempt, receipt?.observedAt ?? attempt.updatedAt, this.now(), attempt.state === 'Reorged' ? 'Canonical observation changed; prior finality is downgraded' : undefined);
+      const finality = wireFinality(campaign.chainId, attempt, receipt, receipt?.observedAt ?? attempt.updatedAt, this.now(), attempt.state === 'Reorged' ? 'Canonical observation changed; prior finality is downgraded' : undefined);
       const state = campaign.chainId === 4663 && attempt.robinhoodFinality === 'soft' ? 'Included' : campaign.chainId === 4663 && attempt.robinhoodFinality === 'posted' ? 'Posted to Ethereum' : campaign.chainId === 4663 && attempt.robinhoodFinality === 'final' ? 'Ethereum final' : attempt.state;
       return { id: attempt.id, walletId: attempt.wallet, hash: attempt.hash ?? null, nonce: attempt.nonce === undefined ? null : String(attempt.nonce), attemptNumber: String(attemptNumber.get(attempt.id) ?? 1), replacementOfId: attempt.replacementOfId ?? null, state, finality, retry: retryNone(attempt.state === 'Reorged' ? 'RECONCILIATION_REQUIRED' : 'NO_SAFE_RETRY', attempt.state === 'Reorged' ? 'Reconciliation is required before retry' : 'No retry is authorized from this read model', attempt.state === 'Reorged' ? 'Wait for reconciliation' : 'No safe action'), ...(attempt.redactedError ? { reason: issue('EXECUTION_ERROR', 'warning', 'Execution did not complete', false, 'Inspect') } : {}) };
     });
     const receiptProjection = receipts.map((receipt) => {
       const attempt = attemptForReceipt(receipt);
-      const finality = wireFinality(campaign.chainId, attempt, receipt.observedAt, this.now(), receipt.state === 'Reorged' ? 'Receipt is no longer canonical' : undefined);
+      const finality = wireFinality(campaign.chainId, attempt, receipt, receipt.observedAt, this.now(), receipt.state === 'Reorged' ? 'Receipt is no longer canonical' : undefined);
       const receiptFreshness = calculateFreshness(receipt.observedAt, new Date(Date.parse(receipt.observedAt) + PHASE2_DEFAULTS.readModelRetentionMs).toISOString(), this.now());
       const receiptProvenance = [{ kind: 'chain_observation', recordId: receipt.id, observedAt: receipt.observedAt }];
-      return { id: receipt.id, attemptId: receipt.transactionAttemptId ?? attempt?.id ?? '', hash: attempt?.hash ?? '', status: receipt.state === 'Failed' ? 'reverted' : receipt.state === 'Reorged' ? 'reorged' : 'confirmed', blockNumber: receipt.blockNumber === undefined ? null : String(receipt.blockNumber), blockHash: receipt.blockHash ?? null, gasUsed: receipt.gasUsed === undefined ? null : { value: receipt.gasUsed.toString(), unit: 'gas' as const, freshness: receiptFreshness, provenance: receiptProvenance }, effectiveGasPrice: receipt.effectiveGasPrice === undefined ? null : amount(receipt.effectiveGasPrice, 'actual', receiptFreshness, receipt.id, receipt.observedAt), actualSpend: amount(receipt.actualSpendWei, 'actual', receiptFreshness, receipt.id, receipt.observedAt), finality };
+      const status = receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Failed' ? 'reverted' : receipt.state === 'Reorged' ? 'reorged' : receipt.state === 'Submitted' || receipt.state === 'Pending' ? 'pending' : 'pending';
+      return { id: receipt.id, attemptId: receipt.transactionAttemptId ?? attempt?.id ?? '', hash: attempt?.hash ?? '', status, blockNumber: receipt.blockNumber === undefined ? null : String(receipt.blockNumber), blockHash: receipt.blockHash ?? null, gasUsed: receipt.gasUsed === undefined ? null : { value: receipt.gasUsed.toString(), unit: 'gas' as const, freshness: receiptFreshness, provenance: receiptProvenance }, effectiveGasPrice: receipt.effectiveGasPrice === undefined ? null : amount(receipt.effectiveGasPrice, 'actual', receiptFreshness, receipt.id, receipt.observedAt), actualSpend: amount(receipt.actualSpendWei, 'actual', receiptFreshness, receipt.id, receipt.observedAt), finality };
     });
     const eventProjection = state.events.filter((event) => event.runId === run.id).map((event) => ({ id: event.id, type: event.type, state: typeof event.data.state === 'string' ? event.data.state : null, occurredAt: event.at, message: safeMessage(event.type.replaceAll('_', ' ')) }));
-    const outcome: RunProjection['run']['outcome'] = run.mode === 'dry-run' && run.state === 'Completed' ? 'dry_run_completed' : run.state === 'Completed' ? 'settled' : run.state === 'Failed' && attempts.length > 0 ? 'partial' : ['Failed', 'Aborted'].includes(run.state) ? attempts.length > 0 ? 'partial' : 'unknown' : attempts.length > 0 ? 'partial' : 'not_started';
+    const settlementReady = walletResults.length > 0 && walletResults.every((wallet) => wallet.finality?.settlementReached === true);
+    const outcome: RunProjection['run']['outcome'] = run.mode === 'dry-run' && run.state === 'Completed' ? 'dry_run_completed' : run.state === 'Completed' && settlementReady ? 'settled' : run.state === 'Completed' ? 'partial' : run.state === 'Failed' && attempts.length > 0 ? 'partial' : ['Failed', 'Aborted'].includes(run.state) ? attempts.length > 0 ? 'partial' : 'unknown' : attempts.length > 0 ? 'partial' : 'not_started';
     return { run: { id: run.id, campaignId: run.campaignId, mode: run.mode, state: run.state, outcome, createdAt: run.createdAt, updatedAt: run.updatedAt, retry: retryNone('NO_SAFE_RETRY', 'Run retry is controlled by Backend admission') }, campaign: { id: campaign.id, state: campaign.state, chainId: String(campaign.chainId), contract: campaign.contract ?? null, quantity: String(campaign.quantity), cost, gate: campaignGate, freshness, provenance: [{ kind: 'backend_store', recordId: campaign.id, observedAt: campaign.updatedAt }] }, walletResults, attempts: attemptProjection, receipts: receiptProjection, reconciliations: reconciliations.map((item) => ({ id: item.id, state: item.result, observedAt: item.observedAt, reason: item.reason ? safeMessage(item.reason) : null, retry: retryNone(item.result === 'unknown' ? 'RECONCILIATION_REQUIRED' : 'NO_SAFE_RETRY', item.result === 'unknown' ? 'Wait for reconciliation' : 'No retry is authorized', item.result === 'unknown' ? 'Wait for reconciliation' : 'No safe action') })), events: eventProjection, freshness, provenance: [{ kind: 'backend_store', recordId: run.id, observedAt: run.updatedAt }] };
   }
 
