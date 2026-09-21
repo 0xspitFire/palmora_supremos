@@ -527,7 +527,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public async persistEngineReceipt(record: unknown): Promise<void> {
     this.ensureOpen();
-    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; status?: string; blockNumber?: bigint; blockHash?: string; confirmations?: number; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; finalityStage?: string; finalitySource?: string; observedAt?: string };
+    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; status?: string; blockNumber?: bigint; blockHash?: string; confirmations?: number; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; finalityStage?: string; robinhoodFinality?: 'soft' | 'posted' | 'final'; finalitySource?: string; observedAt?: string };
     if (typeof input.id !== 'string' || typeof input.executionId !== 'string' || typeof input.transactionAttemptId !== 'string' || typeof input.txHash !== 'string' || typeof input.status !== 'string' || typeof input.observedAt !== 'string') throw new Error('LIFECYCLE_RECEIPT_FACTS_REQUIRED');
     const id = input.id;
     const executionId = input.executionId;
@@ -535,6 +535,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const txHash = input.txHash;
     const status = input.status;
     const observedAt = input.observedAt;
+    const finalityStage = input.finalityStage ?? (input.robinhoodFinality === 'final' ? 'ethereum_final' : input.robinhoodFinality);
     const identity = this.executionIdentity(executionId);
     if (!identity) throw new Error('EXECUTION_CHAIN_REQUIRED');
     if (input.blockNumber === undefined || !input.blockHash) {
@@ -552,7 +553,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const actualSpendWei = actualMintValueWei + actualL2ExecutionGasWei + actualL1DataGasWei;
     await this.transaction((current) => {
       if (current.receipts.some((receipt) => receipt.id === id)) return;
-      current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
+       current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution', entityId: executionId, actor: this.actor, reason: 'lifecycle receipt accounting components', newState: 'receipt_accounting', policySnapshot: { kind: 'receipt_accounting', receiptId: id, actualSpendWei: actualSpendWei.toString(), actualMintValueWei: actualMintValueWei.toString(), actualL2ExecutionGasWei: actualL2ExecutionGasWei.toString(), actualL1DataGasWei: actualL1DataGasWei.toString() }, occurredAt: observedAt });
     });
   }
