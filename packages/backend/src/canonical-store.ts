@@ -544,7 +544,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     }
     const blockNumber = input.blockNumber;
     const blockHash = input.blockHash;
-    const mappedStatus = status === 'reverted' ? 'Failed' : status === 'reorged' ? 'Reorged' : 'Confirmed';
+    const mappedStatus = status === 'reverted' ? 'Failed' : status === 'reorged' ? 'Reorged' : finalityStage !== undefined && finalityStage !== 'ethereum_final' ? 'Pending' : status === 'pending' ? 'Pending' : 'Confirmed';
     const lifecycleAttemptHash = this.attemptHash(transactionAttemptId, executionId);
     if (lifecycleAttemptHash.toLowerCase() !== txHash.toLowerCase()) throw new Error('RECEIPT_ATTEMPT_HASH_MISMATCH');
     const actualMintValueWei = ['reverted', 'reorged', 'dropped'].includes(status) ? 0n : identity.valueWei;
@@ -751,7 +751,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private readReconciliations(): ReconciliationRecord[] {
     const rows = this.db.prepare(`SELECT rr.id, rr.chain_profile_id, rr.transaction_attempt_id, rr.execution_id, rr.tx_hash, rr.from_address, rr.nonce, rr.state, rr.checked_at, rr.details_json, e.run_id FROM reconciliation_record rr LEFT JOIN execution e ON e.id = rr.execution_id ORDER BY rr.checked_at, rr.id`).all() as DatabaseReconciliationRow[];
-    return rows.flatMap((row) => !row.run_id ? [] : [{ id: row.id, runId: row.run_id, ...(row.execution_id ? { attemptId: this.attemptIdForExecution(row.execution_id) } : {}), result: reconciliationResult(row.state), observedAt: row.checked_at, ...(decode<{ reason?: string }>(row.details_json)?.reason ? { reason: decode<{ reason: string }>(row.details_json)!.reason } : {}) } satisfies ReconciliationRecord]);
+    return rows.flatMap((row) => !row.run_id ? [] : [{ id: row.id, runId: row.run_id, ...(row.transaction_attempt_id ? { attemptId: row.transaction_attempt_id } : {}), result: reconciliationResult(row.state), observedAt: row.checked_at, ...(decode<{ reason?: string }>(row.details_json)?.reason ? { reason: decode<{ reason: string }>(row.details_json)!.reason } : {}) } satisfies ReconciliationRecord]);
   }
 
   private readReservations(): Reservation[] {
@@ -930,13 +930,14 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private persistReconciliation(record: ReconciliationRecord, prior: ReconciliationRecord | undefined): void {
     if (prior) return;
     const run = this.runFor(record.runId);
-    const intent = run ? this.intentFor(record.attemptId) : undefined;
+    const attempt = record.attemptId ? this.snapshot().attempts.find((item) => item.id === record.attemptId) : undefined;
+    const executionId = attempt?.executionId;
     // Unknown reconciliation results remain visible in backend state but do
     // not become canonical evidence without transaction identity.
-    if (!record.attemptId || !intent?.hash || intent.nonce === undefined) return;
+    if (!record.attemptId || !attempt?.hash || attempt.nonce === undefined || !executionId) return;
     const profile = run ? this.chainProfileForCampaign(run.campaignId) : undefined;
     if (!profile) throw new Error('CHAIN_PROFILE_REQUIRED');
-    this.databaseStore.recordReconciliation({ id: record.id, chainProfileId: profile.id, transactionAttemptId: this.attemptIdForExecution(record.attemptId), txHash: intent.hash, fromAddress: intent.wallet, nonce: intent.nonce, state: databaseReconciliationState(record.result), checkedAt: record.observedAt, source: 'backend-reconcile', policyVersion: 'phase2-reconciliation-v1', details: record.reason ? { sourceEvidence: record.reason } : { sourceEvidence: 'backend-reconcile' }, executionId: record.attemptId });
+    this.databaseStore.recordReconciliation({ id: record.id, chainProfileId: profile.id, transactionAttemptId: record.attemptId, txHash: attempt.hash, fromAddress: attempt.wallet, nonce: attempt.nonce, state: databaseReconciliationState(record.result), checkedAt: record.observedAt, source: 'backend-reconcile', policyVersion: 'phase2-reconciliation-v1', details: record.reason ? { sourceEvidence: record.reason } : { sourceEvidence: 'backend-reconcile' }, executionId });
   }
 
   private persistEvent(event: EventRecord, prior: EventRecord | undefined): void {
@@ -1129,11 +1130,6 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return intent?.id;
   }
 
-  private attemptIdForExecution(executionId: string): string | undefined {
-    const row = this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(executionId) as { id: string } | undefined;
-    return row?.id;
-  }
-
   private attemptHash(attemptId: string, executionId?: string): string {
     const row = executionId ? this.db.prepare('SELECT tx_hash FROM transaction_attempt WHERE id = ? AND execution_id = ?').get(attemptId, executionId) as { tx_hash: string | null } | undefined : this.db.prepare('SELECT tx_hash FROM transaction_attempt WHERE id = ?').get(attemptId) as { tx_hash: string | null } | undefined;
     if (!row?.tx_hash) throw new Error('RECEIPT_TRANSACTION_HASH_REQUIRED');
@@ -1148,11 +1144,6 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private runFor(runId: string): RunRecord | undefined {
     return this.snapshot().runs.find((run) => run.id === runId);
-  }
-
-  private intentFor(executionId?: string): AttemptRecord | undefined {
-    const row = executionId ? this.db.prepare('SELECT a.id, a.transaction_intent_id, a.nonce, a.tx_hash, w.address FROM transaction_attempt a JOIN transaction_intent ti ON ti.id = a.transaction_intent_id JOIN wallet w ON w.id = ti.wallet_id WHERE a.execution_id = ? ORDER BY a.attempted_at DESC LIMIT 1').get(executionId) as { id: string; transaction_intent_id: string; nonce: number | null; tx_hash: string | null; address: string } | undefined : undefined;
-    return row ? { id: row.id, executionId: executionId ?? '', runId: '', wallet: row.address, ...(row.nonce === null ? {} : { nonce: row.nonce }), ...(row.tx_hash ? { hash: row.tx_hash } : {}), state: 'Submitted', createdAt: '', updatedAt: '' } : undefined;
   }
 
   private runChain(runId: string, runs: readonly RunRecord[]): 1 | 4663 {
