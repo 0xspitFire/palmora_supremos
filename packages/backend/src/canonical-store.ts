@@ -927,7 +927,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     // Posted is the configured settlement stage for the L2 path and is
     // represented as a confirmed receipt with its posted finality evidence.
     // Soft/pending observations remain non-terminal until a later update.
-    const staged = finalityStage === 'soft' || (receipt.state === 'Pending' && finalityStage !== 'posted' && finalityStage !== 'ethereum_final');
+    const staged = finalityStage === 'soft' || finalityStage === 'posted' || (receipt.state === 'Pending' && finalityStage !== 'ethereum_final');
     const persistedStatus = receipt.state === 'Reorged' ? 'reorged' : receipt.state === 'Failed' ? 'reverted' : staged ? 'pending' : 'confirmed';
     this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: persistedStatus, blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, ...(receipt.gasUsed === undefined ? {} : { gasUsed: receipt.gasUsed }), ...(receipt.effectiveGasPrice === undefined ? {} : { effectiveGasPrice: receipt.effectiveGasPrice }), finalityStage, finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
     this.transitionExecutionSafe(receipt.executionId, persistedStatus === 'confirmed' ? 'confirmed' : persistedStatus === 'reorged' ? 'reorged' : staged ? 'submitted' : 'failed', `receipt ${receipt.state}`);
