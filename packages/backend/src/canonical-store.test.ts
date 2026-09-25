@@ -382,7 +382,7 @@ describe('CanonicalStoreBridge', () => {
         },
         reconcile: async () => ({ result: 'unknown', attempts: [], receipts: [] }),
       };
-      await expect(new ExecutionCoordinator(value.store, engine).execute(prepared.run.id, [WALLET_ONE])).rejects.toThrow('settlement requires enabled-chain finality');
+      await expect(new ExecutionCoordinator(value.store, engine).execute(prepared.run.id, [WALLET_ONE])).rejects.toThrow('settlement requires latest authoritative finality or reconciliation');
       const snapshot = value.store.snapshot();
       const reservation = snapshot.reservations.find((item) => item.runId === prepared.run.id);
       expect(reservation?.status).toBe('reserved');
@@ -406,6 +406,32 @@ describe('CanonicalStoreBridge', () => {
       expect(row.transaction_attempt_id).toBe('endpoint-attempt-b');
       expect(value.store.snapshot().receipts.find((receipt) => receipt.id === 'endpoint-receipt')?.transactionAttemptId).toBe('endpoint-attempt-b');
     } finally { await close(value); }
+  });
+
+  it('persists pending staged receipts across restart and rejects unknown statuses', async () => {
+    const value = await fixture(ETHEREUM);
+    let reopened: CanonicalStoreBridge | undefined;
+    try {
+      const campaignValue = await campaign(value, ETHEREUM);
+      const prepared = await armed(value, campaignValue);
+      const admission = await value.store.admitExecution(prepared.input);
+      const executionId = admission.executions[0]!.executionId;
+      const transactionIntentId = admission.executions[0]!.intentId;
+      const txHash = `0x${'9'.repeat(64)}`;
+      await value.store.persistEngineAttempt({ id: 'staged-attempt', executionId, transactionIntentId, endpoint: 'provider', responseClass: 'accepted', txHash, nonce: 9, attemptedAt: NOW });
+      await expect(value.store.persistEngineReceipt({ id: 'invalid-status-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'invented', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, observedAt: NOW })).rejects.toThrow('LIFECYCLE_RECEIPT_STATUS_INVALID');
+      await value.store.persistEngineReceipt({ id: 'staged-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'pending', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, finalityStage: 'soft', observedAt: NOW });
+      expect(value.db.prepare("SELECT status, finality_stage FROM transaction_receipt WHERE id = 'staged-receipt'").get()).toEqual({ status: 'pending', finality_stage: 'unknown' });
+      value.store.close();
+      const reopenedDb = openDatabase(join(value.directory, 'state.sqlite'));
+      reopened = new CanonicalStoreBridge(reopenedDb, { now: () => new Date(NOW) });
+      await reopened.open();
+      expect(reopened.snapshot().receipts.find((receipt) => receipt.id === 'staged-receipt')).toMatchObject({ state: 'Pending' });
+    } finally {
+      if (reopened) reopened.close();
+      else value.store.close();
+      await rm(value.directory, { recursive: true, force: true });
+    }
   });
 
   it('does not charge mint value for a reverted lifecycle receipt', async () => {

@@ -152,6 +152,20 @@ describe('Phase 2 durable read model', () => {
     db.close();
   });
 
+  it('does not let older reconciliation override a later pending receipt', () => {
+    const db = fixture();
+    const repository = new DurableRepository(db);
+    repository.saveIntent({ id: 'intent-evidence-order', campaignId: 'campaign', walletId: 'wallet', intentClass: 'mint', toAddress: '0xcontract', valueWei: 0n, calldata: '0x', chainProfileId: 'chain', createdAt: '2026-01-01T00:00:00.000Z' });
+    repository.saveExecution({ id: 'execution-evidence-order', campaignId: 'campaign', walletId: 'wallet', transactionIntentId: 'intent-evidence-order', state: 'prepared', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordAttempt({ id: 'attempt-evidence-order', transactionIntentId: 'intent-evidence-order', executionId: 'execution-evidence-order', endpoint: 'test', responseClass: 'accepted', txHash: '0xevidence', nonce: 3, attemptedAt: '2026-01-01T00:00:01.000Z' });
+    db.prepare("INSERT INTO spend_reservation (id, wallet_id, campaign_id, chain_profile_id, execution_id, transaction_intent_id, idempotency_key, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at) VALUES ('reservation-evidence-order', 'wallet', 'campaign', 'chain', 'execution-evidence-order', 'intent-evidence-order', 'evidence-order-key', 'policy', '10', '10', '2026-01-01', 'reserved', '2026-01-01T00:00:00.000Z')").run();
+    repository.recordReconciliation({ id: 'reconciliation-evidence-order', chainProfileId: 'chain', transactionAttemptId: 'attempt-evidence-order', executionId: 'execution-evidence-order', txHash: '0xevidence', fromAddress: '0xabc', nonce: 3, state: 'final', source: 'test', policyVersion: 'phase2-reconciliation-v1', details: { sourceEvidence: 'older final evidence' }, checkedAt: '2026-01-01T00:00:02.000Z' });
+    repository.recordReceipt({ id: 'pending-evidence-order', transactionAttemptId: 'attempt-evidence-order', executionId: 'execution-evidence-order', txHash: '0xevidence', status: 'pending', blockNumber: 3, blockHash: '0xblock', confirmations: 1, finalityStage: 'posted', observedAt: '2026-01-01T00:00:03.000Z' });
+    expect(() => db.prepare("UPDATE spend_reservation SET status = 'settled', settled_amount_wei = '10', settled_at = '2026-01-01T00:00:04.000Z' WHERE id = 'reservation-evidence-order'").run()).toThrow('latest authoritative');
+    expect(() => repository.refreshSpendSummary('wallet', 'wallet')).not.toThrow();
+    db.close();
+  });
+
   it('writes compatibility readiness append-only and protects raw SQL evidence boundaries', () => {
     const db = fixture();
     db.prepare("INSERT INTO orchestrator_readiness (id, campaign_id, wallet, state, fresh_until, source_block, observed_at, blocking_reasons_json, checks_json) VALUES ('compat-readiness', 'campaign', '0xabc', 'Ready', '2026-01-01T00:05:00.000Z', '1', '2026-01-01T00:00:00.000Z', '[]', '{}')").run();

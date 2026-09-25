@@ -278,6 +278,7 @@ function executionState(state: string): AttemptRecord['state'] {
 function receiptState(state: string): AttemptRecord['state'] {
   if (state === 'reorged') return 'Reorged';
   if (state === 'confirmed') return 'Confirmed';
+  if (state === 'pending') return 'Pending';
   return 'Failed';
 }
 
@@ -544,7 +545,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     }
     const blockNumber = input.blockNumber;
     const blockHash = input.blockHash;
-    const mappedStatus = status === 'reverted' ? 'Failed' : status === 'reorged' ? 'Reorged' : finalityStage !== undefined && finalityStage !== 'ethereum_final' ? 'Pending' : status === 'pending' ? 'Pending' : 'Confirmed';
+    if (!['pending', 'confirmed', 'reverted', 'reorged', 'dropped'].includes(status)) throw new Error('LIFECYCLE_RECEIPT_STATUS_INVALID');
+    const mappedStatus = status === 'pending' ? 'Pending' : status === 'confirmed' ? 'Confirmed' : status === 'reorged' ? 'Reorged' : 'Failed';
     const lifecycleAttemptHash = this.attemptHash(transactionAttemptId, executionId);
     if (lifecycleAttemptHash.toLowerCase() !== txHash.toLowerCase()) throw new Error('RECEIPT_ATTEMPT_HASH_MISMATCH');
     const actualMintValueWei = ['reverted', 'reorged', 'dropped'].includes(status) ? 0n : identity.valueWei;
