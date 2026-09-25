@@ -93,3 +93,4 @@ Receive entities from Product Manager, architecture from CTO/Lead, and event fac
 - Migration `019_cross_layer_safety_guards.sql` makes orchestrator readiness compatibility writes append-only and wallet-ID aware, permits settlement from final reconciliation evidence, binds finality observations to execution identity, and closes raw-SQL bypasses for chain approval, backup evidence, and campaign-wallet updates.
 - Migrations `020_staged_finality_pending.sql` and `021_settlement_evidence_order.sql` preserve pending soft/posted receipt evidence across restart while preventing older reconciliation from overriding a later pending receipt during settlement.
 - Protected CI must execute environment, verify, Anvil, and Docker jobs on the approved `mintbot-wsl-junayd` runner before PR16 merge.
+- Environment setup cancellation is treated as an incomplete gate; rerun before merge rather than accepting skipped jobs.
