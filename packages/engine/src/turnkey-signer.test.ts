@@ -144,4 +144,10 @@ describe('Turnkey transaction boundary', () => {
     expect(calls).toEqual([]);
     testSigner.zeroize();
   });
+
+  it('does not treat an arbitrary successful response as provider-bound health', async () => {
+    const testSigner = signer(policy(), { getPolicies: async () => ({ policies: [] }) });
+    await expect(testSigner.probe()).rejects.toThrow('TURNKEY_POLICY_NOT_FOUND');
+    testSigner.zeroize();
+  });
 });
