@@ -17,6 +17,7 @@ import { EvidenceService, campaignInputDigest } from './evidence.js';
 import { HealthService } from './health.js';
 import { RuntimeReadinessService } from './runtime-readiness.js';
 import { validateOpsHealthEnvironment } from './ops-health-harness.js';
+import { assertLiveOperationalReadiness } from './custody.js';
 import type { Campaign, ChainEvidenceRecord, EngineAdapter } from './types.js';
 
 class ReadyStore extends DurableStore { override capabilities() { return { durable: true, atomicAcrossProcesses: true }; } }
@@ -25,7 +26,8 @@ const emptyResult = { executionIds: [], attempts: [], receipts: [], state: 'Prep
 const unknownUpdate = { result: 'unknown' as const, attempts: [], receipts: [] };
 const engine = (overrides: Partial<EngineAdapter> = {}): EngineAdapter => ({ prepare: async () => emptyResult, execute: async () => emptyResult, reconcile: async () => unknownUpdate, ...overrides });
 const feePolicy = { kind: 'free' as const, configuredPriorityFeeWei: 20n, freeTotalSpendCapWei: 40n, l2ExecutionGasBudgetWei: 10n, l1DataGasBudgetWei: 4n, totalFeeBudgetWei: 34n };
-const operational = { secretStoreReference: 'TEST_BOT', storePath: 'state.sqlite', signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified' as const, lastReconciliationAt: '2026-08-28T00:00:00.000Z', observedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z' };
+const custody = { provider: 'turnkey' as const, providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-test-policy', policyDigest: `0x${'1'.repeat(64)}`, policyStatus: 'approved' as const, healthStatus: 'healthy' as const, attestationStatus: 'verified' as const, evidenceId: 'custody-evidence-1', observedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z' };
+const operational = { secretStoreReference: 'TEST_BOT', storePath: 'state.sqlite', signerReady: true, custody, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified' as const, lastReconciliationAt: '2026-08-28T00:00:00.000Z', observedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z' };
 const verification = (status: 'unverified' | 'verified' = 'verified') => ({ chainId: 4663 as const, status, seaDropCompatible: status === 'verified', evidenceId: 'evidence-1', checkedAt: '2026-08-28T00:00:00.000Z', sourceBlock: 1n, endpointReference: 'ROBINHOOD_RPC_REFERENCE' });
 const submittedEvidence = (overrides: Partial<ChainEvidenceRecord> = {}): ChainEvidenceRecord => ({ id: 'evidence-1', chainId: 4663, status: 'pending', executionEnabled: false, seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, negativeCases: { revert: true, sold_out: true, price_drift: true, insufficient_funds: true, quantity_limit: true, stale_phase: true, fee_recipient: true, kill: true, cap: true }, reconciliationPassed: true, finalityPassed: true, endpointIdentity: 'ROBINHOOD_RPC_REFERENCE', strategyVersion: 'seadrop-v1-public@1', checkedAt: '2026-08-28T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', sourceBlock: 1n, sourceBlockHash: '0xblock', ...overrides });
 async function installAcceptedEvidence(store: DurableStore, overrides: Partial<ChainEvidenceRecord> = {}): Promise<EvidenceService> { const service = new EvidenceService(store, () => new Date(), { verify: (_record, approval) => approval.verifierId === 'engineering-lead' && approval.proof === 'approval-proof' }); await service.recordChainEvidence(submittedEvidence(overrides)); await service.acceptChainEvidence('evidence-1', { verifierId: 'engineering-lead', proof: 'approval-proof', acceptedAt: '2026-08-28T00:01:00.000Z' }); return service; }
@@ -179,6 +181,32 @@ describe('backend Phase 1 blockers', () => {
     expect(health.operational?.storePath).toBe('state.sqlite'); expect(health.operational?.secretStoreReference).toBe('TEST_BOT');
   });
 
+  it('requires typed, fresh custody evidence instead of a signer boolean', () => {
+    expect(() => assertLiveOperationalReadiness(undefined, new Date('2026-08-29T00:00:00.000Z'))).toThrow('RUNTIME_READINESS_REQUIRED');
+    expect(() => assertLiveOperationalReadiness({ ...operational, signerReady: undefined as never }, new Date('2026-08-29T00:00:00.000Z'))).toThrow('SIGNER_NOT_READY');
+    expect(() => assertLiveOperationalReadiness({ ...operational, custody: undefined as never }, new Date('2026-08-29T00:00:00.000Z'))).toThrow('CUSTODY_EVIDENCE_REQUIRED');
+    expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, expiresAt: '2026-08-28T00:00:00.000Z' } }, new Date('2026-08-29T00:00:00.000Z'))).toThrow('CUSTODY_EVIDENCE_STALE');
+    expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, provider: 'local' } }, new Date('2026-08-29T00:00:00.000Z'))).toThrow('CUSTODY_PROVIDER_UNAPPROVED');
+    expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, policyStatus: 'rejected' } }, new Date('2026-08-29T00:00:00.000Z'))).toThrow('CUSTODY_POLICY_NOT_APPROVED');
+  });
+
+  it('rejects wrong provider or policy bindings without accessing signer material', () => {
+    const expected = { provider: 'turnkey' as const, providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-approved-policy', policyDigest: `0x${'2'.repeat(64)}` };
+    expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, providerIdentity: 'turnkey-other-org' } }, new Date('2026-08-29T00:00:00.000Z'), expected)).toThrow('CUSTODY_PROVIDER_MISMATCH');
+    expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, policyReference: 'turnkey-wrong-policy', policyDigest: expected.policyDigest } }, new Date('2026-08-29T00:00:00.000Z'), expected)).toThrow('CUSTODY_POLICY_MISMATCH');
+  });
+
+  it('rejects local signer live admission and keeps Robinhood execution disabled', async () => {
+    const store = new ReadyStore();
+    const input = await readyLiveInput(store);
+    await store.transaction((state) => { state.runtime.operational = { ...operational, custody: { ...operational.custody, provider: 'local' } }; });
+    await expect(new ExecutionCoordinator(store, engine()).arm(input, 'live')).rejects.toThrow('CUSTODY_PROVIDER_UNAPPROVED');
+    await store.transaction((state) => { state.runtime.operational = operational; });
+    const coordinator = new ExecutionCoordinator(store, engine());
+    const run = await coordinator.arm(input, 'live');
+    await expect(coordinator.execute(run.id, ['wallet-1'])).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
+  });
+
   it('fails closed without ops references and accepts only complete non-production metadata', () => {
     const now = new Date('2026-08-29T00:00:00.000Z');
     const missing = validateOpsHealthEnvironment({}, now);
@@ -198,10 +226,10 @@ describe('backend Phase 1 blockers', () => {
     await expect(new ExecutionCoordinator(store, engine()).arm({ campaign, wallets: ['wallet-1'], simulationIds: ['sim-1'], evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
   });
 
-  it('allows only one concurrent execution claim', async () => {
+  it('keeps Robinhood execution disabled before any reservation or engine call', async () => {
     const store = new ReadyStore(); const input = await readyLiveInput(store); const coordinator = new ExecutionCoordinator(store, engine()); const run = await coordinator.arm(input, 'live');
     const results = await Promise.allSettled([coordinator.execute(run.id, ['wallet-1']), coordinator.execute(run.id, ['wallet-1'])]);
-    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1); expect(store.snapshot().reservations).toHaveLength(1);
+    expect(results.filter(result => result.status === 'rejected')).toHaveLength(2); expect(store.snapshot().reservations).toHaveLength(0); expect(store.snapshot().events.some(event => event.type === 'execution_facts_recorded')).toBe(false);
   });
 
   it('keeps startup blocked while an execution outcome is unknown', async () => {
@@ -209,19 +237,19 @@ describe('backend Phase 1 blockers', () => {
     expect(store.snapshot().runtime.startupState).toBe('Blocked'); expect(store.snapshot().runtime.blockingReasons).toContain('UNRESOLVED_EXECUTIONS');
   });
 
-  it('settles Robinhood only from observed final receipt spend', async () => {
+  it('does not execute Robinhood even when synthetic finality facts are supplied', async () => {
     const store = new ReadyStore(); const input = await readyLiveInput(store);
     const adapter = engine({
       execute: async request => ({ executionIds: ['execution-1'], attempts: [{ id: 'attempt-1', executionId: 'execution-1', runId: request.runId, wallet: 'wallet-1', nonce: 1, hash: '0xhash', state: 'Pending', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], receipts: [], state: 'Pending' }),
       reconcile: async run => ({ result: 'final', attempts: [{ id: 'attempt-final', executionId: 'execution-1', runId: run.id, wallet: 'wallet-1', nonce: 1, hash: '0xhash', state: 'Confirmed', robinhoodFinality: 'final', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], receipts: [{ id: 'receipt-final', executionId: 'execution-1', runId: run.id, state: 'Confirmed', robinhoodFinality: 'final', blockNumber: 2n, blockHash: '0xfinal', actualSpendWei: 12n, observedAt: new Date().toISOString() }] }),
     });
-    const coordinator = new ExecutionCoordinator(store, adapter); const run = await coordinator.arm(input, 'live'); await coordinator.execute(run.id, ['wallet-1']); expect(store.snapshot().reservations[0]?.status).toBe('reserved'); await coordinator.reconcile(); expect(store.snapshot().reservations[0]).toMatchObject({ status: 'settled', actualAmountWei: 12n }); expect(store.snapshot().runs[0]?.state).toBe('Completed');
+    const coordinator = new ExecutionCoordinator(store, adapter); const run = await coordinator.arm(input, 'live'); await expect(coordinator.execute(run.id, ['wallet-1'])).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED'); expect(store.snapshot().reservations).toHaveLength(0);
   });
 
-  it('downgrades a completed run when later reconciliation observes a reorg', async () => {
+  it('does not begin a Robinhood run that could later require reorg reconciliation', async () => {
     const store = new ReadyStore(); const input = await readyLiveInput(store); let observation = 0;
     const adapter = engine({ execute: async request => ({ executionIds: ['execution-1'], attempts: [{ id: 'attempt-1', executionId: 'execution-1', runId: request.runId, wallet: 'wallet-1', nonce: 1, hash: '0xhash', state: 'Pending', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], receipts: [], state: 'Pending' }), reconcile: async run => { observation += 1; return observation === 1 ? { result: 'final', attempts: [{ id: 'attempt-final', executionId: 'execution-1', runId: run.id, wallet: 'wallet-1', nonce: 1, hash: '0xhash', state: 'Confirmed', robinhoodFinality: 'final', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], receipts: [{ id: 'receipt-final', executionId: 'execution-1', runId: run.id, state: 'Confirmed', robinhoodFinality: 'final', blockNumber: 2n, blockHash: '0xfinal', actualSpendWei: 12n, observedAt: new Date().toISOString() }] } : { result: 'reorged', attempts: [], receipts: [{ id: 'receipt-reorg', executionId: 'execution-1', runId: run.id, state: 'Reorged', robinhoodFinality: 'soft', blockNumber: 2n, blockHash: '0xreorged', actualSpendWei: 12n, observedAt: new Date().toISOString() }], reason: 'canonical block changed' }; } });
-    const coordinator = new ExecutionCoordinator(store, adapter); const run = await coordinator.arm(input, 'live'); await coordinator.execute(run.id, ['wallet-1']); await coordinator.reconcile(); await coordinator.reconcile(); expect(store.snapshot().runs[0]?.state).toBe('Failed');
+    const coordinator = new ExecutionCoordinator(store, adapter); const run = await coordinator.arm(input, 'live'); await expect(coordinator.execute(run.id, ['wallet-1'])).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED'); expect(store.snapshot().runs[0]?.state).toBe('Armed');
   });
 
   it('exposes canonical missing-run errors and confines wallet paths', () => {

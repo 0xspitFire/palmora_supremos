@@ -67,6 +67,8 @@ export { validateOpsHealthEnvironment } from './ops-health-harness.js';
 export type { OpsHealthEnvironment, OpsHealthValidation } from './ops-health-harness.js';
 export { PHASE2_DEFAULTS } from './phase2-defaults.js';
 export type { ImmediateAlertType } from './phase2-defaults.js';
+export { assertCustodyReadiness, assertLiveOperationalReadiness } from './custody.js';
+export type { ApprovedCustodyProvider, CustodyAttestationStatus, CustodyHealthStatus, CustodyPolicyBinding, CustodyPolicyStatus, CustodyProvider, CustodyReadiness } from './custody.js';
 export { AlertManager, DEFAULT_ALERT_POLICY, DEFAULT_ALERT_THRESHOLDS, evaluateOperationalAlerts } from './alerts.js';
 export type { AlertInput, AlertKind, AlertPolicy, AlertPriority, AlertThresholds, OperationalAlert, OperationalSnapshot } from './alerts.js';
 export { JsonJobStore } from './job-store.js';

@@ -3,8 +3,8 @@ import type { BackendStore } from './store.js';
 import type { AttemptRecord, BackendState, Campaign, CampaignState, EngineAdapter, EventRecord, IntentRecord, ReceiptRecord, Reservation, RunRecord, ValidatedCampaign } from './types.js';
 import { SpendLedger } from './spend-ledger.js';
 import { EvidenceService, liveRequestDigest } from './evidence.js';
-import { assertRobinhoodFreePolicy } from './policy.js';
 import { rebindExecutionResult, type CanonicalExecutionStore } from './canonical-store.js';
+import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
 
 export class ExecutionCoordinator {
   readonly ledger: SpendLedger;
@@ -13,6 +13,7 @@ export class ExecutionCoordinator {
   constructor(
     private readonly store: BackendStore,
     private readonly engine: EngineAdapter,
+    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding } = {},
   ) {
     this.ledger = new SpendLedger(store);
     this.evidence = new EvidenceService(store);
@@ -51,7 +52,8 @@ export class ExecutionCoordinator {
       if (initial.runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED');
       if (!initial.runtime.dependencies.engine || !initial.runtime.dependencies.chain || !initial.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
       this.assertLiveStoreReady();
-      if (!initial.runtime.operational || initial.runtime.operational.expiresAt <= new Date().toISOString() || !initial.runtime.operational.secretStoreReference || !initial.runtime.operational.storePath || !initial.runtime.operational.signerReady || initial.runtime.operational.killSwitchEngaged || !initial.runtime.operational.notificationReady || initial.runtime.operational.chainVerification !== 'verified') throw new Error('RUNTIME_READINESS_REQUIRED');
+      if (!initial.runtime.operational?.secretStoreReference || !initial.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
+      assertLiveOperationalReadiness(initial.runtime.operational, new Date(), this.options.expectedCustodyPolicy);
       simulationIds = this.evidence.assertLiveEvidence(canonicalInput);
       if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
       if (!campaign.chainVerification.evidenceId || !campaign.chainVerification.checkedAt || campaign.chainVerification.sourceBlock === undefined) throw new Error('CHAIN_VERIFICATION_EVIDENCE_REQUIRED');
@@ -96,13 +98,14 @@ export class ExecutionCoordinator {
     if (current.runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED');
     if (!current.runtime.dependencies.engine || !current.runtime.dependencies.chain || !current.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
     this.assertLiveStoreReady();
-    if (!current.runtime.operational || current.runtime.operational.expiresAt <= new Date().toISOString() || !current.runtime.operational.secretStoreReference || !current.runtime.operational.storePath || !current.runtime.operational.signerReady || current.runtime.operational.killSwitchEngaged || !current.runtime.operational.notificationReady || current.runtime.operational.chainVerification !== 'verified') throw new Error('RUNTIME_READINESS_REQUIRED');
+    if (!current.runtime.operational?.secretStoreReference || !current.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
+    assertLiveOperationalReadiness(current.runtime.operational, new Date(), this.options.expectedCustodyPolicy);
     this.evidence.assertLiveEvidence({ campaign, wallets: intent.wallets, simulationIds: intent.simulationIds, evidenceAt: intent.evidenceAt });
     if (wallets.length !== intent.wallets.length || wallets.some(wallet => !intent.wallets.some(armed => armed.toLowerCase() === wallet.toLowerCase()))) throw new Error('EXECUTION_FLEET_MISMATCH');
+    if (campaign.chainId === 4663) throw new Error('ROBINHOOD_EXECUTION_DISABLED');
     const totalFee = campaign.feePolicy.totalFeeBudgetWei;
     if (totalFee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
     const reservationAmount = campaign.mintPriceWei * BigInt(campaign.quantity) + totalFee;
-    if (campaign.chainId === 4663) assertRobinhoodFreePolicy(campaign.spendPolicy.gasCeilingWei, campaign.spendPolicy.dailyCapWei, reservationAmount);
     const canonical = this.canonicalStore();
     let reservations: Reservation[];
     let prepared: Awaited<ReturnType<CanonicalExecutionStore['admitExecution']>>['executions'] = [];

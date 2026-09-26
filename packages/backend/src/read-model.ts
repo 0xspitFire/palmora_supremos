@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import type { AttemptRecord, BackendState, Campaign, EventRecord, Freshness, ReadinessCheck, RunRecord } from './types.js';
 import { PHASE2_DEFAULTS } from './phase2-defaults.js';
+import { assertLiveOperationalReadiness } from './custody.js';
 
 export interface RunReadModel { run: Readonly<RunRecord>; campaign: Readonly<Campaign>; events: readonly Readonly<EventRecord>[]; attempts: readonly Readonly<BackendState['attempts'][number]>[]; receipts: readonly Readonly<BackendState['receipts'][number]>[]; reconciliations: readonly Readonly<BackendState['reconciliations'][number]>[]; readiness: readonly Readonly<ReadinessCheck>[]; }
 
@@ -288,10 +289,11 @@ export class ReadModelService {
     for (const [name, ready] of Object.entries(state.runtime.dependencies)) if (!ready) blockers.push(issue(`${name.toUpperCase()}_NOT_READY`, 'blocking', `${name} dependency is not ready`, false, name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
     const operational = state.runtime.operational;
     if (operational) {
-      if (!operational.signerReady) blockers.push(issue('SIGNER_NOT_READY', 'blocking', 'The configured signer is not ready', false, 'Inspect'));
+      if (operational.signerReady !== true) blockers.push(issue('SIGNER_NOT_READY', 'blocking', 'The configured signer is not ready', false, 'Inspect'));
       if (!operational.notificationReady) blockers.push(issue('NOTIFICATIONS_NOT_READY', 'blocking', 'Notification delivery is not ready', false, 'Inspect'));
       if (operational.chainVerification !== 'verified') blockers.push(issue('CHAIN_VERIFICATION_REQUIRED', 'blocking', 'Chain verification is not current', false, 'Refresh read model'));
       if (Number.isFinite(Date.parse(operational.expiresAt)) && Date.parse(operational.expiresAt) <= Date.parse(checkedAt)) blockers.push(issue('OPERATIONAL_READINESS_STALE', 'blocking', 'Operational readiness evidence is stale', false, 'Refresh read model'));
+      try { assertLiveOperationalReadiness(operational, new Date(checkedAt)); } catch (error) { blockers.push(issue(error instanceof Error ? error.message : 'CUSTODY_READINESS_REQUIRED', 'blocking', 'Custody readiness evidence is missing or invalid', false, 'Inspect')); }
     }
     if (state.runtime.startupState !== 'Ready' && !blockers.some((item) => item.code === 'STARTUP_RECONCILIATION_REQUIRED')) blockers.push(issue('STARTUP_RECONCILIATION_REQUIRED', 'blocking', 'Startup reconciliation is not complete', false, 'Wait for reconciliation'));
     const killed = state.killed || operational?.killSwitchEngaged === true;
