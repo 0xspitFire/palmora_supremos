@@ -78,7 +78,8 @@ For an approved host, run `pnpm ops:backup` with explicit `STORE_PATH` and
 `KILL_SWITCH_PATH`, and the secret-manager-injected `BACKUP_ENCRYPTION_KEY`.
 Retain only the encrypted snapshot and checksum sidecar for exactly 30 days;
 record the redacted snapshot name, checksum, schema version, operation, and
-kill-switch state.
+kill-switch state. The backup command does not enforce object-store retention;
+the selected off-host provider must enforce versioning and retention separately.
 
 Robinhood characterization uses `SEQUENCER_URL` and `FEED_URL`, defaulting to
 the documented mainnet endpoints. Set `CHECK_ROBINHOOD=true` only for probes;
@@ -122,7 +123,9 @@ must remain retained as intermediate reconciliation states.
 
 Runtime readiness uses `SIGNER_HEALTH_URL` and, after Phase 1,
 `NOTIFICATION_HEALTH_URL` service probes rather than operator readiness
-booleans. Chain verification comes from the RPC chain-ID probe. The health
+booleans. Chain identity comes from the RPC chain-ID probe, but identity alone
+is not finality or live authorization. Durable backup, reconciliation, finality,
+execution-state, custody, and human-evidence gates remain required. The health
 probe reports statuses and safe reason codes only; it never reports endpoint
 values, secret-store values, private material, or passphrases.
 
@@ -135,6 +138,8 @@ jobs in the authoritative normalized store in WAL mode, reconciles before
 scheduled work, and exposes loopback-only `/livez`, `/readyz`, `/health`,
 `/status`, and `/metrics` endpoints. The service does not accept HTTP control
 commands, handle wallet keys, sign transactions, or broadcast transactions.
+The legacy JSON job path is not an authority for live state and must not replace
+the normalized SQLite job projection.
 
 The checked-in `ops/systemd/mint-bot.service` is a local WSL/host unit template,
 not an installation or a production-readiness claim. It runs as an unprivileged
@@ -148,8 +153,9 @@ health or Telegram result.
 In `dry-run` mode the service does not read Turnkey secret files, wallet maps,
 attestation files, live signer clients, or external RPC configuration; it marks
 external reconciliation blocked until a host profile explicitly enables it.
-Telegram requires HTTPS. A non-HTTPS endpoint is accepted only when it exactly
-matches an explicitly configured loopback approved proxy reference.
+Telegram requires HTTPS. A proxy exception must be an explicitly configured
+loopback proxy URL owned by the service account; a boolean flag alone is not an
+approved transport policy. The bot token remains host-secret-only.
 
 ### Required human inputs
 
