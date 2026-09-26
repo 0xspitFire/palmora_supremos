@@ -2,12 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ReadOnlyApi } from './api.js';
+import { Phase2ReadOnlyApi, ReadOnlyApi } from './api.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { NotificationDispatcher } from './notifications.js';
 import { Orchestrator } from './orchestrator.js';
 import { PHASE2_DEFAULTS } from './phase2-defaults.js';
 import { ReadModelService } from './read-model.js';
+import { Phase2ReadModelService } from './read-model-v1.js';
 import { DurableStore } from './store.js';
 import type { Campaign, EngineAdapter, RunRecord } from './types.js';
 
@@ -141,5 +142,22 @@ describe('Phase 2 backend operational shell', () => {
     expect(response.headers.allow).toBe('GET');
     expect(response.body.issues[0]?.code).toBe('READ_MODEL_GET_ONLY');
     expect(PHASE2_DEFAULTS.readinessFreshnessMs).toBe(300_000);
+  });
+
+  it('fails closed when startup is ready but operational evidence is absent', async () => {
+    const store = new DurableStore();
+    await store.transaction((state) => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+    const response = new Phase2ReadModelService(() => new Date(NOW)).health(store.snapshot(), { requestId: 'health-fail-closed' });
+    expect(response.data?.state).toBe('Not ready');
+    expect(response.issues.some((item) => item.code === 'OPERATIONAL_READINESS_UNKNOWN')).toBe(true);
+  });
+
+  it('wires the v1 GET API to Phase2ReadModelService', () => {
+    const store = new DurableStore();
+    const api = new Phase2ReadOnlyApi(new Phase2ReadModelService(() => new Date(NOW)), store);
+    const response = api.handle({ method: 'GET', path: '/api/v1/read-model/health', requestId: 'v1-api-request' });
+    expect(response.status).toBe(200);
+    expect(response.body.contract).toBe('mintbot.read-model');
+    expect(response.body.version).toBe('1');
   });
 });
