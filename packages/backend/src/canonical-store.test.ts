@@ -36,8 +36,10 @@ async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false
   const db = openDatabase(join(directory, 'state.sqlite'));
   const profileId = `profile-${chainId}`;
   db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(profileId, chainId, chainId === ETHEREUM ? 'Ethereum' : 'Robinhood', '[]', 2, NOW);
-  db.prepare('UPDATE chain_profile SET execution_enabled = ?, verification_status = ? WHERE id = ?').run(chainId === ROBINHOOD ? 0 : executionEnabled ? 1 : 0, chainId === ROBINHOOD ? 'execution_blocked' : 'verified', profileId);
+  const verificationStatus = chainId === ROBINHOOD ? 'execution_blocked' : 'verified';
+  const verificationEvidence = JSON.stringify({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : 'ETH_FEED_REFERENCE', sourceBlock: 1, sourceBlockHash: '0xblock', expiresAt: evidenceExpiresAt, acceptedAt: NOW, acceptedBy: 'test-operator', approvalProof: 'test-proof', strategyVersion: 'seadrop-v1-public@1' });
   if (includeVerification) db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`verification-${chainId}`, profileId, chainId === ROBINHOOD ? 'execution_blocked' : 'verified', chainId, chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : null, chainId === ROBINHOOD ? 'RH_ARCHIVE_REFERENCE' : 'ETH_ARCHIVE_REFERENCE', chainId === ETHEREUM ? 'ETH_FEED_REFERENCE' : null, JSON.stringify({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : 'ETH_FEED_REFERENCE', sourceBlock: 1, sourceBlockHash: '0xblock', expiresAt: evidenceExpiresAt, acceptedAt: NOW, acceptedBy: 'test-operator', approvalProof: 'test-proof', strategyVersion: 'seadrop-v1-public@1' }), NOW, 'test-operator', NOW);
+  db.prepare('UPDATE chain_profile SET execution_enabled = ?, verification_status = ?, verification_evidence_json = ?, verification_approved_by = ?, verification_approved_at = ? WHERE id = ?').run(includeVerification && chainId === ETHEREUM && executionEnabled ? 1 : 0, includeVerification ? verificationStatus : 'unverified', includeVerification ? verificationEvidence : null, includeVerification ? 'test-operator' : null, includeVerification ? NOW : null, profileId);
   db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`fee-${chainId}`, profileId, `test-${chainId}-${paid ? 'paid' : 'free'}`, chainId === ETHEREUM ? 'ordering' : 'fee_only', '34', '40', '20', 2, paid ? 1 : 0, 1, NOW, 'allowed');
   const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW) });
   await store.open();
@@ -79,6 +81,14 @@ async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: re
 }
 
 describe('CanonicalStoreBridge', () => {
+  it('fails closed when the normalized database is below migration 15', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      value.db.prepare('DELETE FROM schema_migrations WHERE version >= 15').run();
+      await expect(new CanonicalStoreBridge(value.db, { now: () => new Date(NOW) }).open()).rejects.toThrow('NORMALIZED_SCHEMA_VERSION_REQUIRED');
+    } finally { value.store.close(); await rm(value.directory, { recursive: true, force: true }); }
+  });
+
   it('does not infer Robinhood Ethereum-finality from an L2 confirmation', () => {
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed')).toBe('unknown');
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'soft')).toBe('soft');
@@ -261,7 +271,7 @@ describe('CanonicalStoreBridge', () => {
       value.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
       const persisted = value.store.snapshot().campaigns.find((item) => item.id === campaignValue.id);
       if (!persisted) throw new Error('campaign missing');
-      await value.store.transaction((state) => { state.simulations.push({ id: 'simulation-daily-arm', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(persisted), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 34n }); });
+      await value.store.transaction((state) => { const checkedAt = new Date().toISOString(); state.simulations.push({ id: 'simulation-daily-arm', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(persisted), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt, expiresAt: new Date(Date.now() + 300_000).toISOString(), worstCaseFeeWei: 34n }); });
       const coordinator = new ExecutionCoordinator(value.store, noopEngine);
       await expect(coordinator.arm({ campaign: campaignValue, wallets: [WALLET_ONE], simulationIds: ['simulation-daily-arm'], evidenceAt: NOW }, 'live')).rejects.toThrow('PAID_ETHEREUM_CAP_REQUIRED');
     } finally { await close(value); }
@@ -360,8 +370,9 @@ describe('CanonicalStoreBridge', () => {
       const campaignValue = await campaign(value, ETHEREUM);
       const prepared = await armed(value, campaignValue, [WALLET_ONE], ['settlement-simulation']);
       await value.store.transaction((state) => {
-        state.simulations.push({ id: 'settlement-simulation', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(campaignValue), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z', worstCaseFeeWei: 34n });
-        state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational: { secretStoreReference: 'TEST_OPERATOR', storePath: 'state.sqlite', signerReady: true, custody: { provider: 'turnkey', providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-test-policy', policyDigest: `0x${'1'.repeat(64)}`, policyStatus: 'approved', healthStatus: 'healthy', attestationStatus: 'verified', evidenceId: 'custody-evidence-1', observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' }, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' } };
+        const checkedAt = new Date().toISOString();
+        state.simulations.push({ id: 'settlement-simulation', campaignId: campaignValue.id, wallet: WALLET_ONE, inputDigest: campaignInputDigest(campaignValue), success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt, expiresAt: new Date(Date.now() + 300_000).toISOString(), worstCaseFeeWei: 34n });
+        state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational: { secretStoreReference: 'TEST_OPERATOR', storePath: 'state.sqlite', signerReady: true, custody: { provider: 'turnkey', providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-test-policy', policyDigest: `0x${'1'.repeat(64)}`, policyStatus: 'approved', healthStatus: 'healthy', attestationStatus: 'verified', evidenceId: 'custody-evidence-1', observedAt: checkedAt, expiresAt: new Date(Date.now() + 300_000).toISOString() }, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: checkedAt, observedAt: checkedAt, expiresAt: new Date(Date.now() + 300_000).toISOString() } };
       });
       const engine: EngineAdapter = {
         prepare: async () => ({ executionIds: [], attempts: [], receipts: [], state: 'Prepared' }),
@@ -371,12 +382,12 @@ describe('CanonicalStoreBridge', () => {
         },
         reconcile: async () => ({ result: 'unknown', attempts: [], receipts: [] }),
       };
-      await new ExecutionCoordinator(value.store, engine).execute(prepared.run.id, [WALLET_ONE]);
+      await expect(new ExecutionCoordinator(value.store, engine).execute(prepared.run.id, [WALLET_ONE])).rejects.toThrow('settlement requires latest authoritative finality or reconciliation');
       const snapshot = value.store.snapshot();
       const reservation = snapshot.reservations.find((item) => item.runId === prepared.run.id);
-      expect(reservation?.status).toBe('settled');
-      expect(reservation?.actualAmountWei).toBe(17n);
-      expect(snapshot.receipts.find((item) => item.id === 'provider-receipt')?.actualSpendWei).toBe(17n);
+      expect(reservation?.status).toBe('reserved');
+      expect(reservation?.actualAmountWei).toBeUndefined();
+      expect(snapshot.receipts.find((item) => item.id === 'provider-receipt')).toBeUndefined();
     } finally { await close(value); }
   });
 
@@ -395,6 +406,32 @@ describe('CanonicalStoreBridge', () => {
       expect(row.transaction_attempt_id).toBe('endpoint-attempt-b');
       expect(value.store.snapshot().receipts.find((receipt) => receipt.id === 'endpoint-receipt')?.transactionAttemptId).toBe('endpoint-attempt-b');
     } finally { await close(value); }
+  });
+
+  it('persists pending staged receipts across restart and rejects unknown statuses', async () => {
+    const value = await fixture(ETHEREUM);
+    let reopened: CanonicalStoreBridge | undefined;
+    try {
+      const campaignValue = await campaign(value, ETHEREUM);
+      const prepared = await armed(value, campaignValue);
+      const admission = await value.store.admitExecution(prepared.input);
+      const executionId = admission.executions[0]!.executionId;
+      const transactionIntentId = admission.executions[0]!.intentId;
+      const txHash = `0x${'9'.repeat(64)}`;
+      await value.store.persistEngineAttempt({ id: 'staged-attempt', executionId, transactionIntentId, endpoint: 'provider', responseClass: 'accepted', txHash, nonce: 9, attemptedAt: NOW });
+      await expect(value.store.persistEngineReceipt({ id: 'invalid-status-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'invented', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, observedAt: NOW })).rejects.toThrow('LIFECYCLE_RECEIPT_STATUS_INVALID');
+      await value.store.persistEngineReceipt({ id: 'staged-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'pending', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, finalityStage: 'soft', observedAt: NOW });
+      expect(value.db.prepare("SELECT status, finality_stage FROM transaction_receipt WHERE id = 'staged-receipt'").get()).toEqual({ status: 'pending', finality_stage: 'unknown' });
+      value.store.close();
+      const reopenedDb = openDatabase(join(value.directory, 'state.sqlite'));
+      reopened = new CanonicalStoreBridge(reopenedDb, { now: () => new Date(NOW) });
+      await reopened.open();
+      expect(reopened.snapshot().receipts.find((receipt) => receipt.id === 'staged-receipt')).toMatchObject({ state: 'Pending' });
+    } finally {
+      if (reopened) reopened.close();
+      else value.store.close();
+      await rm(value.directory, { recursive: true, force: true });
+    }
   });
 
   it('does not charge mint value for a reverted lifecycle receipt', async () => {

@@ -789,6 +789,7 @@ export class MintEngine {
           submittedHash = signedHash;
           await this.persistReconciliation({
             executionId,
+            transactionAttemptId: attemptIds[0],
             txHash: signedHash,
             fromAddress: walletAddress,
             nonce,

@@ -181,6 +181,7 @@ export interface ReconciliationRecord {
   state: 'unresolved' | 'matched' | 'ambiguous' | 'reorged' | 'final';
   checkedAt: string;
   source: string;
+  policyVersion?: string;
   details?: unknown;
   executionId?: string;
 }
@@ -345,8 +346,13 @@ export class DurableRepository {
       }
       const wallet = this.db.prepare('SELECT chain_profile_id, address FROM wallet WHERE id = ?').get(record.walletId) as { chain_profile_id: string; address: string } | undefined;
       if (!wallet) throw new Error('wallet not found for transaction intent');
-      if (record.chainProfileId !== undefined && record.chainProfileId !== wallet.chain_profile_id) throw new Error('transaction intent chain does not match wallet');
-      this.db.prepare('INSERT INTO transaction_intent (id, campaign_id, wallet_id, intent_class, to_address, value_wei, calldata, nonce, policy_snapshot_json, created_at, chain_profile_id, from_address, gas_limit_wei, max_fee_per_gas_wei, max_priority_fee_per_gas_wei, idempotency_key, request_id, request_fingerprint, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.campaignId, record.walletId, record.intentClass, record.toAddress, record.valueWei.toString(), record.calldata, record.nonce ?? null, json(record.policySnapshot), record.createdAt, record.chainProfileId ?? wallet.chain_profile_id, record.fromAddress ?? wallet.address, (record.gasLimitWei ?? 0n).toString(), (record.maxFeePerGasWei ?? 0n).toString(), (record.maxPriorityFeePerGasWei ?? 0n).toString(), record.idempotencyKey ?? null, record.requestId ?? null, requestFingerprint, record.runId ?? null);
+       const campaign = this.db.prepare('SELECT ct.chain_profile_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id WHERE c.id = ?').get(record.campaignId) as { chain_profile_id: string } | undefined;
+      if (!campaign) throw new Error('campaign not found for transaction intent');
+      const chainProfileId = record.chainProfileId ?? wallet.chain_profile_id;
+      if (chainProfileId !== wallet.chain_profile_id || chainProfileId !== campaign.chain_profile_id) throw new Error('transaction intent chain does not match wallet and campaign');
+      const membership = this.db.prepare('SELECT enabled FROM campaign_wallet WHERE campaign_id = ? AND wallet_id = ?').get(record.campaignId, record.walletId) as { enabled: number } | undefined;
+      if (!membership || membership.enabled !== 1) throw new Error('transaction intent requires enabled campaign wallet membership');
+       this.db.prepare('INSERT INTO transaction_intent (id, campaign_id, wallet_id, intent_class, to_address, value_wei, calldata, nonce, policy_snapshot_json, created_at, chain_profile_id, from_address, gas_limit_wei, max_fee_per_gas_wei, max_priority_fee_per_gas_wei, idempotency_key, request_id, request_fingerprint, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.campaignId, record.walletId, record.intentClass, record.toAddress, record.valueWei.toString(), record.calldata, record.nonce ?? null, json(record.policySnapshot), record.createdAt, chainProfileId, record.fromAddress ?? wallet.address, (record.gasLimitWei ?? 0n).toString(), (record.maxFeePerGasWei ?? 0n).toString(), (record.maxPriorityFeePerGasWei ?? 0n).toString(), record.idempotencyKey ?? null, record.requestId ?? null, requestFingerprint, record.runId ?? null);
     });
   }
 
@@ -371,15 +377,24 @@ export class DurableRepository {
     const checkedAt = Date.parse(record.checkedAt);
     if (!Number.isFinite(checkedAt) || checkedAt > Date.now()) throw new Error('simulation checked time is invalid or in the future');
     this.immediate(() => {
-      const campaign = this.db.prepare('SELECT ct.chain_profile_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id WHERE c.id = ?').get(record.campaignId) as { chain_profile_id: string } | undefined;
-      const wallet = this.db.prepare('SELECT chain_profile_id FROM wallet WHERE id = ?').get(record.walletId) as { chain_profile_id: string } | undefined;
-      const campaignWallet = this.db.prepare('SELECT enabled FROM campaign_wallet WHERE campaign_id = ? AND wallet_id = ?').get(record.campaignId, record.walletId) as { enabled: number } | undefined;
-      if (!campaign || !wallet || campaign.chain_profile_id !== wallet.chain_profile_id || campaignWallet?.enabled !== 1) throw new Error('simulation wallet and campaign identity mismatch');
+      if (!Number.isInteger(record.freshnessSeconds) || record.freshnessSeconds < 300 || record.freshnessSeconds > 86_400) throw new Error('simulation freshness must be between five minutes and 24 hours');
+      const checkedAt = Date.parse(record.checkedAt);
+      if (!Number.isFinite(checkedAt) || checkedAt > Date.now()) throw new Error('simulation checked_at cannot be future or invalid');
+      const membership = this.db.prepare('SELECT enabled FROM campaign_wallet WHERE campaign_id = ? AND wallet_id = ?').get(record.campaignId, record.walletId) as { enabled: number } | undefined;
+      if (!membership || membership.enabled !== 1) throw new Error('simulation requires enabled campaign wallet membership');
       if (record.transactionIntentId !== undefined) {
-        const intent = this.db.prepare('SELECT wallet_id, campaign_id, chain_profile_id FROM transaction_intent WHERE id = ?').get(record.transactionIntentId) as { wallet_id: string; campaign_id: string; chain_profile_id: string | null } | undefined;
-        if (!intent || intent.wallet_id !== record.walletId || intent.campaign_id !== record.campaignId || (intent.chain_profile_id !== null && intent.chain_profile_id !== campaign.chain_profile_id)) throw new Error('simulation transaction intent identity mismatch');
+        const intent = this.db.prepare('SELECT campaign_id, wallet_id FROM transaction_intent WHERE id = ?').get(record.transactionIntentId) as { campaign_id: string; wallet_id: string } | undefined;
+        if (!intent || intent.campaign_id !== record.campaignId || intent.wallet_id !== record.walletId) throw new Error('simulation does not match transaction intent');
       }
-      this.db.prepare('INSERT INTO simulation (id, wallet_id, campaign_id, transaction_intent_id, source_block_number, source_block_hash, checked_at, freshness_seconds, outcome, revert_taxonomy, tool_version, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.walletId, record.campaignId, record.transactionIntentId ?? null, record.sourceBlockNumber, record.sourceBlockHash ?? null, record.checkedAt, record.freshnessSeconds, record.outcome, safeText(record.revertTaxonomy, 'simulation revert taxonomy') ?? null, safeText(record.toolVersion, 'simulation tool version'), json(record.details ?? {}) ?? '{}');
+       const campaign = this.db.prepare('SELECT ct.chain_profile_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id WHERE c.id = ?').get(record.campaignId) as { chain_profile_id: string } | undefined;
+       const wallet = this.db.prepare('SELECT chain_profile_id FROM wallet WHERE id = ?').get(record.walletId) as { chain_profile_id: string } | undefined;
+       const campaignWallet = this.db.prepare('SELECT enabled FROM campaign_wallet WHERE campaign_id = ? AND wallet_id = ?').get(record.campaignId, record.walletId) as { enabled: number } | undefined;
+       if (!campaign || !wallet || campaign.chain_profile_id !== wallet.chain_profile_id || campaignWallet?.enabled !== 1) throw new Error('simulation wallet and campaign identity mismatch');
+       if (record.transactionIntentId !== undefined) {
+         const intent = this.db.prepare('SELECT wallet_id, campaign_id, chain_profile_id FROM transaction_intent WHERE id = ?').get(record.transactionIntentId) as { wallet_id: string; campaign_id: string; chain_profile_id: string | null } | undefined;
+         if (!intent || intent.wallet_id !== record.walletId || intent.campaign_id !== record.campaignId || (intent.chain_profile_id !== null && intent.chain_profile_id !== campaign.chain_profile_id)) throw new Error('simulation transaction intent identity mismatch');
+       }
+       this.db.prepare('INSERT INTO simulation (id, wallet_id, campaign_id, transaction_intent_id, source_block_number, source_block_hash, checked_at, freshness_seconds, outcome, revert_taxonomy, tool_version, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.walletId, record.campaignId, record.transactionIntentId ?? null, record.sourceBlockNumber, record.sourceBlockHash ?? null, record.checkedAt, record.freshnessSeconds, record.outcome, safeText(record.revertTaxonomy, 'simulation revert taxonomy') ?? null, safeText(record.toolVersion, 'simulation tool version'), json(record.details ?? {}) ?? '{}');
     });
   }
 
@@ -440,19 +455,30 @@ export class DurableRepository {
       const executionEnabled = record.executionEnabled ?? (record.status === 'execution_blocked' ? false : profile.execution_enabled === 1);
       if (record.status !== 'verified' && executionEnabled) throw new Error('execution can only remain enabled for a verified chain');
       const evidence = json(record.evidence ?? {}) ?? '{}';
-      this.db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, sea_drop_test_tx_hash, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.status, record.chainId, safeText(record.sequencerEndpointReference, 'sequencer endpoint') ?? null, safeText(record.archiveEndpointReference, 'archive endpoint') ?? null, safeText(record.feedEndpointReference, 'feed endpoint') ?? null, record.seaDropTestTxHash ?? null, evidence, record.checkedAt, safeText(record.approvedBy, 'verification approver') ?? null, record.approvedAt ?? null);
-      this.db.prepare('UPDATE chain_profile SET verification_status = ?, verification_evidence_json = ?, execution_enabled = ? WHERE id = ?').run(record.status, evidence, executionEnabled ? 1 : 0, record.chainProfileId);
+      const approver = safeText(record.approvedBy, 'verification approver');
+      const approvedAt = record.approvedAt ?? null;
+      if (record.status === 'verified' || executionEnabled) {
+        if (!approver || !approvedAt || !Number.isFinite(Date.parse(approvedAt)) || evidence === '{}') throw new Error('verified chain requires approver, approval time, and substantive evidence');
+      }
+      this.db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, sea_drop_test_tx_hash, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.status, record.chainId, safeText(record.sequencerEndpointReference, 'sequencer endpoint') ?? null, safeText(record.archiveEndpointReference, 'archive endpoint') ?? null, safeText(record.feedEndpointReference, 'feed endpoint') ?? null, record.seaDropTestTxHash ?? null, evidence, record.checkedAt, approver ?? null, approvedAt);
+      this.db.prepare('UPDATE chain_profile SET verification_status = ?, verification_evidence_json = ?, verification_approved_by = ?, verification_approved_at = ?, execution_enabled = ? WHERE id = ?').run(record.status, evidence, approver ?? null, approvedAt, executionEnabled ? 1 : 0, record.chainProfileId);
       this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, evidence_snapshot_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`${record.id}:audit`, 'chain_profile', record.chainProfileId, profile.verification_status, record.status, safeText(record.approvedBy, 'verification approver') ?? 'database', 'chain verification evidence recorded', evidence, record.checkedAt);
     });
   }
 
   public recordReconciliation(record: ReconciliationRecord): void {
     this.immediate(() => {
+      if (!record.txHash || !record.fromAddress || record.nonce === undefined) throw new Error('reconciliation requires tx hash, from address, and nonce');
+      if (!record.policyVersion || !record.details || typeof record.details !== 'object' || Array.isArray(record.details) || Object.keys(record.details as Record<string, unknown>).length === 0) throw new Error('reconciliation requires policy version and source evidence');
       const attempt = record.transactionAttemptId === undefined ? undefined : this.db.prepare('SELECT execution_id, chain_profile_id, tx_hash, from_address, nonce FROM transaction_attempt WHERE id = ?').get(record.transactionAttemptId) as { execution_id: string | null; chain_profile_id: string | null; tx_hash: string | null; from_address: string | null; nonce: number | null } | undefined;
       if (record.transactionAttemptId !== undefined && !attempt) throw new Error('transaction attempt not found for reconciliation');
+      if (record.transactionAttemptId === undefined && record.executionId === undefined) throw new Error('reconciliation requires attempt or execution linkage');
       if (attempt && attempt.chain_profile_id !== null && attempt.chain_profile_id !== record.chainProfileId) throw new Error('reconciliation chain does not match attempt');
-      if (attempt && ((record.executionId !== undefined && record.executionId !== attempt.execution_id) || (record.txHash !== undefined && record.txHash.toLowerCase() !== attempt.tx_hash?.toLowerCase()) || (record.fromAddress !== undefined && record.fromAddress.toLowerCase() !== attempt.from_address?.toLowerCase()) || (record.nonce !== undefined && record.nonce !== attempt.nonce))) throw new Error('reconciliation identity does not match attempt');
-      this.db.prepare('INSERT INTO reconciliation_record (id, chain_profile_id, transaction_attempt_id, tx_hash, from_address, nonce, state, checked_at, source, details_json, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.transactionAttemptId ?? null, record.txHash ?? attempt?.tx_hash ?? null, record.fromAddress ?? attempt?.from_address ?? null, record.nonce ?? attempt?.nonce ?? null, record.state, record.checkedAt, safeText(record.source, 'reconciliation source'), json(record.details ?? {}) ?? '{}', record.executionId ?? attempt?.execution_id ?? null);
+      if (attempt && (record.txHash.toLowerCase() !== attempt.tx_hash?.toLowerCase() || record.fromAddress.toLowerCase() !== attempt.from_address?.toLowerCase() || record.nonce !== attempt.nonce)) throw new Error('reconciliation identity does not match attempt');
+      const execution = record.executionId === undefined ? undefined : this.db.prepare('SELECT id, wallet_id FROM execution WHERE id = ?').get(record.executionId) as { id: string; wallet_id: string } | undefined;
+      if (record.executionId !== undefined && !execution) throw new Error('reconciliation execution not found');
+      if (execution && attempt?.execution_id !== null && attempt?.execution_id !== undefined && attempt.execution_id !== execution.id) throw new Error('reconciliation execution does not match attempt');
+       this.db.prepare('INSERT INTO reconciliation_record (id, chain_profile_id, transaction_attempt_id, tx_hash, from_address, nonce, state, checked_at, source, details_json, execution_id, policy_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.transactionAttemptId ?? null, record.txHash, record.fromAddress, record.nonce, record.state, record.checkedAt, safeText(record.source, 'reconciliation source'), json(record.details) ?? '{}', record.executionId ?? attempt?.execution_id ?? null, safeText(record.policyVersion, 'reconciliation policy version'));
     });
   }
 
@@ -462,12 +488,14 @@ export class DurableRepository {
       if (!profile) throw new Error('chain profile not found for reorg event');
       const attempt = record.transactionAttemptId === undefined ? undefined : this.db.prepare('SELECT execution_id, chain_profile_id, tx_hash, from_address, nonce FROM transaction_attempt WHERE id = ?').get(record.transactionAttemptId) as { execution_id: string | null; chain_profile_id: string | null; tx_hash: string | null; from_address: string | null; nonce: number | null } | undefined;
       if (record.transactionAttemptId !== undefined && !attempt) throw new Error('transaction attempt not found for reorg event');
+      if (record.executionId !== undefined && record.transactionAttemptId === undefined) throw new Error('reorg event requires transaction attempt identity');
       if (attempt?.chain_profile_id !== null && attempt?.chain_profile_id !== undefined && attempt.chain_profile_id !== record.chainProfileId) throw new Error('reorg event chain does not match attempt');
       if (record.executionId !== undefined && attempt?.execution_id !== record.executionId) throw new Error('reorg event execution does not match attempt');
+      if (record.transactionAttemptId !== undefined && (!attempt?.tx_hash || !attempt.from_address || attempt.nonce === null)) throw new Error('reorg event requires transaction identity facts');
       const evidence = json(record.evidence ?? {}) ?? '{}';
       this.db.prepare('INSERT INTO reorg_event (id, chain_profile_id, transaction_attempt_id, old_block_hash, new_block_hash, previous_finality_stage, new_finality_stage, detected_at, evidence_json, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.transactionAttemptId ?? null, record.oldBlockHash ?? null, record.newBlockHash ?? null, record.previousFinalityStage, record.newFinalityStage, record.detectedAt, evidence, record.executionId ?? attempt?.execution_id ?? null);
       if (record.transactionAttemptId !== undefined) {
-        this.db.prepare('INSERT INTO reconciliation_record (id, chain_profile_id, transaction_attempt_id, tx_hash, from_address, nonce, state, checked_at, source, details_json, execution_id) VALUES (?, ?, ?, ?, ?, ?, \'reorged\', ?, \'reorg-event\', ?, ?)').run(`${record.id}:reconciliation`, record.chainProfileId, record.transactionAttemptId, attempt?.tx_hash ?? null, attempt?.from_address ?? null, attempt?.nonce ?? null, record.detectedAt, evidence, record.executionId ?? attempt?.execution_id ?? null);
+         this.db.prepare("INSERT INTO reconciliation_record (id, chain_profile_id, transaction_attempt_id, tx_hash, from_address, nonce, state, checked_at, source, details_json, execution_id, policy_version) VALUES (?, ?, ?, ?, ?, ?, 'reorged', ?, 'reorg-event', ?, ?, 'phase2-reconciliation-v1')").run(`${record.id}:reconciliation`, record.chainProfileId, record.transactionAttemptId, attempt?.tx_hash, attempt?.from_address, attempt?.nonce, record.detectedAt, json({ sourceEvidence: record.evidence ?? {}, reorgEventId: record.id }) ?? '{}', record.executionId ?? attempt?.execution_id ?? null);
       }
     });
   }
@@ -539,6 +567,17 @@ export class DurableRepository {
     this.immediate(() => {
       const currentSchema = this.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null };
       if (record.outcome === 'passed' && currentSchema.version !== record.schemaVersion) throw new Error('backup evidence schema version is not current');
+      if (record.outcome === 'passed') {
+        const evidence = record.evidence && typeof record.evidence === 'object' ? record.evidence as Record<string, unknown> : {};
+        const restoreReference = typeof evidence.restoreReference === 'string' ? evidence.restoreReference : undefined;
+        const offsiteReference = typeof evidence.offsiteReference === 'string' ? evidence.offsiteReference : undefined;
+        const retentionPolicyId = typeof evidence.retentionPolicyId === 'string' ? evidence.retentionPolicyId : undefined;
+         const retention = retentionPolicyId === undefined ? undefined : this.db.prepare("SELECT id FROM retention_policy WHERE id = ? AND active = 1 UNION SELECT id FROM backup_policy WHERE id = ? AND active = 1").get(retentionPolicyId, retentionPolicyId) as { id: string } | undefined;
+        const referenceEvidence = restoreReference && offsiteReference && backupReferenceExists(restoreReference) && backupReferenceExists(offsiteReference);
+        const flagEvidence = evidence.offHost === true && evidence.restoreVerified === true && evidence.postRestoreReconciliation === true && typeof evidence.retentionDays === 'number' && evidence.retentionDays > 0;
+        if (!referenceEvidence && !flagEvidence) throw new Error('passed backup evidence requires restore, off-host, and retention evidence');
+        if (retentionPolicyId !== undefined && !retention && !flagEvidence) throw new Error('passed backup evidence requires an active retention policy');
+       }
       if (record.outcome === 'passed' && (!record.verificationSha256 || record.verificationSha256.toLowerCase() !== record.sha256.toLowerCase())) throw new Error('passed backup evidence requires verification hash');
       this.db.prepare('INSERT INTO backup_restore_evidence (id, store_reference, backup_reference, sha256, schema_version, operation, outcome, kill_switch_engaged, evidence_json, recorded_at, encryption_verified, integrity_check, verification_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, safeText(record.storeReference, 'backup store reference'), safeText(record.backupReference, 'backup reference'), record.sha256.toLowerCase(), record.schemaVersion, record.operation, record.outcome, record.killSwitchEngaged ? 1 : 0, json(record.evidence ?? {}) ?? '{}', record.recordedAt, record.encryptionVerified ? 1 : 0, record.integrityCheck ?? 'not_recorded', record.verificationSha256?.toLowerCase() ?? null);
     });
@@ -555,8 +594,8 @@ export class DurableRepository {
   }
 
   public isFinalSuccess(chainProfileId: string, receiptId: string): boolean {
-    const row = this.db.prepare("SELECT r.status, r.finality_stage AS stage, c.success_finality_stage AS required, (SELECT rr.state FROM reconciliation_record rr WHERE rr.transaction_attempt_id = r.transaction_attempt_id ORDER BY rr.checked_at DESC, rr.id DESC LIMIT 1) AS reconciliation_state FROM transaction_receipt r JOIN transaction_attempt a ON a.id = r.transaction_attempt_id JOIN transaction_intent i ON i.id = a.transaction_intent_id JOIN wallet w ON w.id = i.wallet_id JOIN chain_profile c ON c.id = w.chain_profile_id WHERE r.id = ? AND c.id = ? AND NOT EXISTS (SELECT 1 FROM transaction_receipt newer WHERE newer.transaction_attempt_id = r.transaction_attempt_id AND (newer.observed_at > r.observed_at OR (newer.observed_at = r.observed_at AND newer.id > r.id)))").get(receiptId, chainProfileId) as { status: string; stage: string; required: string; reconciliation_state: string | null } | undefined;
-    return row !== undefined && row.status === 'confirmed' && row.stage === row.required && (row.reconciliation_state === null || row.reconciliation_state === 'final');
+    const row = this.db.prepare("SELECT r.status, r.finality_stage AS stage, c.success_finality_stage AS required, c.execution_enabled, (SELECT rr.state FROM reconciliation_record rr WHERE rr.transaction_attempt_id = r.transaction_attempt_id ORDER BY rr.checked_at DESC, rr.id DESC LIMIT 1) AS reconciliation_state FROM transaction_receipt r JOIN transaction_attempt a ON a.id = r.transaction_attempt_id JOIN transaction_intent i ON i.id = a.transaction_intent_id JOIN wallet w ON w.id = i.wallet_id JOIN chain_profile c ON c.id = w.chain_profile_id WHERE r.id = ? AND c.id = ? AND NOT EXISTS (SELECT 1 FROM transaction_receipt newer WHERE newer.transaction_attempt_id = r.transaction_attempt_id AND (newer.observed_at > r.observed_at OR (newer.observed_at = r.observed_at AND newer.id > r.id)))").get(receiptId, chainProfileId) as { status: string; stage: string; required: string; execution_enabled: number; reconciliation_state: string | null } | undefined;
+    return row !== undefined && row.status === 'confirmed' && row.stage === row.required && row.execution_enabled === 1 && (row.reconciliation_state === null || row.reconciliation_state === 'final');
   }
 
   public saveExecutionBundle(execution: ExecutionRecord, intent: TransactionIntentRecord, lifecycle: LifecycleEventRecord, audit: AuditEventRecord): void {

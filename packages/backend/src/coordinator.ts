@@ -191,7 +191,8 @@ export class ExecutionCoordinator {
         if (!currentRun) throw new Error('RUN_NOT_FOUND');
         state.attempts.push(...update.attempts.filter(item => !state.attempts.some(existing => existing.id === item.id)));
         state.receipts.push(...update.receipts.filter(item => !state.receipts.some(existing => existing.id === item.id)));
-        state.reconciliations.push({ id: `rec_${randomUUID()}`, runId: run.id, result: update.result, observedAt: new Date().toISOString(), ...(update.reason ? { reason: update.reason } : {}) });
+         const reconciliationAttemptId = update.receipts.find(item => item.transactionAttemptId)?.transactionAttemptId ?? update.attempts[0]?.id ?? snapshot.attempts.find(item => item.runId === run.id && item.hash)?.id;
+         state.reconciliations.push({ id: `rec_${randomUUID()}`, runId: run.id, result: update.result, observedAt: new Date().toISOString(), ...(reconciliationAttemptId ? { attemptId: reconciliationAttemptId } : {}), ...(update.reason ? { reason: update.reason } : {}) });
          if (currentRun.state === 'Aborted') {
            // A kill aborts new admissions but never erases submitted facts.
          } else if ((update.result === 'confirmed' && intent.campaignSnapshot.chainId === 1) || update.result === 'final') {

@@ -14,7 +14,7 @@ import { SqliteBackendStore } from './backend-store.js';
 
 function fixture() {
   const db = openDatabase();
-  db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, verification_status, execution_enabled, created_at) VALUES ('chain', 1, 'Ethereum', '[]', 2, 'verified', 1, '2026-01-01T00:00:00.000Z')").run();
+  db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, verification_status, verification_evidence_json, verification_approved_by, verification_approved_at, execution_enabled, created_at) VALUES ('chain', 1, 'Ethereum', '[]', 2, 'verified', '{\"fixture\":\"approved\",\"finalityPassed\":true}', 'fixture', '2025-12-31T00:00:00.000Z', 1, '2026-01-01T00:00:00.000Z')").run();
   db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('wallet', 'chain', '0xabc', 'kms://wallet', '2026-01-01T00:00:00.000Z')").run();
   db.prepare("INSERT INTO spend_policy (id, wallet_id, daily_cap_wei, version, active) VALUES ('policy', 'wallet', '100', 'v1', 1)").run();
   return db;
@@ -50,11 +50,11 @@ function campaignFixture(db: ReturnType<typeof openDatabase>, suffix: string, ch
   db.prepare('INSERT INTO collection (id, contract_id, name) VALUES (?, ?, ?)').run(collectionId, contractId, suffix);
   db.prepare('INSERT INTO "drop" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES (?, ?, ?, ?, ?)').run(dropId, collectionId, 'test', '0', '2026-01-01T00:00:00.000Z');
   db.prepare('INSERT INTO campaign (id, drop_id, state, created_at) VALUES (?, ?, ?, ?)').run(campaignId, dropId, 'draft', '2026-01-01T00:00:00.000Z');
-  if (chainProfileId === 'chain') db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignId, 'wallet', '2026-01-01T00:00:00.000Z');
+  db.prepare('INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignId, chainProfileId === 'chain' ? 'wallet' : chainProfileId === 'robinhood-disabled' ? 'robinhood-wallet' : `${chainProfileId}-wallet`, '2026-01-01T00:00:00.000Z');
   return campaignId;
 }
 
-function linkedExecutionFixture(db: ReturnType<typeof openDatabase>, campaignId: string, suffix: string, chainProfileId = 'chain', walletId = chainProfileId === 'chain' ? 'wallet' : `${chainProfileId}-wallet`, valueWei = 0n) {
+function linkedExecutionFixture(db: ReturnType<typeof openDatabase>, campaignId: string, suffix: string, chainProfileId = 'chain', walletId = chainProfileId === 'chain' ? 'wallet' : chainProfileId === 'robinhood-disabled' ? 'robinhood-wallet' : `${chainProfileId}-wallet`, valueWei = 0n) {
   const repository = new DurableRepository(db);
   db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignId, walletId, '2026-01-01T00:00:00.000Z');
   const intentId = `intent-${suffix}`;
@@ -68,7 +68,7 @@ describe('database migrations and spend reservations', () => {
   it('applies migrations idempotently and enables integrity pragmas', () => {
     const db = fixture();
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 16 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 21 });
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(db.pragma('journal_mode', { simple: true })).toBe('memory');
     expect(() => db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('other', 'chain', '0xABC', 'kms://other', '2026-01-01T00:00:00.000Z')").run()).toThrow();
@@ -102,7 +102,7 @@ describe('database migrations and spend reservations', () => {
       worker.once('error', (error: Error) => resolve(`error:${error.message}`));
     });
     const results = await Promise.all([run(), run()]);
-    expect(results.sort()).toEqual(['16', '16']);
+    expect(results.sort()).toEqual(['21', '21']);
     rmSync(directory, { recursive: true, force: true });
   });
 
@@ -196,7 +196,7 @@ describe('database migrations and spend reservations', () => {
     db.prepare("INSERT INTO transaction_intent (id, campaign_id, wallet_id, intent_class, to_address, value_wei, calldata, nonce, created_at) VALUES ('intent', 'campaign', 'wallet', 'mint', '0xdef', '1', '0x', 7, '2026-01-01T00:00:00.000Z')").run();
     const repository = new DurableRepository(db);
     repository.recordAttempt({ id: 'attempt', transactionIntentId: 'intent', endpoint: 'test', responseClass: 'accepted', txHash: '0xhash', nonce: 7, attemptedAt: '2026-01-01T00:00:01.000Z' });
-    repository.recordSimulation({ id: 'simulation', walletId: 'wallet', campaignId: 'campaign', transactionIntentId: 'intent', sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 30, outcome: 'pass', toolVersion: 'test' });
+    repository.recordSimulation({ id: 'simulation', walletId: 'wallet', campaignId: 'campaign', transactionIntentId: 'intent', sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' });
     repository.recordReceipt({ id: 'receipt', transactionAttemptId: 'attempt', txHash: '0xhash', status: 'confirmed', confirmations: 2, gasUsed: 21n, effectiveGasPrice: 3n, finalityStage: 'ethereum_final', finalitySource: 'test', observedAt: '2026-01-01T00:00:02.000Z' });
     repository.recordLifecycleEvent({ id: 'transition', entityType: 'wallet', entityId: 'wallet', newState: 'prepared', actor: 'test', source: 'test', reason: 'fixture', occurredAt: '2026-01-01T00:00:00.000Z' });
     repository.recordAuditEvent({ id: 'audit-2', entityType: 'wallet', entityId: 'wallet', actor: 'test', reason: 'fixture', policySnapshot: { cap: '100' }, occurredAt: '2026-01-01T00:00:00.000Z' });
@@ -238,6 +238,7 @@ describe('database migrations and spend reservations', () => {
     db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-rh', 'contract-rh', 'Robinhood test')").run();
     db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-rh', 'collection-rh', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
     db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign', 'drop-rh', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES ('campaign', 'wallet', 1, '2026-01-01T00:00:00.000Z')").run();
     db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES ('fee', 'chain', 'v1', 'fee_only', '1000', '1000', '5', 2, 0, 1, '2026-01-01T00:00:00.000Z', 'allowed')").run();
     const reservations = new SpendReservations(db);
     const input = { walletId: 'wallet', chainProfileId: 'chain', campaignId: 'campaign', policyId: 'policy', freeMint: true, mintValueWei: 0n, l2ExecutionGasWei: 60n, l1DataGasWei: 30n, priorityFeeComponentWei: 0n, at: new Date('2026-01-01T00:00:00.000Z') };
@@ -285,12 +286,12 @@ describe('database migrations and spend reservations', () => {
     const destination = join(directory, 'state.sqlite');
     await backupDatabase(source, destination);
     const verification = verifyBackup(destination);
-    expect(verification.schemaVersion).toBe(16);
+    expect(verification.schemaVersion).toBe(21);
     expect(verification.integrityCheck).toBe('ok');
     expect(verification.foreignKeyViolations).toBe(0);
     const restoredDestination = join(directory, 'restored.sqlite');
     const restoredVerification = await restoreDatabase(destination, restoredDestination);
-    expect(restoredVerification).toMatchObject({ schemaVersion: 16, integrityCheck: 'ok', foreignKeyViolations: 0 });
+    expect(restoredVerification).toMatchObject({ schemaVersion: 21, integrityCheck: 'ok', foreignKeyViolations: 0 });
     const staleDestination = join(directory, 'stale.sqlite');
     copyFileSync(destination, staleDestination);
     const staleDb = new BetterSqlite3(staleDestination);
@@ -308,7 +309,7 @@ describe('database migrations and spend reservations', () => {
     const repository = new DurableRepository(restored);
     repository.saveBackupPolicy({ id: 'backup-policy', approvalOwner: 'product-owner', approvedAt: '2026-01-01T00:00:00.000Z' });
     expect(restored.prepare('SELECT retention_days, encryption_required FROM backup_policy WHERE id = ?').get('backup-policy')).toEqual({ retention_days: 30, encryption_required: 1 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: destination, backupReference: 's3://test/backup', sha256: verification.sha256, schemaVersion: verification.schemaVersion, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: verification.sha256, evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: destination, backupReference: 's3://test/backup', sha256: verification.sha256, schemaVersion: 21, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: verification.sha256, evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:00.000Z' });
     restored.close();
     source.close();
     rmSync(directory, { recursive: true, force: true });
@@ -321,6 +322,7 @@ describe('database migrations and spend reservations', () => {
     db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-policy', 'contract-policy', 'Policy')").run();
     db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-policy', 'collection-policy', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
     db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-policy', 'drop-policy', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES ('campaign-policy', 'wallet', 1, '2026-01-01T00:00:00.000Z')").run();
     db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES ('fee-policy', 'chain', 'v1', 'fee_only', '2000000000000000', '2000000000000000', '1', 2, 0, 1, '2026-01-01T00:00:00.000Z', 'allowed')").run();
     const policy = db.prepare('SELECT free_mint_wallet_cap_wei, free_mint_period_cap_wei FROM spend_policy WHERE id = ?').get('policy');
     expect(policy).toEqual({ free_mint_wallet_cap_wei: '200000000000000', free_mint_period_cap_wei: '2000000000000000' });
@@ -340,11 +342,11 @@ describe('database migrations and spend reservations', () => {
     db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-final', 'contract-final', 'Finality')").run();
     db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-final', 'collection-final', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
     db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-final', 'drop-final', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES ('campaign-final', 'wallet', 1, '2026-01-01T00:00:00.000Z')").run();
     const repository = new DurableRepository(db);
     repository.saveIntent({ id: 'intent-final', campaignId: 'campaign-final', walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', createdAt: '2026-01-01T00:00:00.000Z' });
     repository.recordAttempt({ id: 'attempt-final', transactionIntentId: 'intent-final', endpoint: 'sequencer', responseClass: 'accepted', txHash: '0xfinal', attemptedAt: '2026-01-01T00:00:01.000Z' });
-    repository.recordReceipt({ id: 'receipt-soft', transactionAttemptId: 'attempt-final', txHash: '0xfinal', status: 'confirmed', confirmations: 1, finalityStage: 'soft', observedAt: '2026-01-01T00:00:02.000Z' });
-    expect(repository.isFinalSuccess('chain', 'receipt-soft')).toBe(false);
+    expect(() => repository.recordReceipt({ id: 'receipt-soft', transactionAttemptId: 'attempt-final', txHash: '0xfinal', status: 'confirmed', confirmations: 1, finalityStage: 'soft', observedAt: '2026-01-01T00:00:02.000Z' })).toThrow('enabled-chain finality');
     repository.recordReceipt({ id: 'receipt-final', transactionAttemptId: 'attempt-final', txHash: '0xfinal', status: 'confirmed', confirmations: 10, finalityStage: 'ethereum_final', observedAt: '2026-01-01T00:00:03.000Z' });
     expect(repository.isFinalSuccess('chain', 'receipt-final')).toBe(true);
     repository.recordReceipt({ id: 'receipt-reorged', transactionAttemptId: 'attempt-final', txHash: '0xfinal', status: 'reorged', confirmations: 0, finalityStage: 'soft', observedAt: '2026-01-01T00:00:04.000Z' });
@@ -361,6 +363,7 @@ describe('database migrations and spend reservations', () => {
     source.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-recovery', 'contract-recovery', 'Recovery')").run();
     source.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-recovery', 'collection-recovery', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
     source.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-recovery', 'drop-recovery', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    source.prepare("INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES ('campaign-recovery', 'wallet', 1, '2026-01-01T00:00:00.000Z')").run();
     source.prepare("INSERT INTO transaction_intent (id, campaign_id, wallet_id, intent_class, to_address, value_wei, calldata, created_at) VALUES ('intent-recovery', 'campaign-recovery', 'wallet', 'mint', '0xdef', '0', '0x', '2026-01-01T00:00:00.000Z')").run();
     source.prepare("INSERT INTO spend_reservation (id, wallet_id, idempotency_key, policy_id, amount_wei, usage_date, status, created_at) VALUES ('reservation-recovery', 'wallet', 'recovery-key', 'policy', '10', '2026-01-01', 'reserved', '2026-01-01T00:00:00.000Z')").run();
     source.prepare("INSERT INTO audit_event (id, entity_type, entity_id, actor, reason, occurred_at) VALUES ('audit-recovery', 'reservation', 'reservation-recovery', 'system', 'recovery test', '2026-01-01T00:00:00.000Z')").run();
@@ -386,6 +389,7 @@ describe('database migrations and spend reservations', () => {
     db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('collection-store', 'contract-store', 'Store')").run();
     db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('drop-store', 'collection-store', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
     db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('campaign-store', 'drop-store', 'prepared', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES ('campaign-store', 'wallet', 1, '2026-01-01T00:00:00.000Z')").run();
     db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES ('fee-store', 'chain', 'v1', 'fee_only', '1000', '1000', '10', 2, 0, 1, '2026-01-01T00:00:00.000Z', 'allowed')").run();
     const store = new SqliteBackendStore(db);
     store.saveIntent({ id: 'intent-store', campaignId: 'campaign-store', walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', createdAt: '2026-01-01T00:00:00.000Z' });
@@ -403,7 +407,7 @@ describe('database migrations and spend reservations', () => {
     const db = legacyFixture();
     migrate(db);
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 16 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 21 });
     expect(db.prepare('SELECT reserved_amount_wei, request_fingerprint FROM spend_reservation WHERE id = ?').get('legacy-reservation')).toMatchObject({ reserved_amount_wei: '10' });
     expect(db.prepare('SELECT execution_enabled, success_finality_stage FROM chain_profile WHERE id = ?').get('legacy-chain')).toEqual({ execution_enabled: 0, success_finality_stage: 'ethereum_final' });
     db.close();
@@ -434,6 +438,7 @@ describe('database migrations and spend reservations', () => {
     const db = fixture();
     const campaignId = campaignFixture(db, 'multi-wallet');
     db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('wallet-two', 'chain', '0xdef', 'reference-only', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, 'wallet-two', 1, '2026-01-01T00:00:00.000Z')").run(campaignId);
     const repository = new DurableRepository(db);
     repository.saveIntent({ id: 'intent-wallet-one', campaignId, walletId: 'wallet', intentClass: 'mint', toAddress: '0xcontract', valueWei: 1n, calldata: '0x01', idempotencyKey: 'intent-wallet-one-key', requestId: 'shared-run-request', chainProfileId: 'chain', createdAt: '2026-01-01T00:00:00.000Z' });
     repository.saveIntent({ id: 'intent-wallet-two', campaignId, walletId: 'wallet-two', intentClass: 'mint', toAddress: '0xcontract', valueWei: 1n, calldata: '0x01', idempotencyKey: 'intent-wallet-two-key', requestId: 'shared-run-request', chainProfileId: 'chain', createdAt: '2026-01-01T00:00:00.000Z' });
@@ -503,11 +508,11 @@ describe('database migrations and spend reservations', () => {
     repository.recordAttempt({ id: 'attempt-recovery-replacement', transactionIntentId: 'intent-recovery-view', endpoint: 'test', responseClass: 'accepted', txHash: '0xreplacement', nonce: 7, replacementOfId: 'attempt-recovery-view', attemptedAt: '2026-01-01T00:00:02.500Z' });
     expect(() => db.prepare("UPDATE transaction_attempt SET response_class = 'changed' WHERE id = 'attempt-recovery-view'").run()).toThrow('transaction attempts are append-only');
     repository.recordReceipt({ id: 'receipt-recovery-view', transactionAttemptId: 'attempt-recovery-view', txHash: '0xrecovery', status: 'reorged', confirmations: 0, finalityStage: 'soft', observedAt: '2026-01-01T00:00:03.000Z' });
-    repository.recordReconciliation({ id: 'reconciliation-recovery-view', chainProfileId: 'chain', transactionAttemptId: 'attempt-recovery-view', txHash: '0xrecovery', fromAddress: '0xabc', nonce: 7, state: 'reorged', source: 'test', checkedAt: '2026-01-01T00:00:04.000Z' });
+    repository.recordReconciliation({ id: 'reconciliation-recovery-view', chainProfileId: 'chain', transactionAttemptId: 'attempt-recovery-view', txHash: '0xrecovery', fromAddress: '0xabc', nonce: 7, state: 'reorged', source: 'test', policyVersion: 'reconciliation-v1', details: { sourceEvidence: 'receipt-and-attempt' }, checkedAt: '2026-01-01T00:00:04.000Z' });
     repository.recordReorgEvent({ id: 'reorg-recovery-view', chainProfileId: 'chain', transactionAttemptId: 'attempt-recovery-view', executionId: 'execution-recovery-view', previousFinalityStage: 'ethereum_final', newFinalityStage: 'soft', detectedAt: '2026-01-01T00:00:04.500Z' });
     expect(() => db.prepare("DELETE FROM transaction_receipt WHERE id = 'receipt-recovery-view'").run()).toThrow('transaction receipts are append-only');
     db.prepare("INSERT INTO raw_observation (id, source, observed_at, payload_json, deduplication_key) VALUES ('stale-simulation-observation', 'watcher', '2026-01-01T00:00:00.000Z', '{}', 'stale-simulation-observation')").run();
-    repository.recordSimulation({ id: 'stale-simulation', walletId: 'wallet', campaignId, transactionIntentId: 'intent-recovery-view', sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 1, outcome: 'pass', toolVersion: 'test' });
+    repository.recordSimulation({ id: 'stale-simulation', walletId: 'wallet', campaignId, transactionIntentId: 'intent-recovery-view', sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' });
     const reservations = new SpendReservations(db);
     reservations.reserve({ id: 'orphan-recovery', walletId: 'wallet', idempotencyKey: 'orphan-recovery', policyId: 'policy', amountWei: 10n, at: new Date('2026-01-01T00:00:00.000Z') });
     const models = new ReadModels(db);
@@ -531,7 +536,7 @@ describe('database migrations and spend reservations', () => {
     repository.recordRetentionEvidence({ id: 'retention-evidence', policyId: 'raw-observation-30d', entityType: 'raw_observation', cutoffAt: '2026-01-01T00:00:00.000Z', rowsDeleted: 3, rowsRetained: 1, outcome: 'passed', recordedAt: '2026-01-01T00:00:01.000Z' });
     expect(db.prepare('SELECT entity_type, rows_deleted, rows_retained, outcome FROM retention_evidence WHERE id = ?').get('retention-evidence')).toEqual({ entity_type: 'raw_observation', rows_deleted: 3, rows_retained: 1, outcome: 'passed' });
     expect(db.prepare('SELECT retention_days, retain_indefinitely FROM retention_policy WHERE entity_type = ?').get('raw_observation')).toEqual({ retention_days: 30, retain_indefinitely: 0 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 16, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 21, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
     expect(db.prepare('SELECT encryption_verified, integrity_check FROM backup_restore_evidence WHERE id = ?').get('backup-evidence-integrity')).toEqual({ encryption_verified: 1, integrity_check: 'ok' });
     expect(() => repository.recordAuditEvent({ id: 'secret-audit', entityType: 'run', entityId: 'run', actor: 'test', reason: 'secret boundary', policySnapshot: { privateKey: 'not-written' }, occurredAt: '2026-01-01T00:00:03.000Z' })).toThrow('approved secret store');
     expect(() => db.prepare("UPDATE retention_evidence SET rows_deleted = 4 WHERE id = 'retention-evidence'").run()).toThrow('retention evidence is append-only');
@@ -582,7 +587,7 @@ describe('database migrations and spend reservations', () => {
     const repository = new DurableRepository(db);
     const campaignId = campaignFixture(db, 'fingerprint');
     expect(() => repository.saveIntent({ id: 'fingerprint-intent', campaignId, walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', requestFingerprint: 'not-a-computed-fingerprint', createdAt: '2026-01-01T00:00:00.000Z' })).toThrow(IdempotencyConflictError);
-    expect(() => repository.recordBackupRestoreEvidence({ id: 'forged-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 16, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' })).toThrow('passed backup evidence requires encrypted');
+    expect(() => repository.recordBackupRestoreEvidence({ id: 'forged-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 21, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' })).toThrow('passed backup evidence requires encrypted');
     db.close();
   });
 
@@ -608,7 +613,7 @@ describe('database migrations and spend reservations', () => {
     const futureSimulationCampaignId = campaignFixture(db, 'stale-as-of-future');
     const futureIntent = linkedExecutionFixture(db, futureSimulationCampaignId, 'stale-as-of-future').intentId;
     const historicalCheckedAt = new Date(Date.now() - 7200 * 1000).toISOString();
-    new DurableRepository(db).recordSimulation({ id: 'stale-as-of-old-simulation', walletId: 'wallet', campaignId: futureSimulationCampaignId, transactionIntentId: futureIntent, sourceBlockNumber: 1, checkedAt: historicalCheckedAt, freshnessSeconds: 1, outcome: 'pass', toolVersion: 'test' });
+    new DurableRepository(db).recordSimulation({ id: 'stale-as-of-old-simulation', walletId: 'wallet', campaignId: futureSimulationCampaignId, transactionIntentId: futureIntent, sourceBlockNumber: 1, checkedAt: historicalCheckedAt, freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' });
     new DurableRepository(db).recordSimulation({ id: 'stale-as-of-future-simulation', walletId: 'wallet', campaignId: futureSimulationCampaignId, transactionIntentId: futureIntent, sourceBlockNumber: 2, checkedAt: new Date(Date.parse(historicalCheckedAt) + 3600 * 1000).toISOString(), freshnessSeconds: 3600, outcome: 'pass', toolVersion: 'test' });
     expect(models.staleSimulations(new Date(Date.parse(historicalCheckedAt) + 1800 * 1000))).toMatchObject([{ simulationId: 'stale-as-of-old-simulation' }]);
     db.close();
@@ -620,10 +625,10 @@ describe('database migrations and spend reservations', () => {
     const otherCampaignId = campaignFixture(db, 'simulation-identity-other');
     const { intentId } = linkedExecutionFixture(db, campaignId, 'simulation-identity');
     const repository = new DurableRepository(db);
-    expect(() => repository.recordSimulation({ id: 'simulation-campaign-mismatch', walletId: 'wallet', campaignId: otherCampaignId, transactionIntentId: intentId, sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation transaction intent identity mismatch');
-    expect(() => repository.recordSimulation({ id: 'simulation-invalid-block', walletId: 'wallet', campaignId, sourceBlockNumber: -1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation source block must be a non-negative integer');
-    expect(() => repository.recordSimulation({ id: 'simulation-invalid-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: 'not-a-date', freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
-    expect(() => repository.recordSimulation({ id: 'simulation-future-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: new Date(Date.now() + 60_000).toISOString(), freshnessSeconds: 60, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
+    expect(() => repository.recordSimulation({ id: 'simulation-campaign-mismatch', walletId: 'wallet', campaignId: otherCampaignId, transactionIntentId: intentId, sourceBlockNumber: 1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation does not match transaction intent');
+    expect(() => repository.recordSimulation({ id: 'simulation-invalid-block', walletId: 'wallet', campaignId, sourceBlockNumber: -1, checkedAt: '2026-01-01T00:00:00.000Z', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation source block must be a non-negative integer');
+    expect(() => repository.recordSimulation({ id: 'simulation-invalid-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: 'not-a-date', freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
+    expect(() => repository.recordSimulation({ id: 'simulation-future-time', walletId: 'wallet', campaignId, sourceBlockNumber: 1, checkedAt: new Date(Date.now() + 60_000).toISOString(), freshnessSeconds: 300, outcome: 'pass', toolVersion: 'test' })).toThrow('simulation checked time is invalid or in the future');
     db.close();
   });
 });
