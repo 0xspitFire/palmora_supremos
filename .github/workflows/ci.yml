@@ -20,9 +20,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1
+      - name: Add native Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
 
@@ -37,9 +36,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1
+      - name: Add native Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
       - name: Verify SQLite backup tool
@@ -84,9 +82,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1
+      - name: Add native Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile
@@ -104,9 +101,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1
+      - name: Add native Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
       - name: Build production image
@@ -130,9 +126,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1
+      - name: Add native Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile
@@ -150,9 +145,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1
+      - name: Add native Foundry to PATH
+        run: echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
       - name: Verify native WSL toolchain
         run: pnpm ops:environment
       - run: pnpm install --frozen-lockfile

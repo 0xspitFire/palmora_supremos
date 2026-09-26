@@ -7,10 +7,13 @@ execution.
 ## Configuration
 
 Provide `SECRET_STORE_PATH`, `RPC_SECRET_NAMES`, `STORE_PATH`, and
-`KILL_SWITCH_PATH` through the host secret mechanism or service manager. The
-runtime secret store may be `Rets/MINT_BOT_SECRETS.env` or
-`Rets/TEST_BOT.env` under an approved host path. The health probe reads only
-the named values it needs and never prints them. Archive-backed local fork
+`KILL_SWITCH_PATH` through the host secret mechanism or service manager. For
+the Turnkey profile, set `MINT_BOT_CUSTODY=turnkey`, `TURNKEY_SECRET_FILE`,
+and `MINT_BOT_SECRET_ROOT`; the Turnkey file contains only host-injected
+references and credentials and is never committed. The runtime RPC/backup
+secret store may be `Rets/MINT_BOT_SECRETS.env` or `Rets/TEST_BOT.env` under
+an approved host path. The health probe reads only the named values it needs
+and never prints them. Archive-backed local fork
 tests must use the `ROBINHOOD_ARCHIVE_RPC` key by reference from
 `~/W3/Rets/archive-rpc.env`, or the Ethereum archive key by reference from
 `~/W3/Rets/eth-archive-rpc.env`. The approved keystore directory is
@@ -37,7 +40,8 @@ Windows paths and `/mnt/c` are not valid execution locations.
 Run `pnpm ops:environment` and then `pnpm ops:health` before enabling live
 admission. Health configuration uses `SECRET_STORE_PATH`, `RPC_SECRET_NAMES`,
 `STORE_PATH`, `KILL_SWITCH_PATH`, `RUNTIME_PROBE_TTL_MS`,
-`SIGNER_HEALTH_URL`, and (outside Phase 1) `NOTIFICATION_HEALTH_URL`. Set
+`SIGNER_HEALTH_URL`, `MINT_BOT_CUSTODY`, `TURNKEY_SECRET_FILE`, and (outside
+Phase 1) `NOTIFICATION_HEALTH_URL`. Set
 `EXPECTED_CHAIN_ID` when the default for the selected `OPS_HEALTH_MODE` is not
 appropriate. A failed RPC, migration, store, signer, or kill-switch check is
 unsafe. An unknown check means the host configuration is incomplete.
@@ -74,7 +78,8 @@ For an approved host, run `pnpm ops:backup` with explicit `STORE_PATH` and
 `KILL_SWITCH_PATH`, and the secret-manager-injected `BACKUP_ENCRYPTION_KEY`.
 Retain only the encrypted snapshot and checksum sidecar for exactly 30 days;
 record the redacted snapshot name, checksum, schema version, operation, and
-kill-switch state.
+kill-switch state. The backup command does not enforce object-store retention;
+the selected off-host provider must enforce versioning and retention separately.
 
 Robinhood characterization uses `SEQUENCER_URL` and `FEED_URL`, defaulting to
 the documented mainnet endpoints. Set `CHECK_ROBINHOOD=true` only for probes;
@@ -118,19 +123,23 @@ must remain retained as intermediate reconciliation states.
 
 Runtime readiness uses `SIGNER_HEALTH_URL` and, after Phase 1,
 `NOTIFICATION_HEALTH_URL` service probes rather than operator readiness
-booleans. Chain verification comes from the RPC chain-ID probe. The health
+booleans. Chain identity comes from the RPC chain-ID probe, but identity alone
+is not finality or live authorization. Durable backup, reconciliation, finality,
+execution-state, custody, and human-evidence gates remain required. The health
 probe reports statuses and safe reason codes only; it never reports endpoint
 values, secret-store values, private material, or passphrases.
 
 ## Service supervision
 
-Phase 2 now includes a supervised, outbound-notification-only orchestrator
+Phase 2 includes a supervised, outbound-notification-only orchestrator
 entrypoint at `packages/cli/dist/orchestrator-service.js` (the source launcher
-is `scripts/orchestrator.mjs`). It persists the SQLite database in WAL mode,
-persists restartable scheduler state in `MINT_BOT_JOBS_PATH`, reconciles before
+is `scripts/orchestrator.mjs`). It persists the SQLite database and scheduler
+jobs in the authoritative normalized store in WAL mode, reconciles before
 scheduled work, and exposes loopback-only `/livez`, `/readyz`, `/health`,
 `/status`, and `/metrics` endpoints. The service does not accept HTTP control
 commands, handle wallet keys, sign transactions, or broadcast transactions.
+The legacy JSON job path is not an authority for live state and must not replace
+the normalized SQLite job projection.
 
 The checked-in `ops/systemd/mint-bot.service` is a local WSL/host unit template,
 not an installation or a production-readiness claim. It runs as an unprivileged
@@ -144,8 +153,9 @@ health or Telegram result.
 In `dry-run` mode the service does not read Turnkey secret files, wallet maps,
 attestation files, live signer clients, or external RPC configuration; it marks
 external reconciliation blocked until a host profile explicitly enables it.
-Telegram requires HTTPS. A non-HTTPS endpoint is accepted only when it exactly
-matches an explicitly configured loopback approved proxy reference.
+Telegram requires HTTPS. A proxy exception must be an explicitly configured
+loopback proxy URL owned by the service account; a boolean flag alone is not an
+approved transport policy. The bot token remains host-secret-only.
 
 ### Required human inputs
 
@@ -156,8 +166,10 @@ matches an explicitly configured loopback approved proxy reference.
    define the human-controlled procedure for removing it only after the
    applicable safety gates and approvals have passed.
 3. Configure the host secret manager to provide `SECRET_STORE_PATH` containing
-   the existing `TG_BOT_TOKEN` and `TG_CHAT_ID` names. Values must not be placed
-   in repository files, unit files, arguments, CI variables, logs, or backups.
+   the existing `TG_BOT_TOKEN` and `TG_CHAT_ID` names, plus the separate
+   `TURNKEY_SECRET_FILE` only when a host profile explicitly enables custody.
+   Values must not be placed in repository files, unit files, arguments, CI
+   variables, logs, or backups.
 4. Provide the RPC/signer references required by the existing runtime and the
    host-only method for injecting `BACKUP_ENCRYPTION_KEY` into the backup unit.
 5. Choose the loopback health port, NTP/time source, encrypted-backup destination,
@@ -196,6 +208,14 @@ mark a live or production gate complete. Set
 to fail when any reference is missing. The service unit sets `LimitCORE=0` and
 uses bounded redacted logs; host owners must still provide rotation/revocation,
 recovery, backup/restore, and restart evidence.
+
+## Current development boundary
+
+The current merged baseline is `origin/main@d39e443`. Phase 1 local/controlled
+testing and Phase 2 read-only development are integrated and protected. Turnkey
+Verifiable Cloud proof retrieval is conditionally waived while waitlist access
+is pending. Production host provisioning, off-host backup, wallet rotation,
+and live broadcast authorization remain human-controlled gates.
 
 ## Logs and retention
 
