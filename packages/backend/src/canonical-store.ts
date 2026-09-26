@@ -278,6 +278,7 @@ function executionState(state: string): AttemptRecord['state'] {
 function receiptState(state: string): AttemptRecord['state'] {
   if (state === 'reorged') return 'Reorged';
   if (state === 'confirmed') return 'Confirmed';
+  if (state === 'pending') return 'Pending';
   return 'Failed';
 }
 
@@ -400,55 +401,14 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public async open(): Promise<void> {
     const row = this.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null };
-    if (row.version === null || row.version < 14) throw new Error('NORMALIZED_SCHEMA_VERSION_REQUIRED');
+    if (row.version === null || row.version < 15) throw new Error('NORMALIZED_SCHEMA_VERSION_REQUIRED');
     const backendState = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backend_state'").get() as { name: string } | undefined;
     if (backendState) throw new Error('JSON_BACKEND_STATE_MUST_NOT_BE_LIVE');
     const reservationColumns = new Set((this.db.prepare('PRAGMA table_info(spend_reservation)').all() as Array<{ name: string }>).map((column) => column.name));
     this.supportsReservationBoundaryFields = ['mint_class', 'fee_policy_id', 'fee_policy_version', 'fee_policy_snapshot_json'].every((column) => reservationColumns.has(column));
     this.supportsCampaignPeriods = Boolean(this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'campaign_period'").get());
     if (row.version >= 15 && (!this.supportsReservationBoundaryFields || !this.supportsCampaignPeriods)) throw new Error('NORMALIZED_SCHEMA_RESERVATION_CONTRACT_REQUIRED');
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS orchestrator_job (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        run_id TEXT,
-        campaign_id TEXT,
-        state TEXT NOT NULL,
-        scheduled_at TEXT NOT NULL,
-        target_at TEXT,
-        t_minus_ms INTEGER NOT NULL,
-        chain_time_offset_ms INTEGER NOT NULL,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        request_digest TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER NOT NULL,
-        last_error TEXT,
-        next_attempt_at TEXT,
-        lease_owner TEXT,
-        lease_expires_at TEXT,
-        started_at TEXT,
-        completed_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS orchestrator_readiness (
-        id TEXT PRIMARY KEY,
-        campaign_id TEXT NOT NULL,
-        wallet TEXT NOT NULL,
-        state TEXT NOT NULL,
-        fresh_until TEXT NOT NULL,
-        source_block TEXT,
-        source_block_hash TEXT,
-        observed_at TEXT,
-        blocking_reasons_json TEXT NOT NULL,
-        checks_json TEXT NOT NULL,
-        check_states_json TEXT,
-        provenance_json TEXT
-      )
-    `);
+    if (!this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'orchestrator_job'").get() || !this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'orchestrator_readiness'").get()) throw new Error('CANONICAL_ORCHESTRATOR_VIEWS_REQUIRED');
     this.opened = true;
   }
 
@@ -568,7 +528,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public async persistEngineReceipt(record: unknown): Promise<void> {
     this.ensureOpen();
-    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; status?: string; blockNumber?: bigint; blockHash?: string; confirmations?: number; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; finalityStage?: string; finalitySource?: string; observedAt?: string };
+    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; status?: string; blockNumber?: bigint; blockHash?: string; confirmations?: number; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; finalityStage?: string; robinhoodFinality?: 'soft' | 'posted' | 'final'; finalitySource?: string; observedAt?: string };
     if (typeof input.id !== 'string' || typeof input.executionId !== 'string' || typeof input.transactionAttemptId !== 'string' || typeof input.txHash !== 'string' || typeof input.status !== 'string' || typeof input.observedAt !== 'string') throw new Error('LIFECYCLE_RECEIPT_FACTS_REQUIRED');
     const id = input.id;
     const executionId = input.executionId;
@@ -576,6 +536,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const txHash = input.txHash;
     const status = input.status;
     const observedAt = input.observedAt;
+    const finalityStage = input.finalityStage ?? (input.robinhoodFinality === 'final' ? 'ethereum_final' : input.robinhoodFinality);
     const identity = this.executionIdentity(executionId);
     if (!identity) throw new Error('EXECUTION_CHAIN_REQUIRED');
     if (input.blockNumber === undefined || !input.blockHash) {
@@ -584,7 +545,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     }
     const blockNumber = input.blockNumber;
     const blockHash = input.blockHash;
-    const mappedStatus = status === 'reverted' ? 'Failed' : status === 'reorged' ? 'Reorged' : 'Confirmed';
+    if (!['pending', 'confirmed', 'reverted', 'reorged', 'dropped'].includes(status)) throw new Error('LIFECYCLE_RECEIPT_STATUS_INVALID');
+    const mappedStatus = status === 'pending' ? 'Pending' : status === 'confirmed' ? 'Confirmed' : status === 'reorged' ? 'Reorged' : 'Failed';
     const lifecycleAttemptHash = this.attemptHash(transactionAttemptId, executionId);
     if (lifecycleAttemptHash.toLowerCase() !== txHash.toLowerCase()) throw new Error('RECEIPT_ATTEMPT_HASH_MISMATCH');
     const actualMintValueWei = ['reverted', 'reorged', 'dropped'].includes(status) ? 0n : identity.valueWei;
@@ -593,7 +555,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const actualSpendWei = actualMintValueWei + actualL2ExecutionGasWei + actualL1DataGasWei;
     await this.transaction((current) => {
       if (current.receipts.some((receipt) => receipt.id === id)) return;
-      current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && input.finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
+       current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution', entityId: executionId, actor: this.actor, reason: 'lifecycle receipt accounting components', newState: 'receipt_accounting', policySnapshot: { kind: 'receipt_accounting', receiptId: id, actualSpendWei: actualSpendWei.toString(), actualMintValueWei: actualMintValueWei.toString(), actualL2ExecutionGasWei: actualL2ExecutionGasWei.toString(), actualL1DataGasWei: actualL1DataGasWei.toString() }, occurredAt: observedAt });
     });
   }
@@ -601,11 +563,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   public async persistEngineReconciliation(record: unknown): Promise<void> {
     this.ensureOpen();
     const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; fromAddress?: string; nonce?: number; state?: string; source?: string; details?: Record<string, unknown>; checkedAt?: string };
-    if (!input.id || !input.executionId || !input.fromAddress || input.nonce === undefined || !input.state || !input.source || !input.checkedAt) throw new Error('LIFECYCLE_RECONCILIATION_FACTS_REQUIRED');
+    if (!input.id || !input.executionId || !input.transactionAttemptId || !input.txHash || !input.fromAddress || input.nonce === undefined || !input.state || !input.source || !input.checkedAt) throw new Error('LIFECYCLE_RECONCILIATION_FACTS_REQUIRED');
     const identity = this.executionIdentity(input.executionId);
     if (!identity) throw new Error('EXECUTION_CHAIN_REQUIRED');
     if (this.db.prepare('SELECT id FROM reconciliation_record WHERE id = ?').get(input.id)) return;
-    this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, ...(input.transactionAttemptId ? { transactionAttemptId: input.transactionAttemptId } : {}), ...(input.txHash ? { txHash: input.txHash } : {}), fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, details: input.details ?? {}, executionId: input.executionId });
+    this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, transactionAttemptId: input.transactionAttemptId, txHash: input.txHash, fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, policyVersion: 'phase2-reconciliation-v1', details: input.details && Object.keys(input.details).length > 0 ? input.details : { sourceEvidence: input.source }, executionId: input.executionId });
   }
 
   public async admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult> {
@@ -791,7 +753,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private readReconciliations(): ReconciliationRecord[] {
     const rows = this.db.prepare(`SELECT rr.id, rr.chain_profile_id, rr.transaction_attempt_id, rr.execution_id, rr.tx_hash, rr.from_address, rr.nonce, rr.state, rr.checked_at, rr.details_json, e.run_id FROM reconciliation_record rr LEFT JOIN execution e ON e.id = rr.execution_id ORDER BY rr.checked_at, rr.id`).all() as DatabaseReconciliationRow[];
-    return rows.flatMap((row) => !row.run_id ? [] : [{ id: row.id, runId: row.run_id, ...(row.execution_id ? { attemptId: this.attemptIdForExecution(row.execution_id) } : {}), result: reconciliationResult(row.state), observedAt: row.checked_at, ...(decode<{ reason?: string }>(row.details_json)?.reason ? { reason: decode<{ reason: string }>(row.details_json)!.reason } : {}) } satisfies ReconciliationRecord]);
+    return rows.flatMap((row) => !row.run_id ? [] : [{ id: row.id, runId: row.run_id, ...(row.transaction_attempt_id ? { attemptId: row.transaction_attempt_id } : {}), result: reconciliationResult(row.state), observedAt: row.checked_at, ...(decode<{ reason?: string }>(row.details_json)?.reason ? { reason: decode<{ reason: string }>(row.details_json)!.reason } : {}) } satisfies ReconciliationRecord]);
   }
 
   private readReservations(): Reservation[] {
@@ -857,10 +819,10 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     for (const campaign of next.campaigns) this.persistCampaign(campaign, previous.campaigns.find((item) => item.id === campaign.id));
     for (const run of next.runs) this.persistRun(run, previous.runs.find((item) => item.id === run.id));
     for (const intent of next.intents) this.persistIntent(intent, previous.intents.find((item) => item.id === intent.id));
-    for (const reservation of next.reservations) this.persistReservation(reservation, previous.reservations.find((item) => item.id === reservation.id));
     for (const attempt of next.attempts) this.persistAttempt(attempt, previous.attempts.find((item) => item.id === attempt.id));
     for (const receipt of next.receipts) this.persistReceipt(receipt, previous.receipts.find((item) => item.id === receipt.id));
     for (const reconciliation of next.reconciliations) this.persistReconciliation(reconciliation, previous.reconciliations.find((item) => item.id === reconciliation.id));
+    for (const reservation of next.reservations) this.persistReservation(reservation, previous.reservations.find((item) => item.id === reservation.id));
     for (const event of next.events) this.persistEvent(event, previous.events.find((item) => item.id === event.id));
     for (const notification of next.notificationOutbox) this.persistNotification(notification, previous.notificationOutbox.find((item) => item.id === notification.id));
     for (const evidence of next.chainEvidence) this.persistChainEvidence(evidence, previous.chainEvidence.find((item) => item.id === evidence.id));
@@ -914,6 +876,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const id = this.intentRowId(intent.id, wallet);
       if (this.db.prepare('SELECT id FROM transaction_intent WHERE id = ?').get(id)) continue;
       const policyId = this.ensureSpendPolicy(canonicalWallet.walletId, campaign);
+       this.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaign.id, canonicalWallet.walletId, intent.createdAt);
        const record: TransactionIntentRecord = { id, campaignId: campaign.id, walletId: canonicalWallet.walletId, intentClass: 'mint', toAddress: campaign.contract, valueWei: campaign.mintPriceWei * BigInt(campaign.quantity), calldata: '0x', chainProfileId: graph.chainProfileId, fromAddress: wallet, gasLimitWei: campaign.spendPolicy.gasCeilingWei, maxFeePerGasWei: campaign.feePolicy.totalFeeBudgetWei ?? 0n, maxPriorityFeePerGasWei: campaign.feePolicy.configuredPriorityFeeWei, idempotencyKey: `${intent.id}:${wallet.toLowerCase()}`, requestId: intent.id, runId: intent.runId, policySnapshot: policySnapshot(campaign, this.runFor(intent.runId), intent), createdAt: intent.createdAt };
       this.databaseStore.saveIntent(record);
       this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'transaction_intent', entityId: id, newState: 'prepared', actor: this.actor, source: 'backend', reason: 'immutable intent persisted before action', policyVersion: 'phase1', occurredAt: intent.createdAt });
@@ -962,17 +925,27 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const attempt = receipt.transactionAttemptId ? this.db.prepare('SELECT id FROM transaction_attempt WHERE id = ? AND execution_id = ?').get(receipt.transactionAttemptId, receipt.executionId) as { id: string } | undefined : this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(receipt.executionId) as { id: string } | undefined;
     if (!attempt || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined) throw new Error('RECEIPT_PERSISTENCE_FACTS_REQUIRED');
     const chainId = chain.chain_id;
-    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'reverted', blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, ...(receipt.gasUsed === undefined ? {} : { gasUsed: receipt.gasUsed }), ...(receipt.effectiveGasPrice === undefined ? {} : { effectiveGasPrice: receipt.effectiveGasPrice }), finalityStage: canonicalReceiptFinalityStage(chainId, receipt.state, receipt.robinhoodFinality), finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
-    this.transitionExecutionSafe(receipt.executionId, receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : 'failed', `receipt ${receipt.state}`);
+    const finalityStage = canonicalReceiptFinalityStage(chainId, receipt.state, receipt.robinhoodFinality);
+    // Posted is the configured settlement stage for the L2 path and is
+    // represented as a confirmed receipt with its posted finality evidence.
+    // Soft/pending observations remain non-terminal until a later update.
+    const staged = finalityStage === 'soft' || finalityStage === 'posted' || (receipt.state === 'Pending' && finalityStage !== 'ethereum_final');
+    const persistedStatus = receipt.state === 'Reorged' ? 'reorged' : receipt.state === 'Failed' ? 'reverted' : staged ? 'pending' : 'confirmed';
+    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: persistedStatus, blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, ...(receipt.gasUsed === undefined ? {} : { gasUsed: receipt.gasUsed }), ...(receipt.effectiveGasPrice === undefined ? {} : { effectiveGasPrice: receipt.effectiveGasPrice }), finalityStage, finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
+    this.transitionExecutionSafe(receipt.executionId, persistedStatus === 'confirmed' ? 'confirmed' : persistedStatus === 'reorged' ? 'reorged' : staged ? 'submitted' : 'failed', `receipt ${receipt.state}`);
   }
 
   private persistReconciliation(record: ReconciliationRecord, prior: ReconciliationRecord | undefined): void {
     if (prior) return;
     const run = this.runFor(record.runId);
-    const intent = run ? this.intentFor(record.attemptId) : undefined;
+    const attempt = record.attemptId ? this.snapshot().attempts.find((item) => item.id === record.attemptId) : undefined;
+    const executionId = attempt?.executionId;
+    // Unknown reconciliation results remain visible in backend state but do
+    // not become canonical evidence without transaction identity.
+    if (!record.attemptId || !attempt?.hash || attempt.nonce === undefined || !executionId) return;
     const profile = run ? this.chainProfileForCampaign(run.campaignId) : undefined;
     if (!profile) throw new Error('CHAIN_PROFILE_REQUIRED');
-    this.databaseStore.recordReconciliation({ id: record.id, chainProfileId: profile.id, ...(record.attemptId ? { transactionAttemptId: this.attemptIdForExecution(record.attemptId) } : {}), ...(record.reason ? { details: { reason: record.reason } } : {}), state: databaseReconciliationState(record.result), checkedAt: record.observedAt, source: 'backend-reconcile', ...(intent ? { fromAddress: intent.wallet } : {}), ...(intent?.nonce === undefined ? {} : { nonce: intent.nonce }), ...(intent?.hash ? { txHash: intent.hash } : {}), ...(record.attemptId ? { executionId: record.attemptId } : {}) });
+    this.databaseStore.recordReconciliation({ id: record.id, chainProfileId: profile.id, transactionAttemptId: record.attemptId, txHash: attempt.hash, fromAddress: attempt.wallet, nonce: attempt.nonce, state: databaseReconciliationState(record.result), checkedAt: record.observedAt, source: 'backend-reconcile', policyVersion: 'phase2-reconciliation-v1', details: record.reason ? { sourceEvidence: record.reason } : { sourceEvidence: 'backend-reconcile' }, executionId });
   }
 
   private persistEvent(event: EventRecord, prior: EventRecord | undefined): void {
@@ -1030,6 +1003,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const graph = this.chainProfileForCampaign(simulation.campaignId);
     if (!graph) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
     const wallet = this.ensureWallet(graph.id, simulation.wallet, this.readCampaigns().find((item) => item.id === simulation.campaignId) as Campaign);
+    this.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(simulation.campaignId, wallet.walletId, simulation.checkedAt);
     const freshnessSeconds = Math.max(0, Math.floor((Date.parse(simulation.expiresAt) - Date.parse(simulation.checkedAt)) / 1000));
     this.databaseStore.recordSimulation({ id: simulation.id, walletId: wallet.walletId, campaignId: simulation.campaignId, sourceBlockNumber: Number(simulation.sourceBlock), sourceBlockHash: simulation.sourceBlockHash, checkedAt: simulation.checkedAt, freshnessSeconds, outcome: simulation.success ? 'pass' : 'fail', toolVersion: 'backend-phase1', details: { inputDigest: simulation.inputDigest, ...(simulation.gasEstimate === undefined ? {} : { gasEstimate: simulation.gasEstimate.toString() }), worstCaseFeeWei: simulation.worstCaseFeeWei.toString() } });
   }
@@ -1164,11 +1138,6 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return intent?.id;
   }
 
-  private attemptIdForExecution(executionId: string): string | undefined {
-    const row = this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(executionId) as { id: string } | undefined;
-    return row?.id;
-  }
-
   private attemptHash(attemptId: string, executionId?: string): string {
     const row = executionId ? this.db.prepare('SELECT tx_hash FROM transaction_attempt WHERE id = ? AND execution_id = ?').get(attemptId, executionId) as { tx_hash: string | null } | undefined : this.db.prepare('SELECT tx_hash FROM transaction_attempt WHERE id = ?').get(attemptId) as { tx_hash: string | null } | undefined;
     if (!row?.tx_hash) throw new Error('RECEIPT_TRANSACTION_HASH_REQUIRED');
@@ -1183,11 +1152,6 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private runFor(runId: string): RunRecord | undefined {
     return this.snapshot().runs.find((run) => run.id === runId);
-  }
-
-  private intentFor(executionId?: string): AttemptRecord | undefined {
-    const row = executionId ? this.db.prepare('SELECT a.id, a.transaction_intent_id, a.nonce, a.tx_hash, w.address FROM transaction_attempt a JOIN transaction_intent ti ON ti.id = a.transaction_intent_id JOIN wallet w ON w.id = ti.wallet_id WHERE a.execution_id = ? ORDER BY a.attempted_at DESC LIMIT 1').get(executionId) as { id: string; transaction_intent_id: string; nonce: number | null; tx_hash: string | null; address: string } | undefined : undefined;
-    return row ? { id: row.id, executionId: executionId ?? '', runId: '', wallet: row.address, ...(row.nonce === null ? {} : { nonce: row.nonce }), ...(row.tx_hash ? { hash: row.tx_hash } : {}), state: 'Submitted', createdAt: '', updatedAt: '' } : undefined;
   }
 
   private runChain(runId: string, runs: readonly RunRecord[]): 1 | 4663 {

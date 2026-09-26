@@ -201,6 +201,7 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
         runId,
         ...(submittedAttemptId ? { transactionAttemptId: submittedAttemptId } : {}),
         state: wallet.lifecycleState === 'reorged' ? 'Reorged' : failed ? 'Failed' : 'Confirmed',
+        ...(campaign.chainId === 4663 && (wallet.finalityStage === 'soft' || wallet.finalityStage === 'posted' || wallet.finalityStage === 'ethereum_final') ? { finalityStage: wallet.finalityStage } : {}),
         ...(campaign.chainId === 4663 && robinhoodFinality(wallet.finalityStage) ? { robinhoodFinality: robinhoodFinality(wallet.finalityStage) } : {}),
         blockNumber: wallet.blockNumber,
         blockHash: wallet.blockHash,

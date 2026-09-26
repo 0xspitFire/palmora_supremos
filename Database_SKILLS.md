@@ -82,3 +82,15 @@ Receive entities from Product Manager, architecture from CTO/Lead, and event fac
 - Migration `016_phase2_read_models.sql` adds durable jobs/events, normalized provenance and freshness observations, wallet metadata source columns, append-only readiness/opportunity evidence/finality observations, alert delivery state, and exact-string spend-summary snapshots. Existing intents, attempts, receipts, reservations, ledgers, and lifecycle/audit facts remain authoritative.
 - Product defaults are encoded as readiness freshness `300` seconds, discovery/calendar freshness `900` seconds, alert/read-model retention `30` days, and Phase 2 event/audit retention `90` days. Retention is policy-driven and never silently deletes immutable evidence.
 - `phase2.ts` is the repository/read-query boundary. Job leases are recoverable after restart; idempotency keys reject payload conflicts; read projections omit wallet key references, raw provider payloads, and secret-like fields; monetary values cross the read boundary as canonical decimal strings.
+
+### 2026-09-19 — CTO invariant correction pass
+
+- Migration `017_cto_invariant_guards.sql` requires substantive approval evidence before verified/enabled chain admission, enforces five-minute-to-24-hour simulation freshness and non-future observations, and guards campaign-wallet chain/membership identity at the SQLite boundary.
+- Reconciliation now requires transaction hash, sender, nonce, matching attempt/execution identity, policy version, and non-empty source evidence. Passed backup evidence requires existing store/backup/restore/off-host paths, an active retention policy, encryption/integrity proof, and an engaged kill switch.
+
+### 2026-09-20 — Independent-review cross-layer corrections
+
+- Migration `019_cross_layer_safety_guards.sql` makes orchestrator readiness compatibility writes append-only and wallet-ID aware, permits settlement from final reconciliation evidence, binds finality observations to execution identity, and closes raw-SQL bypasses for chain approval, backup evidence, and campaign-wallet updates.
+- Migrations `020_staged_finality_pending.sql` and `021_settlement_evidence_order.sql` preserve pending soft/posted receipt evidence across restart while preventing older reconciliation from overriding a later pending receipt during settlement.
+- Protected CI must execute environment, verify, Anvil, and Docker jobs on the approved `mintbot-wsl-junayd` runner before PR16 merge.
+- Environment setup cancellation is treated as an incomplete gate; rerun before merge rather than accepting skipped jobs.
