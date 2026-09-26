@@ -51,8 +51,8 @@ export type {
   WalletReadinessRow,
   ReconciliationReadModel,
 } from './read-model-v1.js';
-export { ReadOnlyApi, ReadModelApi } from './api.js';
-export type { ReadOnlyApiRequest, ReadOnlyApiResponse } from './api.js';
+export { Phase2ReadOnlyApi, ReadOnlyApi, ReadModelApi } from './api.js';
+export type { Phase2ReadOnlyApiResponse, ReadOnlyApiRequest, ReadOnlyApiResponse } from './api.js';
 export { normalizeTotalFeeBudget } from './fees.js';
 export type { FeeBudgetInput } from './fees.js';
 export { resolveWalletPath } from './keystore-path.js';
