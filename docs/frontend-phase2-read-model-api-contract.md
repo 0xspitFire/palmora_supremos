@@ -2,25 +2,25 @@
 
 > Contract document version: `1.0.0-contract`
 > Wire contract namespace: `mintbot.read-model/v1`
-> Status: product/design contract accepted; implementation blocked by dependencies
-> Date: 2026-09-18
+> Status: product/design contract accepted; implementation and fixture gates remain owner-controlled
+> Date: 2026-09-14
 > Consumer owner: Frontend
 > Authoritative owners: Product/Design for scope and copy; Backend and Database
 > for projections; Blockchain/CTO for chain truth; DevOps for transport safety
 
 ## 1. Decision Summary
 
-This document defines the versioned, read-only contract that a future Phase 2
-web client may consume. It is an API/read-model handoff, not a web
-implementation. It does not add routes, a browser execution surface, browser
+This document defines the accepted versioned, read-only contract consumed by the
+Phase 2 web client. It is an API/read-model handoff, not a browser execution
+surface. It does not add routes, a browser execution surface, browser
 RPC access, a signer, key access, secret access, transaction construction, or
 any client-side safety override.
 
 The Backend/store remains authoritative for every fact. The client renders the
 projection and may not infer eligibility, readiness, spend, success, finality,
-retryability, or permission from other fields. Phase 1 remains CLI-only.
-Acceptance of this contract is not authorization to start Phase 2 UI
-implementation or any execution operation.
+retryability, or permission from other fields. Phase 1 remains CLI-only and
+this contract is not authorization for any execution mutation or live-capital
+operation.
 
 The contract has these non-negotiable properties:
 
@@ -48,8 +48,8 @@ The contract has these non-negotiable properties:
 
 - Read-only projections for the future Phase 2 intelligence, readiness,
   calendar, reminder, alert, and operational-status views.
-- A future read-only run/transaction projection so staged finality and recovery
-  can be displayed without making the web client an execution engine.
+- A read-only run/transaction projection so staged finality and recovery can be
+  displayed without making the web client an execution engine.
 - Stable wire names, versioning, amount serialization, provenance, freshness,
   blocker, retry, finality, reorg, abort, and redaction rules.
 - Product/design acceptance scenarios and explicit Backend, Database,
@@ -78,10 +78,12 @@ transaction truth.
 
 ## 3. Versioning and Transport
 
-- The document version is `1.0.0-contract` for the accepted product/design
-  baseline. Implementation eligibility remains blocked until the dependency
-  gates in §11 are evidenced; accepting the wire contract does not authorize
-  frontend implementation or execution.
+- The document version is `1.0.0-contract`; Product/Design accepted the
+  read-only wire semantics. Backend/Database/Blockchain/CTO/DevOps still own
+  implementation fixtures, chain truth, redaction, transport, and release
+  gates.
+- Implementation and live-release eligibility remain gated by the dependency
+  evidence in §11; accepting the wire contract does not authorize execution.
 - The wire namespace is `mintbot.read-model/v1`; every response includes both
   `contract` and `version`.
 - Additive fields are allowed within `v1` when their absence has a defined
@@ -297,6 +299,13 @@ type SourcedQuantity = {
 
 `amount = null` is the explicit unknown/unavailable representation; it is not a
 zero amount.
+
+Spend copy must preserve the distinction between `reserved` and `actual`:
+`reserved` is an admission or budget observation and is not settled spend;
+`actual` is a Backend receipt observation and remains subject to the separate
+finality/reconciliation projection. Every spend summary is rendered with the
+envelope's server `generatedAt`/snapshot `capturedAt` as its `asOf`; the client
+does not derive an as-of time from its local clock or combine snapshots.
 
 ### Gates, checks, and safe actions
 
@@ -541,21 +550,21 @@ type TelegramAlertReadModel = TelegramAlertCommon & (
 );
 ```
 
-## 6. Phase 2 Read-Only Resources
+## 6. Read-Only Resources
 
-All paths below are accepted Phase 2 resource shapes under
-`/api/v1/read-model`. They are `GET` only and are not implemented by this
-documentation change.
+All paths below are Backend-owned under `/api/v1/read-model`. They are `GET`
+only. The frontend uses an injected GET transport and never creates a mutation
+request or browser-chain connection.
 
 | Resource | Purpose | Initial phase use | Safe primary action |
 |---|---|---|---|
 | `/home` | Attention items, readiness counts, candidate opportunities, reminders, and system summary | Phase 2 | `Inspect` |
 | `/opportunities` | Paginated evidence-backed candidate summaries | Phase 2 discovery; extensible for Phase 4 | `Inspect` |
-| `/opportunities/{id}` | Full available evidence, score inputs, risks, gates, and freshness | Phase 2 read-only detail; Phase 4 expands evidence | `Inspect` |
+| `/opportunities/{id}` | Full available evidence, score inputs, risks, gates, and freshness; may be unavailable until its source is published | Phase 2 read-only detail; Phase 4 expands evidence | `Inspect` |
 | `/calendar` | Upcoming mint records, source authority, timing, price, supply, and readiness summary | Phase 2 | `Inspect` |
 | `/campaigns/{id}/readiness` | Per-wallet readiness matrix for one campaign/drop | Phase 2 read-only readiness | `Inspect` or `Refresh read model` |
 | `/runs/{id}` | Dry-run/live record, wallet outcomes, attempts, receipts, reconciliation, and finality history | Phase 2 monitoring projection | `Inspect` or `Wait for reconciliation` |
-| `/alerts` | Persisted alert and delivery summaries with canonical links | Phase 2 reminders | `Inspect` |
+| `/alerts` | Persisted alert and delivery summaries with source event/run IDs | Phase 2 reminders | `Inspect` |
 | `/health` | Safe dependency, kill-switch, reconciliation, and data-freshness summary | Phase 2 system strip | `Inspect` or `No safe action` |
 
 No resource in `v1` returns an action URL that signs, broadcasts, arms, kills,
@@ -568,17 +577,16 @@ and must call Backend transitions through the same authoritative state machine.
 
 `HomeReadModel` contains:
 
-- `attention`: items with `severity`, subject ID, canonical state, plain-language
-  reason, `freshness`, `provenance`, and a safe primary action.
+- `attention`: Backend `ReadModelIssue` items with `code`, `severity`, message,
+  retryability, provenance, and a Backend-provided safe action.
 - `readinessSummary`: separate counts for `ready`, `blocked`, `unknown`,
   `stale`, `ineligible`, and `executing`; no unknown or stale item is counted
   as ready.
 - `opportunities`: summaries with score and gate separated.
 - `calendarHighlights`: only records whose source and opening evidence are
   represented; stale entries stay explicitly stale.
-- `reminders`: `ReminderReadModel[]`; critical items are not grouped and
-  non-critical items retain their grouped state and source IDs.
-- `alerts`: `TelegramAlertReadModel[]` with persisted delivery state, never
+- `alerts`: persisted `sourceEventId`, optional `runId`, type, redacted text,
+  delivery state, attempt count, timestamps, freshness, and provenance; never
   delivery-as-execution proof.
 - `system`: the redacted health projection described below.
 
@@ -647,16 +655,17 @@ claim. A blocked gate remains blocked regardless of score.
 
 Each calendar entry includes:
 
-- project/collection name when known, contract address when known, chain ID and
-  canonical chain name;
-- opening/closing times and phase, each with source provenance and freshness;
+- project name when known, contract address when known, chain ID and canonical
+  chain name;
+- opening/closing times and phase, with entry-level source provenance and
+  freshness;
 - mint price as a sourced `EthAmount`, or explicit `Unknown` when unavailable;
-- supply and per-wallet limit as integer strings when known;
-- method, public/FCFS status, and expected gas as an estimate;
+- supply and per-wallet limit as sourced quantities when known;
+- method, public/FCFS status, and expected gas as a sourced quantity;
 - source authority (`on_chain`, `operator_record`, or `external_source`),
-  verification status, last verification, and expiry;
-- eligibility summary with counts split across `eligible`, `ineligible`,
-  `unknown`, `ready`, and `stale`;
+  verification `GateSummary`, and entry-level freshness;
+- eligibility summary with counts split across `total`, `ready`, `blocked`,
+  `unknown`, `stale`, `ineligible`, and `executing`;
 - `nextAction: "Inspect"` only.
 
 A manually entered or externally sourced time is not presented as an on-chain
@@ -813,7 +822,7 @@ type RunReadModel = {
 The canonical campaign labels are `Draft`, `Validating`, `Ready`, `Armed`,
 `Active`, `Paused`, `Completed`, `Failed`, `Aborted`, and `Cancelled`.
 
-The accepted wire execution status codes and labels are:
+The wire execution status codes and labels are:
 
 | Code | Label | Success claim |
 |---|---|---|
@@ -1022,6 +1031,11 @@ the Backend projection.
 
 The current code is useful input but is not this wire contract:
 
+The current `ReadOnlyApi` route names are the intended GET boundary, but the
+active legacy projection and the accepted v1 DTOs must not be silently coerced
+in the browser. Backend must publish the accepted v1 serializer/fixtures on
+those routes before this package is wired to live responses.
+
 - `packages/backend/src/read-model.ts` currently exposes only a narrow run
   projection and accepts readiness as an external array. It needs a stable
   snapshot envelope, typed availability/issues, and authoritative readiness
@@ -1044,7 +1058,7 @@ The current code is useful input but is not this wire contract:
   final` for staged chains. Backend owns the explicit mapping and history; the
   client must not derive it from a hash or receipt alone.
 - Current health records contain operational fields that must not be projected
-  verbatim. The future `/health` read model is a redacted summary, not a dump of
+  verbatim. The `/health` read model is a redacted summary, not a dump of
   `OperationalReadiness` or configuration.
 - The existing command application includes mutating operations. It is not a
   Phase 2 browser API. Any future command surface must be a separate,
@@ -1059,30 +1073,34 @@ The current code is useful input but is not this wire contract:
 
 ### Acceptance state
 
-- Product Owner has approved the Phase 2 scope: single local operator,
-  read-only web intelligence/readiness/calendar/reminder/status views, and
-  outbound-only Telegram alerts under `mintbot.read-model/v1`.
-- Product and Design copy, state vocabulary, freshness defaults, retention
-  defaults, and no-mutation boundary are accepted in this document and the
-  two root specifications.
-- This is an accepted product/design contract baseline, not an implementation
-  release. Frontend implementation and live execution remain **NOT ELIGIBLE**.
+- **Engineering Lead:** accept the contract version, integration eligibility,
+  Phase 2 surface boundary, and ownership map.
+- **Backend:** implement the server-side projection/serializer, snapshot
+  consistency, issue taxonomy, canonical state mapping, safe retry policy, and
+  redacted health response. Do not add browser execution routes under `v1`.
+- **Database:** persist/query source records, provenance, freshness policies,
+  immutable lifecycle history, finality/reorg observations, reservation
+  amounts, and wallet-by-campaign readiness without process-local inference.
+- **Blockchain/CTO:** approve chain verification status, Robinhood blocked
+  wording, staged finality/reorg semantics, and required settlement stage per
+  chain.
+- **Product Manager/Designer:** approve plain-language labels, calendar source
+  authority, score/confidence vocabulary, blocker copy, and the distinction
+  between `Inspect`, `Promote proposal`, `Approve`, and `ARM LIVE CAMPAIGN`.
+- **DevOps:** provide the authenticated server transport, safe logging,
+  snapshot observability, and deployment configuration without exposing secret
+  values. Native WSL remains the development/test environment for this branch.
+- **Frontend (`@mint-bot/web`):** validate injected envelopes, render all
+  states, keep route access GET-only, and maintain responsive/accessibility,
+  redaction, stale/partial/unknown, finality, and no-mutation tests. The
+  package owns presentation only; Backend fixtures and chain truth remain
+  authoritative.
 
-### Required dependency gates
-
-| Gate | Owner | Required deliverable | Evidence required before frontend implementation |
-|---|---|---|---|
-| Phase 1 foundation | Engineering Lead | Recorded P1 exit decision and phase sequencing | P1 gate status is explicit; this document never authorizes capital or execution |
-| Read-model adapter | Backend | `GET`-only `mintbot.read-model/v1` serializer, snapshot consistency, canonical state/finality mapping, typed issues, freshness, safe actions, and redacted health | Contract fixtures round-trip envelope, partial/stale/unknown states, and reject all mutation routes |
-| Durable source records | Database | Opportunity, calendar, eligibility/readiness, simulation, lifecycle, finality/reorg, reminder, alert-delivery, provenance, policy, and retention records | Query fixtures are transactionally consistent, preserve history, and apply 5m/15m policy versions and 30d/90d retention |
-| Chain truth | Blockchain/CTO | Chain verification, staged finality/reorg mapping, Robinhood blocked state, and source evidence | Ethereum and Robinhood fixtures prove only the required settlement stage is success; compatibility evidence does not enable execution |
-| One-way notifications | Backend/Notifications | Idempotent outbound Telegram delivery, immediate critical alerts, grouped non-critical reminders, canonical read links, and delivery state | Event fixtures prove no inbound command/callback/mutation and delivery never stands in for execution proof |
-| Safe transport and operations | DevOps | Authenticated server transport, TLS/origin policy, safe logs, snapshot observability, and deployment configuration without secret values | Redaction and access tests show no credentials, endpoint values, or secret-bearing URLs cross the read boundary |
-| Consumer implementation | Future Frontend | Schema validation, responsive/accessibility behavior, and all required state fixtures | Review occurs only after every preceding gate is accepted; no Phase 2 code is part of this handoff |
-
-An owner may provide evidence in a later implementation change, but a missing
-gate keeps the corresponding surface unavailable and never justifies a client
-fallback or execution shortcut.
+The Product Owner has approved the Phase 2 scope and read-only v1 semantics.
+The frontend implementation may be reviewed against this contract, but release
+eligibility and live execution remain blocked until the listed dependency gates
+are evidenced and accepted. A missing gate keeps the corresponding surface
+unavailable and never justifies a client fallback or execution shortcut.
 
 ### Assumptions
 
@@ -1101,13 +1119,13 @@ fallback or execution shortcut.
   facts that another product policy requires to remain auditable.
 - A missing value is unknown, not zero. A high score is not permission. A
   notification is not execution proof.
-- Phase 1 remains CLI-only. No web or Telegram mutation is authorized by this
-  document; Phase 3 must introduce a separately reviewed Backend contract.
+- Phase 1 remains CLI-only. Phase 2 web is read-only and consumes the accepted
+  v1 envelope through Backend-owned GET routes; fixture, transport, and release
+  gates remain owned by the listed specialists.
 
 ## 12. Acceptance Criteria and Scenarios
 
-Before a frontend implementation is eligible for integration, contract tests
-and review must demonstrate:
+Contract fixtures, frontend tests, and review must demonstrate:
 
 1. Every monetary field round-trips as a canonical string amount with no
    precision loss, and Robinhood FREE cost components remain independent.
@@ -1253,54 +1271,64 @@ Review date: 2026-09-18
 
 ### Review basis
 
-- Baseline was verified as clean `origin/main` at `29d837c` before these
-  documentation-only edits.
-- The baseline has no `packages/web` tree and no tracked JSX/TSX frontend
-  source. No frontend code, browser transport, or execution mutation was added
-  by this handoff.
-- Reviewed `Frontend_SKILLS.md`, `PRODUCT_SPEC.md`,
-  `PRODUCT_DESIGN_SPEC.md`, `PLAN_Frontend.md`, `PLAN_Backend.md`,
-  `PLAN_Database.md`, Backend read-model/application contracts, Database read
-  models, and current chain/finality mappings.
+The review covers the accepted frontend implementation commit `e3a7bc4`
+(`Align Phase 2 frontend read models`) and synchronization with the corrective
+`origin/main` baseline. It reviewed `Frontend_SKILLS.md`, `PRODUCT_SPEC.md`,
+`PRODUCT_DESIGN_SPEC.md`, `PLAN_Frontend.md`, Backend read-model/application
+contracts, Database read models, and current chain/finality mappings. The
+implementation is presentation-only; the integrated release gate remains
+separate from this contract review.
 
 ### Checklist
 
 | Check | Status | Evidence and limitation |
 |---|---|---|
-| Phase 1 has no frontend implementation | **PASS** | Phase 1 remains CLI-only; the baseline contains no web package and this change contains documentation only. |
-| Phase 2 scope is reconciled | **PASS** | Product, Design, and Frontend Plan now agree on read-only web intelligence/readiness/calendar/reminder/status views and outbound-only Telegram alerts. |
-| Canonical campaign and wallet-readiness states | **PASS as contract** | The contract preserves canonical campaign labels and wallet states, including `Unknown`, `Ready`, `Failed`, and `Skipped`; readiness remains per wallet and campaign. |
-| Safety gates versus desirability score | **PASS as boundary** | Score, confidence, evidence, and gate are separate fields. Backend/Store permission and simulation policy remain authoritative. |
+| Phase 1 has no frontend execution surface | **PASS** | Product and design keep Phase 1 CLI-only; the Phase 2 web package renders read models only and has no signing or execution authority. |
+| No Phase 2/3 dashboard or control leakage | **PASS** | The package uses injected GET routes, escaped output, and inspection/disclosure links only; no browser client, mutation request, or execution control was added. |
+| Canonical campaign and wallet-readiness states | **PASS as contract** | The accepted contract preserves the canonical campaign labels and wallet states, including `Unknown`, `Ready`, `Failed`, and `Skipped`; readiness remains per wallet and campaign. |
+| Safety gates versus desirability score | **PASS as boundary** | Score, confidence, evidence, and gate are separate contract fields. Backend/store permission and simulation policy remain authoritative; the client cannot promote a score into permission. |
+| Robinhood paid-mint block | **PASS fail-closed** | The normalized origin-main Backend/CanonicalStore path rejects paid Robinhood execution and keeps chain execution disabled. The v1 projection exposes the block without a live action. |
+| Robinhood staged finality | **PASS as rendering boundary; Backend evidence gate remains** | The accepted v1 DTO exposes `soft`, `posted`, and `ethereum_final`; the frontend maps intermediate states to non-success copy. Backend/Blockchain still own confirmation-depth and canonicality evidence. |
+| Reorg, abort, cancellation, and unknown outcomes | **PASS as rendering boundary; fixture gate remains** | The v1 DTO exposes reconciliation/finality/retry fields; the frontend preserves unresolved and reorg states without generic retry or success claims. Fixture completeness remains a Backend/Database gate. |
+| No secret or browser-chain access | **PASS** | Frontend output is allowlisted/escaped, unsafe text is redacted, route access is injected GET-only, and keys, credentials, endpoint values, calldata, raw transactions, signer access, and browser RPC are absent. |
 | Freshness and retention defaults | **PASS as contract** | Readiness is 5 minutes; discovery/calendar is 15 minutes; critical alerts are immediate; non-critical reminders are grouped; read-model/alert retention is 30 days; audit retention is 90 days. |
-| Robinhood paid-mint block and staged finality | **PASS fail-closed** | Compatibility evidence does not enable execution; `Included` and `Posted to Ethereum` are not success; `Ethereum final` is required. Technical mapping fixtures remain a Backend/Blockchain dependency. |
-| Reorg, abort, cancellation, and unknown outcomes | **PASS as required shape; dependency pending** | The contract requires history, typed reasons, provenance, and retry policy; Backend/Database must provide fixtures before implementation. |
-| No secret or browser-chain access | **PASS by contract and absence** | The allowlisted projection prohibits keys, credentials, endpoint values, calldata, raw transactions, signer access, and browser RPC. |
 
 ### Eligibility verdict
 
-- Product/design contract: **ACCEPTED BASELINE**.
-- Frontend implementation: **NOT ELIGIBLE** until every dependency gate in §11
-  has accepted fixtures and the Engineering Lead records the phase gate.
+`PRODUCT_SPEC.md`, `PRODUCT_DESIGN_SPEC.md`, `PLAN_Frontend.md`, and this
+contract now agree that Phase 2 includes read-only web intelligence,
+readiness, calendar, reminders, alerts, and operational status. Phase 3 owns
+approval, arming, execution, pause, kill, funding, retry, and two-way Telegram
+mutations.
+
+### Closure verdict
+
+- Frontend-owned Phase 1 blockers: **ZERO**.
+- Shared gates: Backend/Database must continue to provide snapshot consistency,
+  string-safe serialization, field provenance and expiry, typed readiness
+  blockers, backend-owned retryability, and complete finality/reorg/abort
+  history. Blockchain/CTO owns confirmation-depth truth; DevOps owns safe GET
+  transport and deployment evidence.
+- Overall Phase 1 release/deployment status remains owned by the integrated
+  engineering gate and is not changed by this frontend review.
+- Frontend implementation integration status: **READY FOR CONTRACT-BOUND
+  REVIEW; release/live readiness remains separately gated**.
 - Live execution or capital authorization: **NOT GRANTED** by this document.
 
-## 14. Contract Handoff
+## 14. Handoff Status
 
 - Artifact: `docs/frontend-phase2-read-model-api-contract.md`
-- Baseline: clean `origin/main@29d837c` before docs changes.
-- Reconciled documents: `PLAN_Frontend.md`, `PRODUCT_SPEC.md`, and
-  `PRODUCT_DESIGN_SPEC.md`.
-- Product Owner decision captured: one local operator; read-only web Phase 2;
-  outbound-only Telegram; 5-minute readiness freshness; 15-minute
-  discovery/calendar freshness; immediate critical alerts; grouped reminders;
-  30-day read-model/alert retention; 90-day audit retention.
-- Implementation changes: none. No frontend code, secrets, credentials, or
-  execution authorization were added or requested.
-- Required recipients: Engineering Lead, Backend, Database,
-  Blockchain/CTO, DevOps/Notifications, and future Frontend implementation.
-- Validation performed: baseline branch/status inspection; document and code
-  contract review; scope, mutation, state, freshness, retention, and redaction
-  consistency checks. Runtime tests are not applicable to this documentation
-  handoff.
-- Integration status: **NOT ELIGIBLE** until the dependency evidence in §11 is
-  delivered and accepted. Any Phase 3 mutation must be separately versioned,
-  authenticated, confirmation-gated, and audited.
+- Worktree: `/home/Junayd/W3/MintBot/.kilo/worktrees/phase2-frontend`
+- Branch/commit: `phase2-frontend` / frontend implementation `e3a7bc4`,
+  synchronized against the corrective `origin/main` baseline by the owning PR.
+- Implementation: `packages/web` consumes the accepted v1 DTOs through an
+  injected GET-only route client and renders read-only surfaces. It has no
+  browser RPC, wallet/provider injection, signer/key access, mutation HTTP
+  calls, or live execution controls.
+- Validation: frontend build and tests cover redaction, no-mutation routing,
+  responsive/accessibility behavior, stale/partial/unavailable/unknown data,
+  staged finality/reorg copy, reserved-versus-actual spend copy, and server
+  `asOf` rendering. Workspace validation remains required after integration.
+- Integration status: **READY FOR CONTRACT-BOUND REVIEW**. Backend/Database
+  fixture completeness, Blockchain/CTO finality evidence, DevOps transport
+  safety, and Product Owner release gates remain separate dependencies.

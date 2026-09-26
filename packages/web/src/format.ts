@@ -120,7 +120,8 @@ export function renderFreshness(freshness: Freshness | null | undefined): string
 export function renderAmount(amount: SourcedAmount | null | undefined, label: string): string {
   const kind = amount?.kind ?? 'unknown';
   const value = formatAmount(amount);
-  return `<div class="metric"><span class="metric-label">${safeText(label)}</span><strong>${value}</strong><span class="metric-meta">${safeText(kind)}; ${renderFreshness(amount?.freshness)}</span></div>`;
+  const kindLabel = kind === 'reserved' ? 'Reserved; not settled' : kind === 'actual' ? 'Actual Backend observation; finality shown separately' : kind === 'estimated' ? 'Estimate; not settled' : 'Unknown amount kind';
+  return `<div class="metric"><span class="metric-label">${safeText(label)}</span><strong>${value}</strong><span class="metric-meta">${safeText(kindLabel)}; ${renderFreshness(amount?.freshness)}</span></div>`;
 }
 
 export function renderTime(time: SourcedTime | null | undefined, label: string): string {
@@ -139,7 +140,7 @@ export function safeActionLabel(action: string | null | undefined): string {
   return typeof action === 'string' && SAFE_ACTIONS.has(action) ? action : 'No safe action';
 }
 
-export function renderIssues(issues: ReadModelIssue[], headingId = 'issues-heading'): string {
+export function renderIssues(issues: readonly ReadModelIssue[], headingId = 'issues-heading'): string {
   if (issues.length === 0) return '';
   return `<section class="issues" aria-labelledby="${safeText(headingId)}"><h3 id="${safeText(headingId)}">What needs attention</h3><ul>${issues.map(renderIssue).join('')}</ul></section>`;
 }
@@ -150,7 +151,7 @@ export function renderCheck(check: GateCheck): string {
   return `<li class="check check-${outcome}"><div>${renderBadge(outcome, outcome)} <strong>${safeText(check.code)}</strong> <span class="check-required">${required}</span></div><p>${safeText(check.message)}</p><span class="metric-meta">${renderFreshness(check.freshness)}</span></li>`;
 }
 
-export function renderGate(gate: { decision: string; checks: GateCheck[]; blockers: ReadModelIssue[]; nextAction: string }, heading = 'Safety gate', idSuffix = ''): string {
+export function renderGate(gate: { decision: string; checks: readonly GateCheck[]; blockers: readonly ReadModelIssue[]; nextAction: string }, heading = 'Safety gate', idSuffix = ''): string {
   const decision = gate.decision === 'permitted' || gate.decision === 'blocked' ? gate.decision : 'unknown';
   const label = decision === 'permitted' ? 'Recorded checks pass' : decision === 'blocked' ? 'Blocked' : 'Unknown';
   const headingId = `gate-heading${stateClass(idSuffix) === 'unknown' ? '' : `-${stateClass(idSuffix)}`}`;
@@ -164,7 +165,7 @@ export function renderEnvelopeNotice<T>(envelope: ReadModelEnvelope<T>, subject:
   return `<div class="surface-notice surface-notice-${stateClass(status)}" role="status">${renderBadge(status, status)} <strong>${safeText(subject)}</strong> - ${safeText(next)} ${renderFreshness(envelope.freshness)}</div>`;
 }
 
-export function renderProvenance(provenance: { recordId: string; observedAt: string; kind: string; sourceBlockNumber?: string; modelVersion?: string; policyVersion?: string }[]): string {
+export function renderProvenance(provenance: ReadonlyArray<{ recordId: string; observedAt: string; kind: string; sourceBlockNumber?: string; modelVersion?: string; policyVersion?: string }>): string {
   if (provenance.length === 0) return '<span class="metric-meta">Source: Unknown</span>';
   return `<details class="provenance"><summary>Evidence details</summary><ul>${provenance.map((item) => `<li>${safeText(item.kind)}; record ${safeIdentifier(item.recordId)}; observed ${formatTime(item.observedAt)}${item.sourceBlockNumber ? `; block ${safeIdentifier(item.sourceBlockNumber)}` : ''}${item.modelVersion ? `; model ${safeText(item.modelVersion)}` : ''}${item.policyVersion ? `; policy ${safeText(item.policyVersion)}` : ''}</li>`).join('')}</ul></details>`;
 }

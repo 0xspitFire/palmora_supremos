@@ -1,8 +1,8 @@
 export const READ_MODEL_CONTRACT = 'mintbot.read-model' as const;
 export const READ_MODEL_VERSION = '1' as const;
-// The Backend/API handoff is still a proposal on this baseline. Keep the
-// frontend package transport-agnostic until the owners accept the wire DTOs.
-export const READ_MODEL_CONTRACT_STATUS = 'proposal' as const;
+// Product/Design accepted the wire contract; Backend/API transport remains
+// injected so the browser cannot acquire chain or signer authority.
+export const READ_MODEL_CONTRACT_STATUS = 'accepted' as const;
 
 export type Availability = 'available' | 'partial' | 'stale' | 'unavailable';
 export type FreshnessStatus = 'fresh' | 'stale' | 'unknown';
@@ -71,7 +71,7 @@ export interface ReadModelEnvelope<T> {
   availability: Availability;
   freshness: Freshness;
   data: T | null;
-  issues: ReadModelIssue[];
+  issues: readonly ReadModelIssue[];
   nextCursor?: string;
 }
 
@@ -95,20 +95,20 @@ export interface SourcedAmount {
   amount: EthAmount | null;
   kind: AmountKind;
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface SourcedQuantity {
   value: string | null;
   unit: 'gas';
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface SourcedTime {
   value: string | null;
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export type CheckOutcome = 'pass' | 'fail' | 'unknown' | 'stale';
@@ -126,8 +126,8 @@ export interface GateCheck {
 
 export interface GateSummary {
   decision: 'permitted' | 'blocked' | 'unknown';
-  checks: GateCheck[];
-  blockers: ReadModelIssue[];
+  checks: readonly GateCheck[];
+  blockers: readonly ReadModelIssue[];
   nextAction: SafeAction;
 }
 
@@ -144,7 +144,7 @@ export interface ScoreFactor {
   code: string;
   contribution: number;
   explanation: string;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
   freshness: Freshness;
 }
 
@@ -160,7 +160,7 @@ export interface EvidenceRow {
   id: string;
   label: string;
   summary: string;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
   freshness: Freshness;
 }
 
@@ -196,7 +196,7 @@ export interface CampaignSummary {
   cost: SourcedAmount;
   gate: GateSummary;
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface OpportunityReadModel {
@@ -222,17 +222,17 @@ export interface OpportunityReadModel {
       denominator: string | null;
       label: 'low' | 'medium' | 'high' | 'unknown';
     };
-    factors: ScoreFactor[];
+    factors: readonly ScoreFactor[];
     freshness: Freshness;
-    provenance: Provenance[];
+    provenance: readonly Provenance[];
   };
-  risks: RiskFlag[];
-  evidence: EvidenceRow[];
+  risks: readonly RiskFlag[];
+  evidence: readonly EvidenceRow[];
   gate: GateSummary;
   readiness: ReadinessSummary | null;
   nextAction: 'Inspect';
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export type CalendarSourceAuthority = 'on_chain' | 'operator_record' | 'external_source';
@@ -247,29 +247,23 @@ export interface CalendarEligibilitySummary {
 
 export interface CalendarEntry {
   id: string;
-  project: {
-    name: string | null;
-    collection: string | null;
-    contract: string | null;
-  };
+  project: { name: string | null; contract: string | null };
   chain: { id: string; name: string };
-  opening: SourcedTime;
-  closing: SourcedTime | null;
+  openingAt: string | null;
+  closingAt: string | null;
   phase: string | null;
-  price: SourcedAmount | null;
-  supply: string | null;
-  perWalletLimit: string | null;
+  price: SourcedAmount;
+  supply: SourcedQuantity;
+  perWalletLimit: SourcedQuantity;
   method: string | null;
-  access: 'public' | 'fcfs' | 'allowlist' | 'unknown';
-  expectedGas: SourcedAmount | null;
+  publicStatus: 'public' | 'fcfs' | 'allowlist' | 'unknown';
+  expectedGas: SourcedQuantity;
   sourceAuthority: CalendarSourceAuthority;
-  verificationStatus: string;
-  lastVerifiedAt: string | null;
-  expiresAt: string | null;
-  eligibility: CalendarEligibilitySummary;
+  verification: GateSummary;
+  eligibility: ReadinessSummary;
   nextAction: 'Inspect';
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface ReadinessRow {
@@ -277,8 +271,8 @@ export interface ReadinessRow {
   wallet: { id: string; address: string; label: string | null };
   state: 'Unknown' | 'Unfunded' | 'Funded' | 'Eligible' | 'Ready' | 'Executing' | 'Minted' | 'Failed' | 'Skipped';
   decision: 'ready' | 'blocked' | 'unknown' | 'stale';
-  checks: GateCheck[];
-  blockers: ReadModelIssue[];
+  checks: readonly GateCheck[];
+  blockers: readonly ReadModelIssue[];
   cost: {
     mintValue: SourcedAmount;
     executionGas: SourcedAmount;
@@ -289,35 +283,25 @@ export interface ReadinessRow {
   };
   nextAction: SafeAction;
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
-export interface AttentionItem {
-  id: string;
-  severity: 'info' | 'warning' | 'blocking';
-  subjectId: string;
-  state: string;
-  reason: string;
-  freshness: Freshness;
-  provenance: Provenance[];
-  nextAction: SafeAction;
-}
+export type AttentionItem = ReadModelIssue;
 
-export type AlertDeliveryState = 'pending' | 'delivering' | 'delivered' | 'failed' | 'unknown';
+export type AlertDeliveryState = 'pending' | 'delivering' | 'delivered' | 'failed';
 
 export interface AlertReadModel {
   id: string;
+  sourceEventId: string;
+  runId: string | null;
   type: string;
-  severity: 'info' | 'warning' | 'blocking';
-  subjectId: string | null;
-  message: string;
   state: AlertDeliveryState;
+  text: string;
+  attempts: string;
   createdAt: string;
   deliveredAt: string | null;
-  canonicalPath: string | null;
-  nextAction: 'Inspect';
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface SystemHealth {
@@ -330,33 +314,23 @@ export interface SystemHealth {
     notifications: 'ready' | 'not_ready' | 'unknown';
     reconciliation: 'clear' | 'required' | 'in_progress' | 'unknown';
   };
-  blockers: ReadModelIssue[];
+  blockers: readonly ReadModelIssue[];
   checkedAt: string;
   freshness: Freshness;
 }
 
 export interface HomeReadModel {
-  attention: AttentionItem[];
+  attention: readonly ReadModelIssue[];
   readinessSummary: ReadinessSummary;
-  opportunities: OpportunityReadModel[];
-  calendarHighlights: CalendarEntry[];
-  alerts: AlertReadModel[];
+  opportunities: readonly OpportunityReadModel[];
+  calendarHighlights: readonly CalendarEntry[];
+  alerts: readonly AlertReadModel[];
   system: SystemHealth;
 }
 
-export interface ReadinessReadModel {
-  campaign: CampaignSummary | null;
-  summary: ReadinessSummary;
-  rows: ReadinessRow[];
-}
-
-export interface CalendarReadModel {
-  entries: CalendarEntry[];
-}
-
-export interface AlertsReadModel {
-  alerts: AlertReadModel[];
-}
+export type ReadinessReadModel = ReadonlyArray<ReadinessRow>;
+export type CalendarReadModel = ReadonlyArray<CalendarEntry>;
+export type AlertsReadModel = ReadonlyArray<AlertReadModel>;
 
 export interface Finality {
   stage: 'unknown' | 'confirmed' | 'soft' | 'posted' | 'ethereum_final';
@@ -364,7 +338,7 @@ export interface Finality {
   settlementReached: boolean;
   observedAt: string | null;
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
   downgradeReason?: string;
 }
 
@@ -383,7 +357,7 @@ export interface WalletExecutionResult {
   walletId: string;
   address: string;
   state: string;
-  attemptIds: string[];
+  attemptIds: readonly string[];
   finality: Finality | null;
   reason?: OutcomeReason;
   retry: RetryPolicy;
@@ -401,7 +375,7 @@ export interface TransactionAttempt {
   finality: Finality | null;
   retry: RetryPolicy;
   reason?: ReadModelIssue;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface TransactionReceipt {
@@ -415,7 +389,7 @@ export interface TransactionReceipt {
   effectiveGasPrice: SourcedAmount | null;
   actualSpend: SourcedAmount | null;
   finality: Finality;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface ReconciliationObservation {
@@ -424,7 +398,7 @@ export interface ReconciliationObservation {
   observedAt: string;
   reason: string | null;
   retry: RetryPolicy;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface TimelineEvent {
@@ -446,7 +420,6 @@ export interface RunReadModel {
     createdAt: string;
     updatedAt: string;
     retry: RetryPolicy;
-    reason?: OutcomeReason | null;
   };
   campaign: CampaignSummary;
   walletResults: WalletExecutionResult[];
@@ -455,7 +428,7 @@ export interface RunReadModel {
   reconciliations: ReconciliationObservation[];
   events: TimelineEvent[];
   freshness: Freshness;
-  provenance: Provenance[];
+  provenance: readonly Provenance[];
 }
 
 export interface ReadOnlySnapshot {

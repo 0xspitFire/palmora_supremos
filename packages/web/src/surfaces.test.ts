@@ -1,38 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import type {
   AlertReadModel,
-  AlertsReadModel,
   CalendarEntry,
-  CalendarReadModel,
   Finality,
   Freshness,
   GateSummary,
   HomeReadModel,
   OpportunityReadModel,
   Provenance,
-  ReadinessReadModel,
-  ReadinessRow,
   ReadModelEnvelope,
+  ReadinessRow,
   RetryPolicy,
   SourcedAmount,
-  SourcedTime,
+  SourcedQuantity,
   SystemHealth,
 } from './contracts.js';
-import { renderAlerts, renderCalendar, renderFinality, renderHealth, renderHome, renderReadiness, renderRun } from './surfaces.js';
 import { renderApp } from './main.js';
-import { WEB_STYLES } from './styles.js';
 import { formatAmount, safeActionLabel, safeText, stateClass } from './format.js';
-
-const baseFreshness: Freshness = {
-  status: 'fresh',
-  observedAt: '2026-09-17T22:00:00.000Z',
-  expiresAt: '2026-09-17T22:15:00.000Z',
-  ageSeconds: '5',
-  policyVersion: 'fixture-v1',
-};
+import { renderAlerts, renderCalendar, renderFinality, renderHealth, renderHome, renderReadiness, renderRun } from './surfaces.js';
+import { WEB_STYLES } from './styles.js';
 
 const OBSERVED_AT = '2026-09-17T22:00:00.000Z';
 const EXPIRES_AT = '2026-09-17T22:15:00.000Z';
+
+const baseFreshness: Freshness = {
+  status: 'fresh',
+  observedAt: OBSERVED_AT,
+  expiresAt: EXPIRES_AT,
+  ageSeconds: '5',
+  policyVersion: 'read-model-v1',
+};
 
 const staleFreshness: Freshness = {
   ...baseFreshness,
@@ -46,10 +43,10 @@ const unknownFreshness: Freshness = {
   observedAt: null,
   expiresAt: null,
   ageSeconds: null,
-  policyVersion: null,
+  policyVersion: 'read-model-v1',
 };
 
-const source: Provenance = { kind: 'backend_store', recordId: 'record-1', observedAt: OBSERVED_AT };
+const source: Provenance = { kind: 'backend_store', recordId: 'record-1', observedAt: OBSERVED_AT, policyVersion: 'read-model-v1' };
 const provenance = [source];
 
 function amount(value: string | null, kind: SourcedAmount['kind'] = 'estimated', freshness = baseFreshness): SourcedAmount {
@@ -61,20 +58,20 @@ function amount(value: string | null, kind: SourcedAmount['kind'] = 'estimated',
   };
 }
 
-function sourcedTime(value: string | null, freshness = baseFreshness): SourcedTime {
-  return { value, freshness, provenance };
+function quantity(value: string | null, freshness = baseFreshness): SourcedQuantity {
+  return { value, unit: 'gas', freshness, provenance };
 }
 
-function gate(decision: GateSummary['decision'] = 'blocked'): GateSummary {
+function gate(decision: GateSummary['decision'] = 'blocked', freshness = baseFreshness): GateSummary {
   return {
     decision,
-    checks: [{ code: 'simulated', outcome: decision === 'permitted' ? 'pass' : 'fail', required: true, message: 'Backend check result', evaluatedAt: OBSERVED_AT, validUntil: EXPIRES_AT, freshness: baseFreshness, provenance: source }],
+    checks: [{ code: 'simulated', outcome: decision === 'permitted' ? 'pass' : 'fail', required: true, message: 'Backend check result', evaluatedAt: OBSERVED_AT, validUntil: EXPIRES_AT, freshness, provenance: source }],
     blockers: decision === 'blocked' ? [{ code: 'SIMULATION_FAILED', severity: 'blocking', message: 'Simulation needs review', retryable: false, safeAction: 'Inspect', provenance: source }] : [],
     nextAction: decision === 'blocked' ? 'Inspect' : 'No safe action',
   };
 }
 
-function envelope<T>(data: T | null, availability: ReadModelEnvelope<T>['availability'] = 'available', freshness = baseFreshness): ReadModelEnvelope<T> {
+function envelope<T>(data: T | null, availability: ReadModelEnvelope<T>['availability'] = 'available', freshness = baseFreshness, issues: ReadModelEnvelope<T>['issues'] = []): ReadModelEnvelope<T> {
   return {
     contract: 'mintbot.read-model',
     version: '1',
@@ -84,18 +81,22 @@ function envelope<T>(data: T | null, availability: ReadModelEnvelope<T>['availab
     availability,
     freshness,
     data,
-    issues: [],
+    issues,
   };
 }
 
 const retry: RetryPolicy = {
   allowed: false,
   kind: 'none',
-  reasonCode: 'NO_RETRY',
+  reasonCode: 'NO_SAFE_RETRY',
   message: 'No safe retry',
   requiresFreshData: true,
   safeAction: 'No safe action',
 };
+
+function summary(overrides: Partial<HomeReadModel['readinessSummary']> = {}): HomeReadModel['readinessSummary'] {
+  return { total: '1', ready: '0', blocked: '0', unknown: '1', stale: '0', ineligible: '0', executing: '0', freshness: baseFreshness, ...overrides };
+}
 
 function readinessRow(overrides: Partial<ReadinessRow> = {}): ReadinessRow {
   return {
@@ -111,10 +112,6 @@ function readinessRow(overrides: Partial<ReadinessRow> = {}): ReadinessRow {
     provenance,
     ...overrides,
   };
-}
-
-function summary(overrides: Partial<HomeReadModel['readinessSummary']> = {}): HomeReadModel['readinessSummary'] {
-  return { total: '1', ready: '0', blocked: '0', unknown: '1', stale: '0', ineligible: '0', executing: '0', freshness: baseFreshness, ...overrides };
 }
 
 function system(overrides: Partial<SystemHealth> = {}): SystemHealth {
@@ -149,37 +146,23 @@ function opportunity(overrides: Partial<OpportunityReadModel> = {}): Opportunity
   };
 }
 
-function home(overrides: Partial<HomeReadModel> = {}): HomeReadModel {
-  return {
-    attention: [{ id: 'attention-1', severity: 'warning', subjectId: 'opportunity-1', state: 'Unknown', reason: 'Review the supplied evidence', freshness: baseFreshness, provenance, nextAction: 'Inspect' }],
-    readinessSummary: summary(),
-    opportunities: [opportunity()],
-    calendarHighlights: [],
-    alerts: [],
-    system: system(),
-    ...overrides,
-  };
-}
-
 function calendarEntry(overrides: Partial<CalendarEntry> = {}): CalendarEntry {
   return {
     id: 'calendar-1',
-    project: { name: 'Example Drop', collection: 'Example Collection', contract: '0xcontract' },
+    project: { name: 'Example Drop', contract: '0xcontract' },
     chain: { id: '1', name: 'Ethereum' },
-    opening: sourcedTime('2026-09-18T00:00:00.000Z'),
-    closing: sourcedTime('2026-09-18T01:00:00.000Z'),
+    openingAt: '2026-09-18T00:00:00.000Z',
+    closingAt: '2026-09-18T01:00:00.000Z',
     phase: 'Public',
     price: amount('0'),
-    supply: '1000',
-    perWalletLimit: '2',
+    supply: quantity(null),
+    perWalletLimit: quantity(null),
     method: 'SeaDrop',
-    access: 'public',
-    expectedGas: amount('1000000000000000'),
+    publicStatus: 'public',
+    expectedGas: quantity('100000'),
     sourceAuthority: 'external_source',
-    verificationStatus: 'verified',
-    lastVerifiedAt: OBSERVED_AT,
-    expiresAt: EXPIRES_AT,
-    eligibility: { eligible: '1', ineligible: '0', unknown: '0', ready: '0', stale: '0' },
+    verification: gate('permitted'),
+    eligibility: summary({ total: '1' }),
     nextAction: 'Inspect',
     freshness: baseFreshness,
     provenance,
@@ -188,7 +171,19 @@ function calendarEntry(overrides: Partial<CalendarEntry> = {}): CalendarEntry {
 }
 
 function alert(overrides: Partial<AlertReadModel> = {}): AlertReadModel {
-  return { id: 'alert-1', type: 'Opening soon', severity: 'info', subjectId: 'calendar-1', message: 'The opening time is approaching.', state: 'delivered', createdAt: OBSERVED_AT, deliveredAt: OBSERVED_AT, canonicalPath: '/calendar/calendar-1', nextAction: 'Inspect', freshness: baseFreshness, provenance, ...overrides };
+  return { id: 'alert-1', sourceEventId: 'event-1', runId: 'run-1', type: 'Opening soon', text: 'The opening time is approaching.', state: 'delivered', attempts: '1', createdAt: OBSERVED_AT, deliveredAt: OBSERVED_AT, freshness: baseFreshness, provenance, ...overrides };
+}
+
+function home(overrides: Partial<HomeReadModel> = {}): HomeReadModel {
+  return {
+    attention: [{ code: 'REVIEW_REQUIRED', severity: 'warning', message: 'Review the supplied evidence', retryable: false, safeAction: 'Inspect', provenance: source }],
+    readinessSummary: summary(),
+    opportunities: [opportunity()],
+    calendarHighlights: [calendarEntry()],
+    alerts: [alert()],
+    system: system(),
+    ...overrides,
+  };
 }
 
 describe('Phase 2 read-only surfaces', () => {
@@ -205,8 +200,7 @@ describe('Phase 2 read-only surfaces', () => {
   });
 
   it('renders unknown eligibility as Unknown and never substitutes Ineligible or a force action', () => {
-    const model: ReadinessReadModel = { campaign: null, summary: summary(), rows: [readinessRow()] };
-    const html = renderReadiness(envelope(model));
+    const html = renderReadiness(envelope([readinessRow()]));
     const row = html.match(/<tr tabindex="0">([\s\S]*?)<\/tr>/)?.[1] ?? '';
 
     expect(html).toContain('Unknown');
@@ -217,18 +211,17 @@ describe('Phase 2 read-only surfaces', () => {
   });
 
   it('marks stale calendar evidence and keeps source authority visible', () => {
-    const model: CalendarReadModel = { entries: [calendarEntry({ freshness: staleFreshness, opening: sourcedTime('2026-09-18T00:00:00.000Z', staleFreshness), sourceAuthority: 'operator_record', verificationStatus: 'stale' })] };
-    const html = renderCalendar(envelope(model, 'stale', staleFreshness));
+    const entry = calendarEntry({ freshness: staleFreshness, verification: gate('blocked', staleFreshness) });
+    const html = renderCalendar(envelope([entry], 'stale', staleFreshness));
 
     expect(html).toContain('Stale');
-    expect(html).toContain('operator record');
+    expect(html).toContain('external source');
     expect(html).toContain('A source time is not an on-chain guarantee');
     expect(html).not.toContain('Ready for');
   });
 
   it('keeps unaffected records visible while identifying a partial projection', () => {
-    const model: CalendarReadModel = { entries: [calendarEntry()] };
-    const html = renderCalendar(envelope(model, 'partial'));
+    const html = renderCalendar(envelope([calendarEntry()], 'partial', baseFreshness, [{ code: 'CALENDAR_TIME_UNKNOWN', severity: 'warning', message: 'One record is incomplete', retryable: false, safeAction: 'Inspect' }]));
 
     expect(html).toContain('Partial');
     expect(html).toContain('Example Drop');
@@ -236,20 +229,28 @@ describe('Phase 2 read-only surfaces', () => {
   });
 
   it('renders missing amounts as Unknown rather than zero', () => {
-    const model: ReadinessReadModel = { campaign: null, summary: summary(), rows: [readinessRow({ cost: { mintValue: amount(null, 'unknown'), executionGas: amount(null, 'unknown'), dataPostingGas: null, priorityFeeComponent: null, estimatedTotal: amount(null, 'unknown'), balance: null } })] };
-    const html = renderReadiness(envelope(model));
+    const row = readinessRow({ cost: { mintValue: amount(null, 'unknown'), executionGas: amount(null, 'unknown'), dataPostingGas: null, priorityFeeComponent: null, estimatedTotal: amount(null, 'unknown'), balance: null } });
+    const html = renderReadiness(envelope([row]));
 
     expect(html).toContain('Unknown');
     expect(html).not.toContain('0 ETH');
   });
 
+  it('labels reserved and actual spend separately and shows the server as-of', () => {
+    const row = readinessRow({ cost: { mintValue: amount('1000000000000000', 'reserved'), executionGas: amount('2000000000000000', 'actual'), dataPostingGas: null, priorityFeeComponent: null, estimatedTotal: amount('3000000000000000', 'estimated'), balance: null } });
+    const html = renderReadiness(envelope([row]));
+
+    expect(html).toContain('Reserved; not settled');
+    expect(html).toContain('Actual Backend observation; finality shown separately');
+    expect(html).toContain(`As of ${OBSERVED_AT}`);
+  });
+
   it('keeps delivered reminder state distinct from execution settlement', () => {
-    const model: AlertsReadModel = { alerts: [alert()] };
-    const html = renderAlerts(envelope(model));
+    const html = renderAlerts(envelope([alert()]));
 
     expect(html).toContain('delivered');
     expect(html).toContain('Alert delivery is not proof that a mint settled.');
-    expect(html).toContain('href="/calendar/calendar-1"');
+    expect(html).toContain('Source event');
     expect(html).not.toContain('Minted');
   });
 
@@ -297,9 +298,9 @@ describe('Phase 2 read-only surfaces', () => {
   });
 
   it('redacts unsafe text and ignores extra operational fields', () => {
-    const unsafeAlert = alert({ message: 'private key = hidden material', canonicalPath: 'https://user:password@example.invalid/private' });
+    const unsafeAlert = alert({ text: 'private key = hidden material' });
     const unsafeHealth = { ...system(), endpoint: 'https://user:password@example.invalid', signer: 'hidden material' } as unknown as SystemHealth;
-    const alertHtml = renderAlerts(envelope({ alerts: [unsafeAlert] }));
+    const alertHtml = renderAlerts(envelope([unsafeAlert]));
     const healthHtml = renderHealth(envelope(unsafeHealth));
 
     expect(alertHtml).not.toContain('hidden material');
@@ -309,7 +310,7 @@ describe('Phase 2 read-only surfaces', () => {
   });
 
   it('keeps unavailable data explicit instead of rendering an empty-success state', () => {
-    const html = renderCalendar(envelope<CalendarReadModel>(null, 'unavailable', unknownFreshness));
+    const html = renderCalendar(envelope<ReadonlyArray<CalendarEntry>>(null, 'unavailable', unknownFreshness));
 
     expect(html).toContain('Unavailable');
     expect(html).toContain('no readiness or spend claim is made');
@@ -317,7 +318,7 @@ describe('Phase 2 read-only surfaces', () => {
   });
 
   it('exposes keyboard and responsive semantics without color-only status meaning', () => {
-    const html = renderReadiness(envelope({ campaign: null, summary: summary(), rows: [readinessRow()] }));
+    const html = renderReadiness(envelope([readinessRow()]));
 
     expect(html).toContain('caption>Wallet-by-campaign readiness matrix');
     expect(html).toContain('scope="col"');
@@ -330,7 +331,7 @@ describe('Phase 2 read-only surfaces', () => {
   });
 
   it('renders only read-only navigation and inspection links', () => {
-    const html = renderApp({ home: envelope(home()), calendar: envelope({ entries: [calendarEntry()] }) });
+    const html = renderApp({ home: envelope(home()), calendar: envelope([calendarEntry()]) });
 
     expect(html).toContain('data-read-only="true"');
     expect(html).toContain('href="#calendar"');
@@ -339,10 +340,10 @@ describe('Phase 2 read-only surfaces', () => {
     expect(html).not.toContain('>Execute<');
   });
 
-  it('marks the package as proposal-bound and fails closed on malformed wire primitives', () => {
+  it('marks the package as accepted-contract-bound and fails closed on malformed wire primitives', () => {
     const html = renderApp({});
 
-    expect(html).toContain('data-contract-status="proposal"');
+    expect(html).toContain('data-contract-status="accepted"');
     expect(formatAmount({ amount: { value: 1 as unknown as string, asset: 'ETH', unit: 'wei', decimals: 18 }, kind: 'estimated', freshness: baseFreshness, provenance } as unknown as SourcedAmount)).toBe('Unknown');
     expect(safeText('https://user:password@example.invalid')).toBe('Unavailable');
     expect(stateClass(null as unknown as string)).toBe('unknown');

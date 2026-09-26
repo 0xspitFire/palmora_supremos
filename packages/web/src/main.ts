@@ -45,5 +45,6 @@ export function mountReadOnlyApp(root: HTMLElement, snapshot: ReadOnlySnapshot):
 export { READ_MODEL_CONTRACT, READ_MODEL_CONTRACT_STATUS, READ_MODEL_VERSION } from './contracts.js';
 export * from './contracts.js';
 export * from './format.js';
+export * from './read-model-client.js';
 export * from './styles.js';
 export * from './surfaces.js';
