@@ -92,3 +92,84 @@ Receive workflows from Product Manager, interaction rules from Product Designer,
 - Versioned reservation metadata is explicit when available: `mint_class`,
   active fee-policy identity and snapshot, and the canonical
   `campaign:<id>` period are persisted before engine side effects.
+
+## 2026-09-26 — Phase 2 competency refinements
+
+### Durable orchestration and projection engineering
+
+- Build long-running orchestrators around persistent jobs, collision-resistant
+  idempotency keys, recoverable leases, bounded concurrency, retry classification,
+  and explicit terminal states. A scheduler must survive process restart without
+  replaying completed work or accepting live work before boot reconciliation.
+- Convert T-minus schedules from chain time through a recorded clock offset;
+  retain target time, scheduled time, offset, and policy version so timing
+  decisions are reproducible rather than based on an untracked local clock.
+- Model startup as a readiness state machine (`Cold`, `Reconciling`, `Ready`,
+  `Blocked`) and preserve dependency, signer, kill-switch, and unresolved-
+  submission blockers across coordinator and orchestrator boundaries.
+- Treat the normalized SQLite repository as the live authority for scheduler
+  jobs, readiness observations, delivery state, lifecycle facts, and settlement
+  evidence. JSON adapters are compatibility/test fixtures only; new operational
+  state must not create a second live authority.
+
+### Read-model and notification contracts
+
+- Publish `mintbot.read-model/v1` envelopes with snapshot identity, availability,
+  freshness, provenance, typed blockers, safe next actions, and explicit
+  `unknown`/`stale`/`partial` states. Missing money, finality, readiness, or
+  reconciliation facts remain unknown; clients never infer chain truth.
+- Keep Phase 2 transport GET-only and map backend state without exposing key
+  references, raw provider payloads, calldata, credentials, or secret-like
+  errors. Redaction is applied before persistence, notification dispatch, and
+  read-model serialization.
+- Implement notifications as one-way, idempotent outbox delivery with
+  canonical read links, persisted attempts, retry-safe transitions, failure
+  evidence, and deduplication. Delivery is never execution proof and Telegram
+  does not become a mutation or approval surface.
+- Project chain-specific finality and gas facts without flattening them into a
+  generic success state: receipts carry provenance, gas components, staged
+  Robinhood status, reconciliation evidence, and downgrade/reorg visibility.
+
+### Cross-layer custody and safety integration
+
+- Require explicit signer readiness in live admission in addition to secret-store
+  references, custody policy, attestation, notification, chain verification,
+  backup, and kill-switch health. Optional compatibility fields may support old
+  fixtures, but an explicit negative readiness signal always blocks live work.
+- Integrate Backend only through Coordinator, Signer, reservation, lifecycle,
+  and finality contracts. Canonical identity must remain bound across run,
+  intent, execution, wallet, nonce, attempt, receipt, and reconciliation rows;
+  raw SQL or result-ID rebinding cannot bypass those guards.
+- Preserve partial-failure semantics: abort unsent work, retain submitted facts,
+  settle only from authoritative receipt/reconciliation evidence, and never
+  overwrite provider-settled reservations with a later weaker projection.
+
+### Evidence-gated delivery leadership
+
+- Use actual Git ancestry, not branch labels or recovery prose, as integration
+  authority. Synchronize against the requested base, resolve conflicts by
+  preserving approved safety behavior and adopting newer invariant tests only
+  deliberately, then rerun generated-package builds before dependent tests.
+- Treat environment, verify, Anvil, Docker, review approval, and clean-worktree
+  evidence as independent release gates. A skipped, cancelled, or stale check is
+  not a pass for the updated commit; rerun on the approved runner and inspect
+  job-level conclusions before merge.
+- Communicate cross-agent handoffs with commit ancestry, changed boundaries,
+  test counts, CI run/job identifiers, known blockers, and explicit merge
+  decisions. Escalate changed-base conflicts or policy changes to the Product
+  Owner instead of silently widening scope.
+
+### Chain-specific operational expertise
+
+- Treat Robinhood Chain `4663` as direct-to-sequencer, not Ethereum private
+  orderflow: priority fee does not imply queue priority, paid mints remain
+  blocked, and success requires the staged path `soft -> posted -> Ethereum
+  final`.
+- Reserve Robinhood FREE mint exposure as zero value plus independent L2
+  execution-gas, L1 data-gas, and bounded priority-fee components. Preserve
+  pending/posted evidence across restart and do not promote soft or posted state
+  to settlement or Ethereum finality.
+- Distinguish local deterministic tests from release evidence. Strict archive
+  fork replay, native-WSL environment attestation, migration/backup checks, and
+  protected CI are separate proof obligations; passing unit tests alone never
+  authorizes unattended execution.
