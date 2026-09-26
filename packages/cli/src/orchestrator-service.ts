@@ -94,7 +94,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     alerts,
     backupStatusPath: config.backupStatusPath,
   });
-  await orchestrator.start({ skipReconciliation: true });
+  await orchestrator.start();
   const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics });
   await http.start();
   metrics.set('mintbot_process_up', 1);

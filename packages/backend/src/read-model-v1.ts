@@ -770,8 +770,10 @@ export class Phase2ReadModelService {
     const settlementReached = receipt.state === 'Confirmed' && (chainId === 1 ? receipt.finalityStage === 'ethereum_final' : receipt.robinhoodFinality === 'final' && receipt.finalityStage === 'ethereum_final');
     const finality = finalityModel(context, chainId, stage, settlementReached, receipt.observedAt, provenance, receipt.state === 'Reorged' ? 'Receipt was downgraded after a canonicality change.' : undefined);
     const freshness = classifyFreshness(receipt.observedAt, null, context.now, context.freshnessPolicyVersion);
+    const gasUsed = receipt.gasUsed === undefined ? null : sourcedQuantity(receipt.gasUsed, freshness, provenance);
+    const effectiveGasPrice = receipt.effectiveGasPrice === undefined ? null : sourcedAmount(receipt.effectiveGasPrice, 'actual', freshness, provenance);
     const amount = receipt.actualSpendWei === undefined ? null : sourcedAmount(receipt.actualSpendWei, 'actual', freshness, provenance);
-    return { id: receipt.id, attemptId: receipt.transactionAttemptId ?? attempt?.id ?? '', hash: attempt?.hash ?? '', status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : receipt.state === 'Failed' ? 'reverted' : 'pending', blockNumber: receipt.blockNumber === undefined ? null : receipt.blockNumber.toString(), blockHash: receipt.blockHash ?? null, gasUsed: null, effectiveGasPrice: null, actualSpend: amount, finality, provenance };
+    return { id: receipt.id, attemptId: receipt.transactionAttemptId ?? attempt?.id ?? '', hash: attempt?.hash ?? '', status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : receipt.state === 'Failed' ? 'reverted' : 'pending', blockNumber: receipt.blockNumber === undefined ? null : receipt.blockNumber.toString(), blockHash: receipt.blockHash ?? null, gasUsed, effectiveGasPrice, actualSpend: amount, finality, provenance };
   }
 
   private reconciliationReadModel(record: ReconciliationRecord): ReconciliationReadModel {
@@ -818,7 +820,9 @@ export class Phase2ReadModelService {
     const runtime = context.state.runtime;
     const operational = runtime.operational;
     const freshness = operational ? classifyFreshness(operational.observedAt, operational.expiresAt, context.now, context.freshnessPolicyVersion) : UNKNOWN_FRESHNESS;
-    const blockers = [...new Set(runtime.blockingReasons)].map(reason => issue(reason, safeHealthMessage(reason), 'blocking', 'No safe action'));
+    const dependencyBlockers = Object.entries(runtime.dependencies).filter(([, ready]) => !ready).map(([dependency]) => `${dependency.toUpperCase()}_NOT_READY`);
+    const probeBlockers = operational === undefined ? ['RUNTIME_PROBE_REQUIRED'] : freshness.status === 'fresh' ? [] : ['RUNTIME_PROBE_STALE'];
+    const blockers = [...new Set([...runtime.blockingReasons, ...dependencyBlockers, ...probeBlockers])].map(reason => issue(reason, safeHealthMessage(reason), 'blocking', 'No safe action'));
     const reconciliation: SystemHealthReadModel['dependencies']['reconciliation'] = runtime.blockingReasons.some(reason => /RECONCILIATION|UNRESOLVED/i.test(reason)) ? 'required' : runtime.startupState === 'Reconciling' ? 'in_progress' : operational ? 'clear' : 'unknown';
     const data: SystemHealthReadModel = { state: context.state.killed ? 'Killed' : runtime.startupState === 'Ready' && blockers.length === 0 ? 'Ready' : operational ? 'Not ready' : 'Unknown', killSwitch: context.state.killed || operational?.killSwitchEngaged ? 'engaged' : operational ? 'clear' : 'unknown', dependencies: { engine: runtime.dependencies.engine ? 'ready' : 'not_ready', chain: runtime.dependencies.chain ? 'ready' : 'not_ready', backup: runtime.dependencies.backup ? 'ready' : 'not_ready', notifications: runtime.dependencies.notifications ? 'ready' : 'not_ready', reconciliation }, blockers, checkedAt: operational?.observedAt ?? context.generatedAt, freshness };
     return { data, issues: blockers, freshness };

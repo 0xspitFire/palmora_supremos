@@ -10,7 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  pull-request-safe:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm test -- --reporter=dot
+
   environment:
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 10
     steps:
@@ -26,6 +48,7 @@ jobs:
         run: pnpm ops:environment
 
   verify:
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     needs: environment
     runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 15
@@ -74,6 +97,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   anvil:
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     needs: environment
     runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 15
@@ -93,6 +117,7 @@ jobs:
           ROBINHOOD_FORK_SOURCE: '~/W3/Rets/archive-rpc.env:ROBINHOOD_ARCHIVE_RPC'
 
   docker:
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     needs: environment
     runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 20
@@ -117,7 +142,7 @@ jobs:
           test "$status" -ne 0
 
   archive-fork-replay:
-    if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.ARCHIVE_FORK_RUNNER == 'true'
     needs: environment
     runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 20
@@ -136,7 +161,7 @@ jobs:
           ROBINHOOD_FORK_SOURCE: '~/W3/Rets/archive-rpc.env:ROBINHOOD_ARCHIVE_RPC'
 
   ethereum-fork-replay:
-    if: github.event_name == 'workflow_dispatch' && vars.ARCHIVE_FORK_RUNNER == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.ARCHIVE_FORK_RUNNER == 'true'
     needs: environment
     runs-on: [self-hosted, linux, wsl]
     timeout-minutes: 20

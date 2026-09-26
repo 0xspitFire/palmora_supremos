@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AlertManager } from './alerts.js';
@@ -135,6 +135,26 @@ describe('phase 2 operations', () => {
       await wait(20);
       expect(reconciliations).toBe(1);
       expect((await jobs.list())[0]?.state).toBe('succeeded');
+      await orchestrator.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks scheduling when backup evidence is future-dated', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mintbot-backup-status-'));
+    try {
+      const statusPath = join(root, 'status.json');
+      await writeFile(statusPath, JSON.stringify({ status: 'ok', recordedAt: '2026-01-02T00:00:00.000Z' }));
+      const store = new DurableStore();
+      await store.open();
+      await store.transaction((state) => {
+        state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } };
+      });
+      const jobs = new JsonJobStore(join(root, 'jobs.json'));
+      const orchestrator = new OrchestratorService(store, {} as BackendApplication, { start: async () => undefined, reconcile: async () => undefined }, { jobs, dryRunOnly: true, backupStatusPath: statusPath, now: () => new Date('2026-01-01T00:00:00.000Z'), logger: new RedactedLogger({ stdout: false }) });
+      await orchestrator.start();
+      expect(store.snapshot().runtime.blockingReasons).toContain('BACKUP_NOT_READY');
       await orchestrator.stop();
     } finally {
       await rm(root, { recursive: true, force: true });

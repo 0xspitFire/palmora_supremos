@@ -60,6 +60,7 @@ export class OrchestratorService {
   private ticking = false;
   private jobsSnapshot: ScheduledJob[] = [];
   private lastBackupObservation?: string;
+  private lastBackupStatus?: 'ok' | 'failed';
   private lastBackupRecordedAt?: number;
 
   public constructor(private readonly store: BackendStore, private readonly application: BackendApplication, private readonly coordinator: Pick<ExecutionCoordinator, 'start' | 'reconcile'> & Partial<Pick<ExecutionCoordinator, 'kill'>>, private readonly options: OrchestratorOptions) {
@@ -79,7 +80,7 @@ export class OrchestratorService {
     return this.options.jobs.put({ id: input.id, runId: input.runId, wallets: input.wallets, executeAt: input.executeAt, mode: input.mode });
   }
 
-  public async start(options: { skipReconciliation?: boolean } = {}): Promise<void> {
+  public async start(): Promise<void> {
     if (this.running) return;
     await this.options.jobs.open();
     await this.options.jobs.recoverRunning();
@@ -88,13 +89,11 @@ export class OrchestratorService {
     this.recordReconciliationMetrics();
     this.running = true;
     this.metrics.recordRestart();
-    if (!options.skipReconciliation) {
-      try {
-        await this.coordinator.start();
-      } catch (error) {
-        this.options.logger?.error({ error }, 'orchestrator_reconciliation_failed');
-        await this.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'RECONCILIATION_FAILED'])] }; });
-      }
+    try {
+      await this.coordinator.start();
+    } catch (error) {
+      this.options.logger?.error({ error }, 'orchestrator_reconciliation_failed');
+      await this.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'RECONCILIATION_FAILED'])] }; });
     }
     await this.tick();
     this.schedulerTimer = setInterval(() => { void this.tick(); }, this.schedulerIntervalMs);
@@ -123,7 +122,7 @@ export class OrchestratorService {
     try {
       await this.observeBackupStatus();
       this.recordReconciliationMetrics();
-      if (this.options.backupStatusPath && (this.lastBackupObservation !== 'ok' || this.lastBackupRecordedAt === undefined || this.now().getTime() - this.lastBackupRecordedAt > (this.options.backupMaxAgeMs ?? 30 * 86_400_000))) {
+      if (this.options.backupStatusPath && (this.lastBackupStatus !== 'ok' || this.lastBackupRecordedAt === undefined || this.now().getTime() - this.lastBackupRecordedAt > (this.options.backupMaxAgeMs ?? 30 * 86_400_000))) {
         await this.store.transaction((state) => {
           state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'BACKUP_NOT_READY'])] };
         });
@@ -165,11 +164,15 @@ export class OrchestratorService {
       const fingerprint = `${status.status ?? 'unknown'}:${status.recordedAt ?? ''}`;
       if (fingerprint === this.lastBackupObservation) return;
       this.lastBackupObservation = fingerprint;
-      this.lastBackupRecordedAt = Number.isFinite(recordedAt) ? recordedAt : undefined;
-      this.metrics.recordBackup(status.status === 'ok' ? 'ok' : 'failed', Number.isFinite(recordedAt) ? recordedAt / 1_000 : undefined);
+      const recordedAtIsValid = Number.isFinite(recordedAt) && recordedAt <= this.now().getTime();
+      this.lastBackupStatus = status.status === 'ok' && recordedAtIsValid ? 'ok' : 'failed';
+      this.lastBackupRecordedAt = this.lastBackupStatus === 'ok' ? recordedAt : undefined;
+      this.metrics.recordBackup(this.lastBackupStatus, this.lastBackupRecordedAt === undefined ? undefined : this.lastBackupRecordedAt / 1_000);
     } catch {
       if (this.lastBackupObservation === 'missing') return;
       this.lastBackupObservation = 'missing';
+      this.lastBackupStatus = 'failed';
+      this.lastBackupRecordedAt = undefined;
       this.metrics.recordBackup('failed');
     }
   }
