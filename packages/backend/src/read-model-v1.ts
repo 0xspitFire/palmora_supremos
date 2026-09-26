@@ -629,7 +629,8 @@ export class Phase2ReadModelService {
     const decision = checks.some(check => check.outcome === 'fail') ? 'blocked' : checks.some(check => check.outcome === 'stale') ? 'stale' : checks.every(check => check.outcome === 'pass') ? 'ready' : 'unknown';
     const latestAttempt = latestAttemptForWallet(context.state, campaign.id, wallet);
     const latestReceipt = latestReceiptForAttempt(context.state, latestAttempt?.id);
-    const executionState = latestReceipt?.state === 'Reorged' ? 'Failed' : latestAttempt?.state === 'Pending' || latestAttempt?.state === 'Submitted' ? 'Executing' : latestReceipt?.state === 'Confirmed' && (latestReceipt.robinhoodFinality === 'final' || campaign.chainId === 1) ? 'Minted' : latestAttempt?.state === 'Failed' ? 'Failed' : decision === 'ready' ? 'Ready' : fundedCheck.outcome === 'pass' ? 'Funded' : eligibilityCheck.outcome === 'pass' ? 'Eligible' : 'Unknown';
+    const latestFinality = latestReceipt ? this.receiptReadModel(context, latestReceipt, context.state.attempts.filter(item => item.runId === latestAttempt?.runId), campaign.chainId).finality : null;
+    const executionState = latestReceipt?.state === 'Reorged' ? 'Failed' : latestAttempt?.state === 'Pending' || latestAttempt?.state === 'Submitted' ? 'Executing' : latestFinality?.settlementReached === true ? 'Minted' : latestAttempt?.state === 'Failed' ? 'Failed' : decision === 'ready' ? 'Ready' : fundedCheck.outcome === 'pass' ? 'Funded' : eligibilityCheck.outcome === 'pass' ? 'Eligible' : 'Unknown';
     const freshness = aggregateFreshness(checks.map(check => check.freshness));
     const provenance = checks.flatMap(check => check.provenance ? [check.provenance] : []);
     return {
@@ -726,11 +727,12 @@ export class Phase2ReadModelService {
     const receipts = context.state.receipts.filter(receipt => receipt.runId === run.id).sort(receiptOrder);
     const reconciliations = context.state.reconciliations.filter(item => item.runId === run.id).sort(reconciliationOrder);
     const events = context.state.events.filter(event => event.runId === run.id).sort(eventOrder).map(event => this.timelineEvent(event));
-    const projectedAttempts = attempts.map((attempt, index) => this.attemptReadModel(context, attempt, index + 1));
-    const projectedReceipts = receipts.map(receipt => this.receiptReadModel(context, receipt, attempts));
+    const projectedAttempts = attempts.map((attempt, index) => this.attemptReadModel(context, attempt, index + 1, campaign.chainId, receipts.find(receipt => receipt.executionId === attempt.executionId)));
+    const projectedReceipts = receipts.map(receipt => this.receiptReadModel(context, receipt, attempts, campaign.chainId));
     const projectedReconciliations = reconciliations.map(item => this.reconciliationReadModel(item));
-    const walletResults = this.walletExecutionResults(context, attempts, receipts, reconciliations);
-    const outcome = run.mode === 'dry-run' && ['Completed', 'Failed'].includes(run.state) ? 'dry_run_completed' : run.state === 'Completed' && reconciliations.every(item => ['confirmed', 'final'].includes(item.result)) && receipts.every(receipt => campaign.chainId === 1 ? receipt.finalityStage === 'ethereum_final' : receipt.robinhoodFinality === 'final') ? 'settled' : attempts.length > 0 || receipts.length > 0 ? 'partial' : run.state === 'Armed' ? 'not_started' : 'unknown';
+    const walletResults = this.walletExecutionResults(context, attempts, receipts, reconciliations, campaign.chainId);
+    const settlementReady = projectedReceipts.length > 0 && projectedReceipts.every(receipt => receipt.finality.settlementReached) && reconciliations.every(item => ['confirmed', 'final'].includes(item.result));
+    const outcome = run.mode === 'dry-run' && ['Completed', 'Failed'].includes(run.state) ? 'dry_run_completed' : run.state === 'Completed' && settlementReady ? 'settled' : attempts.length > 0 || receipts.length > 0 ? 'partial' : run.state === 'Armed' ? 'not_started' : 'unknown';
     const freshness = aggregateFreshness([campaignFreshness(context, campaign), ...receipts.map(receipt => classifyFreshness(receipt.observedAt, null, context.now, context.freshnessPolicyVersion)), ...reconciliations.map(item => classifyFreshness(item.observedAt, null, context.now, context.freshnessPolicyVersion))]);
     const issues = [...reconciliations.filter(item => item.result === 'unknown' || item.result === 'reorged').map(item => issue(item.result === 'reorged' ? 'REORG_RECONCILIATION_REQUIRED' : 'RECONCILIATION_UNRESOLVED', item.result === 'reorged' ? 'A reorg observation requires reconciliation before any retry or accounting conclusion.' : 'The authoritative transaction outcome is unresolved.', 'blocking', 'Wait for reconciliation', reconciliationProvenance(item)))];
     const data: RunReadModelV1 = {
@@ -754,18 +756,19 @@ export class Phase2ReadModelService {
     return { id: campaign.id, state: campaign.state, chainId: campaign.chainId.toString(), contract: addressValue(campaign.contract), quantity: campaign.quantity.toString(), cost: sourcedAmount(campaign.mintPriceWei * BigInt(campaign.quantity), 'estimated', freshness, provenance), gate: this.chainGate(context, campaign.chainId, campaign.chainVerification.evidenceId), freshness, provenance };
   }
 
-  private attemptReadModel(context: ProjectionContext, attempt: AttemptRecord, attemptNumber: number): TransactionAttemptReadModel {
+  private attemptReadModel(context: ProjectionContext, attempt: AttemptRecord, attemptNumber: number, chainId: 1 | 4663, receipt?: ReceiptRecord): TransactionAttemptReadModel {
     const provenance = [storeProvenance(`attempt:${attempt.id}`, attempt.createdAt)];
-    const finality = attempt.robinhoodFinality === undefined ? null : finalityModel(context, attempt.robinhoodFinality === 'final' ? 'ethereum_final' : attempt.robinhoodFinality, attempt.robinhoodFinality === 'final', attempt.updatedAt, provenance);
+    const finality = receipt || attempt.robinhoodFinality !== undefined ? finalityModel(context, chainId, receipt?.finalityStage === 'ethereum_final' && chainId === 1 ? 'confirmed' : receipt?.finalityStage ?? (attempt.robinhoodFinality === 'final' ? 'ethereum_final' : attempt.robinhoodFinality ?? 'unknown'), receipt?.state === 'Confirmed' && (chainId === 1 ? receipt.finalityStage === 'ethereum_final' : attempt.robinhoodFinality === 'final' && receipt.finalityStage === 'ethereum_final'), receipt?.observedAt ?? attempt.updatedAt, provenance) : null;
     const reason = attempt.state === 'Failed' ? issue('ATTEMPT_FAILED', 'The transaction attempt failed; inspect its typed backend reason.', 'warning', 'Inspect', provenance[0]) : undefined;
     return { id: attempt.id, walletId: attempt.wallet, hash: attempt.hash ?? null, nonce: attempt.nonce === undefined ? null : attempt.nonce.toString(), attemptNumber: attemptNumber.toString(), replacementOfId: attempt.replacementOfId ?? null, state: attempt.state, finality, retry: DENIED_RETRY, ...(reason === undefined ? {} : { reason }), provenance };
   }
 
-  private receiptReadModel(context: ProjectionContext, receipt: ReceiptRecord, attempts: readonly AttemptRecord[]): TransactionReceiptReadModel {
+  private receiptReadModel(context: ProjectionContext, receipt: ReceiptRecord, attempts: readonly AttemptRecord[], chainId: 1 | 4663): TransactionReceiptReadModel {
     const attempt = attempts.find(item => item.id === receipt.transactionAttemptId);
     const provenance = [storeProvenance(`receipt:${receipt.id}`, receipt.observedAt)];
-    const stage = receipt.finalityStage ?? (receipt.robinhoodFinality === 'soft' ? 'soft' : receipt.robinhoodFinality === 'posted' ? 'posted' : receipt.robinhoodFinality === 'final' ? 'ethereum_final' : 'unknown');
-    const finality = finalityModel(context, stage, receipt.state === 'Confirmed' && (receipt.robinhoodFinality === 'final' || receipt.robinhoodFinality === undefined), receipt.observedAt, provenance, receipt.state === 'Reorged' ? 'Receipt was downgraded after a canonicality change.' : undefined);
+    const stage = chainId === 1 ? receipt.finalityStage === 'ethereum_final' ? 'confirmed' : 'unknown' : receipt.finalityStage ?? (receipt.robinhoodFinality === 'soft' ? 'soft' : receipt.robinhoodFinality === 'posted' ? 'posted' : receipt.robinhoodFinality === 'final' ? 'ethereum_final' : 'unknown');
+    const settlementReached = receipt.state === 'Confirmed' && (chainId === 1 ? receipt.finalityStage === 'ethereum_final' : receipt.robinhoodFinality === 'final' && receipt.finalityStage === 'ethereum_final');
+    const finality = finalityModel(context, chainId, stage, settlementReached, receipt.observedAt, provenance, receipt.state === 'Reorged' ? 'Receipt was downgraded after a canonicality change.' : undefined);
     const freshness = classifyFreshness(receipt.observedAt, null, context.now, context.freshnessPolicyVersion);
     const amount = receipt.actualSpendWei === undefined ? null : sourcedAmount(receipt.actualSpendWei, 'actual', freshness, provenance);
     return { id: receipt.id, attemptId: receipt.transactionAttemptId ?? attempt?.id ?? '', hash: attempt?.hash ?? '', status: receipt.state === 'Confirmed' ? 'confirmed' : receipt.state === 'Reorged' ? 'reorged' : receipt.state === 'Failed' ? 'reverted' : 'pending', blockNumber: receipt.blockNumber === undefined ? null : receipt.blockNumber.toString(), blockHash: receipt.blockHash ?? null, gasUsed: null, effectiveGasPrice: null, actualSpend: amount, finality, provenance };
@@ -777,7 +780,7 @@ export class Phase2ReadModelService {
     return { id: record.id, state, observedAt: record.observedAt, reason: safeReadModelText(record.reason), retry: DENIED_RETRY, provenance };
   }
 
-  private walletExecutionResults(context: ProjectionContext, attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], reconciliations: readonly ReconciliationRecord[]): readonly WalletExecutionResult[] {
+  private walletExecutionResults(context: ProjectionContext, attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], reconciliations: readonly ReconciliationRecord[], chainId: 1 | 4663): readonly WalletExecutionResult[] {
     const wallets = new Set(attempts.map(item => item.wallet));
     const results: WalletExecutionResult[] = [];
     for (const wallet of wallets) {
@@ -787,7 +790,7 @@ export class Phase2ReadModelService {
       const latestReceipt = walletReceipts.at(-1);
       const latestAttempt = walletAttempts.at(-1);
       const latestReconciliation = reconciliations.filter(item => item.attemptId !== undefined && walletAttemptIds.has(item.attemptId)).at(-1);
-      const finality = latestReceipt ? this.receiptReadModel(context, latestReceipt, attempts).finality : latestAttempt?.robinhoodFinality ? finalityModel(context, latestAttempt.robinhoodFinality === 'final' ? 'ethereum_final' : latestAttempt.robinhoodFinality, latestAttempt.robinhoodFinality === 'final', latestAttempt.updatedAt, [storeProvenance(`attempt:${latestAttempt.id}`, latestAttempt.updatedAt)]) : null;
+      const finality = latestReceipt ? this.receiptReadModel(context, latestReceipt, attempts, chainId).finality : latestAttempt?.robinhoodFinality ? finalityModel(context, chainId, latestAttempt.robinhoodFinality === 'final' ? 'ethereum_final' : latestAttempt.robinhoodFinality, false, latestAttempt.updatedAt, [storeProvenance(`attempt:${latestAttempt.id}`, latestAttempt.updatedAt)]) : null;
       const state = latestReconciliation?.result === 'reorged' ? 'Reorged' : latestReceipt?.state ?? latestAttempt?.state ?? 'Unknown';
       const reason = latestReconciliation?.result === 'reorged' ? { code: 'REORGED', label: 'Unknown' as const, message: 'Receipt history was downgraded after a reorg observation.', actor: 'chain' as const, occurredAt: latestReconciliation.observedAt, submittedWork: 'some' as const, retry: DENIED_RETRY, provenance: reconciliationProvenance(latestReconciliation) } : undefined;
       results.push({ walletId: wallet, address: wallet, state, attemptIds: walletAttempts.map(item => item.id), finality, ...(reason === undefined ? {} : { reason }), retry: DENIED_RETRY, freshness: latestReceipt ? classifyFreshness(latestReceipt.observedAt, null, context.now, 'read-model-v1') : latestAttempt ? classifyFreshness(latestAttempt.updatedAt, null, context.now, 'read-model-v1') : UNKNOWN_FRESHNESS });
@@ -897,9 +900,10 @@ function sourcedAmountOrNull(value: bigint | undefined, kind: SourcedAmount['kin
 function sourcedQuantity(value: bigint | null, freshness: Freshness, provenance: readonly Provenance[]): SourcedQuantity { return { value: value === null ? null : value.toString(), unit: 'gas', freshness, provenance }; }
 function emptyReadinessSummary(freshness: Freshness): ReadinessSummary { return { total: '0', ready: '0', blocked: '0', unknown: '0', stale: '0', ineligible: '0', executing: '0', freshness }; }
 
-function finalityModel(context: ProjectionContext, stage: FinalityReadModel['stage'], settlementReached: boolean, observedAt: string, provenance: readonly Provenance[], downgradeReason?: string): FinalityReadModel {
+function finalityModel(context: ProjectionContext, chainId: 1 | 4663, stage: FinalityReadModel['stage'], settlementReached: boolean, observedAt: string, provenance: readonly Provenance[], downgradeReason?: string): FinalityReadModel {
   const freshness = classifyFreshness(observedAt, null, context.now, context.freshnessPolicyVersion);
-  return { stage, requiredStage: context.state.campaigns.some(campaign => campaign.chainId === 4663) ? 'ethereum_final' : 'confirmed', settlementReached, observedAt, freshness, provenance, ...(downgradeReason === undefined ? {} : { downgradeReason }) };
+  const requiredStage = chainId === 4663 ? 'ethereum_final' : 'confirmed';
+  return { stage, requiredStage, settlementReached: settlementReached && stage === requiredStage, observedAt, freshness, provenance, ...(downgradeReason === undefined ? {} : { downgradeReason }) };
 }
 
 function latestSimulation(values: readonly SimulationEvidenceRecord[]): SimulationEvidenceRecord | undefined { return values.slice().sort((left, right) => left.checkedAt.localeCompare(right.checkedAt) || left.id.localeCompare(right.id)).at(-1); }

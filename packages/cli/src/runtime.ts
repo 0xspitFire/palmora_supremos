@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
 import { openDatabase } from '@mint-bot/database';
-import { readTurnkeySecretConfig, readTurnkeyWalletMap, TurnkeySigner, type WalletInfo } from '@mint-bot/engine';
+import { readTurnkeySecretConfig, readTurnkeyWalletMap, turnkeyPolicyRef, TurnkeySigner, type WalletInfo } from '@mint-bot/engine';
 import type { Address } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 
@@ -55,7 +55,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     walletList: () => configuredWallets(projectRoot, resolveWalletPath(projectRoot)),
     signerFactory: () => TurnkeySigner.fromSecrets('mainnet', secretRoot),
     passphraseProvider: async () => '',
-    policyRef: turnkeyMap.policyId,
+     policyRef: turnkeyPolicyRef(turnkeyMap.policyId, turnkeyMap.policyDigest),
   } : {};
   const configuredAdapterOptions = turnkeyConfig
     ? { ...adapterOptions, ...turnkeyOptions }

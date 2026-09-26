@@ -108,6 +108,45 @@ describe('Phase 2 read-model projection', () => {
     expect(result.data?.run.outcome).toBe('partial');
   });
 
+  it('derives required finality from the current campaign when Ethereum and Robinhood runs share a snapshot', () => {
+    const state = emptyState();
+    const ethereum = campaign({ id: 'ethereum-campaign', chainId: 1, chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, checkedAt: NOW.toISOString(), sourceBlock: 100n, endpointReference: 'ETH_RPC_REFERENCE' } });
+    const robinhood = campaign({ id: 'robinhood-campaign', chainVerification: { chainId: 4663, status: 'verified', seaDropCompatible: true, checkedAt: NOW.toISOString(), sourceBlock: 100n, endpointReference: 'RH_RPC_REFERENCE' } });
+    state.campaigns.push(ethereum, robinhood);
+    state.runs.push(
+      { id: 'ethereum-run', intentId: 'ethereum-intent', campaignId: ethereum.id, mode: 'live', requestDigest: 'eth', state: 'Completed', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() },
+      { id: 'robinhood-run', intentId: 'robinhood-intent', campaignId: robinhood.id, mode: 'live', requestDigest: 'rh', state: 'Completed', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() },
+    );
+    state.attempts.push(
+      { id: 'ethereum-attempt', executionId: 'ethereum-execution', runId: 'ethereum-run', wallet: WALLET, nonce: 1, hash: '0xeth', state: 'Confirmed', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() },
+      { id: 'robinhood-attempt', executionId: 'robinhood-execution', runId: 'robinhood-run', wallet: WALLET, nonce: 2, hash: '0xrh', state: 'Confirmed', robinhoodFinality: 'posted', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() },
+    );
+    state.receipts.push(
+      { id: 'ethereum-receipt', executionId: 'ethereum-execution', runId: 'ethereum-run', transactionAttemptId: 'ethereum-attempt', state: 'Confirmed', blockNumber: 101n, blockHash: '0xethblock', observedAt: NOW.toISOString() },
+      { id: 'robinhood-receipt', executionId: 'robinhood-execution', runId: 'robinhood-run', transactionAttemptId: 'robinhood-attempt', state: 'Confirmed', robinhoodFinality: 'posted', finalityStage: 'posted', blockNumber: 101n, blockHash: '0xrhblock', observedAt: NOW.toISOString() },
+    );
+    const service = new Phase2ReadModelService(() => NOW);
+    const ethereumResult = service.run(state, 'ethereum-run');
+    const robinhoodResult = service.run(state, 'robinhood-run');
+    expect(ethereumResult.data?.receipts[0]?.finality).toMatchObject({ requiredStage: 'confirmed', stage: 'unknown', settlementReached: false });
+    expect(ethereumResult.data?.run.outcome).toBe('partial');
+    expect(robinhoodResult.data?.receipts[0]?.finality).toMatchObject({ requiredStage: 'ethereum_final', stage: 'posted', settlementReached: false });
+    expect(robinhoodResult.data?.run.outcome).toBe('partial');
+  });
+
+  it('maps an unknown receipt state to pending/unknown and never settlement', () => {
+    const state = emptyState();
+    const current = campaign({ id: 'unknown-campaign', chainId: 1, chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, checkedAt: NOW.toISOString(), sourceBlock: 100n, endpointReference: 'ETH_RPC_REFERENCE' } });
+    state.campaigns.push(current);
+    state.runs.push({ id: 'unknown-run', intentId: 'unknown-intent', campaignId: current.id, mode: 'live', requestDigest: 'unknown', state: 'Completed', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+    state.attempts.push({ id: 'unknown-attempt', executionId: 'unknown-execution', runId: 'unknown-run', wallet: WALLET, nonce: 3, hash: '0xunknown', state: 'Confirmed', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+    state.receipts.push({ id: 'unknown-receipt', executionId: 'unknown-execution', runId: 'unknown-run', transactionAttemptId: 'unknown-attempt', state: 'Unobserved' as unknown as 'Prepared', observedAt: NOW.toISOString() });
+    const result = new Phase2ReadModelService(() => NOW).run(state, 'unknown-run');
+    expect(result.data?.receipts[0]?.status).toBe('pending');
+    expect(result.data?.receipts[0]?.finality).toMatchObject({ stage: 'unknown', settlementReached: false });
+    expect(result.data?.run.outcome).toBe('partial');
+  });
+
   it('returns unavailable rather than an empty-success discovery/calendar result', () => {
     const state = emptyState();
     const service = new Phase2ReadModelService(() => NOW);

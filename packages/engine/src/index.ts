@@ -26,6 +26,7 @@ export type {
   WalletMintResult,
   MintJobResult,
   MintJobConfig,
+  TransactionAccessListItem,
   TransactionIntent,
   SpendReservation,
   SpendReservationProvider,
@@ -73,10 +74,30 @@ export {
 // Signer
 export { LocalEncryptedSigner, generateAndEncryptWallets, importAndEncryptWallets, zeroizePrivateKeyArray } from './signer.js';
 export type { WalletImportRecord } from './signer.js';
-export { TurnkeySigner, createTurnkeyClient, readTurnkeySecretConfig, readTurnkeyWalletMap } from './turnkey-signer.js';
-export type { TurnkeyClient, TurnkeyHealthReport, TurnkeyPolicyBinding, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
-export { importPrivateKeyToTurnkey } from './turnkey-import.js';
-export type { TurnkeyImportClient, TurnkeyPrivateKeyImport } from './turnkey-import.js';
+export { TurnkeySigner, createTurnkeyClient, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyWalletMap } from './turnkey-signer.js';
+export type { TurnkeyClient, TurnkeyHealthReport, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
+export {
+  canonicalPolicyDigest,
+  canonicalPolicyJson,
+  normalizeAccessList,
+  normalizeHexBytes,
+  turnkeyPolicyRef,
+  validateKeyInventory,
+  validatePolicyBinding,
+  validateTransactionIntent,
+  validateTurnkeyPolicyAst,
+} from './turnkey-policy.js';
+export type {
+  TurnkeyEnvironment,
+  TurnkeyKeyInventory,
+  TurnkeyKeyInventoryEntry,
+  TurnkeyPolicyAst,
+  TurnkeyPolicyScope,
+  TurnkeyPolicyTransaction,
+  TurnkeyProviderBinding,
+} from './turnkey-policy.js';
+export { importPrivateKeyToTurnkey, validateImportedTurnkeyKey } from './turnkey-import.js';
+export type { TurnkeyImportBinding, TurnkeyImportClient, TurnkeyPrivateKeyImport } from './turnkey-import.js';
 
 // Nonce manager
 export { NonceManagerImpl } from './nonce-manager.js';
