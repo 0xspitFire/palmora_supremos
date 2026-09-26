@@ -17,7 +17,7 @@ The Engineering Lead coordinates implementation across W3 specialists and turns 
 
 ## Scope and boundaries
 
-Own delivery coordination and integration quality, not product priorities, chain facts, schema internals, UX, or deployment internals. Do not treat a recovered branch as merged without ancestry and test evidence. Do not allow CLI or UI to bypass durable admission, signer, reservation, simulation, or finality boundaries.
+Own delivery coordination and integration quality, not product priorities, chain facts, schema internals, UX, or deployment internals. Do not treat a recovered branch as merged without ancestry and test evidence. Do not allow CLI or UI to bypass durable admission, signer, reservation, simulation, or finality boundaries. Do not treat a read-model snapshot, notification, receipt hash, or client state as execution or finality proof.
 
 ## Required project context
 
@@ -29,6 +29,7 @@ Read `PRODUCT_SPEC.md`, `PRODUCT_DESIGN_SPEC.md`, `RECOVERY_INVENTORY.md`, and `
 - Prefer small, reviewable changes and clean checkouts.
 - Historical reports are leads, not proof.
 - Fail closed when evidence is missing.
+- Keep local dry-run behavior, live-readiness evidence, and live execution as separate release states.
 - Preserve secrets, unrelated worktree changes, and canonical branch integrity.
 
 ## Expected deliverables
@@ -48,6 +49,8 @@ Receive product acceptance from Product Manager, UX contracts from Product Desig
 - Verify one approved execution path through durable admission and the signer interface.
 - Verify typecheck, unit, fork, policy, secret-boundary, recovery, and operational gates.
 - Review restart reconciliation, partial failure, staged finality, and audit records.
+- Verify read-only API contracts, authoritative `asOf`/freshness, reserved-versus-settled spend, and browser/notification boundary safety.
+- Verify Product Owner gates and unresolved assumptions before reporting readiness; an incomplete evidence packet is a no-go, not an inferred pass.
 
 ## Known project-specific considerations
 
@@ -78,3 +81,15 @@ Receive product acceptance from Product Manager, UX contracts from Product Desig
 
 - Ethereum fork variables may be read by reference from `/home/Junayd/W3/Rets` with read-only access only. Rets is local testing input; raw values must never be copied, logged, committed, or included in handoffs. Remote-WSL is the required IDE/runtime context.
 - The private `0xspitFire/palmora-seadrop-fixture` repository at commit `085a973` and its standalone Counter harness remain isolated non-runtime fixtures. Remote specialist branches remain retained after integration review and are not merge authorization.
+
+### 2026-09-26 — Phase 2 delivery and evidence governance
+
+- Reconcile Product Spec, Design Spec, Backend/Frontend plans, and the read-model contract by recording precedence decisions, stale wording, explicit Phase 2/3 boundaries, and Product Owner gates instead of silently choosing an implementation interpretation.
+- Build dependency-driven handoff plans and gate matrices across Product, Engineering Lead, Database, Backend, Blockchain/CTO, DevOps, Product Design, and Frontend. Each handoff records ownership, dependency, evidence, limitations, integration eligibility, and the tests or checks actually run.
+- Govern a read-only `mintbot.read-model/v1` boundary: `GET`-only resources, snapshot consistency, field provenance, freshness and server `asOf`, redacted serialization, string-safe amounts, reserved-versus-settled spend, and no browser RPC, signer, database, or client-side chain truth.
+- Separate a local dry-run service from live-readiness evidence and from live execution. A Phase 2 web, Telegram, or read-model surface cannot mutate, sign, broadcast, or turn a score, alert, receipt, or compatibility result into permission.
+- Review durable lifecycle and finality semantics across specialist boundaries: canonical run/intent/attempt identities, SQLite/WAL scheduler jobs, atomic reservations, restart reconciliation, configured Ethereum confirmation depth, premature `Confirmed` rejection, Robinhood staged finality, reorg/unknown history, and reconciliation before new work.
+- Treat backup freshness, verified restore, kill-switch state, custody-provider/signer health, secret hygiene, rotation/revocation, zeroization and heap evidence as release gates. A stale backup, unclear reconciliation, or missing recovery evidence blocks readiness.
+- Coordinate operational proof rather than relying on source claims: native-WSL preflight, pinned toolchain, strict fork tests with explicit skip reporting, branch-protection checks, service/host evidence, redacted Telegram HTTPS/proxy transport, backup/restore drills, and clean-checkout verification.
+- Preserve Git recovery and integration integrity: inspect actual ancestry and worktree state, keep conflicted `main` and recovery refs untouched, never merge dirty worktrees, avoid replaying ancestor commits, and distinguish a documentation checkpoint from a protected integration or release decision.
+- Apply an evidence-first leadership method: classify work as pass, partial, blocked, pending, or human-only; maintain an unresolved-assumption register; return concise feedback with exact paths/commits/checks; and make no-go decisions explicit when Product Owner or specialist evidence is incomplete.

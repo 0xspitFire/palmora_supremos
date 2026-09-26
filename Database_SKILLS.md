@@ -94,3 +94,12 @@ Receive entities from Product Manager, architecture from CTO/Lead, and event fac
 - Migrations `020_staged_finality_pending.sql` and `021_settlement_evidence_order.sql` preserve pending soft/posted receipt evidence across restart while preventing older reconciliation from overriding a later pending receipt during settlement.
 - Protected CI must execute environment, verify, Anvil, and Docker jobs on the approved `mintbot-wsl-junayd` runner before PR16 merge.
 - Environment setup cancellation is treated as an incomplete gate; rerun before merge rather than accepting skipped jobs.
+
+### 2026-09-26 — Phase 2 lead engineering competencies
+
+- **Cross-layer lifecycle tracing:** follow a fact from CLI/engine input through Backend canonical persistence, repository validation, SQLite triggers, compatibility views, restart projection, and settlement admission. A passing unit test is insufficient when an adjacent layer can remap or discard the fact.
+- **Staged finality modeling:** keep receipt status, configured chain finality, and observed Robinhood `soft`/`posted`/`final` stages distinct. Persist non-terminal observations as pending, allow only configured terminal evidence to settle, and preserve staged observations across restart.
+- **Evidence ordering and authority:** order receipt and reconciliation evidence by observation time so an older final reconciliation cannot override a newer pending/reorg observation. Bind every reconciliation/finality record to the exact attempt, execution, chain profile, policy version, and source evidence.
+- **Append-only compatibility projections:** adapt legacy writer shapes through normalized, append-only views with stable compatibility IDs, wallet-address resolution, latest-row filtering, tombstones, and direct-repository tombstone clearing. Compatibility writes must never mutate immutable evidence.
+- **Defense-in-depth integrity:** enforce critical invariants both in repositories and SQLite triggers, then add raw-SQL bypass tests for approval evidence, backup proof, campaign membership, finality identity, and reconciliation evidence.
+- **Recovery and review leadership:** resolve rebases without discarding parallel work, use independent approval gates, assign protected CI to the approved runner, distinguish infrastructure cancellation from code failure, rerun incomplete gates, and merge only after environment, Verify, Anvil, Docker, review, and clean-worktree checks all pass.
