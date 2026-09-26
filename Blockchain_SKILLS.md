@@ -17,7 +17,7 @@ The Blockchain Engineer owns W3's chain-facing correctness: profiles, contract s
 
 ## Scope and boundaries
 
-Own chain facts and engine chain-facing modules. Do not own application schema, scheduling, Telegram, dashboard, deployment, or product scoring. Never bypass the `Signer` interface or replace durable Backend/Database admission with an in-memory check.
+Own chain facts and engine chain-facing modules. Provide typed fact, provenance, freshness, finality, and receipt contracts to Backend/Database projections without owning their application schema, scheduling, Telegram, dashboard, deployment, or product scoring. Never bypass the `Signer` interface or replace durable Backend/Database admission with an in-memory check.
 
 ## Required project context
 
@@ -56,7 +56,7 @@ Receive chain priority/policy from Product Manager and CTO. Give Backend transac
 - Positive Robinhood SeaDrop evidence is a fixture, not unattended-execution proof.
 - Robinhood free-mint policy still requires independent L2 execution and L1 data-fee reservations; paid mints remain blocked.
 - EIP-7702 sponsored execution is deferred and unaudited.
-- Seven canonical fork tests currently skip without approved Anvil fixtures; this is not passing evidence.
+- Ordinary full-suite fork tests skip when approved archive fixtures are absent; that is not passing evidence. Strict fork wrappers must be run separately and must report zero skipped or todo tests before their evidence is accepted.
 
 ## 2026-09-14 Gate 3 refinements
 
@@ -88,3 +88,23 @@ Receive chain priority/policy from Product Manager and CTO. Give Backend transac
 - A strict Robinhood fixture must accept decimal zero for `ROBINHOOD_SEADROP_MINT_VALUE_WEI`; zero is valid and required for a FREE mint, but it is never an execution authorization.
 - The scheduled fixture and code-owned positive evidence must agree on the authoritative transaction identity and decoded mint arguments before a strict replay can be treated as release evidence.
 - The verified replacement transaction is `mintSigned`, not the four-argument `mintPublic` strategy path; record that distinction explicitly and do not treat signed-mint compatibility as public-mint execution approval.
+
+## 2026-09-26 Phase 2 read-model and chain-fact competencies
+
+- Build a read-only `ChainFactsReader` boundary around existing `MintStrategy` implementations. The adapter may read heads, logs, drop configuration, wallet state, receipts, and finality evidence, but must never import a signer/broadcaster or call `eth_send*`, signing, admission, or evidence-acceptance paths.
+- Model every fact as an immutable envelope with `availability`, `value`, `freshness`, and `provenance`. Missing values remain `null`/unknown; they must never be coerced to zero, false, confirmed, or execution-enabled.
+- Use deterministic, injected clocks and policy versions for freshness classification. Current defaults are 15 seconds for heads and receipt/finality, 30 seconds for logs and wallets, 5 minutes for drop/calendar facts, and 5 minutes for operational reorg views while retaining reorg history indefinitely.
+- Carry source block number/hash, opaque source references, observation time, expiry, and evidence IDs through Backend read-model projections. Redact URLs, credentials, endpoint identities, calldata, approval proofs, secret references, and store paths from public read models.
+- Treat receipt inclusion and settlement as separate facts. Ethereum success is not product success until configured confirmation depth is satisfied; Robinhood `soft` and `posted` stages remain non-settled until `ethereum_final`.
+- Treat canonicality as tri-state (`true`, `false`, `unknown`). A failed block probe is unknown, not a reorg. Emit a reorg transition only from a prior canonical observation to a later proven non-canonical observation, and preserve both observations append-only.
+- Keep wallet readiness checks independent: funding, eligibility, simulation, chain verification, gas policy, runtime readiness, and reconciliation each require their own evidence. Unknown eligibility is not ineligible; stale simulation is not a failed simulation; unresolved reconciliation blocks retry and accounting conclusions.
+- Produce versioned, snapshot-consistent read models with decimal-string quantities, typed gate checks, safe actions, finality history, reorg history, and explicit unavailable/partial/stale states for discovery, calendar, readiness, run, alert, and health consumers.
+- Preserve chain-specific behavior behind strategies and injected finality observers. Chain ID may select a finality policy or safety gate, but protocol-specific contract reads and decoding remain strategy-owned; Robinhood `4663` stays inspection-only and execution-disabled.
+
+## 2026-09-26 Phase 2 technical leadership and release methodology
+
+- Treat a protected replacement PR as a first-class integration path: inspect its ancestry and intended delta, compare it with merged main, preserve approved behavior, and close it as superseded when its reviewed scope is already merged rather than creating a no-op change.
+- Synchronize divergent branches deliberately by backing up the prior tip, rebasing onto the current main, resolving only identified conflicts, and verifying that custody, symlink, finality, reorg, and no-broadcast safeguards survive the rewrite.
+- Require evidence on the exact candidate SHA: independent review, clean worktree, pinned environment, typecheck, build, lint, focused tests, full tests, strict Anvil replay, Docker build, and fail-closed container health.
+- Distinguish required protected checks from optional secret-gated checks. Environment, verify, Anvil, and Docker must pass before merge; skipped archive-fork jobs must remain explicitly reported as unavailable evidence rather than silently treated as success.
+- Use runner identity and CI job evidence as part of the release record. Report commit SHA, runner, job conclusions, skipped conditions, merge commit, and unresolved human gates back to Product Manager/CTO rather than relying on local validation alone.
