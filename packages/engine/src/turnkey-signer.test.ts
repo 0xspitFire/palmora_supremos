@@ -146,18 +146,8 @@ describe('Turnkey transaction boundary', () => {
   });
 
   it('does not treat an arbitrary successful response as provider-bound health', async () => {
-    const signer = new TurnkeySigner({
-      organizationId: 'org-test',
-      wallets: [{ index: 0, address: '0x0000000000000000000000000000000000000001', signWith: 'turnkey-account-test' }],
-      policyId: 'policy-test',
-      policyDigest: `0x${'0'.repeat(64)}`,
-      client: {
-        signTransaction: async () => ({ signedTransaction: '0x02' }),
-        getWhoami: async () => ({ organizationId: 'org-test' }),
-        getPolicies: async () => ({ policies: [] }),
-      },
-    });
-    await expect(signer.probe()).rejects.toThrow('TURNKEY_POLICY_NOT_FOUND');
-    signer.zeroize();
+    const testSigner = signer(policy(), { getPolicies: async () => ({ policies: [] }) });
+    await expect(testSigner.probe()).rejects.toThrow('TURNKEY_POLICY_NOT_FOUND');
+    testSigner.zeroize();
   });
 });
