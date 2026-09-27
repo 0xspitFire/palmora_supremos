@@ -94,13 +94,15 @@ describe('Phase 2 read-model projection', () => {
     state.campaigns.push(campaign());
     state.runs.push({ id: 'run-1', intentId: 'intent-1', campaignId: 'campaign-1', mode: 'live', requestDigest: 'digest', state: 'Active', createdAt: '2026-09-17T23:00:00.000Z', updatedAt: NOW.toISOString() });
     state.attempts.push({ id: 'attempt-1', executionId: 'execution-1', runId: 'run-1', wallet: WALLET, nonce: 1, hash: '0xhash', state: 'Submitted', robinhoodFinality: 'soft', createdAt: '2026-09-17T23:01:00.000Z', updatedAt: '2026-09-17T23:01:00.000Z' });
-    state.receipts.push({ id: 'receipt-soft', executionId: 'execution-1', runId: 'run-1', transactionAttemptId: 'attempt-1', state: 'Confirmed', robinhoodFinality: 'soft', blockNumber: 101n, blockHash: '0xsoft', actualSpendWei: 16n, observedAt: '2026-09-17T23:02:00.000Z' });
+    state.receipts.push({ id: 'receipt-soft', executionId: 'execution-1', runId: 'run-1', transactionAttemptId: 'attempt-1', state: 'Confirmed', robinhoodFinality: 'soft', blockNumber: 101n, blockHash: '0xsoft', gasUsed: 21_000n, effectiveGasPrice: 2n, actualSpendWei: 16n, observedAt: '2026-09-17T23:02:00.000Z' });
     state.receipts.push({ id: 'receipt-posted', executionId: 'execution-1', runId: 'run-1', transactionAttemptId: 'attempt-1', state: 'Confirmed', robinhoodFinality: 'posted', blockNumber: 101n, blockHash: '0xsoft', actualSpendWei: 16n, observedAt: '2026-09-17T23:03:00.000Z' });
     state.receipts.push({ id: 'receipt-reorg', executionId: 'execution-1', runId: 'run-1', transactionAttemptId: 'attempt-1', state: 'Reorged', robinhoodFinality: 'soft', blockNumber: 101n, blockHash: '0xreorg', actualSpendWei: 16n, observedAt: '2026-09-17T23:04:00.000Z' });
     state.reconciliations.push({ id: 'reconciliation-reorg', runId: 'run-1', attemptId: 'attempt-1', result: 'reorged', observedAt: '2026-09-17T23:04:01.000Z', reason: 'canonical block changed' });
     const result = new Phase2ReadModelService(() => NOW).run(state, 'run-1', { requestId: 'request-run' });
     expect(result.data?.receipts.map(receipt => receipt.finality.stage)).toEqual(['soft', 'posted', 'soft']);
     expect(result.data?.receipts[0]?.finality.settlementReached).toBe(false);
+    expect(result.data?.receipts[0]?.gasUsed?.value).toBe('21000');
+    expect(result.data?.receipts[0]?.effectiveGasPrice?.amount?.value).toBe('2');
     expect(result.data?.receipts[2]?.status).toBe('reorged');
     expect(result.data?.receipts[2]?.finality.settlementReached).toBe(false);
     expect(result.data?.reconciliations[0]?.state).toBe('reorged');
@@ -158,6 +160,14 @@ describe('Phase 2 read-model projection', () => {
     expect(calendar.data).toEqual([]);
     expect(calendar.availability).toBe('unavailable');
     expect(calendar.issues[0]?.code).toBe('CALENDAR_SOURCE_UNAVAILABLE');
+  });
+
+  it('keeps health blocked when a dependency is false without a runtime blocker', () => {
+    const state = emptyState();
+    state.runtime.dependencies.backup = false;
+    const result = new Phase2ReadModelService(() => NOW).health(state, { requestId: 'health-dependency' });
+    expect(result.data?.state).toBe('Not ready');
+    expect(result.issues.some(issue => issue.code === 'BACKUP_NOT_READY')).toBe(true);
   });
 
   it('redacts operational secret/path fields and never exposes a Robinhood live action', () => {
