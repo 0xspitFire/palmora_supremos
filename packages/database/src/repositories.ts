@@ -558,6 +558,8 @@ export class DurableRepository {
 
   public recordBackupRestoreEvidence(record: BackupRestoreEvidenceRecord): void {
     if (record.outcome === 'passed' && (record.encryptionVerified !== true || record.integrityCheck !== 'ok' || !record.killSwitchEngaged || !backupReferenceExists(record.storeReference) || !backupReferenceExists(record.backupReference))) throw new Error('passed backup evidence requires encrypted, verified, kill-switched references');
+    const recordedAt = Date.parse(record.recordedAt);
+    if (!Number.isFinite(recordedAt) || recordedAt > Date.now()) throw new Error('backup evidence timestamp must not be in the future');
     if (!/^[a-f0-9]{64}$/i.test(record.sha256)) throw new Error('backup evidence hash must be SHA-256');
     if (record.verificationSha256 !== undefined && record.verificationSha256.toLowerCase() !== record.sha256.toLowerCase()) throw new Error('backup verification hash mismatch');
     if (existsSync(record.backupReference)) {

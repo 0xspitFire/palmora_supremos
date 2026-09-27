@@ -487,8 +487,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.ensureOpen();
     const input = record as { runId?: string; campaignId?: string; requestFingerprint?: string };
     if (!input.runId) throw new Error('RUN_ID_REQUIRED');
-    const row = this.db.prepare('SELECT campaign_id, request_fingerprint, reason FROM execution_run WHERE id = ?').get(input.runId) as { campaign_id: string; request_fingerprint: string; reason: string | null } | undefined;
+    const row = this.db.prepare('SELECT campaign_id, request_fingerprint, reason, state FROM execution_run WHERE id = ?').get(input.runId) as { campaign_id: string; request_fingerprint: string; reason: string | null; state: string } | undefined;
     if (!row) throw new Error('RUN_NOT_FOUND');
+    if (!['prepared', 'active'].includes(row.state)) throw new Error('RUN_NOT_ARMED');
     if (input.campaignId && row.campaign_id !== input.campaignId) throw new Error('RUN_CAMPAIGN_MISMATCH');
     const runReason = decodeRecord<{ backendRequestDigest?: string }>(row.reason);
     const backendFingerprint = runReason?.backendRequestDigest ?? row.request_fingerprint;
@@ -499,11 +500,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.ensureOpen();
     const input = record as { id?: string; executionId?: string; intent?: { campaignId?: string; runId?: string; from?: string } };
     if (!input.id || !input.executionId) throw new Error('EXECUTION_IDENTITY_REQUIRED');
+    if (!input.intent?.campaignId || !input.intent.runId || !input.intent.from) throw new Error('INTENT_IDENTITY_REQUIRED');
     const row = this.db.prepare('SELECT ti.campaign_id, ti.run_id, w.address, e.id AS execution_id FROM transaction_intent ti JOIN wallet w ON w.id = ti.wallet_id LEFT JOIN execution e ON e.transaction_intent_id = ti.id WHERE ti.id = ? ORDER BY e.created_at DESC LIMIT 1').get(input.id) as { campaign_id: string; run_id: string | null; address: string; execution_id: string | null } | undefined;
     if (!row || row.execution_id !== input.executionId) throw new Error('CANONICAL_INTENT_EXECUTION_MISMATCH');
-    if (input.intent?.campaignId && input.intent.campaignId !== row.campaign_id) throw new Error('INTENT_CAMPAIGN_MISMATCH');
-    if (input.intent?.runId && input.intent.runId !== row.run_id) throw new Error('INTENT_RUN_MISMATCH');
-    if (input.intent?.from && input.intent.from.toLowerCase() !== row.address.toLowerCase()) throw new Error('INTENT_WALLET_MISMATCH');
+    if (input.intent.campaignId !== row.campaign_id) throw new Error('INTENT_CAMPAIGN_MISMATCH');
+    if (input.intent.runId !== row.run_id) throw new Error('INTENT_RUN_MISMATCH');
+    if (input.intent.from.toLowerCase() !== row.address.toLowerCase()) throw new Error('INTENT_WALLET_MISMATCH');
   }
 
   public async persistEngineAttempt(record: unknown): Promise<void> {
@@ -521,7 +523,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (!identity || identity.transactionIntentId !== transactionIntentId) throw new Error('CANONICAL_ATTEMPT_IDENTITY_MISMATCH');
     const state = responseClass === 'signed' ? 'Signed' : ['timeout', 'ambiguous'].includes(responseClass) ? 'Pending' : ['rejected', 'provider_error'].includes(responseClass) ? 'Failed' : 'Submitted';
     await this.transaction((current) => {
-      if (current.attempts.some((attempt) => attempt.id === id)) return;
+      const existing = current.attempts.find((attempt) => attempt.id === id);
+      if (existing) {
+        if (existing.executionId !== executionId || existing.runId !== identity.runId || existing.wallet.toLowerCase() !== identity.wallet.toLowerCase() || existing.nonce !== nonce || (existing.hash !== undefined && input.txHash !== undefined && existing.hash.toLowerCase() !== input.txHash.toLowerCase())) throw new Error('ATTEMPT_IDENTITY_MISMATCH');
+        return;
+      }
       current.attempts.push({ id, executionId, runId: identity.runId, wallet: identity.wallet, nonce, endpoint, ...(input.txHash ? { hash: input.txHash } : {}), ...(input.redactedError ? { redactedError: input.redactedError } : {}), ...(input.replacementOfId ? { replacementOfId: input.replacementOfId } : {}), state, createdAt: attemptedAt, updatedAt: attemptedAt });
     });
   }
@@ -555,7 +561,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const actualSpendWei = actualMintValueWei + actualL2ExecutionGasWei + actualL1DataGasWei;
     await this.transaction((current) => {
       if (current.receipts.some((receipt) => receipt.id === id)) return;
-       current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
+       current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(finalityStage ? { finalityStage: finalityStage as ReceiptRecord['finalityStage'] } : {}), ...(input.finalitySource ? { finalitySource: input.finalitySource } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution', entityId: executionId, actor: this.actor, reason: 'lifecycle receipt accounting components', newState: 'receipt_accounting', policySnapshot: { kind: 'receipt_accounting', receiptId: id, actualSpendWei: actualSpendWei.toString(), actualMintValueWei: actualMintValueWei.toString(), actualL2ExecutionGasWei: actualL2ExecutionGasWei.toString(), actualL1DataGasWei: actualL1DataGasWei.toString() }, occurredAt: observedAt });
     });
   }
@@ -575,6 +581,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const wallets = [...input.wallets];
     if (wallets.length === 0) throw new Error('EMPTY_RESERVATION_BATCH');
     if (new Set(wallets.map((wallet) => wallet.toLowerCase())).size !== wallets.length) throw new Error('DUPLICATE_WALLET');
+    if (input.run.state !== 'Armed') throw new Error('RUN_NOT_ARMED');
+    if (input.intent.runId !== input.run.id) throw new Error('INTENT_RUN_MISMATCH');
+    if (input.intent.campaignId !== input.campaign.id || input.run.campaignId !== input.campaign.id) throw new Error('INTENT_CAMPAIGN_MISMATCH');
+    const armedWallets = new Set(input.intent.wallets.map((wallet) => wallet.toLowerCase()));
+    if (wallets.some((wallet) => !armedWallets.has(wallet.toLowerCase()))) throw new Error('INTENT_WALLET_MISMATCH');
     if (input.campaign.chainId === ROBINHOOD_CHAIN_ID && input.campaign.feePolicy.kind === 'paid') throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
     const requestFingerprint = this.runFingerprint(input.run.id);
     if (input.run.requestDigest !== requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');

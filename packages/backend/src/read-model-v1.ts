@@ -819,8 +819,17 @@ export class Phase2ReadModelService {
     const operational = runtime.operational;
     const freshness = operational ? classifyFreshness(operational.observedAt, operational.expiresAt, context.now, context.freshnessPolicyVersion) : UNKNOWN_FRESHNESS;
     const blockers = [...new Set(runtime.blockingReasons)].map(reason => issue(reason, safeHealthMessage(reason), 'blocking', 'No safe action'));
+    for (const [name, ready] of Object.entries(runtime.dependencies)) if (!ready) blockers.push(issue(`${name.toUpperCase()}_NOT_READY`, `${name} dependency is not ready.`, 'blocking', name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
+    if (!operational) blockers.push(issue('OPERATIONAL_READINESS_UNKNOWN', 'Operational readiness evidence is unavailable.', 'blocking', 'Inspect'));
+    else {
+      if (!operational.secretStoreReference || !operational.storePath || !operational.lastReconciliationAt) blockers.push(issue('OPERATIONAL_READINESS_INCOMPLETE', 'Operational readiness evidence is incomplete.', 'blocking', 'Inspect'));
+      if (!operational.signerReady) blockers.push(issue('SIGNER_NOT_READY', 'The configured signer is not ready.', 'blocking', 'Inspect'));
+      if (!operational.notificationReady) blockers.push(issue('NOTIFICATIONS_NOT_READY', 'Notification delivery is not ready.', 'blocking', 'Inspect'));
+      if (operational.chainVerification !== 'verified') blockers.push(issue('CHAIN_VERIFICATION_REQUIRED', 'Chain verification is not current.', 'blocking', 'Refresh read model'));
+      if (freshness.status !== 'fresh') blockers.push(issue(freshness.status === 'stale' ? 'OPERATIONAL_READINESS_STALE' : 'OPERATIONAL_READINESS_UNKNOWN', 'Operational readiness evidence is not current.', 'blocking', 'Refresh read model'));
+    }
     const reconciliation: SystemHealthReadModel['dependencies']['reconciliation'] = runtime.blockingReasons.some(reason => /RECONCILIATION|UNRESOLVED/i.test(reason)) ? 'required' : runtime.startupState === 'Reconciling' ? 'in_progress' : operational ? 'clear' : 'unknown';
-    const data: SystemHealthReadModel = { state: context.state.killed ? 'Killed' : runtime.startupState === 'Ready' && blockers.length === 0 ? 'Ready' : operational ? 'Not ready' : 'Unknown', killSwitch: context.state.killed || operational?.killSwitchEngaged ? 'engaged' : operational ? 'clear' : 'unknown', dependencies: { engine: runtime.dependencies.engine ? 'ready' : 'not_ready', chain: runtime.dependencies.chain ? 'ready' : 'not_ready', backup: runtime.dependencies.backup ? 'ready' : 'not_ready', notifications: runtime.dependencies.notifications ? 'ready' : 'not_ready', reconciliation }, blockers, checkedAt: operational?.observedAt ?? context.generatedAt, freshness };
+    const data: SystemHealthReadModel = { state: context.state.killed ? 'Killed' : runtime.startupState === 'Ready' && blockers.length === 0 ? 'Ready' : runtime.startupState === 'Cold' ? 'Unknown' : 'Not ready', killSwitch: context.state.killed || operational?.killSwitchEngaged ? 'engaged' : operational ? 'clear' : 'unknown', dependencies: { engine: runtime.dependencies.engine ? 'ready' : 'not_ready', chain: runtime.dependencies.chain ? 'ready' : 'not_ready', backup: runtime.dependencies.backup ? 'ready' : 'not_ready', notifications: runtime.dependencies.notifications ? 'ready' : 'not_ready', reconciliation }, blockers, checkedAt: operational?.observedAt ?? context.generatedAt, freshness };
     return { data, issues: blockers, freshness };
   }
 }
