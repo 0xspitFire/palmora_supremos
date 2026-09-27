@@ -163,6 +163,15 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  it('rejects canonical admission for a run that is not Armed', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM);
+      const prepared = await armed(value, campaignValue);
+      await expect(value.store.admitExecution({ ...prepared.input, run: { ...prepared.run, state: 'Active' } })).rejects.toThrow('RUN_NOT_ARMED');
+    } finally { await close(value); }
+  });
+
   it('preserves the Backend request digest across canonical arm replay', async () => {
     const value = await fixture(ETHEREUM);
     try {
@@ -405,6 +414,18 @@ describe('CanonicalStoreBridge', () => {
       const row = value.db.prepare('SELECT transaction_attempt_id FROM transaction_receipt WHERE id = ?').get('endpoint-receipt') as { transaction_attempt_id: string };
       expect(row.transaction_attempt_id).toBe('endpoint-attempt-b');
       expect(value.store.snapshot().receipts.find((receipt) => receipt.id === 'endpoint-receipt')?.transactionAttemptId).toBe('endpoint-attempt-b');
+    } finally { await close(value); }
+  });
+
+  it('rejects a duplicate lifecycle attempt with changed transaction identity', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM);
+      const prepared = await armed(value, campaignValue);
+      const admission = await value.store.admitExecution(prepared.input);
+      const execution = admission.executions[0]!;
+      await value.store.persistEngineAttempt({ id: 'duplicate-identity-attempt', executionId: execution.executionId, transactionIntentId: execution.intentId, endpoint: 'provider', responseClass: 'accepted', txHash: `0x${'a'.repeat(64)}`, nonce: 6, attemptedAt: NOW });
+      await expect(value.store.persistEngineAttempt({ id: 'duplicate-identity-attempt', executionId: execution.executionId, transactionIntentId: execution.intentId, endpoint: 'provider', responseClass: 'accepted', txHash: `0x${'b'.repeat(64)}`, nonce: 6, attemptedAt: NOW })).rejects.toThrow('ATTEMPT_IDENTITY_MISMATCH');
     } finally { await close(value); }
   });
 

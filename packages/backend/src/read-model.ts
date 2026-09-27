@@ -299,10 +299,12 @@ export class ReadModelService {
   private projectHealth(state: BackendState, checkedAt: string): SystemHealthProjection {
     const dependencies = { engine: state.runtime.dependencies.engine ? 'ready' : 'not_ready', chain: state.runtime.dependencies.chain ? 'ready' : 'not_ready', backup: state.runtime.dependencies.backup ? 'ready' : 'not_ready', notifications: state.runtime.dependencies.notifications ? 'ready' : 'not_ready', reconciliation: state.runtime.startupState === 'Reconciling' ? 'in_progress' : state.runtime.startupState === 'Ready' ? 'clear' : 'required' } as SystemHealthProjection['dependencies'];
     const blockers = state.runtime.blockingReasons.map((reason) => issue(reason, 'blocking', this.healthMessage(reason), false, reason.includes('RECONCILI') ? 'Wait for reconciliation' : 'Inspect'));
-    for (const [name, ready] of Object.entries(state.runtime.dependencies)) if (!ready) blockers.push(issue(`${name.toUpperCase()}_NOT_READY`, 'blocking', `${name} dependency is not ready`, false, name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
-    const operational = state.runtime.operational;
-    if (operational) {
-      if (operational.signerReady !== true) blockers.push(issue('SIGNER_NOT_READY', 'blocking', 'The configured signer is not ready', false, 'Inspect'));
+     for (const [name, ready] of Object.entries(state.runtime.dependencies)) if (!ready) blockers.push(issue(`${name.toUpperCase()}_NOT_READY`, 'blocking', `${name} dependency is not ready`, false, name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
+     const operational = state.runtime.operational;
+     if (!operational) blockers.push(issue('OPERATIONAL_READINESS_UNKNOWN', 'blocking', 'Operational readiness evidence is unavailable', false, 'Inspect'));
+     else {
+       if (!operational.secretStoreReference || !operational.storePath || !operational.lastReconciliationAt) blockers.push(issue('OPERATIONAL_READINESS_INCOMPLETE', 'blocking', 'Operational readiness evidence is incomplete', false, 'Inspect'));
+       if (operational.signerReady !== true) blockers.push(issue('SIGNER_NOT_READY', 'blocking', 'The configured signer is not ready', false, 'Inspect'));
       if (!operational.notificationReady) blockers.push(issue('NOTIFICATIONS_NOT_READY', 'blocking', 'Notification delivery is not ready', false, 'Inspect'));
       if (operational.chainVerification !== 'verified') blockers.push(issue('CHAIN_VERIFICATION_REQUIRED', 'blocking', 'Chain verification is not current', false, 'Refresh read model'));
       if (Number.isFinite(Date.parse(operational.expiresAt)) && Date.parse(operational.expiresAt) <= Date.parse(checkedAt)) blockers.push(issue('OPERATIONAL_READINESS_STALE', 'blocking', 'Operational readiness evidence is stale', false, 'Refresh read model'));

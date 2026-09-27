@@ -588,6 +588,7 @@ describe('database migrations and spend reservations', () => {
     const campaignId = campaignFixture(db, 'fingerprint');
     expect(() => repository.saveIntent({ id: 'fingerprint-intent', campaignId, walletId: 'wallet', intentClass: 'mint', toAddress: '0xdef', valueWei: 0n, calldata: '0x', requestFingerprint: 'not-a-computed-fingerprint', createdAt: '2026-01-01T00:00:00.000Z' })).toThrow(IdempotencyConflictError);
     expect(() => repository.recordBackupRestoreEvidence({ id: 'forged-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 21, operation: 'verification', outcome: 'passed', killSwitchEngaged: false, recordedAt: '2026-01-01T00:00:00.000Z' })).toThrow('passed backup evidence requires encrypted');
+    expect(() => repository.recordBackupRestoreEvidence({ id: 'future-backup', storeReference: 'store', backupReference: 'backup', sha256: 'a'.repeat(64), schemaVersion: 21, operation: 'verification', outcome: 'failed', killSwitchEngaged: false, recordedAt: '2999-01-01T00:00:00.000Z' })).toThrow('backup evidence timestamp must not be in the future');
     db.close();
   });
 
