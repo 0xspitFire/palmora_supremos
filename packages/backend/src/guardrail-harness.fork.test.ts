@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type SqliteDatabase } from '@mint-bot/database';
 import { CanonicalStoreBridge } from './canonical-store.js';
 import { ExecutionCoordinator } from './coordinator.js';
+import type { FleetSpendPolicy } from './fleet-policy.js';
 import { campaignInputDigest } from './evidence.js';
 import type { AttemptRecord, Campaign, EngineAdapter, ExecutionResult, ReceiptRecord, RunRecord } from './types.js';
 
@@ -21,6 +22,8 @@ const MINT_PUBLIC_SELECTOR = '0x161ac21f'; // mintPublic(address,address,address
 const NOW = '2026-09-29T00:00:00.000Z';
 const FEE = 50_000_000_000_000_000n; // 0.05 ETH worst-case fee budget per wallet; real SeaDrop mints cost far less.
 const GAS_LIMIT = 300_000n;
+// The harness fee budget is far above Personal Live allowances, so S1-S6 run under an open fleet policy.
+const OPEN_FLEET: FleetSpendPolicy = { freeDailyCapWei: 10n ** 20n, paidDailyCapWei: 10n ** 20n, paidHeadroomAlertWei: 10n ** 20n, paidMaxPricePerNftWei: 10n ** 20n, paidMaxWalletsPerMint: 50, freeFeeAllowanceWei: 10n ** 20n, paidFeeAllowanceWei: 10n ** 20n };
 
 function isLoopback(url: string | undefined): boolean {
   if (!url) return false;
@@ -151,7 +154,7 @@ describe.skipIf(!ready)('Runtime guardrail harness on an Ethereum Anvil fork', (
     const dbPath = join(directory, 'state.sqlite');
     const db = openDatabase(dbPath);
     seedChain(db);
-    const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW) });
+    const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW), fleetPolicy: OPEN_FLEET });
     await store.open();
     const engine = new ForkEngine(() => h.store, mintValue);
     h = { directory, dbPath, db, store, engine, coordinator: new ExecutionCoordinator(store, engine) };
@@ -314,7 +317,7 @@ describe.skipIf(!ready)('Runtime guardrail harness on an Ethereum Anvil fork', (
     const a = wallets[0]!;
     const first = await armLive({ maxRunWei: exposure, dailyCapWei: 2n * exposure - 1n }, [a]);
     const second = await armLive({ maxRunWei: exposure, dailyCapWei: 2n * exposure - 1n }, [a]);
-    const otherStore = new CanonicalStoreBridge(openDatabase(h.dbPath), { now: () => new Date(NOW) });
+    const otherStore = new CanonicalStoreBridge(openDatabase(h.dbPath), { now: () => new Date(NOW), fleetPolicy: OPEN_FLEET });
     await otherStore.open();
     try {
       const otherCoordinator = new ExecutionCoordinator(otherStore, h.engine);
@@ -327,6 +330,46 @@ describe.skipIf(!ready)('Runtime guardrail harness on an Ethereum Anvil fork', (
       expect(await nonceOf(a)).toBe(nonceBefore + 1n);
     } finally {
       otherStore.close();
+    }
+  });
+
+  it('S7: the fleet daily cap stops a second wallet across runs before any broadcast (D-033)', async () => {
+    const [a, b] = [wallets[0]!, wallets[1]!];
+    const tight = new CanonicalStoreBridge(openDatabase(h.dbPath), { now: () => new Date(NOW), fleetPolicy: { ...OPEN_FLEET, freeDailyCapWei: exposure, paidDailyCapWei: exposure, paidHeadroomAlertWei: exposure } });
+    await tight.open();
+    try {
+      const coordinator = new ExecutionCoordinator(tight, h.engine);
+      const first = await armLive({ maxRunWei: exposure, dailyCapWei: exposure }, [a], tight, coordinator);
+      await coordinator.execute(first.id, [a]);
+      const second = await armLive({ maxRunWei: exposure, dailyCapWei: exposure }, [b], tight, coordinator);
+      const nonceBefore = await nonceOf(b);
+      await expect(coordinator.execute(second.id, [b])).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+      expect(reservations(second.id)).toHaveLength(0);
+      expect(await nonceOf(b)).toBe(nonceBefore);
+    } finally {
+      tight.close();
+    }
+  });
+
+  it('S8: a paid run past the headroom line records a notice and raises an alert; a free run does not', async () => {
+    const a = wallets[0]!;
+    const alerts: Array<{ reason: string; runId?: string }> = [];
+    const store = new CanonicalStoreBridge(openDatabase(h.dbPath), { now: () => new Date(NOW), fleetPolicy: { ...OPEN_FLEET, paidHeadroomAlertWei: exposure - 1n } });
+    await store.open();
+    try {
+      const coordinator = new ExecutionCoordinator(store, h.engine, { alerts: { cap: async (reason, runId) => { alerts.push({ reason, ...(runId ? { runId } : {}) }); } } });
+      const run = await armLive({ maxRunWei: exposure, dailyCapWei: exposure }, [a], store, coordinator);
+      await coordinator.execute(run.id, [a]);
+      const notices = store.snapshot().events.filter((event) => event.type === 'fleet_spend_notice' && event.runId === run.id);
+      if (paid) {
+        expect(notices.map((event) => event.data.notice)).toEqual(['PAID_DAILY_HEADROOM_USED']);
+        expect(alerts).toEqual([{ reason: 'PAID_DAILY_HEADROOM_USED', runId: run.id }]);
+      } else {
+        expect(notices).toHaveLength(0);
+        expect(alerts).toHaveLength(0);
+      }
+    } finally {
+      store.close();
     }
   });
 });

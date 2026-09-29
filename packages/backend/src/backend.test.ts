@@ -255,4 +255,20 @@ describe('backend Phase 1 blockers', () => {
   it('exposes canonical missing-run errors and confines wallet paths', () => {
     const store = new DurableStore(); expect(() => new ReadModelService(store).getRun('missing')).toThrow('RUN_NOT_FOUND'); const root = join('C:', 'project'); expect(resolveWalletPath(root)).toBe(join(resolveWalletPath(root), '.')); expect(() => resolveWalletPath(root, './Rets/other')).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
   });
+
+  it('refuses live Ethereum execution on a non-canonical store before any reservation or engine call (T-003)', async () => {
+    const store = new ReadyStore();
+    const execute = vi.fn(async () => emptyResult);
+    const campaign = await new BackendApplication(store, undefined as never).createCampaign({ chainId: 1, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, dryRun: false, maxRunWei: 100n, dailyCapWei: 200n, gasCeilingWei: 40n, broadcastMode: 'public', chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, evidenceId: 'evidence-eth', checkedAt: '2026-08-28T00:00:00.000Z', sourceBlock: 1n, endpointReference: 'ETH_FEED_REFERENCE' }, feePolicy });
+    const coordinator = new ExecutionCoordinator(store, engine({ execute }));
+    (coordinator as unknown as { evidence: { assertLiveEvidence: () => string[] } }).evidence = { assertLiveEvidence: () => ['sim-1'] };
+    await store.transaction(state => {
+      state.runtime = { startupState: 'Ready', reconciliationCompletedAt: new Date().toISOString(), blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true }, operational };
+      state.runs.push({ id: 'run-eth', intentId: 'intent-eth', campaignId: campaign.id, mode: 'live', requestDigest: 'digest', state: 'Armed', createdAt: '2026-08-28T00:00:00.000Z', updatedAt: '2026-08-28T00:00:00.000Z' });
+      state.intents.push({ id: 'intent-eth', runId: 'run-eth', campaignId: campaign.id, campaignSnapshot: structuredClone(campaign), wallets: ['wallet-1'], policy: structuredClone(campaign.spendPolicy), feePolicy: structuredClone(campaign.feePolicy), chainVerification: structuredClone(campaign.chainVerification), simulationIds: ['sim-1'], evidenceAt: '2026-08-28T00:00:00.000Z', createdAt: '2026-08-28T00:00:00.000Z' });
+    });
+    await expect(coordinator.execute('run-eth', ['wallet-1'])).rejects.toThrow('CANONICAL_STORE_REQUIRED_FOR_LIVE');
+    expect(store.snapshot().reservations).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+  });
 });

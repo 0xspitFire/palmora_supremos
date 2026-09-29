@@ -5,6 +5,8 @@ export { SqliteStateStore } from './sqlite-store.js';
 export { CanonicalStoreBridge, PHASE1_ZERO_ADMISSION_BUFFERS, canonicalReceiptFinalityStage, rebindExecutionResult } from './canonical-store.js';
 export type { CanonicalAdmissionInput, CanonicalAdmissionResult, CanonicalExecutionStore, PreparedExecution } from './canonical-store.js';
 export { SpendLedger } from './spend-ledger.js';
+export { PERSONAL_LIVE_FLEET_POLICY, ethToWei, validateFleetSpendPolicy } from './fleet-policy.js';
+export type { FleetNotice, FleetSpendPolicy } from './fleet-policy.js';
 export { ReadinessService } from './readiness.js';
 export { NotificationDispatcher, OneWayNotificationDispatcher, redactNotificationText } from './notifications.js';
 export type { NotificationMessage, NotificationSink } from './notifications.js';

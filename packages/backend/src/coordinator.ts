@@ -13,7 +13,7 @@ export class ExecutionCoordinator {
   constructor(
     private readonly store: BackendStore,
     private readonly engine: EngineAdapter,
-    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding } = {},
+    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding; alerts?: { cap(reason: string, runId?: string): Promise<void> } } = {},
   ) {
     this.ledger = new SpendLedger(store);
     this.evidence = new EvidenceService(store);
@@ -107,12 +107,16 @@ export class ExecutionCoordinator {
     if (totalFee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
     const reservationAmount = campaign.mintPriceWei * BigInt(campaign.quantity) + totalFee;
     const canonical = this.canonicalStore();
+    // Fleet spend limits (D-032/D-033) live only in canonical admission, so live spend must go through it.
+    if (!canonical) throw new Error('CANONICAL_STORE_REQUIRED_FOR_LIVE');
     let reservations: Reservation[];
     let prepared: Awaited<ReturnType<CanonicalExecutionStore['admitExecution']>>['executions'] = [];
+    let notices: readonly string[] = [];
     if (canonical) {
       const admission = await canonical.admitExecution({ run, intent, campaign, wallets });
       reservations = admission.reservations;
       prepared = admission.executions;
+      notices = admission.notices ?? [];
     } else {
       reservations = await this.ledger.reserveBatch(runId, campaign.id, wallets, reservationAmount, campaign.spendPolicy.maxRunWei, campaign.chainId, campaign.spendPolicy.dailyCapWei, current => {
         if (current.killed) throw new Error('KILLED');
@@ -140,8 +144,10 @@ export class ExecutionCoordinator {
     } catch (error) {
       if (canonical && this.store.snapshot().killed) await canonical.abortRemaining('KILLED');
       else await this.store.transaction(latest => { latest.events.push(this.event('execution_outcome_unknown', runId, { reason: 'ENGINE_ERROR' })); });
+      await this.raiseFleetNotices(runId, notices);
       throw error;
     }
+    await this.raiseFleetNotices(runId, notices);
     result = rebindExecutionResult(result, prepared);
     this.assertEngineFacts(runId, campaign.chainId, result.executionIds, result.attempts, result.receipts);
     const killedAfterExecution = this.store.snapshot().killed;
@@ -158,6 +164,16 @@ export class ExecutionCoordinator {
     });
     if (canonical && killedAfterExecution) await canonical.abortRemaining('KILLED');
     return result;
+  }
+
+  /** Records and alerts fleet notices after the engine has run, so an alert never delays or changes execution. */
+  private async raiseFleetNotices(runId: string, notices: readonly string[]): Promise<void> {
+    for (const notice of notices) {
+      try {
+        await this.store.transaction(state => { state.events.push(this.event('fleet_spend_notice', runId, { notice })); });
+        await this.options.alerts?.cap(notice, runId);
+      } catch { /* notice persistence and delivery never block, prove, or alter execution */ }
+    }
   }
 
   async kill(reason: string): Promise<void> {

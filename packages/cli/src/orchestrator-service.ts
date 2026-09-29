@@ -81,6 +81,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     metrics.set('mintbot_notification_up', 0);
   }
   const alerts = new AlertManager(runtime.store, dispatcher, metrics, { policy: { retentionDays: config.alertRetentionDays }, ...(config.canonicalUrlBase ? { canonicalUrlBase: config.canonicalUrlBase } : {}) });
+  runtime.setAlertSink(alerts);
   const jobs = new CanonicalJobStore(runtime.store);
   const orchestrator = new OrchestratorService(runtime.store, runtime.application, runtime.coordinator, {
     jobs,
