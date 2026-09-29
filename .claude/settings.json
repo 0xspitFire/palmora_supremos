@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(~/W3/Rets/**)",
+      "Edit(~/W3/Rets/**)",
+      "Read(./Rets/**)",
+      "Edit(./Rets/**)",
+      "Read(secrets/**)",
+      "Edit(secrets/**)",
+      "Read(**/*.env)",
+      "Edit(**/*.env)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Edit(**/.env.*)",
+      "Read(**/*.key)",
+      "Edit(**/*.key)",
+      "Read(**/keystore/**)",
+      "Read(**/wallets/**)",
+      "Edit(**/wallets/**)",
+      "Read(**/wallets.enc)",
+      "Read(**/wallets.json)",
+      "Read(~/.bashrc)",
+      "Edit(~/.bashrc)",
+      "Read(~/.bash_profile)",
+      "Edit(~/.bash_profile)",
+      "Read(~/.profile)",
+      "Edit(~/.profile)",
+      "Read(~/.zshrc)",
+      "Edit(~/.zshrc)",
+      "Read(~/.bash_history)",
+      "Bash(*W3/Rets*)",
+      "Bash(*secrets/*)"
+    ],
+    "ask": [
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git checkout -b *)",
+      "Bash(git switch -c *)",
+      "Bash(git worktree add *)",
+      "Bash(git worktree remove *)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm add *)",
+      "Bash(pnpm i *)",
+      "Bash(npm install *)",
+      "Bash(npm i *)",
+      "Bash(anvil *)",
+      "Bash(cast *)"
+    ],
+    "allow": [
+      "Bash(pnpm test)",
+      "Bash(pnpm test *)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm build)",
+      "Bash(pnpm ops:fork-replay)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch)",
+      "Bash(git branch -vv)",
+      "Bash(git branch -a)",
+      "Bash(git branch --list *)",
+      "Bash(git worktree list *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.sh", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/typecheck.sh", "timeout": 120 }
+        ]
+      }
+    ]
+  }
+}
