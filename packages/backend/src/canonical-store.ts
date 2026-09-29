@@ -30,6 +30,7 @@ import type {
   StoreCapabilities,
 } from './types.js';
 import type { BackendStore } from './store.js';
+import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
 
 export interface CanonicalAdmissionInput {
   run: RunRecord;
@@ -47,6 +48,8 @@ export interface PreparedExecution {
 export interface CanonicalAdmissionResult {
   reservations: Reservation[];
   executions: PreparedExecution[];
+  /** Owner-facing notices raised by fleet limits; never a permission. */
+  notices?: FleetNotice[];
 }
 
 export interface CanonicalExecutionStore extends BackendStore {
@@ -390,9 +393,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readonly actor: string;
   private readonly now: () => Date;
   private readonly walletKeyReferencePrefix: string;
+  private readonly fleetPolicy?: FleetSpendPolicy;
 
-  public constructor(private readonly db: SqliteDatabase, options: { durable?: boolean; actor?: string; now?: () => Date; walletKeyReferencePrefix?: string } = {}) {
+  public constructor(private readonly db: SqliteDatabase, options: { durable?: boolean; actor?: string; now?: () => Date; walletKeyReferencePrefix?: string; fleetPolicy?: FleetSpendPolicy } = {}) {
     this.databaseStore = new SqliteBackendStore(db);
+    if (options.fleetPolicy) this.fleetPolicy = Object.freeze({ ...validateFleetSpendPolicy(options.fleetPolicy) });
     this.durable = options.durable ?? true;
     this.actor = options.actor ?? 'backend';
     this.now = options.now ?? (() => new Date());
@@ -594,11 +599,15 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (input.campaign.chainId === ROBINHOOD_CHAIN_ID && input.campaign.feePolicy.kind === 'paid') throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
     const requestFingerprint = this.runFingerprint(input.run.id);
     if (input.run.requestDigest !== requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+    const mintClassForFleet: 'free' | 'paid' = input.campaign.mintPriceWei === 0n ? 'free' : 'paid';
+    this.assertFleetRunLimits(input, mintClassForFleet);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.exec('PRAGMA defer_foreign_keys = ON');
       if (this.databaseStore.isKillSwitchEngaged()) throw new Error('KILLED');
       this.assertCanonicalChainProfile(input.campaign);
+      const fleetUsageDate = this.now().toISOString().slice(0, 10);
+      if (mintClassForFleet === 'paid') this.assertPaidWalletsPerMint(input);
       this.persistIntent(input.intent, undefined);
       const executionIds = new Map<string, PreparedExecution>();
       const reservations: Reservation[] = [];
@@ -622,6 +631,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         if (!existing) {
           this.assertCanonicalFeePolicy(input.campaign, input.campaign.feePolicy);
           this.assertCaps(canonicalWallet.walletId, input.campaign, usageDate, amount, totalRunExposure);
+          this.assertFleetDailyCap(mintClassForFleet, usageDate, amount);
           const fee = input.campaign.feePolicy;
           const mintValueWei = input.campaign.mintPriceWei * BigInt(input.campaign.quantity);
           const l2ExecutionGasWei = fee.l2ExecutionGasBudgetWei ?? 0n;
@@ -651,8 +661,10 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       }
       this.updateRunState(input.run.id, 'active', input.run);
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution_run', entityId: input.run.id, newState: 'active', actor: this.actor, reason: 'canonical admission persisted before engine side effect', policySnapshot: { kind: 'event', eventType: 'admission', eventData: { reservationCount: wallets.length } }, occurredAt: this.now().toISOString() });
+      const notices: FleetNotice[] = [];
+      if (this.fleetPolicy && mintClassForFleet === 'paid' && this.fleetDailyExposure('paid', fleetUsageDate) > this.fleetPolicy.paidHeadroomAlertWei) notices.push('PAID_DAILY_HEADROOM_USED');
       this.db.exec('COMMIT');
-      return { reservations, executions: [...executionIds.values()] };
+      return { reservations, executions: [...executionIds.values()], ...(notices.length > 0 ? { notices } : {}) };
     } catch (error) {
       if (this.db.inTransaction) this.db.exec('ROLLBACK');
       throw error;
@@ -1245,6 +1257,48 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (priorRunExposure + amount > campaign.spendPolicy.maxRunWei) throw new Error('SPEND_CAP_EXCEEDED');
     const dailyRows = this.db.prepare("SELECT COALESCE(reserved_amount_wei, amount_wei) AS amount FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(walletId, usageDate) as Array<{ amount: string }>;
     if (dailyRows.reduce((total, row) => total + BigInt(row.amount), 0n) + amount > campaign.spendPolicy.dailyCapWei) throw new Error('DAILY_SPEND_CAP_EXCEEDED');
+  }
+
+  /** Run-level fleet checks that need no reservation rows; runs before any write. */
+  private assertFleetRunLimits(input: CanonicalAdmissionInput, mintClass: 'free' | 'paid'): void {
+    const policy = this.fleetPolicy;
+    if (!policy) {
+      if (input.run.mode === 'live') throw new Error('FLEET_SPEND_POLICY_REQUIRED');
+      return;
+    }
+    if (!Number.isSafeInteger(input.campaign.quantity) || input.campaign.quantity < 1 || input.campaign.mintPriceWei < 0n) throw new Error('CAMPAIGN_AMOUNTS_INVALID');
+    const feeAllowance = this.exposure(input.campaign) - input.campaign.mintPriceWei * BigInt(input.campaign.quantity);
+    if (mintClass === 'paid') {
+      if (input.campaign.mintPriceWei > policy.paidMaxPricePerNftWei) throw new Error('PAID_PRICE_PER_NFT_EXCEEDED');
+      const runWallets = new Set([...input.intent.wallets, ...input.wallets].map((wallet) => wallet.toLowerCase()));
+      if (runWallets.size > policy.paidMaxWalletsPerMint) throw new Error('PAID_WALLET_LIMIT_EXCEEDED');
+      if (feeAllowance > policy.paidFeeAllowanceWei) throw new Error('FEE_ALLOWANCE_EXCEEDED');
+    } else if (feeAllowance > policy.freeFeeAllowanceWei) throw new Error('FEE_ALLOWANCE_EXCEEDED');
+  }
+
+  /** D-032: at most N wallets per paid mint, counting wallets already holding pending or settled exposure on this campaign. */
+  private assertPaidWalletsPerMint(input: CanonicalAdmissionInput): void {
+    const policy = this.fleetPolicy;
+    if (!policy) return;
+    const existing = this.db.prepare("SELECT DISTINCT wallet_id FROM spend_reservation WHERE campaign_id = ? AND status IN ('reserved', 'settled')").all(input.campaign.id) as Array<{ wallet_id: string }>;
+    const walletIds = new Set(existing.map((row) => row.wallet_id));
+    for (const wallet of input.wallets) walletIds.add(this.findWallet(input.campaign, wallet).walletId);
+    if (walletIds.size > policy.paidMaxWalletsPerMint) throw new Error('PAID_WALLET_LIMIT_EXCEEDED');
+  }
+
+  private assertFleetDailyCap(mintClass: 'free' | 'paid', usageDate: string, amount: bigint): void {
+    const policy = this.fleetPolicy;
+    if (!policy) return;
+    const cap = mintClass === 'free' ? policy.freeDailyCapWei : policy.paidDailyCapWei;
+    if (this.fleetDailyExposure(mintClass, usageDate) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
+  }
+
+  /** Pending plus settled exposure across every wallet. A row with unknown mint value counts toward both classes. */
+  private fleetDailyExposure(mintClass: 'free' | 'paid', usageDate: string): bigint {
+    const rows = this.db.prepare("SELECT COALESCE(reserved_amount_wei, amount_wei) AS amount, mint_value_wei FROM spend_reservation WHERE usage_date = ? AND status IN ('reserved', 'settled')").all(usageDate) as Array<{ amount: string; mint_value_wei: string | null }>;
+    return rows
+      .filter((row) => row.mint_value_wei === null || (mintClass === 'free' ? BigInt(row.mint_value_wei) === 0n : BigInt(row.mint_value_wei) > 0n))
+      .reduce((total, row) => total + BigInt(row.amount), 0n);
   }
 
   private runExposure(runId: string): bigint {

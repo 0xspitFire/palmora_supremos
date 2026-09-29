@@ -1,12 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
+import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
 import { openDatabase } from '@mint-bot/database';
 import { readTurnkeySecretConfig, readTurnkeyWalletMap, turnkeyPolicyRef, TurnkeySigner, type WalletInfo } from '@mint-bot/engine';
 import type { Address } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 
-export interface CliRuntime { store: BackendStore; coordinator: ExecutionCoordinator; application: BackendApplication; walletRoot: string; }
+/** Where spend-limit alerts go. The default records a durable alert event; the service swaps in its Telegram-backed manager. */
+export interface SpendAlertSink { cap(reason: string, runId?: string): Promise<void>; }
+
+export interface CliRuntime { store: BackendStore; coordinator: ExecutionCoordinator; application: BackendApplication; walletRoot: string; setAlertSink(sink: SpendAlertSink): void; }
 
 export type CustodyMode = 'local' | 'turnkey';
 
@@ -43,7 +46,7 @@ export async function configuredWallets(projectRoot: string, localWalletFile: st
 
 export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean } = {}): Promise<CliRuntime> {
   const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
-  const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
+  const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
@@ -74,7 +77,8 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     lifecycleStore: adapterOptions?.lifecycleStore ?? lifecycleStore,
     settleComponents: adapterOptions?.settleComponents ?? ((reservationId, components) => store.settleExecutionComponents(reservationId, components)),
   });
-  const coordinator = new ExecutionCoordinator(store, actualEngine);
+  let alertSink: SpendAlertSink = new AlertManager(store);
+  const coordinator = new ExecutionCoordinator(store, actualEngine, { alerts: { cap: (reason, runId) => alertSink.cap(reason, runId) } });
   if (runtimeOptions.startCoordinator !== false) await coordinator.start();
-  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true' }), walletRoot: resolveWalletPath(projectRoot) };
+  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true' }), walletRoot: resolveWalletPath(projectRoot), setAlertSink: (sink) => { alertSink = sink; } };
 }

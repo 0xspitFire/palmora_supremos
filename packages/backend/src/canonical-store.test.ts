@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { openDatabase, type SqliteDatabase } from '@mint-bot/database';
+import { AlertManager } from './alerts.js';
 import { BackendApplication } from './application.js';
 import { canonicalReceiptFinalityStage, CanonicalStoreBridge, type CanonicalAdmissionInput } from './canonical-store.js';
 import { ExecutionCoordinator } from './coordinator.js';
@@ -10,6 +11,7 @@ import { campaignInputDigest } from './evidence.js';
 import { NotificationDispatcher } from './notifications.js';
 import { DurableStore } from './store.js';
 import type { AttemptRecord, Campaign, ChainEvidenceRecord, EngineAdapter, FeePolicy, IntentRecord, RunRecord } from './types.js';
+import { PERSONAL_LIVE_FLEET_POLICY, ethToWei, validateFleetSpendPolicy, type FleetSpendPolicy } from './fleet-policy.js';
 
 const ETHEREUM = 1 as const;
 const ROBINHOOD = 4663 as const;
@@ -31,7 +33,10 @@ interface Fixture {
   application: BackendApplication;
 }
 
-async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false, executionEnabled = true, evidenceExpiresAt = '2099-01-01T00:00:00.000Z', includeVerification = true): Promise<Fixture> {
+/** Generous limits so pre-existing tests exercise only the per-run and per-wallet caps. */
+const OPEN_FLEET_POLICY: FleetSpendPolicy = { freeDailyCapWei: 10n ** 18n, paidDailyCapWei: 10n ** 18n, paidHeadroomAlertWei: 10n ** 18n, paidMaxPricePerNftWei: 10n ** 18n, paidMaxWalletsPerMint: 50, freeFeeAllowanceWei: 10n ** 18n, paidFeeAllowanceWei: 10n ** 18n };
+
+async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false, executionEnabled = true, evidenceExpiresAt = '2099-01-01T00:00:00.000Z', includeVerification = true, fleetPolicy: FleetSpendPolicy | null = OPEN_FLEET_POLICY): Promise<Fixture> {
   const directory = await mkdtemp(join(tmpdir(), 'mint-backend-'));
   const db = openDatabase(join(directory, 'state.sqlite'));
   const profileId = `profile-${chainId}`;
@@ -41,7 +46,7 @@ async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false
   if (includeVerification) db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`verification-${chainId}`, profileId, chainId === ROBINHOOD ? 'execution_blocked' : 'verified', chainId, chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : null, chainId === ROBINHOOD ? 'RH_ARCHIVE_REFERENCE' : 'ETH_ARCHIVE_REFERENCE', chainId === ETHEREUM ? 'ETH_FEED_REFERENCE' : null, JSON.stringify({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : 'ETH_FEED_REFERENCE', sourceBlock: 1, sourceBlockHash: '0xblock', expiresAt: evidenceExpiresAt, acceptedAt: NOW, acceptedBy: 'test-operator', approvalProof: 'test-proof', strategyVersion: 'seadrop-v1-public@1' }), NOW, 'test-operator', NOW);
   db.prepare('UPDATE chain_profile SET execution_enabled = ?, verification_status = ?, verification_evidence_json = ?, verification_approved_by = ?, verification_approved_at = ? WHERE id = ?').run(includeVerification && chainId === ETHEREUM && executionEnabled ? 1 : 0, includeVerification ? verificationStatus : 'unverified', includeVerification ? verificationEvidence : null, includeVerification ? 'test-operator' : null, includeVerification ? NOW : null, profileId);
   db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`fee-${chainId}`, profileId, `test-${chainId}-${paid ? 'paid' : 'free'}`, chainId === ETHEREUM ? 'ordering' : 'fee_only', '34', '40', '20', 2, paid ? 1 : 0, 1, NOW, 'allowed');
-  const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW) });
+  const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW), ...(fleetPolicy ? { fleetPolicy } : {}) });
   await store.open();
   return { directory, db, store, application: new BackendApplication(store, new ExecutionCoordinator(store, noopEngine)) };
 }
@@ -66,8 +71,8 @@ async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM | typeof
   return campaignValue;
 }
 
-async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = []): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
-  const run: RunRecord = { id: `run-${campaignValue.id}`, intentId: `intent-${campaignValue.id}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
+async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = [], runSuffix = ''): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
+  const run: RunRecord = { id: `run-${campaignValue.id}${runSuffix}`, intentId: `intent-${campaignValue.id}${runSuffix}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
   const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [...simulationIds], evidenceAt: NOW, createdAt: NOW };
   for (const [index, address] of wallets.entries()) {
     const walletId = `wallet-${campaignValue.chainId}-${index}`;
@@ -517,6 +522,172 @@ describe('CanonicalStoreBridge', () => {
       expect(sent).toEqual(['notify_notification-event']);
       expect(value.store.snapshot().notificationOutbox[0]?.state).toBe('delivered');
     } finally { await close(value); }
+  });
+
+  describe('fleet-wide spend limits (D-032, D-033)', () => {
+    const reservationCount = (value: Fixture): number => (value.db.prepare('SELECT COUNT(*) AS n FROM spend_reservation').get() as { n: number }).n;
+    const policy = (overrides: Partial<FleetSpendPolicy>): FleetSpendPolicy => ({ ...OPEN_FLEET_POLICY, ...overrides });
+
+    it('encodes the owner-approved Personal Live limits exactly', () => {
+      expect(PERSONAL_LIVE_FLEET_POLICY).toEqual({ freeDailyCapWei: 2_400_000_000_000_000n, paidDailyCapWei: 8_200_000_000_000_000n, paidHeadroomAlertWei: 7_500_000_000_000_000n, paidMaxPricePerNftWei: 3_700_000_000_000_000n, paidMaxWalletsPerMint: 2, freeFeeAllowanceWei: 400_000_000_000_000n, paidFeeAllowanceWei: 370_000_000_000_000n });
+      expect(Object.isFrozen(PERSONAL_LIVE_FLEET_POLICY)).toBe(true);
+      expect(ethToWei('1')).toBe(10n ** 18n);
+      expect(() => ethToWei('0.1e3')).toThrow('ETH_AMOUNT_INVALID');
+      expect(() => ethToWei('-1')).toThrow('ETH_AMOUNT_INVALID');
+    });
+
+    it('rejects an invalid policy at construction', () => {
+      expect(() => validateFleetSpendPolicy(policy({ freeDailyCapWei: 0n }))).toThrow('FLEET_SPEND_POLICY_INVALID');
+      expect(() => validateFleetSpendPolicy(policy({ paidDailyCapWei: -1n }))).toThrow('FLEET_SPEND_POLICY_INVALID');
+      expect(() => validateFleetSpendPolicy(policy({ paidHeadroomAlertWei: 11n, paidDailyCapWei: 10n }))).toThrow('FLEET_SPEND_POLICY_INVALID');
+      expect(() => validateFleetSpendPolicy(policy({ paidMaxWalletsPerMint: 0 }))).toThrow('FLEET_SPEND_POLICY_INVALID');
+      expect(() => validateFleetSpendPolicy(policy({ paidMaxWalletsPerMint: 1.5 }))).toThrow('FLEET_SPEND_POLICY_INVALID');
+    });
+
+    it('fails closed for live admission when no fleet policy is configured', async () => {
+      const value = await fixture(ETHEREUM, false, true, undefined, true, null);
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM));
+        await expect(value.store.admitExecution(prepared.input)).rejects.toThrow('FLEET_SPEND_POLICY_REQUIRED');
+        expect(reservationCount(value)).toBe(0);
+      } finally { await close(value); }
+    });
+
+    it('admits free exposure exactly at the fleet cap and refuses one wei more, counting pending reservations', async () => {
+      const value = await fixture(ETHEREUM, false, true, undefined, true, policy({ freeDailyCapWei: 68n }));
+      try {
+        const first = await armed(value, await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 1_000n, dailyCapWei: 1_000n }), [WALLET_ONE, WALLET_TWO]);
+        expect((await value.store.admitExecution(first.input)).reservations).toHaveLength(2);
+        const second = await armed(value, await campaign(value, ETHEREUM));
+        await expect(value.store.admitExecution(second.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+        expect(reservationCount(value)).toBe(2);
+      } finally { await close(value); }
+    });
+
+    it('rolls back every wallet of a run when a later wallet would cross the fleet cap', async () => {
+      const value = await fixture(ETHEREUM, false, true, undefined, true, policy({ freeDailyCapWei: 67n }));
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM), [WALLET_ONE, WALLET_TWO]);
+        await expect(value.store.admitExecution(prepared.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+        expect(reservationCount(value)).toBe(0);
+      } finally { await close(value); }
+    });
+
+    it('stops counting exposure that was released before broadcast', async () => {
+      const value = await fixture(ETHEREUM, false, true, undefined, true, policy({ freeDailyCapWei: 34n }));
+      try {
+        const first = await armed(value, await campaign(value, ETHEREUM));
+        await value.store.admitExecution(first.input);
+        await value.store.abortRemaining('test release');
+        const second = await armed(value, await campaign(value, ETHEREUM));
+        expect((await value.store.admitExecution(second.input)).reservations).toHaveLength(1);
+      } finally { await close(value); }
+    });
+
+    it('keeps free and paid daily budgets independent', async () => {
+      const value = await fixture(ETHEREUM, true, true, undefined, true, policy({ freeDailyCapWei: 34n, paidDailyCapWei: 134n, paidHeadroomAlertWei: 134n }));
+      try {
+        const free = await armed(value, await campaign(value, ETHEREUM, false));
+        await value.store.admitExecution(free.input);
+        const paid = await armed(value, await campaign(value, ETHEREUM, true));
+        expect((await value.store.admitExecution(paid.input)).reservations).toHaveLength(1);
+        const paidAgain = await armed(value, await campaign(value, ETHEREUM, true));
+        await expect(value.store.admitExecution(paidAgain.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+        const freeAgain = await armed(value, await campaign(value, ETHEREUM, false));
+        await expect(value.store.admitExecution(freeAgain.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+      } finally { await close(value); }
+    });
+
+    it('refuses a paid price above the per-NFT limit and admits one at it', async () => {
+      const value = await fixture(ETHEREUM, true, true, undefined, true, policy({ paidMaxPricePerNftWei: 99n }));
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM, true));
+        await expect(value.store.admitExecution(prepared.input)).rejects.toThrow('PAID_PRICE_PER_NFT_EXCEEDED');
+        expect(reservationCount(value)).toBe(0);
+      } finally { await close(value); }
+      const atLimit = await fixture(ETHEREUM, true, true, undefined, true, policy({ paidMaxPricePerNftWei: 100n }));
+      try {
+        const prepared = await armed(atLimit, await campaign(atLimit, ETHEREUM, true));
+        expect((await atLimit.store.admitExecution(prepared.input)).reservations).toHaveLength(1);
+      } finally { await close(atLimit); }
+    });
+
+    it('refuses a paid run with more wallets than allowed, counting the armed intent', async () => {
+      const value = await fixture(ETHEREUM, true, true, undefined, true, policy({ paidMaxWalletsPerMint: 1 }));
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM, true), [WALLET_ONE, WALLET_TWO]);
+        await expect(value.store.admitExecution(prepared.input)).rejects.toThrow('PAID_WALLET_LIMIT_EXCEEDED');
+        await expect(value.store.admitExecution({ ...prepared.input, wallets: [WALLET_ONE] })).rejects.toThrow('PAID_WALLET_LIMIT_EXCEEDED');
+        expect(reservationCount(value)).toBe(0);
+      } finally { await close(value); }
+    });
+
+    it('counts wallets across every run of the same paid mint', async () => {
+      const value = await fixture(ETHEREUM, true, true, undefined, true, policy({ paidMaxWalletsPerMint: 1 }));
+      try {
+        const campaignValue = await campaign(value, ETHEREUM, true);
+        const first = await armed(value, campaignValue, [WALLET_ONE]);
+        expect((await value.store.admitExecution(first.input)).reservations).toHaveLength(1);
+        const second = await armed(value, campaignValue, [WALLET_TWO], [], '-second');
+        await expect(value.store.admitExecution(second.input)).rejects.toThrow('PAID_WALLET_LIMIT_EXCEEDED');
+        expect(reservationCount(value)).toBe(1);
+      } finally { await close(value); }
+    });
+
+    it('refuses impossible campaign amounts before any write', async () => {
+      const value = await fixture(ETHEREUM, true, true, undefined, true, policy({}));
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM, true));
+        await expect(value.store.admitExecution({ ...prepared.input, campaign: { ...prepared.input.campaign, quantity: 0 } })).rejects.toThrow('CAMPAIGN_AMOUNTS_INVALID');
+        await expect(value.store.admitExecution({ ...prepared.input, campaign: { ...prepared.input.campaign, mintPriceWei: -1n } })).rejects.toThrow('CAMPAIGN_AMOUNTS_INVALID');
+        expect(reservationCount(value)).toBe(0);
+      } finally { await close(value); }
+    });
+
+    it('refuses a per-wallet fee allowance above the free and paid limits', async () => {
+      const free = await fixture(ETHEREUM, false, true, undefined, true, policy({ freeFeeAllowanceWei: 33n }));
+      try {
+        const prepared = await armed(free, await campaign(free, ETHEREUM));
+        await expect(free.store.admitExecution(prepared.input)).rejects.toThrow('FEE_ALLOWANCE_EXCEEDED');
+      } finally { await close(free); }
+      const paid = await fixture(ETHEREUM, true, true, undefined, true, policy({ paidFeeAllowanceWei: 33n }));
+      try {
+        const prepared = await armed(paid, await campaign(paid, ETHEREUM, true));
+        await expect(paid.store.admitExecution(prepared.input)).rejects.toThrow('FEE_ALLOWANCE_EXCEEDED');
+        expect(reservationCount(paid)).toBe(0);
+      } finally { await close(paid); }
+    });
+
+    it('raises a headroom notice only once paid daily exposure passes the alert line', async () => {
+      const quiet = await fixture(ETHEREUM, true, true, undefined, true, policy({ paidDailyCapWei: 1_000n, paidHeadroomAlertWei: 134n }));
+      try {
+        const prepared = await armed(quiet, await campaign(quiet, ETHEREUM, true));
+        expect((await quiet.store.admitExecution(prepared.input)).notices).toBeUndefined();
+      } finally { await close(quiet); }
+      const loud = await fixture(ETHEREUM, true, true, undefined, true, policy({ paidDailyCapWei: 1_000n, paidHeadroomAlertWei: 133n }));
+      try {
+        const prepared = await armed(loud, await campaign(loud, ETHEREUM, true));
+        expect((await loud.store.admitExecution(prepared.input)).notices).toEqual(['PAID_DAILY_HEADROOM_USED']);
+      } finally { await close(loud); }
+    });
+
+    it('persists a headroom cap alert against a real run in the canonical store', async () => {
+      const value = await fixture(ETHEREUM);
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM));
+        await new AlertManager(value.store).cap('PAID_DAILY_HEADROOM_USED', prepared.run.id);
+        expect(value.store.snapshot().events.some((event) => event.type === 'alert_cap' && event.runId === prepared.run.id && event.data.reason === 'PAID_DAILY_HEADROOM_USED')).toBe(true);
+      } finally { await close(value); }
+    });
+
+    it('keeps the existing per-run and per-wallet caps in force under a generous fleet policy', async () => {
+      const value = await fixture(ETHEREUM);
+      try {
+        const prepared = await armed(value, await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 67n, dailyCapWei: 1_000n }), [WALLET_ONE, WALLET_TWO]);
+        await expect(value.store.admitExecution(prepared.input)).rejects.toThrow('SPEND_CAP_EXCEEDED');
+        expect(reservationCount(value)).toBe(0);
+      } finally { await close(value); }
+    });
   });
 
   it('rejects Robinhood evidence without a distinct archive reference', async () => {
