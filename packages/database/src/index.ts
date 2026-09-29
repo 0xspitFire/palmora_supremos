@@ -14,3 +14,5 @@ export { SqliteBackendStore } from './backend-store.js';
 export type { BackendStore } from './backend-store.js';
 export { BackendStateRepository } from './backend-state.js';
 export type { SqliteDatabase } from './database.js';
+export { IntelligenceRepository } from './intelligence.js';
+export type { ObservedAddressRow } from './intelligence.js';

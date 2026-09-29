@@ -13,6 +13,31 @@ import { configuredSecretRoot, configuredWallets, createCliRuntime, turnkeyCusto
 import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
+import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
+import { resolveChainByNameFromSecrets } from '@mint-bot/engine';
+import { checkDrop } from './drop-check.js';
+import { EngineIntelligencePort } from './intelligence-adapter.js';
+
+/** Read-only Ethereum port for CLI checks; the RPC value stays in memory and is never printed. */
+async function ethereumPort(): Promise<EngineIntelligencePort> {
+  const config = await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
+  const endpoint = config.rpcEndpoints[0];
+  if (!endpoint) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
+  return EngineIntelligencePort.fromRpcUrl(endpoint);
+}
+
+/** Wallets for read-only checks: explicit public addresses, never the keystore. */
+function checkWallets(value: string | undefined): string[] {
+  const list = (value ?? process.env.MINT_BOT_READINESS_WALLETS ?? '').split(',').map((item) => item.trim()).filter((item) => item.length > 0);
+  if (list.length === 0) throw new Error('WALLETS_REQUIRED: pass --wallets 0x...,0x... or set MINT_BOT_READINESS_WALLETS');
+  if (list.some((address) => !/^0x[0-9a-fA-F]{40}$/.test(address))) throw new Error('WALLET_ADDRESS_INVALID');
+  return [...new Set(list.map((address) => address.toLowerCase()))];
+}
+
+function intelligenceRepository(): { repo: IntelligenceRepository; close(): void } {
+  const db = openDatabase(resolve(runtimeRoot, process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite'));
+  return { repo: new IntelligenceRepository(db), close: () => db.close() };
+}
 
 const runtimeRoot = process.cwd();
 const blocked = (error: unknown) => JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false, policy: { robinhoodFreePerWalletCapWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI.toString(), robinhoodFreeActivePeriodCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI.toString(), robinhoodPaidMintsEnabled: false } });
@@ -390,6 +415,12 @@ const cli = yargs(hideBin(process.argv))
         if (wallets.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
         const chainId = args.chain === 'ethereum' ? 1 : 4663;
         const priorityFee = parseGwei(args.priorityFeeGwei.toString());
+        // The mint price comes from chain (T-004, P2-08), never an assumed zero.
+        const drop = chainId === 1 ? await (await ethereumPort()).readDrop(args.contract) : null;
+        if (chainId === 1 && !drop) throw new Error('DROP_UNAVAILABLE');
+        // Paid drops are not run through this free-mint dry-run path (a spend-path change needs owner sign-off);
+        // use the read-only `simulate` command, which uses the real price.
+        if ((drop?.priceWei ?? 0n) > 0n) throw new Error('PAID_DROP_USE_SIMULATE_COMMAND');
         const feePolicy = { kind: 'free' as const, configuredPriorityFeeWei: priorityFee, freeTotalSpendCapWei: priorityFee * 2n, l2ExecutionGasBudgetWei: 0n, l1DataGasBudgetWei: 0n, totalFeeBudgetWei: priorityFee };
         const runtime = await createCliRuntime(runtimeRoot, undefined, process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', { walletFile: file, maxFeePerGasGwei: args.maxFeeGwei, gasLimitPadding: args.gasPadding, killSwitchFile: DEFAULT_KILL_FILE, logFile: join(runtimeRoot, 'Rets', 'state', 'mint-bot.log') });
         const campaign = await runtime.application.createCampaign({
@@ -417,10 +448,39 @@ const cli = yargs(hideBin(process.argv))
     const response = await runtime.application.command('reconcile');
     process.stdout.write(`${json(response)}\n`);
   })
-  .command('validate', 'Validate a campaign through the configured engine adapter', {}, async () => {
-    const runtime = await createCliRuntime(runtimeRoot);
-    try { await runtime.application.command('validate'); } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
-  })
+  .command('validate', 'Read-only check of a SeaDrop drop and your wallets against your limits', (args) => args
+    .option('contract', { type: 'string', demandOption: true })
+    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
+    .option('quantity', { type: 'number', describe: 'NFTs per wallet (default: full allowance for free, by score for paid)' })
+    .option('score', { type: 'number', describe: 'Signal score used to plan paid quantity' }), async (args) => {
+      try {
+        const report = await checkDrop(await ethereumPort(), args.contract, checkWallets(args.wallets), { simulate: false, ...(args.quantity === undefined ? {} : { quantity: args.quantity }), ...(args.score === undefined ? {} : { score: args.score }) });
+        process.stdout.write(`${json(report)}\n`);
+      } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+    })
+  .command('simulate', 'Read-only test mint call (eth_call) per wallet; never signs or sends', (args) => args
+    .option('contract', { type: 'string', demandOption: true })
+    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
+    .option('quantity', { type: 'number' })
+    .option('score', { type: 'number' }), async (args) => {
+      try {
+        const report = await checkDrop(await ethereumPort(), args.contract, checkWallets(args.wallets), { simulate: true, ...(args.quantity === undefined ? {} : { quantity: args.quantity }), ...(args.score === undefined ? {} : { score: args.score }) });
+        process.stdout.write(`${json(report)}\n`);
+      } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+    })
+  .command('watch <action> [address]', 'Manage watched (whale) wallets for discovery: add, list, remove', (args) => args
+    .positional('action', { type: 'string', choices: ['add', 'list', 'remove'] as const, demandOption: true })
+    .positional('address', { type: 'string' })
+    .option('label', { type: 'string' }), (args) => {
+      const store = intelligenceRepository();
+      try {
+        if (args.action === 'list') { process.stdout.write(`${json({ watched: store.repo.observedAddresses(1).map((row) => ({ address: row.address, label: row.label, since: row.createdAt })) })}\n`); return; }
+        if (!args.address) throw new Error('ADDRESS_REQUIRED');
+        if (args.action === 'add') { const row = store.repo.addObservedAddress(1, args.address, args.label); process.stdout.write(`${json({ watching: row.address, label: row.label })}\n`); return; }
+        process.stdout.write(`${json({ removed: store.repo.disableObservedAddress(1, args.address.toLowerCase()) })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+      finally { store.close(); }
+    })
   .command('dry-run', 'Prepare a non-broadcast dry run for a persisted campaign', (args) => args
     .option('campaign-id', { type: 'string', demandOption: true })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
