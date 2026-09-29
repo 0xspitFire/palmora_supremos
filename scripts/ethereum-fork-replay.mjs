@@ -15,6 +15,7 @@ const rpcUrl = resolveLoopbackRpcUrl(process.env.ANVIL_ETHEREUM_RPC_URL ?? 'http
 for (const name of ['ETHEREUM_SEADROP_NFT', 'ETHEREUM_SEADROP_FEE_RECIPIENT', 'ETHEREUM_SEADROP_MINT_VALUE_WEI']) {
   if (!(process.env[name] ?? fixtureValues[name])) throw new Error(`${name} fixture reference is required`);
 }
+const testFiles = resolveTestFiles(process.argv.slice(2));
 
 const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', [
   '--fork-url', forkRpc,
@@ -34,7 +35,7 @@ try {
   const code = await run(process.execPath, [
     vitest,
     'run',
-    'packages/engine/src/ethereum.fork.test.ts',
+    ...testFiles,
     '--reporter=json',
     '--outputFile', reportFile,
   ], {
@@ -45,6 +46,11 @@ try {
     ETHEREUM_SEADROP_MINT_VALUE_WEI: process.env.ETHEREUM_SEADROP_MINT_VALUE_WEI ?? fixtureValues.ETHEREUM_SEADROP_MINT_VALUE_WEI,
   });
   if (code !== 0) process.exitCode = code;
+  if (code !== 0) printFailures(reportFile);
+  if (existsSync(reportFile)) {
+    const summary = JSON.parse(readFileSync(reportFile, 'utf8'));
+    console.log(`Fork tests: ${summary.numPassedTests ?? 0} passed, ${summary.numFailedTests ?? 0} failed, ${(summary.numPendingTests ?? 0) + (summary.numTodoTests ?? 0)} skipped`);
+  }
   if (code === 0) assertStrictReport(reportFile, 'Ethereum');
   rmSync(reportDir, { recursive: true, force: true });
 } finally {
@@ -109,6 +115,36 @@ function toolEnvironment() {
     ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
     ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
   };
+}
+
+function resolveTestFiles(requested) {
+  if (requested.length === 0) return ['packages/engine/src/ethereum.fork.test.ts'];
+  for (const file of requested) {
+    if (!/^packages\/[a-z-]+\/src\/[A-Za-z0-9.-]+\.fork\.test\.ts$/.test(file)) throw new Error('Fork test files must be packages/<package>/src/<name>.fork.test.ts');
+    if (!existsSync(resolve(root, file))) throw new Error(`Fork test file not found: ${file}`);
+  }
+  return requested;
+}
+
+// The Vitest child never receives the archive endpoint, but Anvil errors relayed by tests can quote its
+// upstream URL. Every printed message is redacted: the exact archive value, any non-loopback URL, and long tokens.
+function redact(text) {
+  let out = String(text);
+  if (forkRpc) out = out.split(forkRpc).join('[REDACTED_ARCHIVE]');
+  out = out.replace(/\b(?:https?|wss?):\/\/(?!(?:127\.0\.0\.1|localhost|\[::1\])[:/])[^\s"'`)]+/gi, '[REDACTED_URL]');
+  return out.replace(/\b[A-Za-z0-9_-]{32,}\b/g, (token) => (/^0x[0-9a-fA-F]+$/.test(token) ? token : '[REDACTED_TOKEN]'));
+}
+
+function printFailures(file) {
+  if (!existsSync(file)) { console.error('Fork test runner produced no JSON report'); return; }
+  const report = JSON.parse(readFileSync(file, 'utf8'));
+  for (const suite of report.testResults ?? []) {
+    if (suite.status === 'failed' && (suite.assertionResults ?? []).length === 0) console.error(`FAILED ${redact(suite.name)}: ${redact(String(suite.message ?? '').split('\n')[0])}`);
+    for (const test of suite.assertionResults ?? []) {
+      if (test.status !== 'failed') continue;
+      console.error(`FAILED ${redact(test.fullName ?? test.title)}: ${redact(String((test.failureMessages ?? [])[0] ?? '').split('\n')[0]).slice(0, 300)}`);
+    }
+  }
 }
 
 function assertStrictReport(file, label) {
