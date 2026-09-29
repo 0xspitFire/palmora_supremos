@@ -148,13 +148,6 @@ Operations use owner-only host secrets, an engaged kill switch during startup/re
 
 ## Source of Truth
 
-Use these documents in this order when interpreting the project:
+Package source, migrations, tests, and protected CI are the implementation truth in this repository.
 
-1. `PROJECT.md` for current product direction and phase boundaries.
-2. `DECISIONS.md` for the rationale behind architectural choices.
-3. `PRODUCT_SPEC.md` for detailed functional requirements.
-4. `PRODUCT_DESIGN_SPEC.md` for experience, terminology, and read-only UI rules.
-5. `OPERATIONS.md` for host, health, backup, recovery, and service procedures.
-6. Package source, migrations, tests, and protected CI for implementation truth.
-
-Historical CTO briefs, audit reports, and agent skill files explain how decisions evolved. They do not override newer Product Owner decisions or current protected code/evidence.
+Product direction, architecture, decisions, specifications, and operating procedures are maintained by the Product Owner in a private documentation set outside this repository. Contributors work from task files and follow `CONTRIBUTING.md`. Historical planning documents remain in Git history and do not override newer Product Owner decisions or current protected code and evidence.

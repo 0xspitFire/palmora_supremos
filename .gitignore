@@ -30,3 +30,6 @@ Repo_Analyze
 Agent Instructions/
 AGENTS_INS.md
 Engineers_Agent
+
+# Claude Code personal settings
+.claude/settings.local.json
