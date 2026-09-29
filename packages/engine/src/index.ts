@@ -143,6 +143,10 @@ export type {
   FreshnessStatus,
 } from './chain-facts.js';
 
+// Read-only SeaDrop discovery source (T-004)
+export { SeaDropObserver, SEADROP_EVENTS_ABI, SEADROP_MINT_TOPIC, PUBLIC_DROP_UPDATED_TOPIC, ERC721_TRANSFER_TOPIC } from './seadrop-observer.js';
+export type { LogSource, LogPosition, SeaDropMintObservation, PublicDropUpdateObservation, WatchedMintObservation, ScanResult, ScanOutcome, SeaDropObserverOptions } from './seadrop-observer.js';
+
 // Safety
 export { KillSwitch, SpendTracker } from './safety.js';
 export { validateFeeBudget, validateFreeMintSpend, validateFreeMintReserve, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget, assertPriorityFeeIsNotBudget, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI } from './fee-guard.js';

@@ -14,5 +14,15 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/main.d.ts",
+      "default": "./dist/main.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    }
   }
 }

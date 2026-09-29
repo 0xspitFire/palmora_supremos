@@ -1,9 +1,22 @@
+import { createHash } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import type { MetricsRegistry } from './observability.js';
 import type { NotificationDispatcher } from './notifications.js';
 
 export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder';
 export type AlertPriority = 'immediate' | 'grouped';
+/** Phase 2 intelligence alerts (T-004, P2-06). Outbound only; never a permission or execution proof. */
+export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit';
+export interface IntelligenceAlertInput {
+  kind: IntelligenceAlertKind;
+  /** Stable dedupe identity: the same identity is never alerted twice. */
+  dedupe: string;
+  /** Plain-language message for the owner. */
+  text: string;
+  /** Immediate alerts send now; grouped ones wait for the next digest. */
+  priority: AlertPriority;
+  at?: string;
+}
 export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; }
 export interface AlertPolicy { retentionDays: number; immediateKinds: readonly AlertKind[]; groupedKinds: readonly AlertKind[]; }
 export const DEFAULT_ALERT_POLICY: AlertPolicy = { retentionDays: 30, immediateKinds: ['kill', 'cap', 'blocked', 'failed'], groupedKinds: ['started', 'reminder'] };
@@ -63,6 +76,39 @@ export class AlertManager {
   public async blocked(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'blocked', runId, reason }); }
   public async failed(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'failed', runId, reason }); }
 
+  /** Records an intelligence alert once per dedupe identity; immediate ones are dispatched now, grouped ones join the next digest. */
+  public async intelligence(input: IntelligenceAlertInput): Promise<boolean> {
+    const type = `alert_${input.kind}`;
+    if (this.store.snapshot().events.some((event) => event.type === type && event.data.dedupe === input.dedupe)) return false;
+    const at = input.at ?? this.now().toISOString();
+    const retentionUntil = new Date(Date.parse(at) + this.policy.retentionDays * 86_400_000).toISOString();
+    const eventId = `alert_${input.kind}_${shortDigest(input.dedupe)}`;
+    await this.store.transaction((current) => { current.events.push({ id: eventId, type, at, data: { dedupe: input.dedupe, text: input.text, priority: input.priority, retentionUntil } }); });
+    this.metrics?.recordNotification('pending');
+    if (input.priority === 'immediate' && this.dispatcher) await this.dispatcher.dispatch(eventId, input.text);
+    return true;
+  }
+
+  /**
+   * Sends one digest of grouped intelligence alerts not yet covered by a digest.
+   * Restart-safe: pending alerts and undelivered digests are found from durable events and the outbox.
+   */
+  public async flushDigest(): Promise<number> {
+    const state = this.store.snapshot();
+    const digests = state.events.filter((event) => event.type === 'alert_digest');
+    const covered = new Set(digests.flatMap((event) => Array.isArray(event.data.includes) ? event.data.includes.map(String) : []));
+    const sent = new Set(state.notificationOutbox.map((item) => item.sourceEventId));
+    if (this.dispatcher) for (const event of digests.filter((item) => !sent.has(item.id))) await this.dispatcher.dispatch(event.id, String(event.data.text ?? ''));
+    const pending = state.events.filter((event) => event.type.startsWith('alert_') && event.type !== 'alert_digest' && event.data.priority === 'grouped' && !covered.has(event.id)).sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id));
+    if (pending.length === 0) return 0;
+    const ids = pending.map((event) => event.id);
+    const text = [`MintBot reminders (${pending.length}):`, ...pending.map((event) => `• ${String(event.data.text ?? '')}`)].join('\n');
+    const digestId = `alert_digest_${shortDigest(ids.join(','))}`;
+    await this.store.transaction((current) => { if (!current.events.some((event) => event.id === digestId)) current.events.push({ id: digestId, type: 'alert_digest', at: this.now().toISOString(), data: { includes: ids, text } }); });
+    if (this.dispatcher) await this.dispatcher.dispatch(digestId, text);
+    return pending.length;
+  }
+
   public async flush(): Promise<void> {
     for (const eventId of this.grouped) {
       const event = this.store.snapshot().events.find((candidate) => candidate.id === eventId);
@@ -87,3 +133,5 @@ export class AlertManager {
     else if (this.dispatcher) await this.dispatcher.dispatch(eventId, text);
   }
 }
+
+function shortDigest(value: string): string { return createHash('sha256').update(value).digest('hex').slice(0, 24); }

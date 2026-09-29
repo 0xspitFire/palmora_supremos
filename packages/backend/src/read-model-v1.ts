@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { formatEth } from './intelligence/scoring.js';
 import type {
   AttemptRecord,
   BackendState,
@@ -430,7 +431,11 @@ export class Phase2ReadModelService {
   public readiness(state: BackendState, campaignId: string, request: ProjectionRequest = {}): ReadModelEnvelope<readonly WalletReadinessRow[]> {
     const context = this.context(state, request);
     const campaign = state.campaigns.find(item => item.id === campaignId);
-    if (!campaign) return this.envelope<readonly WalletReadinessRow[]>(context, null, [issue('CAMPAIGN_NOT_FOUND', 'Campaign was not found in this snapshot.', 'blocking', 'No safe action')], UNKNOWN_FRESHNESS);
+    if (!campaign) {
+      const sweepRows = this.sweepRows(context, campaignId);
+      if (sweepRows === null) return this.envelope<readonly WalletReadinessRow[]>(context, null, [issue('CAMPAIGN_NOT_FOUND', 'Campaign was not found in this snapshot.', 'blocking', 'No safe action')], UNKNOWN_FRESHNESS);
+      return this.envelope(context, sweepRows, sweepRows.flatMap(row => [...row.blockers]), aggregateFreshness(sweepRows.map(row => row.freshness)));
+    }
     const rows = this.readinessRows(context, campaign);
     const issues = rows.flatMap(row => [...row.blockers]);
     return this.envelope(context, rows, issues, aggregateFreshness(rows.map(row => row.freshness)));
@@ -507,6 +512,22 @@ export class Phase2ReadModelService {
     const disposition = dispositionValue(event.data.disposition) ?? event.type.slice('opportunity_'.length) as OpportunityReadModel['disposition'];
     const freshness = aggregateFreshness([scoreFreshness, chainGate.checks[0]?.freshness ?? UNKNOWN_FRESHNESS]);
     const risks: RiskFlag[] = chainGate.decision === 'blocked' ? [{ code: 'CHAIN_GATE_BLOCKED', severity: 'blocking', message: chainGate.blockers[0]?.message ?? 'The chain gate is blocked.', provenance: chainGate.checks[0]?.provenance, freshness: chainGate.checks[0]?.freshness ?? UNKNOWN_FRESHNESS }] : [];
+    for (const risk of Array.isArray(event.data.risks) ? event.data.risks as Array<Record<string, unknown>> : []) {
+      const code = stringValue(risk.code);
+      const severity = risk.severity === 'blocking' || risk.severity === 'warning' || risk.severity === 'info' ? risk.severity : undefined;
+      if (code && severity) risks.push({ code, severity, message: safeReadModelText(stringValue(risk.message)) ?? code, provenance: scoreProvenance[0], freshness: scoreFreshness });
+    }
+    const factors: ScoreFactor[] = (Array.isArray(event.data.factors) ? event.data.factors as Array<Record<string, unknown>> : []).flatMap((factor) => {
+      const code = stringValue(factor.code);
+      if (!code) return [];
+      const unavailable = factor.status !== 'available';
+      const points = numberValue(factor.points) ?? 0;
+      const max = numberValue(factor.max);
+      const explanation = safeReadModelText(stringValue(factor.explanation)) ?? code;
+      return [{ code, contribution: unavailable ? 0 : points, explanation: unavailable ? `Unavailable${max === null ? '' : ` (worth up to ${max})`}: ${explanation}` : `${points}${max === null ? '' : ` of ${max}`}: ${explanation}`, provenance: scoreProvenance, freshness: scoreFreshness }];
+    });
+    const contractId = contract ?? '';
+    const sweep = contractId ? this.sweepRows(context, `calendar:${chainId}:${contractId.toLowerCase()}`) : null;
     return {
       id: stringValue(event.data.opportunityId) ?? event.id,
       project: { name: stringValue(event.data.projectName) ?? null, contract },
@@ -514,11 +535,11 @@ export class Phase2ReadModelService {
       disposition,
       openingAt: validIso(stringValue(event.data.openingAt)),
       price: event.data.priceWei === undefined ? null : sourcedAmount(bigintValue(event.data.priceWei), 'estimated', scoreFreshness, provenance),
-      score: { value: scoreValue, modelVersion: stringValue(event.data.scoreVersion) ?? null, confidence: { sampleSize: stringValue(event.data.sampleSize) ?? '0', denominator: stringValue(event.data.denominator) ?? null, label: confidenceValue(event.data.confidence) }, factors: [], freshness: scoreFreshness, provenance: scoreProvenance },
+      score: { value: scoreValue, modelVersion: stringValue(event.data.scoreVersion) ?? null, confidence: { sampleSize: stringValue(event.data.sampleSize) ?? '0', denominator: stringValue(event.data.denominator) ?? null, label: confidenceValue(event.data.confidence) }, factors, freshness: scoreFreshness, provenance: scoreProvenance },
       risks,
       evidence: [{ id: event.id, label: 'Discovery observation', summary: 'Observed by the Backend discovery event stream.', provenance, freshness: classifyFreshness(observedAt, stringValue(event.data.expiresAt), context.now, context.freshnessPolicyVersion) }],
       gate: chainGate,
-      readiness: null,
+      readiness: sweep === null ? null : this.readinessSummary(sweep),
       nextAction: 'Inspect',
       freshness,
       provenance,
@@ -574,22 +595,24 @@ export class Phase2ReadModelService {
     const provenance = [storeProvenance(`calendar:${event.id}`, observedAt)];
     const freshness = classifyFreshness(observedAt, stringValue(event.data.expiresAt), context.now, context.freshnessPolicyVersion);
     const unknown = sourcedQuantity(null, freshness, provenance);
+    const entryId = stringValue(event.data.id) ?? event.id;
+    const sweep = this.sweepRows(context, entryId);
     return {
-      id: stringValue(event.data.id) ?? event.id,
+      id: entryId,
       project: { name: stringValue(event.data.projectName) ?? null, contract: addressValue(event.data.contract) },
       chain: { id: chainId.toString(), name: chainId === 4663 ? 'Robinhood' : 'Ethereum' },
       openingAt: validIso(stringValue(event.data.openingAt)),
       closingAt: validIso(stringValue(event.data.closingAt)),
       phase: stringValue(event.data.phase) ?? null,
       price: sourcedAmount(bigintValue(event.data.priceWei), 'estimated', freshness, provenance),
-      supply: unknown,
-      perWalletLimit: unknown,
+      supply: sourcedQuantity(bigintValue(event.data.maxSupply), freshness, provenance),
+      perWalletLimit: sourcedQuantity(bigintValue(event.data.maxPerWallet), freshness, provenance),
       method: stringValue(event.data.method) ?? null,
       publicStatus: publicStatusValue(event.data.publicStatus),
       expectedGas: unknown,
       sourceAuthority: event.data.sourceAuthority === 'external_source' ? 'external_source' : event.data.sourceAuthority === 'on_chain' ? 'on_chain' : 'operator_record',
       verification: this.chainGate(context, chainId, stringValue(event.data.evidenceId)),
-      eligibility: emptyReadinessSummary(freshness),
+      eligibility: sweep === null ? emptyReadinessSummary(freshness) : this.readinessSummary(sweep),
       nextAction: 'Inspect',
       freshness,
       provenance,
@@ -706,6 +729,46 @@ export class Phase2ReadModelService {
 
   private chainEvidence(state: BackendState, campaign: Campaign): BackendState['chainEvidence'][number] | undefined {
     return state.chainEvidence.find(item => item.id === campaign.chainVerification.evidenceId) ?? state.chainEvidence.filter(item => item.chainId === campaign.chainId).sort((left, right) => right.checkedAt.localeCompare(left.checkedAt))[0];
+  }
+
+  /** Wallet rows from the latest Phase 2 readiness sweep for a calendar entry, or null when none exists. */
+  private sweepRows(context: ProjectionContext, entryId: string): readonly WalletReadinessRow[] | null {
+    let latest: EventRecord | undefined;
+    for (const event of context.state.events) if (event.type === 'readiness_sweep' && event.data.calendarId === entryId && (!latest || event.at >= latest.at)) latest = event;
+    if (!latest || !Array.isArray(latest.data.rows)) return null;
+    const observedAt = validIso(latest.at) ?? context.generatedAt;
+    const freshness = classifyFreshness(observedAt, stringValue(latest.data.expiresAt), context.now, context.freshnessPolicyVersion);
+    const provenance = storeProvenance(`readiness:${latest.id}`, observedAt);
+    const quantity = BigInt(integerValue(latest.data.quantity) ?? 0);
+    const required = bigintValue(latest.data.requiredWei);
+    const priceEvent = [...context.state.events].reverse().find(event => event.type === 'calendar_entry' && event.data.id === entryId);
+    const mintValue = bigintValue(priceEvent?.data.priceWei) === null ? null : bigintValue(priceEvent?.data.priceWei)! * quantity;
+    const fee = required !== null && mintValue !== null && required >= mintValue ? required - mintValue : null;
+    return (latest.data.rows as Array<Record<string, unknown>>).map((row) => {
+      const address = stringValue(row.wallet) ?? 'unknown';
+      const state = stringValue(row.state) ?? 'unknown';
+      const reason = stringValue(row.reason) ?? 'UNKNOWN';
+      const balance = bigintValue(row.balanceWei);
+      const topUp = bigintValue(row.topUpWei);
+      const funded = gateCheck('funded', state === 'unfunded' ? 'fail' : balance === null ? 'unknown' : 'pass', true, state === 'unfunded' ? `Needs ${topUp === null ? 'more ETH' : `${formatEth(topUp)} ETH more`} before this mint.` : balance === null ? 'Balance is not known.' : 'Holds enough ETH for this mint.', observedAt, stringValue(latest!.data.expiresAt) ?? null, provenance, freshness);
+      const simulated = gateCheck('simulated', state === 'ready' ? 'pass' : reason.startsWith('SIMULATION_FAILED') ? 'fail' : 'unknown', true, state === 'ready' ? 'A test mint call succeeded.' : reason.startsWith('SIMULATION_FAILED') ? 'A test mint call failed.' : 'The test mint call runs when the mint is open.', observedAt, stringValue(latest!.data.expiresAt) ?? null, provenance, freshness);
+      const blocked = state === 'unfunded' || state === 'blocked' || state === 'skipped';
+      const decision: WalletReadinessRow['decision'] = freshness.status === 'stale' ? 'stale' : state === 'ready' ? 'ready' : blocked ? 'blocked' : 'unknown';
+      const stateLabel: WalletReadinessRow['state'] = state === 'ready' ? 'Ready' : state === 'funded' ? 'Funded' : state === 'unfunded' ? 'Unfunded' : state === 'skipped' ? 'Skipped' : 'Unknown';
+      const blockers = blocked || state === 'unknown' ? [issue(reason, readinessReasonText(reason, topUp), blocked ? 'blocking' : 'warning', state === 'unfunded' ? 'Fund wallet' : 'Inspect', provenance)] : [];
+      return {
+        campaignId: entryId,
+        wallet: { id: address, address, label: null },
+        state: stateLabel,
+        decision,
+        checks: [funded, simulated],
+        blockers,
+        cost: { mintValue: sourcedAmount(mintValue, 'estimated', freshness, [provenance]), executionGas: sourcedAmount(fee, 'estimated', freshness, [provenance]), dataPostingGas: null, priorityFeeComponent: null, estimatedTotal: sourcedAmount(required, 'estimated', freshness, [provenance]), balance: balance === null ? null : sourcedAmount(balance, 'actual', freshness, [provenance]) },
+        nextAction: state === 'unfunded' ? 'Fund wallet' : 'Inspect',
+        freshness,
+        provenance: [provenance],
+      };
+    });
   }
 
   private readinessSummary(rows: readonly WalletReadinessRow[]): ReadinessSummary {
@@ -944,6 +1007,16 @@ function digestState(state: BackendState): string {
 
 function dateMs(value: string | null | undefined): number | null { if (!value) return null; const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : null; }
 function validIso(value: string | null | undefined): string | null { const parsed = dateMs(value); return parsed === null ? null : new Date(parsed).toISOString(); }
+function readinessReasonText(reason: string, topUp: bigint | null): string {
+  if (reason === 'NEEDS_TOP_UP') return `This wallet needs ${topUp === null ? 'more ETH' : `${formatEth(topUp)} ETH more`} before the mint.`;
+  if (reason === 'PRICE_ABOVE_LIMIT') return 'The price is above your per-NFT limit, so this mint is not planned.';
+  if (reason === 'PAID_WALLET_LIMIT') return 'Only two wallets are used for a paid mint; this one is not needed.';
+  if (reason === 'SCORE_TOO_LOW' || reason === 'SCORE_UNKNOWN') return 'The signal score is too low to plan a paid mint.';
+  if (reason === 'NO_MINT_ALLOWANCE') return 'The drop allows no mints per wallet.';
+  if (reason === 'BALANCE_UNAVAILABLE') return 'The wallet balance could not be read.';
+  if (reason.startsWith('SIMULATION_FAILED')) return 'A test mint call failed, so this wallet is blocked.';
+  return 'See details.';
+}
 function stringValue(value: unknown): string | undefined { return typeof value === 'string' && value.length > 0 ? value : undefined; }
 function addressValue(value: unknown): string | null { const candidate = stringValue(value); return candidate && /^0x[0-9a-fA-F]{40}$/.test(candidate) ? candidate : null; }
 function integerValue(value: unknown): number | null { if (typeof value === 'number' && Number.isSafeInteger(value)) return value; if (typeof value === 'string' && /^\d+$/.test(value)) { const parsed = Number(value); return Number.isSafeInteger(parsed) ? parsed : null; } return null; }

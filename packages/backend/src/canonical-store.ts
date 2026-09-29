@@ -9,7 +9,7 @@ import type {
   SqliteDatabase,
   TransactionIntentRecord,
 } from '@mint-bot/database';
-import { SqliteBackendStore } from '@mint-bot/database';
+import { IntelligenceRepository, SqliteBackendStore } from '@mint-bot/database';
 import type {
   AttemptRecord,
   BackendState,
@@ -414,6 +414,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public close(): void {
     this.db.close();
+  }
+
+  /** Watched addresses and discovery cursors (migration 022); never custody data. */
+  public intelligenceRepository(): IntelligenceRepository {
+    return new IntelligenceRepository(this.db, this.now);
   }
 
   public capabilities(): StoreCapabilities {
