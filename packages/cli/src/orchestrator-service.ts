@@ -17,6 +17,9 @@ import {
   TelegramNotifier,
 } from '@mint-bot/backend';
 import { createCliRuntime, configuredSecretRoot } from './runtime.js';
+import { createDashboard } from './dashboard.js';
+import { EngineIntelligencePort } from './intelligence-adapter.js';
+import { startIntelligence } from './intelligence-service.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -95,7 +98,17 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     backupStatusPath: config.backupStatusPath,
   });
   await orchestrator.start();
-  const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics });
+  let intelligence: { stop(): void } | undefined;
+  if (config.intelligenceEnabled && config.secretStorePath) {
+    const secrets = await loadHostSecretStore(config.secretStorePath);
+    const rpcUrl = secrets.get(config.intelligenceRpcName);
+    if (!rpcUrl) throw new Error('INTELLIGENCE_RPC_SECRET_MISSING');
+    logger.registerSecret(rpcUrl);
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs });
+    logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
+  }
+  const dashboard = createDashboard(runtime.store);
+  const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics, readModel: dashboard.readModel, dashboard: (url) => dashboard.render(url) });
   await http.start();
   metrics.set('mintbot_process_up', 1);
   logger.info({ event: 'service_started', bindHost: config.bindHost, port: config.port, mode: config.mode }, 'orchestrator service started');
@@ -105,6 +118,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     if (stopped) return;
     stopped = true;
     metrics.set('mintbot_process_up', 0);
+    intelligence?.stop();
     await orchestrator.stop();
     await http.stop();
     (runtime.store as CanonicalStoreBridge).close();

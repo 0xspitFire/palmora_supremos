@@ -28,8 +28,17 @@ export interface OrchestratorServiceConfig {
   maxConcurrentJobs: number;
   alertRetentionDays: number;
   canonicalUrlBase?: string;
+  /** Phase 2 intelligence jobs (T-004, P2-09). Read-only; off unless enabled. */
+  intelligenceEnabled: boolean;
+  /** Name (not value) of the Ethereum RPC entry in the host secret store. */
+  intelligenceRpcName: string;
+  /** Public addresses of the owner's wallets for readiness checks; the keystore is never read. */
+  readinessWallets: string[];
+  discoveryIntervalMs: number;
+  readinessIntervalMs: number;
+  digestIntervalMs: number;
 }
-export type ServiceConfigSummary = Omit<OrchestratorServiceConfig, 'secretStorePath'> & { secretStoreConfigured: boolean };
+export type ServiceConfigSummary = Omit<OrchestratorServiceConfig, 'secretStorePath' | 'readinessWallets'> & { secretStoreConfigured: boolean; readinessWalletCount: number };
 
 function value(env: NodeJS.ProcessEnv, key: string): string | undefined {
   const candidate = env[key];
@@ -80,6 +89,12 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
     if (!telegramApprovedProxy || telegramApprovedProxy !== telegramApiBaseUrl) throw new Error('TELEGRAM_HTTPS_OR_APPROVED_PROXY_REQUIRED');
     if (!['127.0.0.1', 'localhost', '[::1]'].includes(telegramUrl.hostname) || telegramUrl.protocol !== 'http:') throw new Error('TELEGRAM_APPROVED_PROXY_MUST_BE_LOOPBACK');
   }
+  const intelligenceEnabled = bool(env, 'MINT_BOT_INTELLIGENCE_ENABLED', false);
+  if (intelligenceEnabled && !secretStorePath) throw new Error('INTELLIGENCE_SECRET_STORE_REQUIRED');
+  const intelligenceRpcName = value(env, 'MINT_BOT_INTELLIGENCE_RPC_NAME') ?? 'ETHEREUM_RPC_URL';
+  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(intelligenceRpcName)) throw new Error('MINT_BOT_INTELLIGENCE_RPC_NAME_INVALID');
+  const readinessWallets = (value(env, 'MINT_BOT_READINESS_WALLETS') ?? '').split(',').map((item) => item.trim()).filter((item) => item.length > 0);
+  if (readinessWallets.some((address) => !/^0x[0-9a-fA-F]{40}$/.test(address)) || readinessWallets.length > 50) throw new Error('MINT_BOT_READINESS_WALLETS_INVALID');
   const bindHost = value(env, 'MINT_BOT_BIND_HOST') ?? '127.0.0.1';
   if (bindHost !== '127.0.0.1' && bindHost !== '::1' && bindHost !== 'localhost') throw new Error('BIND_HOST_MUST_BE_LOOPBACK');
   const port = integer(env, 'MINT_BOT_HEALTH_PORT', integer(env, 'MINT_BOT_HTTP_PORT', 8780, 0), 0);
@@ -111,12 +126,18 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
     maxConcurrentJobs: integer(env, 'MINT_BOT_MAX_CONCURRENT_JOBS', 1, 1),
     alertRetentionDays: integer(env, 'MINT_BOT_ALERT_RETENTION_DAYS', 30, 1),
     ...(value(env, 'MINT_BOT_CANONICAL_URL') ? { canonicalUrlBase: value(env, 'MINT_BOT_CANONICAL_URL') } : {}),
+    intelligenceEnabled,
+    intelligenceRpcName,
+    readinessWallets: [...new Set(readinessWallets.map((address) => address.toLowerCase()))],
+    discoveryIntervalMs: integer(env, 'MINT_BOT_DISCOVERY_INTERVAL_MS', 120_000, 15_000),
+    readinessIntervalMs: integer(env, 'MINT_BOT_READINESS_INTERVAL_MS', 120_000, 15_000),
+    digestIntervalMs: integer(env, 'MINT_BOT_DIGEST_INTERVAL_MS', 900_000, 60_000),
   };
 }
 
 export function summarizeServiceConfig(config: OrchestratorServiceConfig): ServiceConfigSummary {
-  const { secretStorePath: _secretStorePath, ...safe } = config;
-  return { ...safe, secretStoreConfigured: Boolean(config.secretStorePath) };
+  const { secretStorePath: _secretStorePath, readinessWallets, ...safe } = config;
+  return { ...safe, secretStoreConfigured: Boolean(config.secretStorePath), readinessWalletCount: readinessWallets.length };
 }
 
 export function runtimeParentPaths(config: OrchestratorServiceConfig): string[] {

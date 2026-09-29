@@ -84,3 +84,5 @@ export { TelegramNotifier, loadHostSecretStore, telegramAlertText } from './tele
 export type { HostSecretStore, TelegramCredentials, TelegramFetcher, TelegramFetcherResponse, TelegramHealth, TelegramNotifierOptions } from './telegram.js';
 export { ServiceHttpServer } from './service-http.js';
 export type { ServiceHttpOptions } from './service-http.js';
+export * from './intelligence/index.js';
+export type { IntelligenceAlertInput, IntelligenceAlertKind } from './alerts.js';

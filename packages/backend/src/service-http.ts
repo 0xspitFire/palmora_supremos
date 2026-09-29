@@ -10,7 +10,13 @@ export interface ServiceHttpOptions {
   store: BackendStore;
   orchestrator: OrchestratorService;
   metrics: MetricsRegistry;
+  /** Read-model v1 GET adapter (T-004, P2-07). */
+  readModel?: { handle(request: { method: string; path: string }): { status: number; body: unknown } };
+  /** Server-rendered, script-free dashboard page. */
+  dashboard?: (url: URL) => Promise<string> | string;
 }
+
+const DASHBOARD_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'", 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' };
 
 /** Loopback-only, read-only liveness/readiness/metrics HTTP surface. */
 export class ServiceHttpServer {
@@ -48,7 +54,13 @@ export class ServiceHttpServer {
   }
 
   private handle(request: IncomingMessage, response: ServerResponse): void {
-    const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    const url = new URL(request.url ?? '/', 'http://localhost');
+    const path = url.pathname;
+    // DNS-rebinding guard: only loopback Host names are served, so a web page cannot read this server through a hostile domain.
+    if (!this.loopbackHost(request.headers.host)) {
+      this.writeJson(response, 421, { status: 'failed', reason: 'HOST_NOT_ALLOWED' });
+      return;
+    }
     if (request.method !== 'GET') {
       this.writeJson(response, 405, { status: 'failed', reason: 'METHOD_NOT_ALLOWED' });
       return;
@@ -75,7 +87,38 @@ export class ServiceHttpServer {
       response.end(this.options.metrics.renderPrometheus());
       return;
     }
+    if (this.options.readModel && path.startsWith('/api/v1/read-model/')) {
+      try {
+        const result = this.options.readModel.handle({ method: 'GET', path: `${path}${url.search}` });
+        this.writeJson(response, result.status, result.body);
+      } catch {
+        // Fixed reason only: projection errors may carry provider or endpoint text.
+        this.writeJson(response, 503, { status: 'failed', reason: 'READ_MODEL_UNAVAILABLE' });
+      }
+      return;
+    }
+    if (this.options.dashboard && (path === '/' || path === '/dashboard')) {
+      void this.writeDashboard(response, url);
+      return;
+    }
     this.writeJson(response, 404, { status: 'failed', reason: 'NOT_FOUND' });
+  }
+
+  private loopbackHost(host: string | undefined): boolean {
+    if (!host) return false;
+    const match = /^(\[::1\]|127\.0\.0\.1|localhost)(?::(\d+))?$/i.exec(host.trim());
+    if (!match) return false;
+    return match[2] === undefined || !this.listening || Number(match[2]) === this.addressPort();
+  }
+
+  private async writeDashboard(response: ServerResponse, url: URL): Promise<void> {
+    try {
+      const html = await this.options.dashboard!(url);
+      response.writeHead(200, DASHBOARD_HEADERS);
+      response.end(html);
+    } catch {
+      this.writeJson(response, 503, { status: 'failed', reason: 'DASHBOARD_UNAVAILABLE' });
+    }
   }
 
   private writeJson(response: ServerResponse, status: number, value: unknown): void {

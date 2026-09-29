@@ -14,6 +14,7 @@
     "@mint-bot/backend": "workspace:*",
     "@mint-bot/database": "workspace:*",
     "@mint-bot/engine": "workspace:*",
+    "@mint-bot/web": "workspace:*",
     "viem": "^2.27.0",
     "yargs": "^17.7.0"
   },
