@@ -23,6 +23,7 @@
     "ops:ethereum-fork": "node scripts/ethereum-fork-replay.mjs",
     "ops:guardrail-fork": "node scripts/ethereum-fork-replay.mjs packages/backend/src/guardrail-harness.fork.test.ts",
     "ops:intelligence-fork": "node scripts/ethereum-fork-replay.mjs packages/engine/src/seadrop-observer.fork.test.ts",
+    "ops:gas-fork": "node scripts/ethereum-fork-replay.mjs packages/engine/src/mint-gas.fork.test.ts",
     "ops:turnkey-health": "node scripts/turnkey-signer-health.mjs",
     "ops:turnkey-attestation": "node scripts/turnkey-attestation.mjs",
     "ops:environment": "node scripts/native-preflight.mjs",
