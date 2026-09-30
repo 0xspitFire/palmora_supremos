@@ -8,7 +8,7 @@ export interface LogIdentity { txHash?: string | null; logIndex?: number | null;
 export interface ObservedMint extends LogIdentity { nftContract: string; minter: string; payer: string; quantity: bigint; unitPriceWei: bigint; blockNumber: bigint; }
 export interface ObservedDropUpdate { nftContract: string; mintPriceWei: bigint; startTime: number; endTime: number; maxPerWallet: number; blockNumber: bigint; }
 export interface ObservedWatchedMint extends LogIdentity { nftContract: string; recipient: string; blockNumber: bigint; }
-export interface ChainScan { fromBlock: bigint; toBlock: bigint; mints: ObservedMint[]; dropUpdates: ObservedDropUpdate[]; watchedMints: ObservedWatchedMint[]; }
+export interface ChainScan { fromBlock: bigint; toBlock: bigint; mints: ObservedMint[]; dropUpdates: ObservedDropUpdate[]; watchedMints: ObservedWatchedMint[]; /** Watched-wallet evidence could not be read for part of this range. */ watchedUnavailable?: boolean; }
 export type ChainScanOutcome = { ok: true; scan: ChainScan } | { ok: false; reason: string };
 
 /** A public SeaDrop drop as read from chain; null fields are unknown, never zero. */

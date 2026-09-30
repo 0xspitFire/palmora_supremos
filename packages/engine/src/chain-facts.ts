@@ -65,6 +65,8 @@ export interface ChainFact<T> {
   readonly sourceBlockNumber?: bigint;
   readonly sourceBlockHash?: Hash;
   readonly errorCode?: ChainFactErrorCode;
+  /** Short provider reason with URLs and long hex removed; diagnostic only, never a secret. */
+  readonly errorDetail?: string;
 }
 
 export interface ChainHead {
@@ -374,8 +376,8 @@ export class ChainFactsReader {
       const logs = await this.client.getLogs(request as never) as unknown as readonly RawLog[];
       const value = logs.map(normalizeLog);
       return this.fact('logs', value, observedAt, this.freshness.logsMs, sourceRecord('logs', toBlock), 'chain_observation');
-    } catch {
-      return this.unavailable('logs', 'LOGS_UNAVAILABLE', observedAt);
+    } catch (error) {
+      return { ...this.unavailable<readonly ChainLog[]>('logs', 'LOGS_UNAVAILABLE', observedAt), errorDetail: providerErrorDetail(error) };
     }
   }
 
@@ -629,6 +631,14 @@ export class ChainFactsReader {
     if (!(value instanceof Date) || Number.isNaN(value.getTime())) throw new Error('INVALID_CHAIN_FACT_TIME');
     return value;
   }
+}
+
+/** A short, secret-free description of a provider error: first line, URLs and long hex removed, capped length. */
+export function providerErrorDetail(error: unknown): string {
+  const raw = error instanceof Error ? ((error as Error & { shortMessage?: string }).shortMessage ?? error.message) : String(error);
+  const status = (error as { status?: unknown; cause?: { status?: unknown } } | null)?.status ?? (error as { cause?: { status?: unknown } } | null)?.cause?.status;
+  const firstLine = (raw.split('\n')[0] ?? '').replace(/[a-z]+:\/\/\S+/gi, '[url]').replace(/0x[0-9a-f]{20,}/gi, '[hex]').replace(/[A-Za-z0-9_-]{32,}/g, '[token]').trim();
+  return `${typeof status === 'number' ? `HTTP ${status}: ` : ''}${firstLine}`.slice(0, 120);
 }
 
 function sourceRecord(kind: string, identity: string | bigint, source?: SourceObservation): string {

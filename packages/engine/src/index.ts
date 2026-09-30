@@ -111,6 +111,7 @@ export type { FinalityObserver, FinalityObservation, FinalitySources, RobinhoodF
 // Read-only Phase 2 chain facts
 export {
   ChainFactsReader,
+  providerErrorDetail,
   appendReceiptObservation,
   classifyFreshness,
   detectReorg,

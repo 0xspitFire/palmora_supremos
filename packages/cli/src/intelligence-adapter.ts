@@ -5,6 +5,10 @@ import type { ChainScanOutcome, DropSnapshot, IntelligenceChainPort, SimulationO
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
+function isRateLimit(detail: string | undefined): boolean {
+  return detail !== undefined && /HTTP 429|rate.?limit|too many requests|throttl|exceeded.*(?:capacity|quota|compute units)/i.test(detail);
+}
+
 /**
  * Engine-backed, read-only chain port for Phase 2 intelligence (T-004). It reads
  * logs, drop configuration, code and balances, and runs eth_call simulations.
@@ -14,11 +18,21 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   public readonly chainId = 1 as const;
   private readonly observer: SeaDropObserver;
   private readonly strategy = new SeaDropV1PublicStrategy();
+  /** Blocks per request; adapts to the provider's getLogs limits (halves on rejection, grows after steady success). */
+  private range: bigint;
+  private readonly maxRange: bigint;
+  private successes = 0;
 
-  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint } = {}) {
+  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint; initialRange?: bigint } = {}) {
     const reader = new ChainFactsReader(client, { chainId: 1, sourceRef: 'intelligence-rpc' });
-    this.observer = new SeaDropObserver(reader, { confirmations: options.confirmations ?? 2n, maxRange: options.maxRange ?? 500n });
+    this.maxRange = options.maxRange ?? 500n;
+    this.range = options.initialRange ?? 100n;
+    if (this.maxRange < 1n || this.range < 1n || this.range > this.maxRange) throw new Error('INTELLIGENCE_RANGE_INVALID');
+    this.observer = new SeaDropObserver(reader, { confirmations: options.confirmations ?? 2n, maxRange: this.maxRange });
   }
+
+  /** Current blocks-per-request, for diagnostics and tests. */
+  public currentRange(): bigint { return this.range; }
 
   /** Builds the port from an RPC URL held only in memory; the URL is never logged or persisted. */
   public static fromRpcUrl(rpcUrl: string): EngineIntelligencePort {
@@ -31,10 +45,21 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   public async safeHead(): Promise<bigint | null> { return this.observer.safeHead(); }
 
   public async scan(fromBlock: bigint, toBlock: bigint, watched: readonly string[]): Promise<ChainScanOutcome> {
-    const outcome = await this.observer.scan(fromBlock, toBlock, watched.filter((address) => ADDRESS.test(address)) as Address[]);
-    if (!outcome.ok) return { ok: false, reason: outcome.reason };
+    const addresses = watched.filter((address) => ADDRESS.test(address)) as Address[];
+    let outcome = await this.observer.scan(fromBlock, this.clamp(fromBlock, toBlock), addresses);
+    // A rejected request usually means the range is above the provider's limit: halve and retry.
+    // Rate limiting is different: shrinking would only add requests, so wait for the next tick instead.
+    while (!outcome.ok && outcome.reason === 'LOGS_UNAVAILABLE' && !isRateLimit(outcome.detail) && this.range > 1n) {
+      this.range = this.range / 2n > 1n ? this.range / 2n : 1n;
+      this.successes = 0;
+      outcome = await this.observer.scan(fromBlock, this.clamp(fromBlock, toBlock), addresses);
+    }
+    if (!outcome.ok) return { ok: false, reason: isRateLimit(outcome.detail) ? `RATE_LIMITED: ${outcome.detail ?? ''}` : `${outcome.reason}${outcome.detail ? `: ${outcome.detail}` : ''}` };
+    this.successes += 1;
+    if (this.successes >= 10 && this.range < this.maxRange) { this.range = this.range * 2n < this.maxRange ? this.range * 2n : this.maxRange; this.successes = 0; }
     const { result } = outcome;
     return { ok: true, scan: {
+      watchedUnavailable: result.watchedUnavailable,
       fromBlock: result.fromBlock,
       toBlock: result.toBlock,
       mints: result.mints.map((mint) => ({ nftContract: mint.nftContract, minter: mint.minter, payer: mint.payer, quantity: mint.quantity, unitPriceWei: mint.unitMintPriceWei, blockNumber: mint.blockNumber, txHash: mint.transactionHash, logIndex: mint.logIndex })),
@@ -68,6 +93,10 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
       const evidence = await simulateMint(this.client, this.strategy, drop, wallet as Address, quantity, valueWei);
       return evidence.success ? { outcome: 'pass' } : { outcome: 'fail', reason: evidence.revertType ?? 'REVERTED' };
     } catch { return { outcome: 'unknown', reason: 'SIMULATION_UNAVAILABLE' }; }
+  }
+
+  private clamp(fromBlock: bigint, toBlock: bigint): bigint {
+    return toBlock - fromBlock + 1n > this.range ? fromBlock + this.range - 1n : toBlock;
   }
 
   private async drop(nftContract: string): Promise<DropConfig | null> {
