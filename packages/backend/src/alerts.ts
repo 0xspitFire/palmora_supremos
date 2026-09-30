@@ -6,7 +6,7 @@ import type { NotificationDispatcher } from './notifications.js';
 export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder';
 export type AlertPriority = 'immediate' | 'grouped';
 /** Phase 2 intelligence alerts (T-004, P2-06). Outbound only; never a permission or execution proof. */
-export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit';
+export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status';
 export interface IntelligenceAlertInput {
   kind: IntelligenceAlertKind;
   /** Stable dedupe identity: the same identity is never alerted twice. */
