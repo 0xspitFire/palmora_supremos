@@ -1,4 +1,4 @@
-import { D033_READINESS_LIMITS, formatEth, paidQuantityForScore, type IntelligenceChainPort, type ReadinessLimits } from '@mint-bot/backend';
+import { D033_READINESS_LIMITS, formatEth, paidQuantityForScore, planFreeQuantity, planningMaxFeeWei, type IntelligenceChainPort, type QuantityPlan, type ReadinessLimits } from '@mint-bot/backend';
 
 const MAX_TIME_SECONDS = 7_258_118_400;
 
@@ -13,7 +13,26 @@ export interface DropCheckReport {
   summary: string;
   drop: { priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null;
   quantity: number;
+  /** Set for free mints when the planner ran (D-037): says whether and why the quantity was reduced for fees. */
+  quantityPlan?: { desired: number; planned: number; reduced: boolean; reason: string; maxFeeGwei: string; message: string };
   wallets: DropCheckWallet[];
+}
+
+/**
+ * Plans the per-wallet quantity for `mint --auto-quantity` (D-037). The quantity never exceeds the drop's
+ * per-wallet allowance; a drop that allows none is refused. Throws with the reason when not even 1 NFT fits.
+ */
+export async function planAutoQuantity(port: IntelligenceChainPort, args: { contract: string; wallet: string; maxPerWallet: number; limits?: ReadinessLimits; gasPaddingPercent?: number }): Promise<QuantityPlan> {
+  const limits = args.limits ?? D033_READINESS_LIMITS;
+  if (!Number.isSafeInteger(args.maxPerWallet) || args.maxPerWallet < 1) throw new Error('NO_MINT_ALLOWANCE: the drop allows no mints per wallet');
+  if (!port.estimateMintGas || !port.baseFeePerGasWei) throw new Error('AUTO_QUANTITY_NEEDS_GAS_ESTIMATES');
+  const baseFee = await port.baseFeePerGasWei();
+  if (baseFee === null) throw new Error('BASE_FEE_UNAVAILABLE');
+  const estimate = port.estimateMintGas.bind(port);
+  const padding = args.gasPaddingPercent ?? 120;
+  const plan = await planFreeQuantity({ desired: args.maxPerWallet, allowanceWei: limits.freeFeeAllowanceWei, maxFeePerGasWei: planningMaxFeeWei(baseFee), paddingNumerator: BigInt(padding), paddingDenominator: 100n, gasForQuantity: (count) => estimate(args.wallet, args.contract, count, 0n) });
+  if (plan.reason === 'cannot_fit_one') throw new Error(`FEES_TOO_HIGH_FOR_FREE_MINT: ${plan.message}`);
+  return plan;
 }
 
 export async function checkDrop(port: IntelligenceChainPort, contract: string, wallets: readonly string[], options: { quantity?: number; score?: number | null; simulate: boolean; now?: Date; limits?: ReadinessLimits }): Promise<DropCheckReport> {
@@ -33,8 +52,20 @@ export async function checkDrop(port: IntelligenceChainPort, contract: string, w
   if (drop.priceWei > limits.paidMaxPricePerNftWei) return { contract, verdict: 'blocked', summary: `Price ${formatEth(drop.priceWei)} ETH is above your ${formatEth(limits.paidMaxPricePerNftWei)} ETH per-NFT limit.`, drop: dropView, quantity: 0, wallets: [] };
   const free = drop.priceWei === 0n;
   const planned = options.quantity ?? (free ? drop.maxPerWallet : Math.max(1, paidQuantityForScore(options.score ?? null)));
-  const quantity = drop.maxPerWallet > 0 ? Math.min(planned, drop.maxPerWallet) : planned;
+  let quantity = drop.maxPerWallet > 0 ? Math.min(planned, drop.maxPerWallet) : planned;
   if (quantity < 1) return { contract, verdict: 'blocked', summary: 'The drop allows no mints per wallet.', drop: dropView, quantity: 0, wallets: [] };
+  // D-037: for a free mint at the full allowance, plan the largest quantity that fits the fee allowance at the current fee.
+  let quantityPlan: DropCheckReport['quantityPlan'];
+  if (free && options.quantity === undefined && wallets.length > 0 && port.estimateMintGas && port.baseFeePerGasWei) {
+    const estimate = port.estimateMintGas.bind(port);
+    const baseFee = await port.baseFeePerGasWei();
+    if (baseFee !== null) {
+      const plan: QuantityPlan = await planFreeQuantity({ desired: quantity, allowanceWei: limits.freeFeeAllowanceWei, maxFeePerGasWei: planningMaxFeeWei(baseFee), gasForQuantity: (count) => estimate(wallets[0]!, contract, count, 0n) });
+      quantityPlan = { desired: plan.desired, planned: plan.planned, reduced: plan.reduced, reason: plan.reason, maxFeeGwei: plan.maxFeeGwei, message: plan.message };
+      if (plan.reason === 'cannot_fit_one') return { contract, verdict: 'blocked', summary: plan.message, drop: dropView, quantity: 0, quantityPlan, wallets: [] };
+      quantity = plan.planned;
+    }
+  }
   const selected = free ? [...wallets] : wallets.slice(0, limits.paidMaxWalletsPerMint);
   const required = drop.priceWei * BigInt(quantity) + (free ? limits.freeFeeAllowanceWei : limits.paidFeeAllowanceWei);
   const rows: DropCheckWallet[] = [];
@@ -52,5 +83,5 @@ export async function checkDrop(port: IntelligenceChainPort, contract: string, w
   const ready = rows.filter((row) => row.verdict === 'ready' || row.verdict === 'funded').length;
   const skipped = wallets.length - selected.length;
   const summary = `${ready} of ${selected.length} wallets are funded for ${quantity} NFT(s) each at ${free ? 'no mint cost' : `${formatEth(drop.priceWei)} ETH`} (mint is ${status}).${skipped > 0 ? ` ${skipped} wallet(s) left out: paid mints use at most ${limits.paidMaxWalletsPerMint}.` : ''}${free && selected.length < limits.freeMinWallets ? ` You asked for at least ${limits.freeMinWallets} wallets on free mints.` : ''}`;
-  return { contract, verdict: rows.some((row) => row.verdict === 'blocked') ? 'blocked' : rows.every((row) => row.verdict === 'ready' || row.verdict === 'funded') ? 'ok' : 'unknown', summary, drop: dropView, quantity, wallets: rows };
+  return { contract, verdict: rows.some((row) => row.verdict === 'blocked') ? 'blocked' : rows.every((row) => row.verdict === 'ready' || row.verdict === 'funded') ? 'ok' : 'unknown', summary: quantityPlan?.reduced ? `${summary} ${quantityPlan.message}` : summary, drop: dropView, quantity, ...(quantityPlan ? { quantityPlan } : {}), wallets: rows };
 }

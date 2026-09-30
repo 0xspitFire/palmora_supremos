@@ -26,6 +26,10 @@ export interface IntelligenceChainPort {
   balance(address: string): Promise<bigint | null>;
   /** eth_call of the SeaDrop public mint for one wallet; read-only. */
   simulateMint(wallet: string, nftContract: string, quantity: number, valueWei: bigint): Promise<SimulationOutcome>;
+  /** Gas estimate for minting `quantity` NFTs from `wallet`, or null when it cannot be estimated (optional: T-012). */
+  estimateMintGas?(wallet: string, nftContract: string, quantity: number, valueWei: bigint): Promise<bigint | null>;
+  /** Current base fee per gas in wei, or null when unknown (optional: T-012). */
+  baseFeePerGasWei?(): Promise<bigint | null>;
 }
 
 export interface IntelligenceRepositoryPort {
@@ -35,7 +39,7 @@ export interface IntelligenceRepositoryPort {
 }
 
 export interface IntelligenceAlertSink {
-  intelligence(input: { kind: 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status'; dedupe: string; text: string; priority: 'immediate' | 'grouped' }): Promise<boolean>;
+  intelligence(input: { kind: 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status' | 'quantity_reduced'; dedupe: string; text: string; priority: 'immediate' | 'grouped' }): Promise<boolean>;
 }
 
 /** D-015 freshness windows. */

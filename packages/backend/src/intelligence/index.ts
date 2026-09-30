@@ -6,3 +6,5 @@ export { formatEth, paidQuantityForScore, scoreOpportunity, SCORING_MODEL_VERSIO
 export type { ScoreResult, ScoredFactor, ScoringInput } from './scoring.js';
 export { calendarId, DISCOVERY_FRESHNESS_MS, opportunityId, READINESS_FRESHNESS_MS } from './port.js';
 export type { ChainScan, ChainScanOutcome, DropSnapshot, IntelligenceAlertSink, IntelligenceChainPort, IntelligenceRepositoryPort, ObservedDropUpdate, ObservedMint, ObservedWatchedMint, SimulationOutcome } from './port.js';
+export { formatGwei, planFreeQuantity, planningMaxFeeWei } from './quantity-plan.js';
+export type { QuantityPlan, QuantityPlanInput, QuantityPlanReason } from './quantity-plan.js';

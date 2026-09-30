@@ -85,6 +85,22 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
     try { return await this.client.getBalance({ address: address as Address }); } catch { return null; }
   }
 
+  /** Read-only gas estimate for minting `quantity` NFTs from `wallet` (eth_estimateGas; nothing is sent). */
+  public async estimateMintGas(wallet: string, nftContract: string, quantity: number, valueWei: bigint): Promise<bigint | null> {
+    if (!ADDRESS.test(wallet) || !Number.isSafeInteger(quantity) || quantity < 1 || valueWei < 0n) return null;
+    const drop = await this.cachedDrop(nftContract);
+    if (!drop) return null;
+    try {
+      const to = (drop.extra?.['seaDropAddress'] as Address | undefined) ?? drop.nftContract;
+      return await this.client.estimateGas({ account: wallet as Address, to, data: this.strategy.buildCalldata(drop, wallet as Address, quantity), value: valueWei });
+    } catch { return null; }
+  }
+
+  /** Current base fee per gas in wei, or null when the node does not report one. */
+  public async baseFeePerGasWei(): Promise<bigint | null> {
+    try { const block = await this.client.getBlock(); return block.baseFeePerGas ?? null; } catch { return null; }
+  }
+
   public async simulateMint(wallet: string, nftContract: string, quantity: number, valueWei: bigint): Promise<SimulationOutcome> {
     if (!ADDRESS.test(wallet) || !Number.isSafeInteger(quantity) || quantity < 1) return { outcome: 'unknown', reason: 'INVALID_INPUT' };
     const drop = await this.drop(nftContract);
@@ -93,6 +109,17 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
       const evidence = await simulateMint(this.client, this.strategy, drop, wallet as Address, quantity, valueWei);
       return evidence.success ? { outcome: 'pass' } : { outcome: 'fail', reason: evidence.revertType ?? 'REVERTED' };
     } catch { return { outcome: 'unknown', reason: 'SIMULATION_UNAVAILABLE' }; }
+  }
+
+  /** Drop configuration cached for 60 seconds, so quantity planning does not re-read it for every estimate. */
+  private readonly dropCache = new Map<string, { at: number; drop: DropConfig }>();
+  private async cachedDrop(nftContract: string): Promise<DropConfig | null> {
+    const key = nftContract.toLowerCase();
+    const hit = this.dropCache.get(key);
+    if (hit && Date.now() - hit.at < 60_000) return hit.drop;
+    const drop = await this.drop(nftContract);
+    if (drop) { this.dropCache.set(key, { at: Date.now(), drop }); if (this.dropCache.size > 100) this.dropCache.delete(this.dropCache.keys().next().value as string); }
+    return drop;
   }
 
   private clamp(fromBlock: bigint, toBlock: bigint): bigint {

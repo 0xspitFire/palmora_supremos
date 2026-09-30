@@ -4,6 +4,7 @@ import type { BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
 import { READINESS_FRESHNESS_MS, shortAddress, type IntelligenceAlertSink, type IntelligenceChainPort } from './port.js';
 import { formatEth, paidQuantityForScore } from './scoring.js';
+import { planFreeQuantity, planningMaxFeeWei, type QuantityPlan } from './quantity-plan.js';
 
 /**
  * Wallet-by-drop readiness sweep (T-004, P2-05, D-033). Read-only: it checks
@@ -66,7 +67,7 @@ export class ReadinessSweep {
     const events: EventRecord[] = [];
     let alertsRaised = 0;
     for (const drop of drops) {
-      const plan = this.plan(drop);
+      const plan = await this.plan(drop, wallets[0]);
       const rows: WalletReadiness[] = [];
       for (const wallet of wallets) rows.push(await this.check(wallet, drop, plan, now));
       if (plan.kind === 'paid') this.limitPaidWallets(rows);
@@ -75,7 +76,7 @@ export class ReadinessSweep {
       const hot = drop.startMs <= now || drop.startMs - now <= HOT_WINDOW_MS;
       const due = !last || last.signature !== signature || now - last.at >= (hot ? HOT_REFRESH_MS : COLD_REFRESH_MS);
       if (due) {
-        events.push({ id: `evt_${randomUUID()}`, type: 'readiness_sweep', at: nowDate.toISOString(), data: { id: `readiness:${drop.id}`, calendarId: drop.id, contract: drop.contract, chainId: this.port.chainId, mintClass: plan.kind, quantity: plan.quantity, requiredWei: plan.requiredWei.toString(), rows, expiresAt: new Date(now + (hot ? READINESS_FRESHNESS_MS : COLD_REFRESH_MS + 60_000)).toISOString() } });
+        events.push({ id: `evt_${randomUUID()}`, type: 'readiness_sweep', at: nowDate.toISOString(), data: { id: `readiness:${drop.id}`, calendarId: drop.id, contract: drop.contract, chainId: this.port.chainId, mintClass: plan.kind, quantity: plan.quantity, ...(plan.quantityPlan ? { quantityPlan: { desired: plan.quantityPlan.desired, planned: plan.quantityPlan.planned, reduced: plan.quantityPlan.reduced, reason: plan.quantityPlan.reason, maxFeeGwei: plan.quantityPlan.maxFeeGwei, message: plan.quantityPlan.message } } : {}), requiredWei: plan.requiredWei.toString(), rows, expiresAt: new Date(now + (hot ? READINESS_FRESHNESS_MS : COLD_REFRESH_MS + 60_000)).toISOString() } });
         this.lastEmit.set(drop.id, { at: now, signature });
       }
       alertsRaised += await this.alert(drop, plan, rows, now);
@@ -109,11 +110,14 @@ export class ReadinessSweep {
     return views.sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id)).slice(0, MAX_DROPS_PER_SWEEP);
   }
 
-  private plan(drop: CalendarView): { kind: 'free' | 'paid'; quantity: number; requiredWei: bigint; blockReason?: string } {
+  private async plan(drop: CalendarView, estimator?: string): Promise<{ kind: 'free' | 'paid'; quantity: number; requiredWei: bigint; blockReason?: string; quantityPlan?: QuantityPlan }> {
     const limits = this.options.limits;
     if (drop.priceWei === 0n) {
       if (drop.maxPerWallet <= 0) return { kind: 'free', quantity: 0, requiredWei: limits.freeFeeAllowanceWei, blockReason: 'NO_MINT_ALLOWANCE' };
-      return { kind: 'free', quantity: drop.maxPerWallet, requiredWei: limits.freeFeeAllowanceWei };
+      // D-037: plan the largest quantity whose padded worst-case fee fits the allowance at the current fee.
+      const quantityPlan = await this.planFreeQuantity(drop, estimator);
+      if (quantityPlan?.reason === 'cannot_fit_one') return { kind: 'free', quantity: 0, requiredWei: limits.freeFeeAllowanceWei, blockReason: 'FEES_TOO_HIGH', quantityPlan };
+      return { kind: 'free', quantity: quantityPlan?.planned ?? drop.maxPerWallet, requiredWei: limits.freeFeeAllowanceWei, ...(quantityPlan ? { quantityPlan } : {}) };
     }
     if (drop.priceWei > limits.paidMaxPricePerNftWei) return { kind: 'paid', quantity: 0, requiredWei: 0n, blockReason: 'PRICE_ABOVE_LIMIT' };
     const score = this.latestScore(drop.contract);
@@ -123,7 +127,7 @@ export class ReadinessSweep {
     return { kind: 'paid', quantity, requiredWei: drop.priceWei * BigInt(quantity) + limits.paidFeeAllowanceWei };
   }
 
-  private async check(wallet: string, drop: CalendarView, plan: ReturnType<ReadinessSweep['plan']>, now: number): Promise<WalletReadiness> {
+  private async check(wallet: string, drop: CalendarView, plan: Awaited<ReturnType<ReadinessSweep['plan']>>, now: number): Promise<WalletReadiness> {
     const base = { wallet, requiredWei: plan.requiredWei.toString(), topUpWei: null };
     if (plan.blockReason) return { ...base, state: plan.blockReason === 'NO_MINT_ALLOWANCE' || plan.blockReason === 'PRICE_ABOVE_LIMIT' ? 'blocked' : 'skipped', reason: plan.blockReason, balanceWei: null };
     const balance = await this.port.balance(wallet);
@@ -151,15 +155,19 @@ export class ReadinessSweep {
     }
   }
 
-  private async alert(drop: CalendarView, plan: ReturnType<ReadinessSweep['plan']>, rows: readonly WalletReadiness[], now: number): Promise<number> {
+  private async alert(drop: CalendarView, plan: Awaited<ReturnType<ReadinessSweep['plan']>>, rows: readonly WalletReadiness[], now: number): Promise<number> {
     const sink = this.options.alerts;
-    if (!sink || plan.blockReason) return 0;
+    if (!sink) return 0;
     const name = `Ethereum mint ${shortAddress(drop.contract)}`;
+    let reducedAlerts = 0;
+    // D-037: whenever fees cut the planned quantity (or rule a mint out), tell the owner why. One per drop and quantity, bundled.
+    if (plan.quantityPlan?.reduced && this.alertAllowed(now) && await safe(sink, { kind: 'quantity_reduced', dedupe: `quantity:${drop.id}:${plan.quantityPlan.planned}`, priority: 'grouped', text: `${name}: ${plan.quantityPlan.message}` })) reducedAlerts += 1;
+    if (plan.blockReason) return reducedAlerts;
     // Only a drop the scorer rated worth a look may interrupt immediately; everything else waits for the digest.
     const score = this.latestScore(drop.contract);
     const soon = drop.startMs - now <= HOUR && score !== null && score >= IMMEDIATE_MIN_SCORE;
     const opens = drop.startMs > now ? `opens in ${formatDuration(drop.startMs - now)}` : 'is open now';
-    let raised = 0;
+    let raised = reducedAlerts;
     const unfunded = rows.filter((row) => row.state === 'unfunded');
     if (unfunded.length > 0) {
       const lines = unfunded.map((row) => `send ${formatEth(BigInt(row.topUpWei ?? '0'))} ETH to ${row.wallet}`);
@@ -169,10 +177,21 @@ export class ReadinessSweep {
     const ready = rows.filter((row) => row.state === 'ready').length;
     if (ready > 0) {
       const preference = plan.kind === 'free' && ready < this.options.limits.freeMinWallets ? ` You asked for at least ${this.options.limits.freeMinWallets} wallets on free mints.` : '';
-      const text = `${ready} of ${rows.length} wallets are ready for ${name}, which ${opens} (${plan.kind === 'free' ? `free, ${plan.quantity} each` : `${plan.quantity} each at ${formatEth(drop.priceWei)} ETH`}). Minting still needs your approval.${preference}`;
+      const text = `${ready} of ${rows.length} wallets are ready for ${name}, which ${opens} (${plan.kind === 'free' ? `free, ${plan.quantity} each${plan.quantityPlan?.reduced ? ` instead of ${plan.quantityPlan.desired} because of network fees` : ''}` : `${plan.quantity} each at ${formatEth(drop.priceWei)} ETH`}). Minting still needs your approval.${preference}`;
       if (this.alertAllowed(now) && await safe(sink, { kind: 'eligible_ready', dedupe: `ready:${drop.id}:${ready}`, priority: soon ? 'immediate' : 'grouped', text })) raised += 1;
     }
     return raised;
+  }
+
+  /** Returns null when the port cannot estimate gas or fees, in which case the full allowance is kept. */
+  private async planFreeQuantity(drop: CalendarView, estimator: string | undefined): Promise<QuantityPlan | null> {
+    const { estimateMintGas, baseFeePerGasWei } = this.port;
+    if (!estimator || !estimateMintGas || !baseFeePerGasWei) return null;
+    try {
+      const baseFee = await baseFeePerGasWei.call(this.port);
+      if (baseFee === null || baseFee < 0n) return null;
+      return await planFreeQuantity({ desired: drop.maxPerWallet, allowanceWei: this.options.limits.freeFeeAllowanceWei, maxFeePerGasWei: planningMaxFeeWei(baseFee), gasForQuantity: (quantity) => estimateMintGas.call(this.port, estimator, drop.contract, quantity, 0n) });
+    } catch { return null; }
   }
 
   private alertAllowed(now: number): boolean {
