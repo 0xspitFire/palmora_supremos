@@ -361,3 +361,22 @@ describe('readiness alert bounds (security review T-004)', () => {
     expect(underfunded.every((event) => event.data.priority === 'grouped')).toBe(true);
   });
 });
+
+describe('dashboard labels during the read-only trial (T-006)', () => {
+  it('shows live-minting checks as information in dry-run, and as blockers otherwise', async () => {
+    const trial = new DurableStore();
+    await trial.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: ['DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED', 'BACKUP_NOT_READY'] }; });
+    const models = new Phase2ReadModelService(() => new Date(START));
+    const trialIssues = models.health(trial.snapshot()).issues;
+    expect(trialIssues.length).toBeGreaterThan(0);
+    expect(trialIssues.every((item) => item.severity === 'info')).toBe(true);
+    expect(trialIssues.find((item) => item.code === 'DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED')?.message).toBe('Read-only trial: the bot watches and alerts but cannot mint or spend.');
+    expect(trialIssues.find((item) => item.code === 'ENGINE_NOT_READY')?.message).toMatch(/^Live minting is off during the read-only trial/);
+
+    const live = new DurableStore();
+    await live.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: ['BACKUP_NOT_READY'] }; });
+    const liveIssues = models.health(live.snapshot()).issues;
+    expect(liveIssues.find((item) => item.code === 'BACKUP_NOT_READY')?.severity).toBe('blocking');
+    expect(liveIssues.find((item) => item.code === 'ENGINE_NOT_READY')?.severity).toBe('blocking');
+  });
+});

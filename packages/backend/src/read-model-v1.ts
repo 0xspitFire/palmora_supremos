@@ -885,9 +885,14 @@ export class Phase2ReadModelService {
     const freshness = operational ? classifyFreshness(operational.observedAt, operational.expiresAt, context.now, context.freshnessPolicyVersion) : UNKNOWN_FRESHNESS;
     const dependencyBlockers = Object.entries(runtime.dependencies).filter(([, ready]) => !ready).map(([dependency]) => `${dependency.toUpperCase()}_NOT_READY`);
     const probeBlockers = operational === undefined ? ['RUNTIME_PROBE_REQUIRED'] : freshness.status === 'fresh' ? [] : ['RUNTIME_PROBE_STALE'];
-    const blockers = [...new Set([...runtime.blockingReasons, ...dependencyBlockers, ...probeBlockers])].map(reason => issue(reason, safeHealthMessage(reason), 'blocking', 'No safe action'));
-    for (const [name, ready] of Object.entries(runtime.dependencies)) if (!ready) blockers.push(issue(`${name.toUpperCase()}_NOT_READY`, `${name} dependency is not ready.`, 'blocking', name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
-    if (!operational) blockers.push(issue('OPERATIONAL_READINESS_UNKNOWN', 'Operational readiness evidence is unavailable.', 'blocking', 'Inspect'));
+    // In the read-only trial (dry-run service) the live-minting checks are off by design: shown as
+    // information, not blockers. Live admission enforces its own checks and is unaffected by this label.
+    const readOnlyTrial = runtime.blockingReasons.includes('DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED');
+    const trialOff = (reason: string): boolean => readOnlyTrial && (reason === 'DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED' || reason === 'KILL_SWITCH_ENGAGED' || reason === 'RUNTIME_PROBE_REQUIRED' || reason === 'OPERATIONAL_READINESS_UNKNOWN' || reason.endsWith('_NOT_READY'));
+    const blockers = [...new Set([...runtime.blockingReasons, ...dependencyBlockers, ...probeBlockers])].map(reason => trialOff(reason) ? issue(reason, trialMessage(reason), 'info', 'Inspect') : issue(reason, safeHealthMessage(reason), 'blocking', 'No safe action'));
+    const liveOnly = (code: string, message: string, action: SafeAction): ReadModelIssue => readOnlyTrial ? issue(code, `Live minting is off during the read-only trial: ${message}`, 'info', 'Inspect') : issue(code, message, 'blocking', action);
+    for (const [name, ready] of Object.entries(runtime.dependencies)) if (!ready) blockers.push(liveOnly(`${name.toUpperCase()}_NOT_READY`, `${name} dependency is not ready.`, name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
+    if (!operational) blockers.push(liveOnly('OPERATIONAL_READINESS_UNKNOWN', 'Operational readiness evidence is unavailable.', 'Inspect'));
     else {
       if (!operational.secretStoreReference || !operational.storePath || !operational.lastReconciliationAt) blockers.push(issue('OPERATIONAL_READINESS_INCOMPLETE', 'Operational readiness evidence is incomplete.', 'blocking', 'Inspect'));
       if (!operational.signerReady) blockers.push(issue('SIGNER_NOT_READY', 'The configured signer is not ready.', 'blocking', 'Inspect'));
@@ -1026,4 +1031,9 @@ function dispositionValue(value: unknown): OpportunityReadModel['disposition'] |
 function confidenceValue(value: unknown): OpportunityReadModel['score']['confidence']['label'] { return value === 'low' || value === 'medium' || value === 'high' ? value : 'unknown'; }
 function publicStatusValue(value: unknown): CalendarEntry['publicStatus'] { return value === 'public' || value === 'fcfs' || value === 'allowlist' ? value : 'unknown'; }
 function redactText(value: string): string { return value.replace(/(?:private[_-]?key|mnemonic|seed(?:[_-]?phrase)?|passphrase|password|api[_-]?key|access[_-]?token|secret[_-]?key|auth[_-]?token)\s*[:=]\s*\S+/gi, '$1=[REDACTED]').replace(/0x[0-9a-f]{128,}/gi, '[REDACTED]'); }
+function trialMessage(code: string): string {
+  if (code === 'DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED') return 'Read-only trial: the bot watches and alerts but cannot mint or spend.';
+  if (code === 'KILL_SWITCH_ENGAGED') return 'Safety stop is on, as intended for the read-only trial: no spending is possible.';
+  return `Live minting is off during the read-only trial: ${safeHealthMessage(code).replace(/\.$/, '')}.`;
+}
 function safeHealthMessage(code: string): string { const messages: Record<string, string> = { RECONCILIATION_REQUIRED: 'Reconcile in-flight chain observations before admitting new work.', DURABLE_STORE_REQUIRED: 'A durable store is required.', ATOMIC_STORE_REQUIRED: 'Cross-process atomic storage is required.', CHAIN_NOT_READY: 'Chain observation is not ready.', ENGINE_NOT_READY: 'Engine dependency is not ready.', BACKUP_NOT_READY: 'Backup verification is not ready.', NOTIFICATIONS_NOT_READY: 'Notification dependency is not ready.', KILLED: 'The kill switch is engaged.', UNRESOLVED_EXECUTIONS: 'One or more execution outcomes remain unresolved.' }; return messages[code] ?? 'A runtime dependency is not ready.'; }

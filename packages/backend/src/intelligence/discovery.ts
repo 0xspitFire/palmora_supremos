@@ -32,6 +32,8 @@ export interface DiscoveryTickResult {
   opportunitiesWritten: number;
   calendarWritten: number;
   alertsRaised: number;
+  /** Watched-wallet evidence was partly unavailable; SeaDrop results are still complete. */
+  watchedPartial?: boolean;
 }
 
 interface Tracked {
@@ -120,6 +122,7 @@ export class DiscoveryService {
         const item = this.tracked.get(contract);
         if (item) { item.drop = drop; item.dropReadAt = at; }
       }
+      if (outcome.scan.watchedUnavailable) result.watchedPartial = true;
       result.fromBlock ??= outcome.scan.fromBlock.toString();
       result.toBlock = outcome.scan.toBlock.toString();
       from = outcome.scan.toBlock + 1n;

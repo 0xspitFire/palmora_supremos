@@ -78,7 +78,7 @@ describe('SeaDropObserver', () => {
 
   it('fails the whole scan when logs are unavailable or reorged, and on an invalid range', async () => {
     expect(await new SeaDropObserver(new FixedSource(200n, null)).scan(1n, 2n)).toEqual({ ok: false, reason: 'LOGS_UNAVAILABLE' });
-    expect(await new SeaDropObserver(new FixedSource(200n, [], null)).scan(1n, 2n, [WHALE])).toEqual({ ok: false, reason: 'LOGS_UNAVAILABLE' });
+    expect(await new SeaDropObserver(new FixedSource(200n, [], null)).scan(1n, 2n, [WHALE])).toMatchObject({ ok: true, result: { watchedUnavailable: true, watchedMints: [] } });
     expect(await new SeaDropObserver(new FixedSource(200n, [{ ...mintLog(), removed: true }])).scan(1n, 2n)).toEqual({ ok: false, reason: 'REORGED_LOG' });
     expect(await new SeaDropObserver(new FixedSource(200n, [])).scan(5n, 4n)).toEqual({ ok: false, reason: 'INVALID_RANGE' });
   });
@@ -90,6 +90,23 @@ describe('SeaDropObserver', () => {
     const erc20Style = transferLog(WHALE, 1n, false);
     const outcome = await new SeaDropObserver(new FixedSource(200n, [foreign, garbage, unpositioned], [erc20Style])).scan(1n, 200n, [WHALE]);
     expect(outcome).toMatchObject({ ok: true, result: { mints: [], dropUpdates: [], watchedMints: [], undecodable: 3, ignored: 1 } });
+  });
+
+  it('asks for watched wallets in small chunks and keeps SeaDrop results when a chunk is rejected', async () => {
+    const watched = Array.from({ length: 45 }, (_, index) => `0x${(index + 1).toString(16).padStart(40, '0')}` as Address);
+    let watchedCalls = 0;
+    const source: LogSource = {
+      readHead: async () => fact({ number: 200n }),
+      readLogs: async (filter) => {
+        if (filter.address !== undefined) return fact([mintLog()]);
+        watchedCalls += 1;
+        return fact(watchedCalls === 2 ? null : []);
+      },
+    };
+    const outcome = await new SeaDropObserver(source, { watchedChunk: 20 }).scan(1n, 200n, watched);
+    expect(watchedCalls).toBe(3);
+    expect(outcome).toMatchObject({ ok: true, result: { watchedUnavailable: true, mints: [expect.objectContaining({ quantity: 2n })] } });
+    expect(() => new SeaDropObserver(source, { watchedChunk: 0 })).toThrow('SEADROP_OBSERVER_OPTIONS_INVALID');
   });
 
   it('drops logs outside the requested block range', async () => {

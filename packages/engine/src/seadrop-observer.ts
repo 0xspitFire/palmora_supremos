@@ -40,9 +40,11 @@ export interface ScanResult {
   undecodable: number;
   /** Logs the node returned outside the requested filter; dropped. */
   ignored: number;
+  /** True when at least one watched-wallet chunk could not be read; SeaDrop results are still complete. */
+  watchedUnavailable: boolean;
 }
 
-export type ScanOutcome = { ok: true; result: ScanResult } | { ok: false; reason: 'HEAD_UNAVAILABLE' | 'LOGS_UNAVAILABLE' | 'REORGED_LOG' | 'INVALID_RANGE' };
+export type ScanOutcome = { ok: true; result: ScanResult } | { ok: false; reason: 'HEAD_UNAVAILABLE' | 'LOGS_UNAVAILABLE' | 'REORGED_LOG' | 'INVALID_RANGE'; detail?: string };
 
 export interface SeaDropObserverOptions {
   seaDropAddress?: Address;
@@ -50,18 +52,22 @@ export interface SeaDropObserverOptions {
   confirmations?: bigint;
   /** Most blocks scanned in one call. */
   maxRange?: bigint;
+  /** Most watched addresses per watched-wallet query. */
+  watchedChunk?: number;
 }
 
 export class SeaDropObserver {
   private readonly seaDrop: Address;
   public readonly confirmations: bigint;
   public readonly maxRange: bigint;
+  public readonly watchedChunk: number;
 
   public constructor(private readonly source: LogSource, options: SeaDropObserverOptions = {}) {
     this.seaDrop = options.seaDropAddress ?? SEADROP_V1_ADDRESS;
     this.confirmations = options.confirmations ?? 2n;
     this.maxRange = options.maxRange ?? 500n;
-    if (this.confirmations < 0n || this.maxRange < 1n) throw new Error('SEADROP_OBSERVER_OPTIONS_INVALID');
+    this.watchedChunk = options.watchedChunk ?? 20;
+    if (this.confirmations < 0n || this.maxRange < 1n || !Number.isSafeInteger(this.watchedChunk) || this.watchedChunk < 1) throw new Error('SEADROP_OBSERVER_OPTIONS_INVALID');
   }
 
   /** Highest block considered settled, or null when the head is unknown. */
@@ -77,15 +83,19 @@ export class SeaDropObserver {
     if (fromBlock < 0n || toBlock < fromBlock) return { ok: false, reason: 'INVALID_RANGE' };
     const end = toBlock - fromBlock + 1n > this.maxRange ? fromBlock + this.maxRange - 1n : toBlock;
     const seaDropLogs = await this.source.readLogs({ address: this.seaDrop, fromBlock, toBlock: end, topics: [[SEADROP_MINT_TOPIC, PUBLIC_DROP_UPDATED_TOPIC]] });
-    if (seaDropLogs.availability === 'unavailable' || seaDropLogs.value === null) return { ok: false, reason: 'LOGS_UNAVAILABLE' };
-    let watchedLogs: readonly ChainLog[] = [];
-    if (watched.length > 0) {
-      const fact = await this.source.readLogs({ fromBlock, toBlock: end, topics: [ERC721_TRANSFER_TOPIC, pad(zeroAddress), watched.map((address) => pad(address.toLowerCase() as Address))] });
-      if (fact.availability === 'unavailable' || fact.value === null) return { ok: false, reason: 'LOGS_UNAVAILABLE' };
-      watchedLogs = fact.value;
+    if (seaDropLogs.availability === 'unavailable' || seaDropLogs.value === null) return { ok: false, reason: 'LOGS_UNAVAILABLE', ...(seaDropLogs.errorDetail ? { detail: seaDropLogs.errorDetail } : {}) };
+    // Watched-wallet mints are best-effort evidence: providers often reject large address-less topic
+    // queries, so they are asked in small chunks and a rejected chunk never fails the SeaDrop scan.
+    const watchedLogs: ChainLog[] = [];
+    let watchedUnavailable = false;
+    for (let start = 0; start < watched.length; start += this.watchedChunk) {
+      const chunk = watched.slice(start, start + this.watchedChunk);
+      const fact = await this.source.readLogs({ fromBlock, toBlock: end, topics: [ERC721_TRANSFER_TOPIC, pad(zeroAddress), chunk.map((address) => pad(address.toLowerCase() as Address))] });
+      if (fact.availability === 'unavailable' || fact.value === null) { watchedUnavailable = true; continue; }
+      watchedLogs.push(...fact.value);
     }
     if ([...seaDropLogs.value, ...watchedLogs].some((log) => log.removed)) return { ok: false, reason: 'REORGED_LOG' };
-    const result: ScanResult = { fromBlock, toBlock: end, mints: [], dropUpdates: [], watchedMints: [], undecodable: 0, ignored: 0 };
+    const result: ScanResult = { fromBlock, toBlock: end, mints: [], dropUpdates: [], watchedMints: [], undecodable: 0, ignored: 0, watchedUnavailable };
     const inRange = (log: ChainLog): boolean => log.blockNumber !== null && log.blockNumber >= fromBlock && log.blockNumber <= end;
     for (const log of seaDropLogs.value) {
       if (!inRange(log)) { result.ignored += 1; continue; }
