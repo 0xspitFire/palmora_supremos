@@ -123,8 +123,8 @@ export interface DropConfig {
  * and build the appropriate calldata. The engine is strategy-agnostic;
  * it delegates all contract-specific logic through this interface.
  *
- * Phase 1: SeaDropV1PublicStrategy, RawCalldataStrategy
- * Phase 2+: ManifoldStrategy, ThirdwebStrategy, etc.
+ * Implemented: SeaDropV1PublicStrategy. Other mint standards need a reviewed strategy with
+ * fork fixtures (FR-STRAT-004). A generic raw-calldata strategy is not allowed (D-006).
  */
 export interface MintStrategy {
   readonly name: string;
