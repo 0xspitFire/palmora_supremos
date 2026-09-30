@@ -41,7 +41,6 @@ export type {
   SignerFactory,
   ExecutionReservationRequest,
   ExecutionReservationStatus,
-  SpendReservationsPort,
   SimulationEvidence,
   FlashbotsAuthSigner,
 } from './types.js';

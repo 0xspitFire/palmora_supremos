@@ -381,18 +381,6 @@ export interface ExecutionReservationRequest {
 
 export type ExecutionReservationStatus = 'reserved' | 'settled' | 'released' | 'expired';
 
-/** Database SpendReservations port. Implemented by the database package. */
-export interface SpendReservationsPort {
-  reserveExecution(request: ExecutionReservationRequest): ExecutionReservationStatus;
-  settleExecution(
-    id: string,
-    actualMintValueWei: bigint,
-    actualL2ExecutionGasWei: bigint,
-    actualL1DataGasWei: bigint,
-    at?: Date,
-  ): void;
-}
-
 export interface SimulationEvidence {
   readonly walletIndex: number;
   readonly address: Address;

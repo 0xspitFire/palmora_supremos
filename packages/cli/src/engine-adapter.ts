@@ -219,6 +219,42 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
   };
 }
 
+/**
+ * Pre-sign guard (T-010, D-019): the transaction the engine is about to sign must match what was
+ * admitted. Its value must equal the admitted price × quantity, and value plus worst-case gas must fit
+ * inside the durable reservation. A price change or fee rise after admission refuses signing
+ * instead of being discovered at settlement after broadcast.
+ */
+export function assertWithinAdmittedExposure(input: { valueWei: bigint; maxGasCostWei: bigint; l1DataGasWei: bigint }, campaign: Pick<Campaign, 'mintPriceWei' | 'quantity'>, reservation: { amountWei: bigint }): void {
+  const admittedValueWei = campaign.mintPriceWei * BigInt(campaign.quantity);
+  if (input.valueWei !== admittedValueWei) throw new Error('MINT_VALUE_CHANGED_SINCE_ADMISSION');
+  if (input.maxGasCostWei < 0n || input.l1DataGasWei < 0n) throw new Error('EXPOSURE_EXCEEDS_RESERVATION');
+  if (input.valueWei + input.maxGasCostWei + input.l1DataGasWei > reservation.amountWei) throw new Error('EXPOSURE_EXCEEDS_RESERVATION');
+}
+
+/**
+ * The complete pre-sign gate, run by the adapter's reserve step before the engine may sign (T-010):
+ * kill switch, durable reservation present and `reserved`, canonical identity, then admitted value and
+ * exposure. Returns the reservation to settle against; any failure throws and nothing is signed.
+ */
+export function preSignReservationGate<R extends { status: string; amountWei: bigint }>(args: {
+  killed: boolean;
+  byWallet: ReadonlyMap<string, R>;
+  runId: string;
+  intentId: string;
+  campaign: Pick<Campaign, 'id' | 'mintPriceWei' | 'quantity'>;
+  input: { address: string; walletIndex: number; runId: string; campaignId: string; executionId: string; transactionIntentId: string; valueWei: bigint; maxGasCostWei: bigint; l1DataGasWei: bigint };
+}): R {
+  const { killed, byWallet, runId, intentId, campaign, input } = args;
+  if (killed) throw new Error('KILLED');
+  const reservation = byWallet.get(input.address.toLowerCase());
+  if (!reservation || reservation.status !== 'reserved') throw new Error('DURABLE_RESERVATION_REQUIRED');
+  const expectedIdentity = canonicalExecutionIdentity(runId, intentId, input.walletIndex, input.address as Address);
+  if (input.runId !== runId || input.campaignId !== campaign.id || input.executionId !== expectedIdentity.executionId || input.transactionIntentId !== expectedIdentity.transactionIntentId) throw new Error('CANONICAL_IDENTITY_REQUIRED');
+  assertWithinAdmittedExposure(input, campaign, reservation);
+  return reservation;
+}
+
 export function createMintEngineAdapter(options: MintEngineAdapterOptions): EngineAdapter {
   const run = async (campaign: Campaign, wallets: readonly string[], dryRun: boolean, runId: string, intentId?: string, reservationProvider?: SpendReservationProvider): Promise<ExecutionResult> => {
     await assertWalletSelection(options, wallets);
@@ -252,11 +288,7 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
         durable: true,
         storeKind: 'normalized-sqlite',
         reserve: async (input) => {
-          if (options.getState().killed) throw new Error('KILLED');
-          const reservation = byWallet.get(input.address.toLowerCase());
-          if (!reservation || reservation.status !== 'reserved') throw new Error('DURABLE_RESERVATION_REQUIRED');
-          const expectedIdentity = canonicalExecutionIdentity(runId, intentId, input.walletIndex, input.address);
-          if (input.runId !== runId || input.campaignId !== campaign.id || input.executionId !== expectedIdentity.executionId || input.transactionIntentId !== expectedIdentity.transactionIntentId) throw new Error('CANONICAL_IDENTITY_REQUIRED');
+          const reservation = preSignReservationGate({ killed: options.getState().killed, byWallet, runId, intentId, campaign, input });
           const settleTotal = async (components: ReservationSettlementComponents): Promise<void> => {
             if (options.settleComponents) {
               await options.settleComponents(reservation.id, components);

@@ -6,7 +6,7 @@ import type { ActiveExecutionRow, ChainVerificationRow, DuplicateNonceIdentityRo
 import type { AlertRow, EventRow, FinalityObservationView, JobRow, OpportunityDetailRow, SpendSummaryRow, WalletMetadataRow } from './phase2.js';
 import type { AuditEventRecord, ChainVerificationRecord, ExecutionRecord, ExecutionRunRecord, ReceiptRecord, ReconciliationRecord, ReorgEventRecord, ReorgResolutionRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
 import { SpendReservations } from './spend-reservations.js';
-import type { ExecutionReservationRequest, ReservationStatus, SettlementComponents } from './spend-reservations.js';
+import type { SettlementComponents } from './spend-reservations.js';
 
 export interface BackendStore {
   saveRun(record: ExecutionRunRecord): void;
@@ -22,8 +22,6 @@ export interface BackendStore {
   recordAuditEvent(record: AuditEventRecord): void;
   recordChainVerification(record: ChainVerificationRecord): void;
   recordRetentionEvidence(record: RetentionEvidenceRecord): void;
-  reserveExecution(request: ExecutionReservationRequest): ReservationStatus;
-  reserveExecutionBundle(intent: TransactionIntentRecord, execution: ExecutionRecord, request: ExecutionReservationRequest): ReservationStatus;
   settleExecution(id: string, mintValueWei: bigint, l2ExecutionGasWei: bigint, l1DataGasWei: bigint): void;
   settleExecutionComponents(id: string, components: SettlementComponents, at?: Date): void;
   readiness(campaignId: string, asOf?: Date): ReadinessRow[];
@@ -80,7 +78,7 @@ export class SqliteBackendStore implements BackendStore {
   private readonly reservations: SpendReservations;
   private readonly readModels: ReadModels;
 
-  public constructor(private readonly db: SqliteDatabase) {
+  public constructor(db: SqliteDatabase) {
     this.repository = new DurableRepository(db);
     this.reservations = new SpendReservations(db);
     this.readModels = new ReadModels(db);
@@ -99,21 +97,6 @@ export class SqliteBackendStore implements BackendStore {
   public recordAuditEvent(record: AuditEventRecord): void { this.repository.recordAuditEvent(record); }
   public recordChainVerification(record: ChainVerificationRecord): void { this.repository.recordChainVerification(record); }
   public recordRetentionEvidence(record: RetentionEvidenceRecord): void { this.repository.recordRetentionEvidence(record); }
-  public reserveExecution(request: ExecutionReservationRequest): ReservationStatus { return this.reservations.reserveExecution(request); }
-  public reserveExecutionBundle(intent: TransactionIntentRecord, execution: ExecutionRecord, request: ExecutionReservationRequest): ReservationStatus {
-    if (execution.transactionIntentId !== intent.id || request.transactionIntentId !== intent.id || request.executionId !== execution.id) throw new Error('execution reservation bundle identity mismatch');
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      this.repository.saveIntent(intent);
-      this.repository.saveExecution(execution);
-      const result = this.reservations.reserveExecution(request);
-      this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
   public settleExecution(id: string, mintValueWei: bigint, l2ExecutionGasWei: bigint, l1DataGasWei: bigint): void { this.reservations.settleExecution(id, mintValueWei, l2ExecutionGasWei, l1DataGasWei); }
   public settleExecutionComponents(id: string, components: SettlementComponents, at?: Date): void { this.reservations.settleExecutionComponents(id, components, at); }
   public readiness(campaignId: string, asOf?: Date): ReadinessRow[] { return this.readModels.readiness(campaignId, asOf); }

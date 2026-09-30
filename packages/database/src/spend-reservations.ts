@@ -192,6 +192,11 @@ export class SpendReservations {
     });
   }
 
+  /**
+   * Database-layer reservation, exercised by tests of the SQL trigger guards. It is NOT an admission
+   * authority and has no runtime caller: live spend is reserved only by CanonicalStoreBridge.admitExecution,
+   * which also enforces the per-run, per-wallet and fleet limits (T-010).
+   */
   public reserveExecution(request: ExecutionReservationRequest): ReservationStatus {
     const replacementBudgetWei = request.replacementBudgetWei ?? 0n;
     const mintValueBufferWei = request.mintValueBufferWei ?? 0n;
