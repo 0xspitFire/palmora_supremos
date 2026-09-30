@@ -19,8 +19,6 @@ export { normalizeError } from './errors.js';
 export type { BackendErrorCode, NormalizedError } from './errors.js';
 export { APPROVED_KEYSTORE_REFERENCE, MAINNET_SECRET_FILE_REFERENCE, assertSafeConfig } from './config.js';
 export type { BackendConfig, SecretReference, SecretStore } from './config.js';
-export { ReadModelService } from './read-model.js';
-export type { RunReadModel, AlertProjection, CalendarProjection, FinalityProjection, HomeProjection, ReadinessProjection, ReadModelSeverity, SystemHealthProjection, WalletReadinessProjection } from './read-model.js';
 export { Phase2ReadModelService, ReadModelV1Service, READ_MODEL_CONTRACT, READ_MODEL_VERSION } from './read-model-v1.js';
 export type {
   AlertReadModel,
@@ -53,8 +51,8 @@ export type {
   WalletReadinessRow,
   ReconciliationReadModel,
 } from './read-model-v1.js';
-export { Phase2ReadOnlyApi, ReadOnlyApi, ReadModelApi } from './api.js';
-export type { Phase2ReadOnlyApiResponse, ReadOnlyApiRequest, ReadOnlyApiResponse } from './api.js';
+export { Phase2ReadOnlyApi, ReadModelApi } from './api.js';
+export type { Phase2ReadOnlyApiResponse, ReadOnlyApiRequest } from './api.js';
 export { normalizeTotalFeeBudget } from './fees.js';
 export type { FeeBudgetInput } from './fees.js';
 export { resolveWalletPath } from './keystore-path.js';

@@ -2,12 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Phase2ReadOnlyApi, ReadOnlyApi } from './api.js';
+import { Phase2ReadOnlyApi } from './api.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { NotificationDispatcher } from './notifications.js';
 import { Orchestrator } from './orchestrator.js';
 import { PHASE2_DEFAULTS } from './phase2-defaults.js';
-import { ReadModelService } from './read-model.js';
 import { Phase2ReadModelService } from './read-model-v1.js';
 import { DurableStore } from './store.js';
 import type { Campaign, EngineAdapter, RunRecord } from './types.js';
@@ -74,12 +73,15 @@ describe('Phase 2 backend operational shell', () => {
     const store = new DurableStore();
     await store.transaction((state) => {
       state.campaigns.push(structuredClone(campaign));
-      state.readiness.push({ campaignId: campaign.id, wallet: 'wallet-a', state: 'Ready', freshUntil: '2020-01-01T00:00:00.000Z', observedAt: '2019-12-31T23:00:00.000Z', blockingReasons: [], checks: { funded: true, eligible: true, constructible: true, simulated: true, gasPolicy: true } });
+      state.simulations.push({ id: 'sim-stale', campaignId: campaign.id, wallet: 'wallet-a', inputDigest: 'digest', success: true, sourceBlock: 1n, sourceBlockHash: '0xblock', checkedAt: '2019-12-31T23:00:00.000Z', expiresAt: '2020-01-01T00:00:00.000Z', worstCaseFeeWei: 1n });
     });
-    const response = new ReadModelService(store, () => new Date(NOW)).getReadinessEnvelope(campaign.id, 'readiness-request');
-    expect(response.availability).toBe('stale');
-    expect(response.data?.rows[0]?.decision).toBe('stale');
-    expect(response.data?.rows[0]?.cost.balance).toBeNull();
+    const response = new Phase2ReadModelService(() => new Date(NOW)).readiness(store.snapshot(), campaign.id, { requestId: 'readiness-request' });
+    const row = response.data?.[0];
+    expect(row?.decision).not.toBe('ready');
+    expect(row?.checks.find((check) => check.code === 'simulated')?.outcome).toBe('stale');
+    expect(row?.checks.find((check) => check.code === 'funded')?.outcome).toBe('unknown');
+    expect(row?.checks.find((check) => check.code === 'eligible')?.outcome).toBe('unknown');
+    expect(row?.cost.balance).toBeNull();
   });
 
   it('does not settle a completed Ethereum run until receipt finality is authoritative', async () => {
@@ -92,12 +94,12 @@ describe('Phase 2 backend operational shell', () => {
       state.attempts.push({ id: 'attempt-finality', executionId: 'execution-finality', runId: completedRun.id, wallet: 'wallet-a', nonce: 8, hash: `0x${'c'.repeat(64)}`, state: 'Confirmed', createdAt: NOW, updatedAt: NOW });
       state.receipts.push({ id: 'receipt-finality', executionId: 'execution-finality', runId: completedRun.id, transactionAttemptId: 'attempt-finality', state: 'Confirmed', blockNumber: 20n, blockHash: `0x${'d'.repeat(64)}`, observedAt: NOW });
     });
-    const service = new ReadModelService(store, () => new Date(NOW));
-    const pending = service.getRunEnvelope(completedRun.id, 'finality-pending');
+    const service = new Phase2ReadModelService(() => new Date(NOW));
+    const pending = service.run(store.snapshot(), completedRun.id, { requestId: 'finality-pending' });
     expect(pending.data?.run.outcome).toBe('partial');
     expect(pending.data?.walletResults[0]?.finality).toMatchObject({ requiredStage: 'confirmed', stage: 'unknown', settlementReached: false });
     await store.transaction((state) => { state.receipts[0]!.finalityStage = 'ethereum_final'; });
-    const settled = service.getRunEnvelope(completedRun.id, 'finality-settled');
+    const settled = service.run(store.snapshot(), completedRun.id, { requestId: 'finality-settled' });
     expect(settled.data?.run.outcome).toBe('settled');
     expect(settled.data?.walletResults[0]?.finality).toMatchObject({ requiredStage: 'confirmed', stage: 'confirmed', settlementReached: true });
   });
@@ -110,7 +112,7 @@ describe('Phase 2 backend operational shell', () => {
       state.runtime.operational = { secretStoreReference: 'TOP_SECRET', storePath: '/secret/path', signerReady: true, custody: { provider: 'turnkey', providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-test-policy', policyDigest: `0x${'1'.repeat(64)}`, policyStatus: 'approved', healthStatus: 'healthy', attestationStatus: 'verified', evidenceId: 'custody-evidence-1', observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' }, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: NOW, observedAt: NOW, expiresAt: '2099-01-01T00:00:00.000Z' };
       state.attempts.push({ id: 'attempt-redaction', executionId: 'execution-redaction', runId: currentRun.id, wallet: 'wallet-a', nonce: 1, hash: `0x${'b'.repeat(64)}`, endpoint: 'https://user:password@provider.invalid', redactedError: 'privateKey=secret calldata=0xdead', state: 'Failed', createdAt: NOW, updatedAt: NOW });
     });
-    const response = new ReadModelService(store, () => new Date(NOW)).getRunEnvelope(currentRun.id, 'redaction-request');
+    const response = new Phase2ReadModelService(() => new Date(NOW)).run(store.snapshot(), currentRun.id, { requestId: 'redaction-request' });
     const encoded = JSON.stringify(response);
     expect(encoded).not.toContain('TOP_SECRET');
     expect(encoded).not.toContain('/secret/path');
@@ -136,7 +138,7 @@ describe('Phase 2 backend operational shell', () => {
 
   it('exposes only GET read-model operations', async () => {
     const store = new DurableStore();
-    const api = new ReadOnlyApi(new ReadModelService(store, () => new Date(NOW)));
+    const api = new Phase2ReadOnlyApi(new Phase2ReadModelService(() => new Date(NOW)), store);
     const response = api.handle({ method: 'POST', path: '/api/v1/read-model/health', requestId: 'api-request' });
     expect(response.status).toBe(405);
     expect(response.headers.allow).toBe('GET');

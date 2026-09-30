@@ -6,7 +6,7 @@ The product optimizes **selection quality and explainability over blind speed**.
 
 ## Status
 
-Phase 1 local/controlled execution and Phase 2 read-only intelligence foundations are integrated in the protected `main` branch. Production and live execution remain separately gated and are not implied by local tests, fork replays, or working Turnkey health.
+Phase 1 (execution foundation) is complete for local/controlled use. Phase 2 (read-only intelligence: discovery, scoring, calendar, wallet readiness, Telegram alerts and a loopback dashboard) is merged and in its live exit trial; the exit requires a multi-day run on real Ethereum data. Production and live execution remain separately gated and are not implied by local tests, fork replays, or working Turnkey health.
 
 Current live boundary:
 
