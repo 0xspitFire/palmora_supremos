@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChainScanOutcome, DropSnapshot, IntelligenceChainPort, SimulationOutcome } from '@mint-bot/backend';
-import { checkDrop } from './drop-check.js';
+import { checkDrop, planAutoQuantity } from './drop-check.js';
 
 const NFT = '0x3333333333333333333333333333333333333333';
 const W1 = '0x1111111111111111111111111111111111111111';
@@ -75,5 +75,44 @@ describe('checkDrop (CLI validate/simulate)', () => {
     const report = await checkDrop(port, NFT, [W1], { simulate: true, now: NOW });
     expect(report.wallets[0]).toMatchObject({ verdict: 'funded', simulation: 'not run' });
     expect(port.simulated).toEqual([]);
+  });
+
+  it('plans fewer NFTs for a free mint when fees are high and explains it in the report (D-037)', async () => {
+    const port = new Port() as Port & { estimateMintGas?: (w: string, c: string, q: number) => Promise<bigint | null>; baseFeePerGasWei?: () => Promise<bigint | null> };
+    port.estimateMintGas = async (_wallet, _contract, quantity) => 101_101n + 69_131n * BigInt(quantity);
+    port.baseFeePerGasWei = async () => 450_000_000n;
+    port.balances.set(W1, 10n ** 18n);
+    const report = await checkDrop(port, NFT, [W1], { simulate: false, now: NOW });
+    expect(report.quantity).toBe(3);
+    expect(report.quantityPlan).toMatchObject({ desired: 5, planned: 3, reduced: true, reason: 'reduced_for_fees' });
+    expect(report.summary).toContain('Planned 3 of 5 NFTs per wallet: at 1 gwei');
+  });
+
+  it('blocks a free mint with the reason when even one NFT does not fit, and never reduces an explicit quantity', async () => {
+    const port = new Port() as Port & { estimateMintGas?: (w: string, c: string, q: number) => Promise<bigint | null>; baseFeePerGasWei?: () => Promise<bigint | null> };
+    port.estimateMintGas = async (_wallet, _contract, quantity) => 101_101n + 69_131n * BigInt(quantity);
+    port.baseFeePerGasWei = async () => 3n * 10n ** 9n;
+    port.balances.set(W1, 10n ** 18n);
+    const blocked = await checkDrop(port, NFT, [W1], { simulate: false, now: NOW });
+    expect(blocked).toMatchObject({ verdict: 'blocked', quantity: 0, quantityPlan: { reason: 'cannot_fit_one' } });
+    const explicit = await checkDrop(port, NFT, [W1], { simulate: false, quantity: 2, now: NOW });
+    expect(explicit.quantity).toBe(2);
+    expect(explicit.quantityPlan).toBeUndefined();
+  });
+
+  it('plans `mint --auto-quantity` from the drop allowance, refuses a drop with no allowance, and refuses when 1 does not fit', async () => {
+    const port = new Port() as Port & { estimateMintGas?: (w: string, c: string, q: number) => Promise<bigint | null>; baseFeePerGasWei?: () => Promise<bigint | null> };
+    port.estimateMintGas = async (_wallet, _contract, quantity) => 101_101n + 69_131n * BigInt(quantity);
+    port.baseFeePerGasWei = async () => 450_000_000n;
+    const plan = await planAutoQuantity(port, { contract: NFT, wallet: W1, maxPerWallet: 5 });
+    expect(plan).toMatchObject({ desired: 5, planned: 3, reduced: true });
+    const asked = await planAutoQuantity(port, { contract: NFT, wallet: W1, maxPerWallet: 2 });
+    expect(asked.planned).toBeLessThanOrEqual(2);
+    await expect(planAutoQuantity(port, { contract: NFT, wallet: W1, maxPerWallet: 0 })).rejects.toThrow('NO_MINT_ALLOWANCE');
+    port.baseFeePerGasWei = async () => 3n * 10n ** 9n;
+    await expect(planAutoQuantity(port, { contract: NFT, wallet: W1, maxPerWallet: 5 })).rejects.toThrow('FEES_TOO_HIGH_FOR_FREE_MINT');
+    port.baseFeePerGasWei = async () => null;
+    await expect(planAutoQuantity(port, { contract: NFT, wallet: W1, maxPerWallet: 5 })).rejects.toThrow('BASE_FEE_UNAVAILABLE');
+    await expect(planAutoQuantity(new Port(), { contract: NFT, wallet: W1, maxPerWallet: 5 })).rejects.toThrow('AUTO_QUANTITY_NEEDS_GAS_ESTIMATES');
   });
 });

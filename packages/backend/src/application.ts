@@ -98,7 +98,7 @@ export class BackendApplication {
       const state = this.store.snapshot();
       const runId = typeof input.runId === 'string' ? input.runId : undefined;
       const runs = runId ? state.runs.filter(run => run.id === runId) : state.runs;
-      return { id: runId ?? 'summary', state: 'Summarized', nextAction: 'Inspect canonical run facts', createdAt: now, retryable: false, data: runs.map(run => ({ run, campaign: state.campaigns.find(campaign => campaign.id === run.campaignId), attempts: state.attempts.filter(attempt => attempt.runId === run.id), receipts: state.receipts.filter(receipt => receipt.runId === run.id), reconciliations: state.reconciliations.filter(item => item.runId === run.id), reservations: state.reservations.filter(item => item.runId === run.id) })) as T };
+      return { id: runId ?? 'summary', state: 'Summarized', nextAction: 'Inspect canonical run facts', createdAt: now, retryable: false, data: runs.map(run => ({ run, campaign: state.campaigns.find(campaign => campaign.id === run.campaignId), attempts: state.attempts.filter(attempt => attempt.runId === run.id), receipts: state.receipts.filter(receipt => receipt.runId === run.id), reconciliations: state.reconciliations.filter(item => item.runId === run.id), reservations: state.reservations.filter(item => item.runId === run.id), ...quantityPlanFor(state.events, run.id) })) as T };
     }
     if (name === 'fund') {
       const state = this.store.snapshot();
@@ -145,4 +145,10 @@ export class BackendApplication {
     const now = new Date().toISOString(); const campaign: Campaign = { id: `cmp_${randomUUID()}`, state: 'Draft', chainId: input.chainId, contract: input.contract, strategy: input.strategy, quantity: input.quantity, dryRun: input.dryRun ?? true, spendPolicy: { maxRunWei: input.maxRunWei, dailyCapWei: input.dailyCapWei, gasCeilingWei: input.gasCeilingWei }, chainVerification: input.chainVerification, mintPriceWei, feePolicy: input.feePolicy, ...(input.broadcastMode ? { broadcastMode: input.broadcastMode } : {}), ...(input.openingAt ? { openingAt: input.openingAt } : {}), ...(input.tMinusMs === undefined ? {} : { tMinusMs: input.tMinusMs }), createdAt: now, updatedAt: now };
     await this.store.transaction(state => { state.campaigns.push(campaign); }); return campaign;
   }
+}
+
+/** The fee-driven quantity explanation recorded on a run (D-037), so the post-mint summary can say why fewer NFTs were planned. */
+function quantityPlanFor(events: readonly { runId?: string; type: string; at: string; data: Record<string, unknown> }[], runId: string): { quantityPlan?: Record<string, unknown> } {
+  const latest = events.filter((event) => event.runId === runId && event.type === 'quantity_plan').sort((left, right) => left.at.localeCompare(right.at)).at(-1);
+  return latest ? { quantityPlan: { ...latest.data } } : {};
 }
