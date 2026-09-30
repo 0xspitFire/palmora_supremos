@@ -15,7 +15,7 @@ import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
 import { resolveChainByNameFromSecrets } from '@mint-bot/engine';
-import { checkDrop } from './drop-check.js';
+import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 
 /** Read-only Ethereum port for CLI checks; the RPC value stays in memory and is never printed. */
@@ -401,6 +401,7 @@ const cli = yargs(hideBin(process.argv))
     .option('contract', { type: 'string', demandOption: true })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
     .option('quantity', { type: 'number', default: 1 })
+    .option('auto-quantity', { type: 'boolean', default: false, describe: 'Plan the quantity from the drop allowance and the current fee (D-037); the reason is recorded in the run and printed' })
     .option('max-wallets', { type: 'number', default: 10 })
     .option('max-spend-eth', { type: 'number', default: 1 })
     .option('daily-cap-eth', { type: 'number', default: 2 })
@@ -416,18 +417,28 @@ const cli = yargs(hideBin(process.argv))
         const chainId = args.chain === 'ethereum' ? 1 : 4663;
         const priorityFee = parseGwei(args.priorityFeeGwei.toString());
         // The mint price comes from chain (T-004, P2-08), never an assumed zero.
-        const drop = chainId === 1 ? await (await ethereumPort()).readDrop(args.contract) : null;
+        const port = chainId === 1 ? await ethereumPort() : null;
+        const drop = port ? await port.readDrop(args.contract) : null;
         if (chainId === 1 && !drop) throw new Error('DROP_UNAVAILABLE');
         // Paid drops are not run through this free-mint dry-run path (a spend-path change needs owner sign-off);
         // use the read-only `simulate` command, which uses the real price.
         if ((drop?.priceWei ?? 0n) > 0n) throw new Error('PAID_DROP_USE_SIMULATE_COMMAND');
         const feePolicy = { kind: 'free' as const, configuredPriorityFeeWei: priorityFee, freeTotalSpendCapWei: priorityFee * 2n, l2ExecutionGasBudgetWei: 0n, l1DataGasBudgetWei: 0n, totalFeeBudgetWei: priorityFee };
         const runtime = await createCliRuntime(runtimeRoot, undefined, process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', { walletFile: file, maxFeePerGasGwei: args.maxFeeGwei, gasLimitPadding: args.gasPadding, killSwitchFile: DEFAULT_KILL_FILE, logFile: join(runtimeRoot, 'Rets', 'state', 'mint-bot.log') });
+        // D-037: with --auto-quantity, mint as many per wallet as the drop allows and the fee allowance covers, and say why when fewer.
+        let quantityPlan: { desired: number; planned: number; reduced: boolean; reason: string; maxFeeGwei: string; message: string } | undefined;
+        let quantity = args.quantity;
+        if (args.autoQuantity) {
+          if (!port || !drop) throw new Error('AUTO_QUANTITY_NEEDS_ETHEREUM_DROP');
+          const plan = await planAutoQuantity(port, { contract: args.contract, wallet: wallets[0]!, maxPerWallet: drop.maxPerWallet, gasPaddingPercent: Math.round(args.gasPadding * 100) });
+          quantityPlan = { desired: plan.desired, planned: plan.planned, reduced: plan.reduced, reason: plan.reason, maxFeeGwei: plan.maxFeeGwei, message: plan.message };
+          quantity = plan.planned;
+        }
         const campaign = await runtime.application.createCampaign({
           chainId,
           contract: args.contract,
           strategy: 'seadrop-v1-public',
-          quantity: args.quantity,
+          quantity,
           dryRun: true,
           maxRunWei: parseEther(args.maxSpendEth.toString()),
           dailyCapWei: parseEther(args.dailyCapEth.toString()),
@@ -439,8 +450,10 @@ const cli = yargs(hideBin(process.argv))
         });
         const validated = { campaign, wallets, evidenceAt: new Date().toISOString(), simulationIds: [] };
         const armed = await runtime.application.command('arm', { validated, mode: 'dry-run' });
+        // The owner must always be told why fewer NFTs than expected were planned (D-037): record it on the run (shown in the run summary).
+        if (quantityPlan) await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, runId: armed.id, type: 'quantity_plan', at: new Date().toISOString(), data: { ...quantityPlan } }); });
         const result = await runtime.application.command('execute', { runId: armed.id, wallets });
-        process.stdout.write(`${json(result)}\n`);
+        process.stdout.write(`${json(quantityPlan ? { ...result, quantityPlan } : result)}\n`);
       } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
     })
   .command('reconcile', 'Reconcile persisted in-flight runs before admission', {}, async () => {

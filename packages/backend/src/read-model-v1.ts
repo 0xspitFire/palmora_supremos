@@ -471,7 +471,7 @@ export class Phase2ReadModelService {
   }
 
   private envelope<T>(context: ProjectionContext, data: T | null, issues: readonly ReadModelIssue[], freshness: Freshness, nextCursor?: string): ReadModelEnvelope<T> {
-    const availability: ReadModelAvailability = data === null ? 'unavailable' : issues.some(item => item.severity === 'blocking') && freshness.status === 'unknown' ? 'unavailable' : freshness.status === 'stale' ? 'stale' : issues.length > 0 ? 'partial' : 'available';
+    const availability: ReadModelAvailability = data === null ? 'unavailable' : issues.some(item => item.severity === 'blocking') && freshness.status === 'unknown' ? 'unavailable' : freshness.status === 'stale' ? 'stale' : issues.some(item => item.severity !== 'info') ? 'partial' : 'available';
     const snapshotId = context.request.snapshotId ?? digestState(context.state);
     const result: ReadModelEnvelope<T> = {
       contract: READ_MODEL_CONTRACT,
@@ -744,6 +744,8 @@ export class Phase2ReadModelService {
     const priceEvent = [...context.state.events].reverse().find(event => event.type === 'calendar_entry' && event.data.id === entryId);
     const mintValue = bigintValue(priceEvent?.data.priceWei) === null ? null : bigintValue(priceEvent?.data.priceWei)! * quantity;
     const fee = required !== null && mintValue !== null && required >= mintValue ? required - mintValue : null;
+    const quantityPlan = typeof latest.data.quantityPlan === 'object' && latest.data.quantityPlan !== null ? latest.data.quantityPlan as Record<string, unknown> : null;
+    const quantityNote = quantityPlan?.reduced === true && typeof quantityPlan.message === 'string' ? safeReadModelText(quantityPlan.message) : null;
     return (latest.data.rows as Array<Record<string, unknown>>).map((row) => {
       const address = stringValue(row.wallet) ?? 'unknown';
       const state = stringValue(row.state) ?? 'unknown';
@@ -755,7 +757,10 @@ export class Phase2ReadModelService {
       const blocked = state === 'unfunded' || state === 'blocked' || state === 'skipped';
       const decision: WalletReadinessRow['decision'] = freshness.status === 'stale' ? 'stale' : state === 'ready' ? 'ready' : blocked ? 'blocked' : 'unknown';
       const stateLabel: WalletReadinessRow['state'] = state === 'ready' ? 'Ready' : state === 'funded' ? 'Funded' : state === 'unfunded' ? 'Unfunded' : state === 'skipped' ? 'Skipped' : 'Unknown';
-      const blockers = blocked || state === 'unknown' ? [issue(reason, readinessReasonText(reason, topUp), blocked ? 'blocking' : 'warning', state === 'unfunded' ? 'Fund wallet' : 'Inspect', provenance)] : [];
+      const blockers = [
+        ...(blocked || state === 'unknown' ? [issue(reason, readinessReasonText(reason, topUp), blocked ? 'blocking' : 'warning', state === 'unfunded' ? 'Fund wallet' : 'Inspect', provenance)] : []),
+        ...(quantityNote ? [issue('QUANTITY_REDUCED', quantityNote, 'info', 'Inspect', provenance)] : []),
+      ];
       return {
         campaignId: entryId,
         wallet: { id: address, address, label: null },
@@ -865,7 +870,7 @@ export class Phase2ReadModelService {
 
   private timelineEvent(event: EventRecord): TimelineEvent {
     const observedAt = validIso(event.at) ?? new Date(0).toISOString();
-    return { id: event.id, type: event.type, state: stringValue(event.data.state) ?? null, occurredAt: observedAt, message: event.type.replaceAll('_', ' '), provenance: storeProvenance(`event:${event.id}`, observedAt) };
+    return { id: event.id, type: event.type, state: stringValue(event.data.state) ?? null, occurredAt: observedAt, message: event.type === 'quantity_plan' ? (safeReadModelText(stringValue(event.data.message)) ?? 'quantity plan') : event.type.replaceAll('_', ' '), provenance: storeProvenance(`event:${event.id}`, observedAt) };
   }
 
   private projectAlerts(context: ProjectionContext, request: ProjectionRequest): ProjectionResult<readonly AlertReadModel[]> {
@@ -1018,6 +1023,7 @@ function readinessReasonText(reason: string, topUp: bigint | null): string {
   if (reason === 'PAID_WALLET_LIMIT') return 'Only two wallets are used for a paid mint; this one is not needed.';
   if (reason === 'SCORE_TOO_LOW' || reason === 'SCORE_UNKNOWN') return 'The signal score is too low to plan a paid mint.';
   if (reason === 'NO_MINT_ALLOWANCE') return 'The drop allows no mints per wallet.';
+  if (reason === 'FEES_TOO_HIGH') return 'Network fees are too high right now for even one NFT within your fee allowance. It will be reconsidered when fees fall.';
   if (reason === 'BALANCE_UNAVAILABLE') return 'The wallet balance could not be read.';
   if (reason.startsWith('SIMULATION_FAILED')) return 'A test mint call failed, so this wallet is blocked.';
   return 'See details.';

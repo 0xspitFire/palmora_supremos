@@ -31,6 +31,8 @@ class FakePort implements IntelligenceChainPort {
   public simulation: SimulationOutcome = { outcome: 'pass' };
   public failScan = false;
   public maxRange: bigint | null = null;
+  public estimateMintGas?: (wallet: string, contract: string, quantity: number, valueWei: bigint) => Promise<bigint | null>;
+  public baseFeePerGasWei?: () => Promise<bigint | null>;
   public scans: Array<[bigint, bigint, readonly string[]]> = [];
   public async safeHead(): Promise<bigint | null> { return this.head; }
   public async scan(fromBlock: bigint, toBlock: bigint, watched: readonly string[]): Promise<ChainScanOutcome> {
@@ -416,5 +418,102 @@ describe('Telegram delivery retry and top-up bundling (T-011)', () => {
     const underfunded = events(t.store, 'alert_underfunded');
     expect(underfunded).toHaveLength(1);
     expect(underfunded[0]?.data.priority).toBe('grouped');
+  });
+});
+
+describe('fee-aware free-mint quantity (T-012, D-037)', () => {
+  const GWEI = 10n ** 9n;
+  /** Measured SeaDrop gas (T-007): about 101,101 base plus 69,131 per NFT. */
+  const gas = async (_w: string, _c: string, quantity: number): Promise<bigint> => 101_101n + 69_131n * BigInt(quantity);
+
+  async function feeAwareSetup(baseFeeWei: bigint | null, withEstimator = true) {
+    const t = setup();
+    if (withEstimator) {
+      t.port.estimateMintGas = gas;
+      t.port.baseFeePerGasWei = async () => baseFeeWei;
+    }
+    t.port.drops.set(NFT, drop({ maxPerWallet: 5, startTime: seconds(START) + 3 * 3600 }));
+    t.port.mints = [mint(900n, W1)];
+    await t.discovery.tick();
+    t.port.balances.set(W1, 10n ** 18n);
+    const sweep = new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS, alerts: t.alerts });
+    return { t, sweep };
+  }
+
+  it('plans fewer NFTs when fees are high, records the reason, and tells the owner once in the bundle', async () => {
+    const { t, sweep } = await feeAwareSetup(450_000_000n);
+    await sweep.tick();
+    const data = events(t.store, 'readiness_sweep')[0]?.data as { quantity: number; quantityPlan: { desired: number; planned: number; reduced: boolean; maxFeeGwei: string; message: string } };
+    expect(data.quantity).toBe(3);
+    expect(data.quantityPlan).toMatchObject({ desired: 5, planned: 3, reduced: true, maxFeeGwei: '1' });
+    expect(data.quantityPlan.message).toContain('Planned 3 of 5 NFTs per wallet: at 1 gwei');
+    const alerts = events(t.store, 'alert_quantity_reduced');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.data).toMatchObject({ priority: 'grouped' });
+    expect(String(alerts[0]?.data.text)).toContain('More will be minted when fees are lower.');
+    await sweep.tick();
+    expect(events(t.store, 'alert_quantity_reduced')).toHaveLength(1);
+  });
+
+  it('shows the explanation on the dashboard as information, never as a blocker', async () => {
+    const { t, sweep } = await feeAwareSetup(450_000_000n);
+    await sweep.tick();
+    const rows = new Phase2ReadModelService(t.clock.now).readiness(t.store.snapshot(), `calendar:1:${NFT}`).data ?? [];
+    const note = rows[0]?.blockers.find((item) => item.code === 'QUANTITY_REDUCED');
+    expect(note).toMatchObject({ severity: 'info' });
+    expect(note?.message).toContain('Planned 3 of 5');
+  });
+
+  it('keeps the full quantity and sends nothing extra when it fits at low fees', async () => {
+    const { t, sweep } = await feeAwareSetup(100_000_000n);
+    await sweep.tick();
+    const data = events(t.store, 'readiness_sweep')[0]?.data as { quantity: number; quantityPlan: { reduced: boolean } };
+    expect(data.quantity).toBe(5);
+    expect(data.quantityPlan.reduced).toBe(false);
+    expect(events(t.store, 'alert_quantity_reduced')).toHaveLength(0);
+  });
+
+  it('skips wallets with a plain reason and alerts when not even one NFT fits', async () => {
+    const { t, sweep } = await feeAwareSetup(3n * GWEI);
+    await sweep.tick();
+    const data = events(t.store, 'readiness_sweep')[0]?.data as { rows: Array<{ state: string; reason: string }> };
+    expect(data.rows[0]).toMatchObject({ state: 'skipped', reason: 'FEES_TOO_HIGH' });
+    expect(String(events(t.store, 'alert_quantity_reduced')[0]?.data.text)).toContain('even 1 NFT would cost more');
+    const rows = new Phase2ReadModelService(t.clock.now).readiness(t.store.snapshot(), `calendar:1:${NFT}`).data ?? [];
+    expect(rows[0]?.blockers.some((item) => item.message.startsWith('Network fees are too high right now'))).toBe(true);
+  });
+
+  it('keeps the full allowance, without guessing, when fees or gas cannot be estimated', async () => {
+    const unknownFee = await feeAwareSetup(null);
+    await unknownFee.sweep.tick();
+    expect((events(unknownFee.t.store, 'readiness_sweep')[0]?.data as { quantity: number }).quantity).toBe(5);
+    const noEstimator = await feeAwareSetup(450_000_000n, false);
+    await noEstimator.sweep.tick();
+    const data = events(noEstimator.t.store, 'readiness_sweep')[0]?.data as { quantity: number; quantityPlan?: unknown };
+    expect(data.quantity).toBe(5);
+    expect(data.quantityPlan).toBeUndefined();
+  });
+});
+
+describe('quantity explanation in the run summary and dashboard (T-012, D-037)', () => {
+  it('shows the reason in the run timeline and the post-mint summary, and does not mark the dashboard partial for information only', async () => {
+    const store = new DurableStore();
+    const runId = 'run-qty';
+    const planData = { desired: 5, planned: 3, reduced: true, reason: 'reduced_for_fees', maxFeeGwei: '1', message: 'Planned 3 of 5 NFTs per wallet: at 1 gwei the 0.0004 ETH fee allowance only covers 3. More will be minted when fees are lower.' };
+    await store.transaction((state) => {
+      state.campaigns.push({ id: 'cmp-qty', state: 'Armed', chainId: 1, contract: NFT, strategy: 'seadrop-v1-public', quantity: 3, dryRun: true, spendPolicy: { maxRunWei: 1n, dailyCapWei: 1n, gasCeilingWei: 1n }, createdAt: new Date(START).toISOString(), updatedAt: new Date(START).toISOString(), chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, endpointReference: 'ETH' }, mintPriceWei: 0n, feePolicy: { kind: 'free', configuredPriorityFeeWei: 1n, totalFeeBudgetWei: 1n } } as never);
+      state.runs.push({ id: runId, intentId: 'intent-qty', campaignId: 'cmp-qty', mode: 'dry-run', requestDigest: 'd', state: 'Armed', createdAt: new Date(START).toISOString(), updatedAt: new Date(START).toISOString() });
+      state.events.push({ id: 'qty-1', runId, type: 'quantity_plan', at: new Date(START).toISOString(), data: planData });
+    });
+    const run = new Phase2ReadModelService(() => new Date(START)).run(store.snapshot(), runId);
+    expect(run.data?.events.find((event) => event.type === 'quantity_plan')?.message).toBe(planData.message);
+    const trial = new DurableStore();
+    await trial.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: ['DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED', 'BACKUP_NOT_READY'] }; });
+    const health = new Phase2ReadModelService(() => new Date(START)).health(trial.snapshot());
+    expect(health.issues.every((item) => item.severity === 'info')).toBe(true);
+    expect(health.availability).not.toBe('partial');
+    const { BackendApplication } = await import('../application.js');
+    const summary = await new BackendApplication(store, undefined as never).command('summary', { runId });
+    expect((summary.data as Array<{ quantityPlan?: { planned: number; message: string } }>)[0]?.quantityPlan).toMatchObject({ planned: 3, message: planData.message });
   });
 });
