@@ -35,7 +35,7 @@ export interface IntelligenceRepositoryPort {
 }
 
 export interface IntelligenceAlertSink {
-  intelligence(input: { kind: 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit'; dedupe: string; text: string; priority: 'immediate' | 'grouped' }): Promise<boolean>;
+  intelligence(input: { kind: 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status'; dedupe: string; text: string; priority: 'immediate' | 'grouped' }): Promise<boolean>;
 }
 
 /** D-015 freshness windows. */

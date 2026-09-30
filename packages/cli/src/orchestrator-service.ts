@@ -105,7 +105,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const rpcUrl = secrets.get(config.intelligenceRpcName);
     if (!rpcUrl) throw new Error('INTELLIGENCE_RPC_SECRET_MISSING');
     logger.registerSecret(rpcUrl);
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs });
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, dashboardUrl: `http://${config.bindHost === '::1' ? '[::1]' : config.bindHost}:${config.port}/` });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
   const dashboard = createDashboard(runtime.store);

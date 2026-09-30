@@ -1,3 +1,4 @@
+import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 import { D033_READINESS_LIMITS, DiscoveryService, ReadinessSweep, type AlertManager, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
@@ -10,6 +11,9 @@ export interface IntelligenceServiceOptions {
   discoveryIntervalMs: number;
   readinessIntervalMs: number;
   digestIntervalMs: number;
+  /** Where the owner opens the dashboard; shown in the start message. */
+  dashboardUrl?: string;
+  now?: () => Date;
 }
 
 /**
@@ -34,12 +38,25 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   const runDiscovery = guarded('discovery', () => discovery.tick());
   const runReadiness = guarded('readiness', () => readiness.tick());
   const runDigest = guarded('digest', () => options.alerts.flushDigest());
-  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs)];
+  const now = options.now ?? (() => new Date());
+  const startedAt = now();
+  const sendStatus = async (dedupe: string, text: string): Promise<void> => {
+    try { await options.alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); }
+    catch (error) { options.logger?.warn({ event: 'status_message_failed', error }, 'status message failed'); }
+  };
+  // Daily check-in: once per UTC date, from 09:00 UTC, restart-safe through durable alert deduplication.
+  const runCheckIn = async (): Promise<void> => {
+    const current = now();
+    if (current.getUTCHours() < 9 || current.getTime() - startedAt.getTime() < 60 * 60_000) return;
+    await sendStatus(`checkin:${current.toISOString().slice(0, 10)}`, checkInMessage(checkInCounts(options.store, options.repo, current)));
+  };
+  void sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, dashboardUrl: options.dashboardUrl ?? 'http://127.0.0.1:8780/' }));
+  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000)];
   for (const timer of timers) timer.unref();
   void runDiscovery().then(runReadiness);
   return {
     stop: () => { for (const timer of timers) clearInterval(timer); },
-    runOnce: async () => { await runDiscovery(); await runReadiness(); await runDigest(); },
+    runOnce: async () => { await runDiscovery(); await runReadiness(); await runDigest(); await runCheckIn(); },
   };
 }
 
