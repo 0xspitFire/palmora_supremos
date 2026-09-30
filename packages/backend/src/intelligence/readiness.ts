@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { PERSONAL_LIVE_FLEET_POLICY } from '../fleet-policy.js';
 import type { BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
 import { READINESS_FRESHNESS_MS, shortAddress, type IntelligenceAlertSink, type IntelligenceChainPort } from './port.js';
@@ -19,14 +20,15 @@ export interface ReadinessLimits {
 }
 
 /**
- * Owner-approved Personal Live limits (D-033), as used for readiness advice.
- * Admission enforces the same values separately (T-003 fleet policy); unify when both merge.
+ * Owner-approved Personal Live limits (D-033) as used for readiness advice. Derived from the
+ * admission fleet policy, so readiness advice and admission can never disagree on a limit.
  */
 export const D033_READINESS_LIMITS: Readonly<ReadinessLimits> = Object.freeze({
-  freeFeeAllowanceWei: 400_000_000_000_000n,
-  paidFeeAllowanceWei: 370_000_000_000_000n,
-  paidMaxPricePerNftWei: 3_700_000_000_000_000n,
-  paidMaxWalletsPerMint: 2,
+  freeFeeAllowanceWei: PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei,
+  paidFeeAllowanceWei: PERSONAL_LIVE_FLEET_POLICY.paidFeeAllowanceWei,
+  paidMaxPricePerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei,
+  paidMaxWalletsPerMint: PERSONAL_LIVE_FLEET_POLICY.paidMaxWalletsPerMint,
+  /** Owner preference (D-032), advice only: admission does not require a minimum wallet count. */
   freeMinWallets: 4,
 });
 
@@ -162,7 +164,7 @@ export class ReadinessSweep {
     if (unfunded.length > 0) {
       const lines = unfunded.map((row) => `send ${formatEth(BigInt(row.topUpWei ?? '0'))} ETH to ${row.wallet}`);
       const text = `${unfunded.length} wallet(s) need more ETH for ${name}, which ${opens}. On Ethereum: ${lines.join('; ')}. Each needs ${formatEth(plan.requiredWei)} ETH in total${plan.kind === 'free' ? ' (free mint, network fee allowance)' : ` (${plan.quantity} NFT(s) plus network fee allowance)`}.`;
-      if (this.alertAllowed(now) && await safe(sink, { kind: 'underfunded', dedupe: `underfunded:${drop.id}:${unfunded.map((row) => `${row.wallet}=${row.topUpWei ?? '?'}`).join(',')}`, priority: soon ? 'immediate' : 'grouped', text })) raised += 1;
+      if (this.alertAllowed(now) && await safe(sink, { kind: 'underfunded', dedupe: `underfunded:${drop.id}:${unfunded.map((row) => `${row.wallet}=${row.topUpWei ?? '?'}`).join(',')}`, priority: 'grouped', text })) raised += 1; // top-up reminders always go in the bundle (T-011)
     }
     const ready = rows.filter((row) => row.state === 'ready').length;
     if (ready > 0) {

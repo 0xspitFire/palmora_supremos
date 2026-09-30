@@ -9,7 +9,7 @@ import { NotificationDispatcher } from './notifications.js';
 import { normalizeError } from './errors.js';
 import { BackendApplication } from './application.js';
 import { ExecutionCoordinator } from './coordinator.js';
-import { ReadModelService } from './read-model.js';
+import { Phase2ReadModelService } from './read-model-v1.js';
 import { normalizeTotalFeeBudget } from './fees.js';
 import { resolveWalletPath } from './keystore-path.js';
 import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from './policy.js';
@@ -253,7 +253,7 @@ describe('backend Phase 1 blockers', () => {
   });
 
   it('exposes canonical missing-run errors and confines wallet paths', () => {
-    const store = new DurableStore(); expect(() => new ReadModelService(store).getRun('missing')).toThrow('RUN_NOT_FOUND'); const root = join('C:', 'project'); expect(resolveWalletPath(root)).toBe(join(resolveWalletPath(root), '.')); expect(() => resolveWalletPath(root, './Rets/other')).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
+    const store = new DurableStore(); expect(new Phase2ReadModelService().run(store.snapshot(), 'missing').issues[0]?.code).toBe('RUN_NOT_FOUND'); const root = join('C:', 'project'); expect(resolveWalletPath(root)).toBe(join(resolveWalletPath(root), '.')); expect(() => resolveWalletPath(root, './Rets/other')).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
   });
 
   it('refuses live Ethereum execution on a non-canonical store before any reservation or engine call (T-003)', async () => {

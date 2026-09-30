@@ -380,3 +380,41 @@ describe('dashboard labels during the read-only trial (T-006)', () => {
     expect(liveIssues.find((item) => item.code === 'ENGINE_NOT_READY')?.severity).toBe('blocking');
   });
 });
+
+describe('Telegram delivery retry and top-up bundling (T-011)', () => {
+  it('retries a failed message on a later tick and delivers it, but never resends stale ones', async () => {
+    let clock = START;
+    const store = new DurableStore();
+    const sent: string[] = [];
+    let failNext = 1;
+    const { NotificationDispatcher } = await import('../notifications.js');
+    const dispatcher = new NotificationDispatcher(store, { send: async ({ text }) => { if (failNext-- > 0) throw new Error('fetch failed'); sent.push(text); } }, () => new Date(clock));
+    const alerts = new AlertManager(store, dispatcher, undefined, { now: () => new Date(clock) });
+    await expect(alerts.intelligence({ kind: 'status', dedupe: 'checkin:1', text: 'Daily check-in', priority: 'immediate' })).rejects.toThrow('fetch failed');
+    expect(store.snapshot().notificationOutbox[0]?.state).toBe('failed');
+    clock += 60 * 60_000;
+    expect(await alerts.retryUndelivered()).toBe(1);
+    expect(sent).toEqual(['Daily check-in']);
+    expect(store.snapshot().notificationOutbox[0]?.state).toBe('delivered');
+    failNext = 1;
+    await alerts.intelligence({ kind: 'status', dedupe: 'checkin:2', text: 'Old check-in', priority: 'immediate' }).catch(() => undefined);
+    clock += 7 * 60 * 60_000;
+    expect(await alerts.retryUndelivered()).toBe(0);
+    expect(sent).toEqual(['Daily check-in']);
+  });
+
+  it('bundles top-up (underfunded) alerts even when a scored mint opens soon', async () => {
+    const t = setup();
+    await t.discovery.tick();
+    t.port.drops.set(NFT, drop({ startTime: seconds(START) + 10 * 60 }));
+    t.port.mints = [mint(1_005n, W1)];
+    t.port.head = 1_010n;
+    await t.discovery.tick();
+    await t.store.transaction((state) => { state.events.push({ id: 'score-soon', type: 'opportunity_notified', at: new Date(t.clock.ms + 1).toISOString(), data: { contract: NFT, score: 80, blocked: false } }); });
+    t.port.balances.set(W1, 1n);
+    await new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS, alerts: t.alerts }).tick();
+    const underfunded = events(t.store, 'alert_underfunded');
+    expect(underfunded).toHaveLength(1);
+    expect(underfunded[0]?.data.priority).toBe('grouped');
+  });
+});

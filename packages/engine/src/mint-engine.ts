@@ -14,7 +14,7 @@
  * 8. Structured logging throughout
  *
  * Architecture:
- * - Strategy pattern for mint contract types (SeaDrop, Manifold, raw calldata)
+ * - Strategy pattern for mint contract types (today: SeaDrop v1 public only; no raw-calldata path, D-006)
  * - Pluggable broadcaster (public, blast, Flashbots, sequencer)
  * - Per-wallet error isolation — one wallet's failure doesn't kill others
  * - Kill switch checked before every significant operation

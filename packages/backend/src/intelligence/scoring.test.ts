@@ -49,3 +49,12 @@ describe('v1-rules-p2 scoring', () => {
     expect([formatEth(0n), formatEth(LIMIT), formatEth(10n ** 18n), formatEth(400_000_000_000_000n), formatEth(1n)]).toEqual(['0', '0.0037', '1', '0.0004', '0.0']);
   });
 });
+
+describe('one source of truth for D-033 limits (T-008)', () => {
+  it('derives readiness limits from the admission fleet policy', async () => {
+    const { D033_READINESS_LIMITS } = await import('./readiness.js');
+    const { PERSONAL_LIVE_FLEET_POLICY } = await import('../fleet-policy.js');
+    expect(D033_READINESS_LIMITS).toMatchObject({ freeFeeAllowanceWei: PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei, paidFeeAllowanceWei: PERSONAL_LIVE_FLEET_POLICY.paidFeeAllowanceWei, paidMaxPricePerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, paidMaxWalletsPerMint: PERSONAL_LIVE_FLEET_POLICY.paidMaxWalletsPerMint });
+    expect(D033_READINESS_LIMITS).toEqual({ freeFeeAllowanceWei: 400_000_000_000_000n, paidFeeAllowanceWei: 370_000_000_000_000n, paidMaxPricePerNftWei: 3_700_000_000_000_000n, paidMaxWalletsPerMint: 2, freeMinWallets: 4 });
+  });
+});
