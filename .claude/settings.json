@@ -29,8 +29,13 @@
       "Read(~/.zshrc)",
       "Edit(~/.zshrc)",
       "Read(~/.bash_history)",
+      "Read(~/W3/Docs/**)",
+      "Edit(~/W3/Docs/**)",
+      "Read(//home/*/W3/Docs/**)",
+      "Edit(//home/*/W3/Docs/**)",
       "Bash(*W3/Rets*)",
-      "Bash(*secrets/*)"
+      "Bash(*secrets/*)",
+      "Bash(*W3/Docs*)"
     ],
     "ask": [
       "Bash(git commit *)",
