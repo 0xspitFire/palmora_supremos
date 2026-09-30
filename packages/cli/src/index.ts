@@ -16,6 +16,8 @@ import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
 import { resolveChainByNameFromSecrets } from '@mint-bot/engine';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
+import { surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
+import { createPublicClient, defineChain, http as httpTransport } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 
 /** Read-only Ethereum port for CLI checks; the RPC value stays in memory and is never printed. */
@@ -480,6 +482,30 @@ const cli = yargs(hideBin(process.argv))
         const report = await checkDrop(await ethereumPort(), args.contract, checkWallets(args.wallets), { simulate: true, ...(args.quantity === undefined ? {} : { quantity: args.quantity }), ...(args.score === undefined ? {} : { score: args.score }) });
         process.stdout.write(`${json(report)}\n`);
       } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+    })
+  .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
+    .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'robinhood' })
+    .option('blocks', { type: 'number', default: 20_000, describe: 'How many recent blocks to survey (maximum 200000)' })
+    .option('max-transactions', { type: 'number', default: 300, describe: 'Most mint transactions to look up (maximum 1000)' }), async (args) => {
+      try {
+        if (!Number.isSafeInteger(args.blocks) || args.blocks < 1 || args.blocks > 200_000) throw new Error('BLOCKS_OUT_OF_RANGE: use 1 to 200000');
+        if (!Number.isSafeInteger(args.maxTransactions) || args.maxTransactions < 1 || args.maxTransactions > 1_000) throw new Error('MAX_TRANSACTIONS_OUT_OF_RANGE: use 1 to 1000');
+        const config = await resolveChainByNameFromSecrets(args.chain, 'mainnet', configuredSecretRoot(runtimeRoot));
+        const endpoint = config.rpcEndpoints[0];
+        if (!endpoint) throw new Error(`${args.chain.toUpperCase()}_RPC_UNAVAILABLE`);
+        let parsed: URL;
+        try { parsed = new URL(endpoint); } catch { throw new Error('RPC_URL_INVALID'); }
+        if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('RPC_MUST_BE_HTTPS');
+        const chain = defineChain({ id: config.chainId, name: args.chain, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } });
+        const client = createPublicClient({ chain, transport: httpTransport(endpoint, { timeout: 20_000, retryCount: 1 }) });
+        const head = await client.getBlockNumber();
+        const from = head >= BigInt(args.blocks) ? head - BigInt(args.blocks) + 1n : 0n;
+        const result = await surveySeaDropMints(client as never, { fromBlock: from, toBlock: head, maxTransactions: args.maxTransactions });
+        process.stdout.write(`${json({ chain: args.chain, ...result })}\n`);
+      } catch (error) {
+        // Provider errors can carry the RPC URL (and its key), so only a cleaned short description is printed.
+        process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`);
+      }
     })
   .command('watch <action> [address]', 'Manage watched (whale) wallets for discovery: add, list, remove', (args) => args
     .positional('action', { type: 'string', choices: ['add', 'list', 'remove'] as const, demandOption: true })
