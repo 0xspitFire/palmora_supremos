@@ -109,6 +109,22 @@ export class AlertManager {
     return pending.length;
   }
 
+  /**
+   * Retries undelivered messages (pending or failed) created within `maxAgeMs`, respecting the
+   * outbox backoff and lease. Older ones stay failed: stale news is not resent. Returns attempts made.
+   */
+  public async retryUndelivered(maxAgeMs = 6 * 60 * 60_000): Promise<number> {
+    if (!this.dispatcher) return 0;
+    const now = this.now().getTime();
+    const due = this.store.snapshot().notificationOutbox.filter((item) => item.state !== 'delivered' && now - Date.parse(item.createdAt) <= maxAgeMs && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= now));
+    let attempts = 0;
+    for (const item of due) {
+      attempts += 1;
+      try { await this.dispatcher.dispatch(item.sourceEventId, item.text); } catch { /* stays failed with a later nextAttemptAt; retried on a later tick */ }
+    }
+    return attempts;
+  }
+
   public async flush(): Promise<void> {
     for (const eventId of this.grouped) {
       const event = this.store.snapshot().events.find((candidate) => candidate.id === eventId);
