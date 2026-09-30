@@ -164,7 +164,7 @@ export class ReadinessSweep {
     if (unfunded.length > 0) {
       const lines = unfunded.map((row) => `send ${formatEth(BigInt(row.topUpWei ?? '0'))} ETH to ${row.wallet}`);
       const text = `${unfunded.length} wallet(s) need more ETH for ${name}, which ${opens}. On Ethereum: ${lines.join('; ')}. Each needs ${formatEth(plan.requiredWei)} ETH in total${plan.kind === 'free' ? ' (free mint, network fee allowance)' : ` (${plan.quantity} NFT(s) plus network fee allowance)`}.`;
-      if (this.alertAllowed(now) && await safe(sink, { kind: 'underfunded', dedupe: `underfunded:${drop.id}:${unfunded.map((row) => `${row.wallet}=${row.topUpWei ?? '?'}`).join(',')}`, priority: soon ? 'immediate' : 'grouped', text })) raised += 1;
+      if (this.alertAllowed(now) && await safe(sink, { kind: 'underfunded', dedupe: `underfunded:${drop.id}:${unfunded.map((row) => `${row.wallet}=${row.topUpWei ?? '?'}`).join(',')}`, priority: 'grouped', text })) raised += 1; // top-up reminders always go in the bundle (T-011)
     }
     const ready = rows.filter((row) => row.state === 'ready').length;
     if (ready > 0) {

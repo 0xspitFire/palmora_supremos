@@ -24,7 +24,7 @@ export interface IntelligenceServiceOptions {
 export function startIntelligence(options: IntelligenceServiceOptions): { stop(): void; runOnce(): Promise<void> } {
   const discovery = new DiscoveryService(options.store, options.repo, options.port, { budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts });
   const readiness = new ReadinessSweep(options.store, options.port, async () => options.wallets, { limits: D033_READINESS_LIMITS, alerts: options.alerts });
-  const busy = { discovery: false, readiness: false, digest: false };
+  const busy = { discovery: false, readiness: false, digest: false, retry: false };
   const guarded = (name: keyof typeof busy, work: () => Promise<unknown>) => async (): Promise<void> => {
     if (busy[name]) return;
     busy[name] = true;
@@ -38,6 +38,8 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   const runDiscovery = guarded('discovery', () => discovery.tick());
   const runReadiness = guarded('readiness', () => readiness.tick());
   const runDigest = guarded('digest', () => options.alerts.flushDigest());
+  // Separate guard: a failing digest never skips retrying undelivered messages (T-011).
+  const runRetry = guarded('retry', () => options.alerts.retryUndelivered());
   const now = options.now ?? (() => new Date());
   const startedAt = now();
   const sendStatus = async (dedupe: string, text: string): Promise<void> => {
@@ -51,12 +53,12 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
     await sendStatus(`checkin:${current.toISOString().slice(0, 10)}`, checkInMessage(checkInCounts(options.store, options.repo, current)));
   };
   void sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, dashboardUrl: options.dashboardUrl ?? 'http://127.0.0.1:8780/' }));
-  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000)];
+  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000)];
   for (const timer of timers) timer.unref();
   void runDiscovery().then(runReadiness);
   return {
     stop: () => { for (const timer of timers) clearInterval(timer); },
-    runOnce: async () => { await runDiscovery(); await runReadiness(); await runDigest(); await runCheckIn(); },
+    runOnce: async () => { await runDiscovery(); await runReadiness(); await runDigest(); await runRetry(); await runCheckIn(); },
   };
 }
 
