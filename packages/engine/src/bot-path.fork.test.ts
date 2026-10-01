@@ -154,6 +154,8 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`bot-path rehearsal on a local ${ch
     client = createPublicClient({ transport: http(rpcUrl!) });
     expect(await rpc('eth_chainId')).toBe(`0x${chainId.toString(16)}`);
     for (const account of accounts) await rpc('anvil_setBalance', [account.address, '0x56BC75E2D63100000']); // 100 ETH on the fork only
+    // A fresh Orbit-chain fork has no excess-blob-gas value in its head block, which makes Anvil refuse eth_call at 'latest'; one mined block fixes that.
+    await rpc('evm_mine');
   });
   afterAll(() => { if (miner) clearInterval(miner); rmSync(directory, { recursive: true, force: true }); });
 
