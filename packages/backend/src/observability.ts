@@ -19,6 +19,7 @@ export function redactRecord(value: unknown, key = '', seen = new WeakSet<object
   if (SENSITIVE_KEY.test(key)) return '[REDACTED]';
   if (typeof value === 'string') return redactText(value);
   if (Array.isArray(value)) return value.map((entry) => redactRecord(entry, key, seen));
+  if (value instanceof Error) return errorSummary(value);
   if (value !== null && typeof value === 'object') {
     if (seen.has(value)) return '[CIRCULAR]';
     seen.add(value);
@@ -34,6 +35,33 @@ export function redactText(value: string): string {
 export function redactError(error: unknown): { name: string; message: string } {
   if (error instanceof Error) return { name: error.name, message: redactText(error.message) };
   return { name: 'UnknownError', message: redactText(String(error)) };
+}
+
+const ANY_URL = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+
+/**
+ * A logged Error keeps a short, secret-free reason. Without this an Error serialises as `{}`
+ * (its fields are not enumerable), which hid why trial digests failed. Only the first line of
+ * each message is kept, every URL is removed, and only names, codes and HTTP statuses from the
+ * cause chain are added.
+ */
+export function errorSummary(error: Error): { name: string; message: string; code?: string; status?: number; causes?: string[] } {
+  const firstLine = (text: string): string => redactText((text.split('\n')[0] ?? '').replace(ANY_URL, '[url]')).slice(0, 300);
+  const item = error as Error & { code?: unknown; status?: unknown; shortMessage?: unknown };
+  const summary: { name: string; message: string; code?: string; status?: number; causes?: string[] } = { name: error.name, message: firstLine(typeof item.shortMessage === 'string' ? item.shortMessage : error.message) };
+  if (typeof item.code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(item.code)) summary.code = item.code;
+  if (typeof item.status === 'number') summary.status = item.status;
+  const causes: string[] = [];
+  let cause: unknown = error.cause;
+  for (let depth = 0; depth < 3 && cause !== undefined && cause !== null; depth += 1) {
+    if (cause instanceof Error) {
+      const code = (cause as Error & { code?: unknown }).code;
+      causes.push(`${cause.name}${typeof code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(code) ? ` ${code}` : ''}: ${firstLine(cause.message).slice(0, 120)}`);
+      cause = cause.cause;
+    } else { causes.push(firstLine(String(cause)).slice(0, 120)); break; }
+  }
+  if (causes.length > 0) summary.causes = causes;
+  return summary;
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
