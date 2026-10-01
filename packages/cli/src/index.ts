@@ -14,11 +14,13 @@ import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
-import { resolveChainByNameFromSecrets } from '@mint-bot/engine';
+import { resolveChainByNameFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
+import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
 import { probeRpc } from './rpc-probe.js';
-import { createPublicClient, defineChain, http as httpTransport } from 'viem';
+import { readFileSync, statSync } from 'node:fs';
+import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 
 /** Read-only Ethereum port for CLI checks; the RPC value stays in memory and is never printed. */
@@ -483,6 +485,30 @@ const cli = yargs(hideBin(process.argv))
         const report = await checkDrop(await ethereumPort(), args.contract, checkWallets(args.wallets), { simulate: true, ...(args.quantity === undefined ? {} : { quantity: args.quantity }), ...(args.score === undefined ? {} : { score: args.score }) });
         process.stdout.write(`${json(report)}\n`);
       } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+    })
+  .command('check-allowlist', 'Read-only: are your own wallets on a project\'s PUBLISHED allowlist? Answers eligible, not_listed or unknown', (args) => args
+    .option('contract', { type: 'string', demandOption: true })
+    .option('list', { type: 'string', describe: 'Path to the allowlist or proof JSON file the project published' })
+    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' }), async (args) => {
+      try {
+        if (!/^0x[0-9a-fA-F]{40}$/.test(args.contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
+        const wallets = checkWallets(args.wallets);
+        let list: ReturnType<typeof parsePublishedList> | null = null;
+        if (args.list) {
+          if (statSync(args.list).size > 20_000_000) throw new Error('ALLOWLIST_FILE_TOO_LARGE');
+          list = parsePublishedList(readFileSync(args.list, 'utf8'));
+        }
+        let root: `0x${string}` | null = null;
+        try {
+          const config = await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
+          const endpoint = config.rpcEndpoints[0];
+          if (endpoint && (endpoint.startsWith('https://') || /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])[:/]/.test(endpoint))) {
+            const client = createPublicClient({ chain: defineChain({ id: config.chainId, name: 'ethereum', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } }), transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 1 }) });
+            root = await client.readContract({ address: SEADROP_V1_ADDRESS as `0x${string}`, abi: parseAbi(['function getAllowListMerkleRoot(address nftContract) view returns (bytes32)']), functionName: 'getAllowListMerkleRoot', args: [args.contract as `0x${string}`] });
+          }
+        } catch { root = null; }
+        process.stdout.write(`${json(checkAllowlist({ contract: args.contract, wallets, onChainRoot: root, list }))}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'robinhood' })
