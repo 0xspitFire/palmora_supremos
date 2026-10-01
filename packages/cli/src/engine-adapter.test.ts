@@ -53,4 +53,25 @@ describe('adapter wiring (T-010)', () => {
     const reserveBody = source.slice(source.indexOf('reserve: async (input) => {'), source.indexOf('const settleTotal'));
     expect(reserveBody).toContain('preSignReservationGate(');
   });
+
+  it('re-reads the reservations when reserve runs, never the copy taken when execute started (T-021)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('./engine-adapter.ts', import.meta.url), 'utf8');
+    const reserveBody = source.slice(source.indexOf('reserve: async (input) => {'), source.indexOf('const settleTotal'));
+    expect(reserveBody).toContain('options.getState()');
+    expect(reserveBody).toContain('byWallet: freshByWallet');
+    expect(reserveBody).not.toMatch(/byWallet,\s*runId/);
+  });
+
+  it('refuses when a reservation was released or settled after execute began, with no signer involved', () => {
+    const address = '0x1111111111111111111111111111111111111111';
+    const identity = canonicalExecutionIdentity('run-1', 'intent-1', 0, address);
+    const input = { address, walletIndex: 0, runId: 'run-1', campaignId: 'cmp-1', executionId: identity.executionId, transactionIntentId: identity.transactionIntentId, valueWei: 2_000n, maxGasCostWei: 400n, l1DataGasWei: 0n };
+    const args = { killed: false, runId: 'run-1', intentId: 'intent-1', campaign: { id: 'cmp-1', mintPriceWei: 1_000n, quantity: 2 }, input };
+    for (const status of ['released', 'settled', 'failed']) {
+      expect(() => preSignReservationGate({ ...args, byWallet: new Map([[address, { id: 'res-1', status, amountWei: 2_400n }]]) })).toThrow('DURABLE_RESERVATION_REQUIRED');
+    }
+    // A reservation that vanished from the fresh state entirely is refused too.
+    expect(() => preSignReservationGate({ ...args, byWallet: new Map() })).toThrow('DURABLE_RESERVATION_REQUIRED');
+  });
 });

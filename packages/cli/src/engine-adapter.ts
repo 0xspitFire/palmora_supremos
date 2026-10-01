@@ -283,12 +283,15 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       if (!intent) throw new Error('INTENT_NOT_FOUND');
       const reservations = state.reservations.filter((reservation) => reservation.runId === runId && reservationIds.includes(reservation.id));
       if (reservationIds.length === 0 || reservations.length !== reservationIds.length || reservationIds.some((id) => !reservations.some((reservation) => reservation.id === id))) throw new Error('DURABLE_RESERVATION_REQUIRED');
-      const byWallet = new Map(reservations.map((reservation) => [reservation.wallet.toLowerCase(), reservation]));
       const provider: SpendReservationProvider = {
         durable: true,
         storeKind: 'normalized-sqlite',
         reserve: async (input) => {
-          const reservation = preSignReservationGate({ killed: options.getState().killed, byWallet, runId, intentId, campaign, input });
+          // T-021: read the reservations again now, not the copy taken when execute started, so a release or
+          // settlement that happened in between is seen before anything is signed.
+          const current = options.getState();
+          const freshByWallet = new Map(current.reservations.filter((candidate) => candidate.runId === runId && reservationIds.includes(candidate.id)).map((candidate) => [candidate.wallet.toLowerCase(), candidate]));
+          const reservation = preSignReservationGate({ killed: current.killed, byWallet: freshByWallet, runId, intentId, campaign, input });
           const settleTotal = async (components: ReservationSettlementComponents): Promise<void> => {
             if (options.settleComponents) {
               await options.settleComponents(reservation.id, components);
