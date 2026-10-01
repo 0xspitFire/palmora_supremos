@@ -61,6 +61,8 @@ const MSG = {
   built: 'path built from a variable or command output (use a literal path)',
   split: 'protected name assembled from split or escaped pieces',
   tooLong: 'command too long to check (over 64 KB)',
+  permFile: 'permission lists change only with the owner (propose the rules in Docs/permission-patch/ and ask the owner to apply them)',
+  grantEdit: 'the grant function is run by the owner in a terminal, never by a session',
   nested: 'command nested too deeply to check',
   unstable: 'variable values keep changing across passes; too complex to check',
   unknownList: 'listing or recursive command from a folder that cannot be known here (use an absolute path or run the cd on its own first)',
@@ -103,7 +105,7 @@ const rules = [
 ];
 
 // Names that must never be assembled from pieces. Each is counted separately in raw and normalized text.
-const protectedNames = [/secrets/g, /Rets/g, /keystore/g, /wallets\.(enc|json)/g, /(?<!process)\.env\b/g, /\.key\b/g, /W3\/Docs/g];
+const protectedNames = [/secrets/g, /Rets/g, /keystore/g, /wallets\.(enc|json)/g, /(?<!process)\.env\b/g, /\.key\b/g, /W3\/Docs/g, /grant-edit/g];
 const grew = (raw, norm) => protectedNames.some((re) => (norm.match(re) ?? []).length > (raw.match(re) ?? []).length);
 
 // ---------------------------------------------------------------------------------------------------
@@ -312,7 +314,9 @@ function parse(tokens) {
       if (target) {
         k += 1;
         const fdDup = /&$/.test(redirect[1]) && /^(\d+|-)$/.test(target.v) && !target.dynamic;
-        if (redirect[1] !== '<<<' && !fdDup) cmd.redirects.push(target);
+        // Input redirects only read; every other kind can write, so it is tagged for the permission check.
+        const reads = redirect[1] === '<' || redirect[1] === '<&';
+        if (redirect[1] !== '<<<' && !fdDup) cmd.redirects.push(reads ? target : { ...target, write: true });
       }
       continue;
     }
@@ -328,6 +332,50 @@ function parse(tokens) {
 
 // Commands that only print or test a path; they may name /, ~, or ~/W3.
 // tr, sed, awk and cut take "/" as a character or delimiter and cannot walk a directory tree.
+// Permission lists (T-019): programs that only read may name them; anything else may not. Interpreters
+// can write from script text, so their words are also searched for the file names.
+const PERMISSION_READ_ONLY = new Set(['cat', 'head', 'tail', 'nl', 'wc', 'stat', 'ls', 'file', 'diff', 'cmp', 'grep', 'egrep', 'fgrep', 'rg', 'jq',
+  'sha256sum', 'sha1sum', 'md5sum', 'realpath', 'readlink', 'dirname', 'basename', 'test', '[', '[[', 'echo', 'printf', 'cd', 'pwd', 'true', ':']);
+const PERMISSION_GIT_READ = new Set(['status', 'diff', 'log', 'show', 'ls-files', 'check-ignore', 'blame', 'add', 'commit']);
+// git diff, log and show write a file with --output, so they are not read-only then.
+const permissionReadOnly = (name, sub, args = []) => PERMISSION_READ_ONLY.has(name)
+  || (name === 'git' && PERMISSION_GIT_READ.has(sub) && !args.some((a) => /^--output(=|$)/.test(a.v)));
+// find and fd can pick files by pattern and then delete or run commands on them.
+const FIND_ACTIONS = /^-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/;
+const FD_ACTIONS = /^(-x|-X|--exec|--exec-batch)$/;
+// find name tests, and whether an expression could match a permission list (AND of the tests; any -o or
+// parenthesis makes it assume yes; -path and -regex forms are not analysed and count as a match).
+const FIND_NAME_TESTS = new Set(['-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename', '-regex', '-iregex']);
+function findCouldMatchList(args, exprAt) {
+  const expr = exprAt === -1 ? [] : args.slice(exprAt);
+  if (expr.some((a) => a.v === '-o' || a.v === '-or' || a.v === '(')) return true;
+  const tests = [];
+  for (let k = 0; k < expr.length - 1; k += 1) if (FIND_NAME_TESTS.has(expr[k].v)) tests.push([expr[k].v, expr[k + 1].v]);
+  if (!tests.length) return true;
+  return tests.every(([flag, value]) => {
+    if (flag === '-name') return matchesListName(value);
+    if (flag === '-iname') {
+      const low = value.toLowerCase();
+      return PERMISSION_NAMES.some((n) => (GLOB_SEGMENT.test(low) ? globRegex(low).test(n) : low === n)) || low.includes('.claude');
+    }
+    return true;
+  });
+}
+// fd: its pattern cannot be told from its command words, so only an extension filter can rule a match out.
+function fdCouldMatchList(args) {
+  const exts = [];
+  for (let k = 0; k < args.length; k += 1) {
+    if ((args[k].v === '-e' || args[k].v === '--extension') && args[k + 1]) exts.push(args[k + 1].v.toLowerCase());
+    else if (args[k].v.startsWith('--extension=')) exts.push(args[k].v.slice(12).toLowerCase());
+  }
+  return exts.length === 0 || exts.includes('json');
+}
+const matchesListName = (v) => PERMISSION_NAMES.some((n) => v === n || (GLOB_SEGMENT.test(v) && globRegex(v).test(n))) || PERMISSION_TEXT.test(v) || v.includes('.claude');
+// Text that names a permission list (settings.json or settings.local.json, not claude-code-settings.json).
+const PERMISSION_TEXT = /(^|[^A-Za-z0-9_-])settings(\.local)?\.json/;
+// A patch against a permission list (git apply, patch, git am would write it): diff header lines.
+const PATCH_OF_LIST = /(^|\n)[ \t]*(\+\+\+ |--- |diff --git |rename (to|from) |copy (to|from) ).*\.claude\/settings(\.local)?\.json/;
+const PERMISSION_NAMES = ['settings.json', 'settings.local.json'];
 const harmless = new Set(['cd', 'echo', 'printf', 'test', '[', '[[', 'pwd', 'realpath', 'dirname', 'basename', 'true', ':', 'which', 'type', 'tr', 'sed', 'awk', 'cut']);
 // Commands that read the current directory when given no path.
 const listingTools = new Set(['find', 'ls', 'dir', 'vdir', 'eza', 'exa', 'lsd', 'tree', 'du', 'rg', 'grep', 'egrep', 'fgrep', 'ugrep', 'zgrep', 'pcregrep', 'fd', 'ag', 'ack',
@@ -591,7 +639,53 @@ function makeJudge(home, exists = existsSync) {
   const holdsProtected = (dir) => typeof dir === 'string' && protectedEntries.some((n) => exists(`${dir === '/' ? '' : dir}/${n}`));
   // Total number of remembered values; when a pass adds none, every use has seen every assignment.
   const knownValues = () => [...vars.values()].reduce((n, list) => n + list.length, 0);
-  return { judge, locate, roots, assign, knownValues, holdsProtected, alternatives };
+  // Does this word point at a permission list (settings.json or settings.local.json inside a .claude
+  // folder) or at the .claude folder itself? Variables, braces and wildcards count; an unknown
+  // directory counts when the word is a bare file name.
+  const permissionAt = (abs) => {
+    const parts = abs.split('/');
+    const last = parts[parts.length - 1];
+    const dir = parts[parts.length - 2];
+    const lastRe = GLOB_SEGMENT.test(last) ? globRegex(last) : null;
+    const dirRe = dir !== undefined && GLOB_SEGMENT.test(dir) ? globRegex(dir) : null;
+    const dirOk = dir !== undefined && (dirRe ? dirRe.test('.claude') : dir === '.claude');
+    const lastIsFile = lastRe ? PERMISSION_NAMES.some((n) => lastRe.test(n)) : PERMISSION_NAMES.includes(last);
+    const lastIsFolder = lastRe ? lastRe.test('.claude') : last === '.claude';
+    return (dirOk && lastIsFile) || lastIsFolder;
+  };
+  const touchesPermissionFile = (word, base) => {
+    const alts = alternatives(word);
+    if (alts === null) return false;
+    for (const a of alts) {
+      // A value written as NAME=path or --flag=path (dd of=..., --output=...) names a path too.
+      const eq = a.v.match(/^-{0,2}[A-Za-z_][\w-]*=(.+)$/);
+      for (const w of eq ? [a, { ...a, v: eq[1], tilde0: false }] : [a]) {
+        const abs = locateOne(w, base);
+        if (abs !== null) { if (permissionAt(abs)) return true; continue; }
+        const parts = w.v.split('/');
+        const last = parts[parts.length - 1];
+        if ((PERMISSION_NAMES.includes(last) && (parts.length === 1 || parts[parts.length - 2] === '.claude' || /\$|\u0000/.test(parts[parts.length - 2]))) || last === '.claude') return true;
+      }
+    }
+    return false;
+  };
+  // Does this word name the grant function (T-019)? Plain text, braces, variables and wildcards count; a
+  // wildcard counts when its folder is the hooks folder (or cannot be told).
+  const touchesGrantFunction = (word, base) => {
+    const alts = alternatives(word);
+    if (alts === null) return false;
+    for (const a of alts) {
+      if (/grant-edit/.test(a.v)) return true;
+      const last = a.v.split('/').pop();
+      if (!GLOB_SEGMENT.test(last) || !globRegex(last).test('grant-edit.mjs')) continue;
+      const abs = locateOne(a, base);
+      if (abs === null) return true;
+      const parent = abs.split('/').slice(-2, -1)[0];
+      if (parent === undefined || (GLOB_SEGMENT.test(parent) ? globRegex(parent).test('hooks') : parent === 'hooks')) return true;
+    }
+    return false;
+  };
+  return { judge, locate, roots, assign, knownValues, holdsProtected, alternatives, touchesPermissionFile, touchesGrantFunction };
 }
 
 // Bash brace expansion: {a,b,c} lists and {x..y} ranges of single letters or integers, nested, left to
@@ -666,6 +760,8 @@ function analyze(src, startDir, ctx, depth, forceShell = false) {
       const w = c.words.find((x) => !/^\w+=/.test(x.v) && !prefixWords.has(baseName(x.v)));
       return w && baseName(w.v);
     });
+    // A permission-list name passed down a pipe (printf ... | xargs rm) may only reach read-only programs.
+    let upstream = false;
     for (let p = 0; p < pipeline.length; p += 1) {
       const stdinIsShell = names.slice(p + 1).some((n) => shells.has(n) || n === 'xargs' || n === 'source' || n === '.' || n === 'eval');
       // Loops, functions, and traps can run a command after a directory change written later in the
@@ -681,8 +777,9 @@ function analyze(src, startDir, ctx, depth, forceShell = false) {
       // An alias, like a function or trap, is code defined now that runs later from another directory.
       if (pipeline[p].funcDef || loopWords.has(head?.v) || head?.v === 'trap' || head?.v === 'alias') ctx.sawLoop = true;
       if (head && (dirMovers.has(head.v) || head.dynamic) && ctx.sawLoop) ctx.cdAfterLoop = true;
-      const r = command(pipeline[p], forceShell || stdinIsShell);
+      const r = command(pipeline[p], forceShell || stdinIsShell, upstream);
       if (r.why) return r;
+      upstream ||= r.named === true;
       dir = r.dir;
       if (!seenDirs.includes(dir)) seenDirs.push(dir);
     }
@@ -696,11 +793,16 @@ function analyze(src, startDir, ctx, depth, forceShell = false) {
   }
   return { why: null, dir };
 
-  function command(cmd, shellBodies) {
+  function command(cmd, shellBodies, upstream = false) {
     let here = dir;
+    let named = false;
     const fail = (why) => ({ why, dir: here });
-    const ok = (next = here) => ({ why: null, dir: next });
-    for (const t of cmd.redirects) { const why = judge(t, here, false); if (why) return fail(why); }
+    const ok = (next = here) => ({ why: null, dir: next, named });
+    for (const t of cmd.redirects) {
+      const why = judge(t, here, false);
+      if (why) return fail(why);
+      if (ctx.touchesPermissionFile(t, here) || (t.subs ?? []).some((x) => PERMISSION_TEXT.test(x))) { if (t.write) return fail(MSG.permFile); named = true; }
+    }
     let words = cmd.words;
     let i = 0;
     let viaXargs = false;
@@ -739,6 +841,34 @@ function analyze(src, startDir, ctx, depth, forceShell = false) {
     const name = nameWord ? nameWord.v.slice(nameWord.v.lastIndexOf('/') + 1) : undefined;
     const args = words.slice(1);
 
+    // Text that names a permission list or the grant function: in a word, in a $(...) body inside a word, or
+    // in a heredoc body (T-019). Any program can be handed such text (sh -c, pnpm exec, python3 on stdin), so
+    // only read-only programs, git and gh may carry it, and it counts as naming the list for later stages.
+    // A patch against a permission list is refused outright (git apply or patch would write it).
+    if (nameWord) {
+      // A plain path word is judged by where it resolves (below); only words that look like script or
+      // shell text (spaces, quotes, operators) are searched as text.
+      const plainPath = (v) => /^[\w@%+=:,.\/~-]+$/.test(v);
+      const texts = [nameWord, ...args].flatMap((w) => [...(plainPath(w.v) ? [] : [w.v]), ...(w.subs ?? [])]).concat(cmd.heredocs.map((h) => h.body ?? ''));
+      if (texts.some((t) => PATCH_OF_LIST.test(t))) return fail(MSG.permFile);
+      const mentionsList = texts.some((t) => PERMISSION_TEXT.test(t));
+      const mentionsGrant = texts.some((t) => /grant-edit/.test(t));
+      const sub1 = args.find((a) => !a.v.startsWith('-'))?.v;
+      if (name !== 'gh' && !permissionReadOnly(name, sub1, args)) {
+        if (mentionsGrant) return fail(MSG.grantEdit);
+        if (mentionsList) return fail(MSG.permFile);
+      }
+      if (mentionsList || mentionsGrant) named = true;
+    }
+
+    // The grant function is run by the owner in a terminal, never by a session (T-019). Programs that
+    // only read, and git and gh (commit messages, PR text), may mention it.
+    if (nameWord && name !== 'gh' && !permissionReadOnly(name, args.find((a) => !a.v.startsWith('-'))?.v, args)
+      && [nameWord, ...args].some((w) => ctx.touchesGrantFunction(w, here))) return fail(MSG.grantEdit);
+
+    // A permission-list name that came down a pipe may only reach read-only programs (xargs rm, sh, while read).
+    if (upstream && !permissionReadOnly(name, args.find((a) => !a.v.startsWith('-'))?.v, args)) return fail(MSG.permFile);
+
     // Heredoc bodies: shell for shells, unknown receivers, xargs, and stdin-to-shell pipelines; otherwise
     // data, where only $(...) and backticks in an unquoted-delimiter body run.
     const bodiesAsShell = shellBodies || viaXargs || (name !== undefined && (!heredocDataReaders.has(name) || nameWord.dynamic));
@@ -765,7 +895,7 @@ function analyze(src, startDir, ctx, depth, forceShell = false) {
     if (nameWord.dynamic) {
       for (const alt of ctx.alternatives(nameWord) ?? []) {
         if (alt.dynamic) continue;
-        const r = command({ words: [alt, ...args], redirects: [], heredocs: [] }, shellBodies);
+        const r = command({ words: [alt, ...args], redirects: [], heredocs: [] }, shellBodies, upstream);
         if (r.why) return fail(r.why);
       }
     }
@@ -779,6 +909,13 @@ function analyze(src, startDir, ctx, depth, forceShell = false) {
       return ok();
     }
     // watch runs its command through sh -c, repeatedly.
+    // script runs a command string under a pseudo-terminal: check that string like bash -c.
+    if (name === 'script') {
+      const k = args.findIndex((a) => /^-[a-zA-Z]*c$/.test(a.v) || a.v === '--command' || a.v.startsWith('--command='));
+      const text = k < 0 ? undefined : args[k].v.startsWith('--command=') ? args[k].v.slice(10) : args[k + 1]?.v;
+      if (text) { const why = nested(text, here, true).why; if (why) return fail(why); }
+      return ok();
+    }
     if (name === 'watch') {
       let k = 0;
       while (k < args.length && args[k].v.startsWith('-')) k += ['-n', '--interval'].includes(args[k].v) ? 2 : 1;
@@ -881,6 +1018,35 @@ function analyze(src, startDir, ctx, depth, forceShell = false) {
       const why = judge(positional[k].w, segDir, harmless.has(name) || k < patterns);
       if (why) return fail(why);
     }
+    // Permission lists (T-019): only read-only programs may name them, or the .claude folder itself, and a
+    // name that came down a pipe may only reach read-only programs.
+    const readOnlyHere = permissionReadOnly(name, sub, args);
+    for (const w of [...args, ...flagValues]) {
+      if (ctx.touchesPermissionFile(w, segDir)) {
+        if (!readOnlyHere) return fail(MSG.permFile);
+        named = true;
+      }
+    }
+    // find and fd can pick the lists by pattern and then act on them, or hand their names to a later stage.
+    // Refuse an action when they start where a list could be (this folder or above, or the home folder)
+    // and the tests could match one; without an action, remember that the names went downstream.
+    if (name === 'find' || name === 'fd') {
+      // find: the start paths are the words before the first expression word; fd: the words after the pattern.
+      const exprAt = args.findIndex((a) => /^(-|!$|\()/.test(a.v));
+      const starts = name === 'find'
+        ? args.slice(0, exprAt === -1 ? args.length : exprAt)
+        : positional.slice(1).map((p) => p.w);
+      const places = starts.length ? starts.map((w) => locate(w, segDir)) : [segDir];
+      const reaches = name === 'fd' || places.some((p) => p === null || segDir === null || p === '/' || segDir === p || segDir.startsWith(`${p}/`) || home === p || home.startsWith(`${p}/`));
+      const acts = name === 'find' ? args.some((a) => FIND_ACTIONS.test(a.v)) : args.some((a) => FD_ACTIONS.test(a.v));
+      const couldMatch = name === 'find' ? findCouldMatchList(args, exprAt) : fdCouldMatchList(args);
+      if (reaches && couldMatch) {
+        if (acts) return fail(MSG.permFile);
+        named = true;
+      }
+    }
+    // A listing run from inside the .claude folder itself also names the lists to a later stage.
+    if (listingTools.has(name) && ctx.touchesPermissionFile(lit('.'), segDir)) named = true;
     // Which words a tool reads as folders, patterns, or flag values differs per tool and cannot be told
     // apart reliably, so listing and recursive commands are judged by where they run, not by their
     // words: from ~/W3, a folder above it, or an unknown folder, they are refused; and a recursive command
