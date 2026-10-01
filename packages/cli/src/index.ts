@@ -18,6 +18,7 @@ import { resolveChainByNameFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/eng
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
+import { probeRpc } from './rpc-probe.js';
 import { readFileSync, statSync } from 'node:fs';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -532,6 +533,21 @@ const cli = yargs(hideBin(process.argv))
         // Provider errors can carry the RPC URL (and its key), so only a cleaned short description is printed.
         process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`);
       }
+    })
+  .command('probe-rpc', 'Read-only load probe of a chain RPC: latency, errors and rate limiting at rising concurrency', (args) => args
+    .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'ethereum' })
+    .option('requests', { type: 'number', default: 30, describe: 'Requests per step (1 to 100)' }), async (args) => {
+      try {
+        const config = await resolveChainByNameFromSecrets(args.chain, 'mainnet', configuredSecretRoot(runtimeRoot));
+        const endpoint = config.rpcEndpoints[0];
+        if (!endpoint) throw new Error(`${args.chain.toUpperCase()}_RPC_UNAVAILABLE`);
+        let parsed: URL;
+        try { parsed = new URL(endpoint); } catch { throw new Error('RPC_URL_INVALID'); }
+        if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('RPC_MUST_BE_HTTPS');
+        const chain = defineChain({ id: config.chainId, name: args.chain, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } });
+        const client = createPublicClient({ chain, transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 0 }) });
+        process.stdout.write(`${json({ chain: args.chain, ...(await probeRpc(client as never, { requestsPerLevel: args.requests })) })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('watch <action> [address]', 'Manage watched (whale) wallets for discovery: add, list, remove', (args) => args
     .positional('action', { type: 'string', choices: ['add', 'list', 'remove'] as const, demandOption: true })
