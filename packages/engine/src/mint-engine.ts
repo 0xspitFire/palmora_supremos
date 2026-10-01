@@ -59,6 +59,7 @@ import { MintError, MintErrorType } from './types.js';
 import { getChainConfig, resolveChainByNameFromSecrets } from './chains.js';
 import { FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, replacementPriorityBudget, validateFeeBudget, validateFreeMintReserve, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
+import { reserveThenSign, robinhoodL1DataGasWei } from './pre-sign.js';
 import { NonceManagerImpl } from './nonce-manager.js';
 import { ReceiptReorgedError, ReceiptTimeoutError, ReceiptWatcherImpl } from './receipt-watcher.js';
 import { EthereumFinalityObserver } from './finality-observer.js';
@@ -729,7 +730,8 @@ export class MintEngine {
         if (this.killSwitch.isKilled()) throw new MintError(MintErrorType.KILLED, 'Kill switch triggered before signing', walletIndex);
         if (!this.reservationProvider) throw new MintError(MintErrorType.DURABLE_RESERVATION_REQUIRED, 'Live execution requires a normalized durable reservation provider', walletIndex);
         this.checkKill();
-        reservation = await this.reservationProvider.reserve({
+        const reservationProvider = this.reservationProvider;
+        const reserveRequest = {
             idempotencyKey: `${transactionIntentId}:reservation`,
             chainId,
             walletIndex,
@@ -742,7 +744,7 @@ export class MintEngine {
             transactionIntentId,
             mintValueWei: value,
             l2ExecutionGasWei: gasLimit * tx.maxFeePerGas!,
-            l1DataGasWei: chainId === 4663 ? BigInt(Math.ceil(Number(gasLimit) / 16)) : 0n,
+            l1DataGasWei: chainId === 4663 ? robinhoodL1DataGasWei(gasLimit, tx.maxFeePerGas!) : 0n,
             priorityFeeComponentWei: tx.maxPriorityFeePerGas!,
             replacementBudgetWei: replacementPriorityBudget(tx.maxPriorityFeePerGas!),
             freeMint: value === 0n,
@@ -752,10 +754,20 @@ export class MintEngine {
               freeMint: value === 0n,
               priorityFeeComponentWei: tx.maxPriorityFeePerGas!.toString(),
             },
-          });
-        this.checkKill();
-        const signedTx = await signer.signTransaction(walletIndex, intent);
-        this.checkKill();
+          };
+        // T-021: the amounts reserved must be the amounts in the transaction, the signer is only called after
+        // the reservation is accepted, and the signed bytes must decode back to the checked transaction.
+        const { reservation: reserved, signedTx } = await reserveThenSign({
+          intent,
+          request: reserveRequest,
+          reserve: () => reservationProvider.reserve(reserveRequest),
+          sign: () => signer.signTransaction(walletIndex, intent),
+          checkKill: () => this.checkKill(),
+          // Set at once so the catch block below releases the reservation if the kill switch, the signer or the
+          // signed-bytes check refuses after the reserve step.
+          onReserved: (created) => { reservation = created; },
+        });
+        reservation = reserved;
 
         walletLog.info({ event: 'tx_signed' }, 'Transaction signed');
 
