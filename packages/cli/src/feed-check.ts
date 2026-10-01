@@ -39,6 +39,9 @@ export class WebSocketFrameDecoder {
       if (length === 126) { if (this.buffer.length < 4) break; length = this.buffer.readUInt16BE(2); offset = 4; }
       else if (length === 127) { if (this.buffer.length < 10) break; const big = this.buffer.readBigUInt64BE(2); if (big > BigInt(MAX_MESSAGE_BYTES)) throw new Error('FEED_FRAME_TOO_LARGE'); length = Number(big); offset = 10; }
       if (length > MAX_MESSAGE_BYTES) throw new Error('FEED_FRAME_TOO_LARGE');
+      // Control frames (close, ping, pong) are small, never fragmented and never compressed (RFC 6455).
+      if (opcode >= 0x8 && (length > 125 || !fin || rsv1)) throw new Error('FEED_CONTROL_FRAME_INVALID');
+      if (opcode === 0x0 && rsv1) throw new Error('FEED_FRAME_UNSUPPORTED');
       if (masked) offset += 4;
       if (this.buffer.length < offset + length) break;
       let data = this.buffer.subarray(offset, offset + length);
@@ -87,6 +90,7 @@ export async function* readFeed(url: string, options: { seconds: number; maxMess
       let body = chunk;
       if (!upgraded) {
         handshake = Buffer.concat([handshake, chunk]);
+        if (handshake.length > 16_384) throw new Error('FEED_HANDSHAKE_TOO_LARGE');
         const end = handshake.indexOf('\r\n\r\n');
         if (end < 0) return;
         const header = handshake.subarray(0, end).toString('latin1');
@@ -146,16 +150,30 @@ export function l2MessageTxHashes(l2Msg: Uint8Array, depth = 0): Hash[] {
   return hashes;
 }
 
-/** Reads one feed JSON message into its sequence numbers and transaction hashes. */
+type FeedJson = { messages?: Array<{ sequenceNumber?: number | string; message?: { message?: { header?: { kind?: number }; l2Msg?: string } } }> };
+
+function parseFeed(text: string): FeedJson['messages'] {
+  try { const parsed = JSON.parse(text) as FeedJson | null; return Array.isArray(parsed?.messages) ? parsed!.messages : []; } catch { return []; }
+}
+
+const sequenceOf = (value: number | string | undefined): bigint | null => {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  try { const sequence = BigInt(value); return sequence >= 0n ? sequence : null; } catch { return null; }
+};
+
+/** Every sequence number in one feed message, including deposits and other messages that carry no transaction. */
+export function decodeFeedSequences(text: string): bigint[] {
+  return (parseFeed(text) ?? []).flatMap((item) => { const sequence = sequenceOf(item?.sequenceNumber); return sequence === null ? [] : [sequence]; });
+}
+
+/** Reads one feed JSON message into transaction hashes. Only L2 messages (header kind 3) carry transactions. */
 export function decodeFeedMessage(text: string): FeedTx[] {
-  let parsed: { messages?: Array<{ sequenceNumber?: number | string; message?: { message?: { l2Msg?: string } } }> };
-  try { parsed = JSON.parse(text); } catch { return []; }
   const out: FeedTx[] = [];
-  for (const item of parsed.messages ?? []) {
-    const sequence = BigInt(item.sequenceNumber ?? -1);
-    const l2 = item.message?.message?.l2Msg;
-    if (sequence < 0n || typeof l2 !== 'string') continue;
-    for (const txHash of l2MessageTxHashes(Buffer.from(l2, 'base64'))) out.push({ sequenceNumber: sequence, txHash });
+  for (const item of parseFeed(text) ?? []) {
+    const sequence = sequenceOf(item?.sequenceNumber);
+    const inner = item?.message?.message;
+    if (sequence === null || inner?.header?.kind !== 3 || typeof inner.l2Msg !== 'string') continue;
+    for (const txHash of l2MessageTxHashes(Buffer.from(inner.l2Msg, 'base64'))) out.push({ sequenceNumber: sequence, txHash });
   }
   return out;
 }
@@ -184,11 +202,12 @@ export async function checkFeed(client: PublicClient, feed: AsyncIterable<string
   const seen: Array<FeedTx & { at: number }> = [];
   for await (const text of feed) {
     feedMessages += 1;
-    for (const tx of decodeFeedMessage(text)) {
-      if (last !== null && tx.sequenceNumber > last + 1n) gaps += 1;
-      if (last === null || tx.sequenceNumber > last) last = tx.sequenceNumber;
-      if (seen.length < maxTransactions) seen.push({ ...tx, at: now() });
+    // Deposits and other non-transaction messages still use sequence numbers, so gaps are counted over all of them.
+    for (const sequence of decodeFeedSequences(text)) {
+      if (last !== null && sequence > last + 1n) gaps += 1;
+      if (last === null || sequence > last) last = sequence;
     }
+    for (const tx of decodeFeedMessage(text)) if (seen.length < maxTransactions) seen.push({ ...tx, at: now() });
     if (seen.length >= maxTransactions) break;
   }
   const delays: number[] = []; let correlated = 0; let pending = 0; let mismatches = 0;

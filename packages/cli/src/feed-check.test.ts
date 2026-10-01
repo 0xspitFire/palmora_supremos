@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { deflateRawSync } from 'node:zlib';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { keccak256, type Hash, type PublicClient } from 'viem';
-import { WebSocketFrameDecoder, checkFeed, decodeFeedMessage, l2MessageTxHashes } from './feed-check.js';
+import { WebSocketFrameDecoder, checkFeed, decodeFeedMessage, decodeFeedSequences, l2MessageTxHashes } from './feed-check.js';
 
 const frame = (opcode: number, payload: Buffer, options: { fin?: boolean; rsv1?: boolean } = {}): Buffer => {
   const head = [(options.fin === false ? 0 : 0x80) | (options.rsv1 ? 0x40 : 0) | opcode];
@@ -42,6 +42,27 @@ describe('WebSocket frame decoder (receive-only)', () => {
   });
 });
 
+describe('frame decoder limits', () => {
+  it('rejects bad control frames and compression bombs', () => {
+    expect(() => new WebSocketFrameDecoder().push(frame(9, Buffer.alloc(126)))).toThrow('FEED_CONTROL_FRAME_INVALID');
+    expect(() => new WebSocketFrameDecoder().push(frame(9, Buffer.from('x'), { fin: false }))).toThrow('FEED_CONTROL_FRAME_INVALID');
+    expect(() => new WebSocketFrameDecoder(true).push(frame(9, Buffer.from('x'), { rsv1: true }))).toThrow('FEED_CONTROL_FRAME_INVALID');
+    // 9 MB of zeros compresses to a few KB but would inflate past the 8 MB limit.
+    const bomb = deflateRawSync(Buffer.alloc(9 * 1024 * 1024), { finishFlush: 2 });
+    const payload = bomb.subarray(0, bomb.length - 4);
+    const head = Buffer.from([0xc1, 126, payload.length >> 8, payload.length & 0xff]);
+    expect(() => new WebSocketFrameDecoder(true).push(Buffer.concat([head, payload]))).toThrow();
+  });
+
+  it('refuses a fragmented message that grows past the limit', () => {
+    const decoder = new WebSocketFrameDecoder();
+    const piece = Buffer.alloc(60_000, 1);
+    let thrown: Error | null = null;
+    try { decoder.push(frame(2, piece, { fin: false })); for (let index = 0; index < 200; index += 1) decoder.push(frame(0, piece, { fin: false })); } catch (error) { thrown = error as Error; }
+    expect(thrown?.message).toBe('FEED_MESSAGE_TOO_LARGE');
+  });
+});
+
 describe('feed message decoding', () => {
   it('turns kind-4 messages and kind-3 batches into transaction hashes, and ignores everything else', async () => {
     const one = await signedTx(1); const two = await signedTx(2);
@@ -53,6 +74,13 @@ describe('feed message decoding', () => {
     expect(l2MessageTxHashes(Buffer.from([3, 0, 0, 0, 0, 0, 0, 0, 200, 1]))).toEqual([]);
     expect(decodeFeedMessage(feedJson([{ seq: 7, l2: Buffer.concat([Buffer.from([4]), one.bytes]) }]))).toEqual([{ sequenceNumber: 7n, txHash: one.hash }]);
     expect(decodeFeedMessage('not json')).toEqual([]);
+    expect(decodeFeedMessage('null')).toEqual([]);
+    expect(decodeFeedMessage('{"messages":[{"sequenceNumber":"junk"},{"sequenceNumber":-4}]}')).toEqual([]);
+    expect(decodeFeedSequences('{"messages":[{"sequenceNumber":"junk"},{"sequenceNumber":3},{"sequenceNumber":"4"}]}')).toEqual([3n, 4n]);
+    // Only header kind 3 carries L2 transactions; a deposit-style message with transaction-looking bytes is ignored.
+    const deposit = JSON.stringify({ messages: [{ sequenceNumber: 9, message: { message: { header: { kind: 12 }, l2Msg: Buffer.concat([Buffer.from([4]), one.bytes]).toString('base64') } } }] });
+    expect(decodeFeedMessage(deposit)).toEqual([]);
+    expect(decodeFeedSequences(deposit)).toEqual([9n]);
     expect(decodeFeedMessage('{"messages":[{"sequenceNumber":1,"message":{}}]}')).toEqual([]);
   });
 });
@@ -71,6 +99,14 @@ describe('feed check against the RPC', () => {
     const report = await checkFeed(clientFor(new Set([a.hash, c.hash])), feed(feedJson([{ seq: 1, l2: l2(a) }, { seq: 2, l2: l2(b) }]), feedJson([{ seq: 5, l2: l2(c) }])), { rpcWaitSeconds: 2, now: () => clock, sleep: async (ms) => { clock += ms; } });
     expect(report).toMatchObject({ feedMessages: 2, transactionsSeen: 3, correlated: 2, pendingAtEnd: 1, mismatches: 0, sequenceGaps: 1 });
     expect(report.summary).toContain('RPC lag');
+  });
+
+  it('counts sequence gaps over every message, so non-transaction messages do not look like gaps', async () => {
+    const a = await signedTx(1); const c = await signedTx(3);
+    const l2 = (item: { bytes: Buffer }): Buffer => Buffer.concat([Buffer.from([4]), item.bytes]);
+    const deposit = JSON.stringify({ messages: [{ sequenceNumber: 2, message: { message: { header: { kind: 12 }, l2Msg: '' } } }] });
+    const report = await checkFeed(clientFor(new Set([a.hash, c.hash])), feed(feedJson([{ seq: 1, l2: l2(a) }]), deposit, feedJson([{ seq: 3, l2: l2(c) }])), { rpcWaitSeconds: 2, now: () => 0, sleep: async () => undefined });
+    expect(report).toMatchObject({ sequenceGaps: 0, transactionsSeen: 2, correlated: 2 });
   });
 
   it('refuses invalid options and reports an empty feed plainly', async () => {

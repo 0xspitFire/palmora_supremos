@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Hash, PublicClient } from 'viem';
+import { encodeFunctionData, parseAbi, zeroAddress, type Hash, type PublicClient } from 'viem';
+import { SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { createNitroFinalitySources, dryRunDrop, observeFinality, checkFees } from './robinhood-readonly.js';
 
 const H = (n: number): Hash => `0x${n.toString(16).padStart(64, '0')}` as Hash;
@@ -67,5 +68,67 @@ describe('Robinhood fee and dry-run checks refuse bad input without touching the
     const report = await dryRunDrop(client, '0x1111111111111111111111111111111111111111', ['0x2222222222222222222222222222222222222222']);
     expect(report.verdict).toBe('blocked');
     expect(report.summary).toContain('No readable SeaDrop public drop');
+  });
+});
+
+
+function dropClient(drop: { mintPrice: bigint; startTime: number; endTime: number; maxTotalMintableByWallet?: number }): PublicClient {
+  return {
+    readContract: async ({ functionName }: { functionName: string }) => {
+      if (functionName === 'getPublicDrop') return { mintPrice: drop.mintPrice, startTime: drop.startTime, endTime: drop.endTime, maxTotalMintableByWallet: drop.maxTotalMintableByWallet ?? 5, feeBps: 0, restrictFeeRecipients: false };
+      throw new Error('not implemented');
+    },
+    call: async () => ({ data: '0x' }),
+    estimateGas: async () => 100_000n,
+    getGasPrice: async () => 10_000_000n,
+    getBalance: async () => 5_000_000_000_000n,
+    getBlockNumber: async () => 1n,
+  } as unknown as PublicClient;
+}
+
+describe('dry run (E6)', () => {
+  const nft = '0x1111111111111111111111111111111111111111';
+  const wallet = '0x2222222222222222222222222222222222222222';
+  const now = new Date('2026-10-01T12:00:00Z');
+  const open = { startTime: Math.floor(now.getTime() / 1000) - 3600, endTime: Math.floor(now.getTime() / 1000) + 3600 };
+
+  it('refuses a paid drop (D-038) and a drop that is not open, without simulating', async () => {
+    const paid = await dryRunDrop(dropClient({ mintPrice: 1n, ...open }), nft, [wallet], { now });
+    expect(paid).toMatchObject({ verdict: 'blocked', wallets: [] });
+    expect(paid.summary).toContain('Paid Robinhood mints are blocked');
+    const ended = await dryRunDrop(dropClient({ mintPrice: 0n, startTime: open.startTime - 7200, endTime: open.startTime - 3600 }), nft, [wallet], { now });
+    expect(ended).toMatchObject({ verdict: 'blocked', wallets: [], drop: { status: 'ended' } });
+    const upcoming = await dryRunDrop(dropClient({ mintPrice: 0n, startTime: open.endTime, endTime: 0 }), nft, [wallet], { now });
+    expect(upcoming.drop?.status).toBe('upcoming');
+  });
+
+  it('simulates a free open drop, flags a wallet with too little ETH, and validates its inputs', async () => {
+    const ok = await dryRunDrop(dropClient({ mintPrice: 0n, ...open }), nft, [wallet], { now, quantity: 99 });
+    expect(ok).toMatchObject({ verdict: 'ok', quantity: 5, wallets: [{ simulation: 'passed', withinPerWalletCap: true, hasEnoughForGas: true }] });
+    const poor = { ...dropClient({ mintPrice: 0n, ...open }), getBalance: async () => 0n } as unknown as PublicClient;
+    expect((await dryRunDrop(poor, nft, [wallet], { now })).wallets[0]).toMatchObject({ hasEnoughForGas: false });
+    expect((await dryRunDrop(dropClient({ mintPrice: 0n, ...open }), nft, [], { now })).summary).toContain('1 to 50 valid wallet');
+    expect((await dryRunDrop(dropClient({ mintPrice: 0n, ...open }), nft, ['bad'], { now })).verdict).toBe('blocked');
+    expect((await dryRunDrop(dropClient({ mintPrice: 0n, ...open }), nft, [wallet], { now, quantity: 0 })).summary).toContain('whole number');
+  });
+});
+
+describe('fee check (E5) arithmetic', () => {
+  const mintPublic = encodeFunctionData({ abi: parseAbi(['function mintPublic(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity)']), functionName: 'mintPublic', args: [zeroAddress, zeroAddress, zeroAddress, 1n] });
+  it('reports median, worst and cap share from real receipts, counting paid mints separately', async () => {
+    const txs: Record<string, { value: bigint; gasUsed: bigint; price: bigint; to?: string }> = {
+      [H(1)]: { value: 0n, gasUsed: 100_000n, price: 20n }, [H(2)]: { value: 0n, gasUsed: 200_000n, price: 20n }, [H(3)]: { value: 0n, gasUsed: 100_000n, price: 4_000_000_000_000n }, [H(4)]: { value: 7n, gasUsed: 100_000n, price: 20n }, [H(5)]: { value: 0n, gasUsed: 100_000n, price: 20n, to: '0x3333333333333333333333333333333333333333' },
+    };
+    const client = {
+      getBlockNumber: async () => 1_000n,
+      getLogs: async () => Object.keys(txs).map((hash) => ({ transactionHash: hash })),
+      getTransaction: async ({ hash }: { hash: string }) => ({ to: txs[hash]!.to ?? SEADROP_V1_ADDRESS, input: mintPublic, value: txs[hash]!.value }),
+      getTransactionReceipt: async ({ hash }: { hash: string }) => ({ status: 'success', gasUsed: txs[hash]!.gasUsed, effectiveGasPrice: txs[hash]!.price }),
+    } as unknown as PublicClient;
+    const report = await checkFees(client, { blocks: 100, samples: 10 });
+    // Free public mints: H1 (2,000,000 wei), H2 (4,000,000 wei), H3 (4e17 wei, over the 2e14 cap). H4 is paid; H5 is not sent to SeaDrop.
+    expect(report).toMatchObject({ mintsSampled: 3, publicMintsLooked: 4, paidPublicMints: 1, underPerWalletCap: 2 });
+    expect(report.costEth.median).toBe('0.00000000');
+    expect(report.summary).toContain('1 were paid');
   });
 });

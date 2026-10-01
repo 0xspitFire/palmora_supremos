@@ -23,7 +23,8 @@ export function createNitroFinalitySources(client: PublicClient): RobinhoodFinal
     isPosted: async (_hash: Hash, blockNumber: bigint) => {
       try { await client.call({ to: NODE_INTERFACE, data: encodeBlock(blockNumber) }); return true; } catch { return false; }
     },
-    // Ethereum final: at or before the node's `finalized` block, which follows Ethereum's own finality.
+    // Ethereum final: at or before the node's `finalized` block. This is L1 data finality (the batch is finalized on
+    // Ethereum), not L2 assertion confirmation. A failed read counts as "not final", the safe answer.
     isEthereumFinal: async (_hash: Hash, blockNumber: bigint) => {
       try { const finalized = await client.getBlock({ blockTag: 'finalized' }); return finalized.number !== null && blockNumber <= finalized.number; } catch { return false; }
     },
@@ -79,7 +80,8 @@ export async function observeFinality(client: PublicClient, options: FinalityObs
     for (const [index, item] of picked.entries()) {
       const entry = tracked[index]!;
       if (entry.finalAfterSeconds !== null) continue;
-      const observation: FinalityObservation = await observer.observe({ txHash: item.hash, txBlockNumber: item.block });
+      let observation: FinalityObservation;
+      try { observation = await observer.observe({ txHash: item.hash, txBlockNumber: item.block }); } catch { continue; } // one failed read must not end a 20-minute run
       const seconds = Math.round((now() - item.blockTime) / 1_000);
       entry.lastStage = observation.stage;
       if (observation.stage === 'posted' || observation.stage === 'ethereum_final') { if (entry.postedAfterSeconds === null) entry.postedAfterSeconds = seconds; }
@@ -106,7 +108,7 @@ export async function observeFinality(client: PublicClient, options: FinalityObs
   const medianPosted = median(tracked.flatMap((entry) => entry.postedAfterSeconds === null ? [] : [entry.postedAfterSeconds]));
   const medianFinal = median(tracked.flatMap((entry) => entry.finalAfterSeconds === null ? [] : [entry.finalAfterSeconds]));
   const finalCount = tracked.filter((entry) => entry.finalAfterSeconds !== null).length;
-  const summary = `Followed ${tracked.length} fresh transaction(s) for up to ${minutes} minute(s): ${tracked.filter((entry) => entry.postedAfterSeconds !== null).length} reached "posted" (median ${medianPosted ?? 'n/a'} s after their block) and ${finalCount} reached Ethereum-final (median ${medianFinal ?? 'n/a'} s). ${stagesInOrder ? 'Stages always came in order (soft, posted, final).' : 'WARNING: a transaction was seen as final before posted.'} ${historical ? `An older transaction (${historical.ageMinutes} min) was "${historical.stage}"${historical.ready ? ' and ready' : ' and NOT ready'}.` : 'No older transaction could be checked.'}`;
+  const summary = `Followed ${tracked.length} fresh transaction(s) for up to ${minutes} minute(s): ${tracked.filter((entry) => entry.postedAfterSeconds !== null).length} reached "posted" (median ${medianPosted ?? 'n/a'} s after their block) and ${finalCount} reached Ethereum-final (median ${medianFinal ?? 'n/a'} s; this means the batch holding the block is finalized on Ethereum, not that Robinhood's own fraud-proof assertion has confirmed). ${stagesInOrder ? 'Stages always came in order (soft, posted, final).' : 'WARNING: a transaction was seen as final before posted.'} ${historical ? `An older transaction (${historical.ageMinutes} min) was "${historical.stage}"${historical.ready ? ' and ready' : ' and NOT ready'}.` : 'No older transaction could be checked.'}`;
   return { followed: tracked, historical, stagesInOrder, medianPostedSeconds: medianPosted, medianFinalSeconds: medianFinal, summary };
 }
 
@@ -131,9 +133,10 @@ export interface FeeCheckReport {
 const ethString = (wei: bigint): string => { const whole = wei / 10n ** 18n; const frac = (wei % 10n ** 18n).toString().padStart(18, '0').slice(0, 8); return `${whole}.${frac}`; };
 
 export async function checkFees(client: PublicClient, options: { blocks?: number; samples?: number } = {}): Promise<FeeCheckReport> {
-  const blocks = BigInt(options.blocks ?? 3_000);
+  const blocksNumber = options.blocks ?? 3_000;
   const samples = options.samples ?? 40;
-  if (blocks < 1n || blocks > 20_000n || !Number.isSafeInteger(samples) || samples < 1 || samples > 200) throw new Error('FEE_CHECK_OPTIONS_INVALID');
+  if (!Number.isSafeInteger(blocksNumber) || blocksNumber < 1 || blocksNumber > 20_000 || !Number.isSafeInteger(samples) || samples < 1 || samples > 200) throw new Error('FEE_CHECK_OPTIONS_INVALID');
+  const blocks = BigInt(blocksNumber);
   const head = await client.getBlockNumber();
   let logs: Array<{ transactionHash: Hash | null }> = [];
   let range = blocks;
@@ -193,6 +196,8 @@ export interface DryRunReport { contract: string; verdict: 'ok' | 'blocked'; sum
 /** Reads a Robinhood SeaDrop public drop and simulates the mint for each wallet with eth_call. Never signs or sends. */
 export async function dryRunDrop(client: PublicClient, contract: string, wallets: readonly string[], options: { quantity?: number; now?: Date } = {}): Promise<DryRunReport> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) return { contract, verdict: 'blocked', summary: 'That is not a valid contract address.', drop: null, quantity: 0, wallets: [] };
+  if (wallets.length === 0 || wallets.length > 50 || wallets.some((wallet) => !/^0x[0-9a-fA-F]{40}$/.test(wallet))) return { contract, verdict: 'blocked', summary: 'Give 1 to 50 valid wallet addresses.', drop: null, quantity: 0, wallets: [] };
+  if (options.quantity !== undefined && (!Number.isSafeInteger(options.quantity) || options.quantity < 1)) return { contract, verdict: 'blocked', summary: 'The quantity must be a whole number of 1 or more.', drop: null, quantity: 0, wallets: [] };
   const strategy = new SeaDropV1PublicStrategy();
   let drop;
   try { drop = await strategy.readDrop(client, contract as Address, 4663); } catch (error) { return { contract, verdict: 'blocked', summary: `No readable SeaDrop public drop here: ${providerErrorDetail(error)}`, drop: null, quantity: 0, wallets: [] }; }
