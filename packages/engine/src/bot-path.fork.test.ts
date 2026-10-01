@@ -232,6 +232,6 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`bot-path rehearsal on a local ${ch
     const outcome = await run(signer, provider, store, killFile('none-5'), 'rehearsal-5', finality('soft')).catch((error: unknown) => error);
     expect(signer.signed.length).toBeGreaterThan(0); // it really signed and broadcast, so the unsettled result is about finality
     expect(records.some((record) => record.status === 'settled')).toBe(false);
-    if (!(outcome instanceof Error)) expect(outcome.successCount).toBe(0);
+    if (!(outcome instanceof Error)) expect((outcome as { successCount: number }).successCount).toBe(0);
   }, 60_000);
 });
