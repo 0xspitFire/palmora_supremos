@@ -19,6 +19,8 @@ import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
 import { probeRpc } from './rpc-probe.js';
+import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
+import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { readFileSync, statSync } from 'node:fs';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -32,6 +34,17 @@ async function ethereumPort(): Promise<EngineIntelligencePort> {
 }
 
 /** Wallets for read-only checks: explicit public addresses, never the keystore. */
+
+/** Read-only client for Robinhood Chain; defaults to the chain's published public RPC, so no secret is needed. */
+function robinhoodReadClient(rpcUrl: string | undefined) {
+  const url = rpcUrl ?? PUBLIC_ROBINHOOD_RPC;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error('RPC_URL_INVALID'); }
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('RPC_MUST_BE_HTTPS');
+  const chain = defineChain({ id: 4663, name: 'robinhood', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } });
+  return createPublicClient({ chain, transport: httpTransport(url, { timeout: 20_000, retryCount: 1 }) });
+}
+
 function checkWallets(value: string | undefined): string[] {
   const list = (value ?? process.env.MINT_BOT_READINESS_WALLETS ?? '').split(',').map((item) => item.trim()).filter((item) => item.length > 0);
   if (list.length === 0) throw new Error('WALLETS_REQUIRED: pass --wallets 0x...,0x... or set MINT_BOT_READINESS_WALLETS');
@@ -509,6 +522,39 @@ const cli = yargs(hideBin(process.argv))
         } catch { root = null; }
         process.stdout.write(`${json(checkAllowlist({ contract: args.contract, wallets, onChainRoot: root, list }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+    })
+  .command('observe-finality', 'Read-only (Robinhood E3): follow fresh transactions through soft, posted and Ethereum-final', (args) => args
+    .option('minutes', { type: 'number', default: 20, describe: 'How long to watch (1 to 60)' })
+    .option('samples', { type: 'number', default: 5, describe: 'Fresh transactions to follow (1 to 20)' })
+    .option('rpc-url', { type: 'string', describe: 'Override the public Robinhood RPC' }), async (args) => {
+      try { process.stdout.write(`${json(await observeFinality(robinhoodReadClient(args.rpcUrl) as never, { minutes: args.minutes, samples: args.samples }))}\n`); }
+      catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+    })
+  .command('check-feed', 'Read-only (Robinhood E4): compare the sequencer feed with the RPC', (args) => args
+    .option('seconds', { type: 'number', default: 45, describe: 'How long to listen to the feed (5 to 300)' })
+    .option('transactions', { type: 'number', default: 30, describe: 'Transactions to compare (1 to 200)' })
+    .option('rpc-url', { type: 'string' })
+    .option('feed-url', { type: 'string', describe: 'Override the public feed (wss only)' }), async (args) => {
+      try {
+        if (!Number.isFinite(args.seconds) || args.seconds < 5 || args.seconds > 300) throw new Error('SECONDS_OUT_OF_RANGE: use 5 to 300');
+        const feed = readFeed(args.feedUrl ?? PUBLIC_ROBINHOOD_FEED, { seconds: args.seconds, maxMessages: 5_000 });
+        process.stdout.write(`${json(await checkFeed(robinhoodReadClient(args.rpcUrl) as never, feed, { maxTransactions: args.transactions }))}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+    })
+  .command('check-fees', 'Read-only (Robinhood E5): what real recent free mints cost, against the approved caps', (args) => args
+    .option('blocks', { type: 'number', default: 3000, describe: 'Recent blocks to look through (1 to 20000)' })
+    .option('samples', { type: 'number', default: 40 })
+    .option('rpc-url', { type: 'string' }), async (args) => {
+      try { process.stdout.write(`${json(await checkFees(robinhoodReadClient(args.rpcUrl) as never, { blocks: args.blocks, samples: args.samples }))}\n`); }
+      catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+    })
+  .command('simulate-robinhood', 'Read-only (Robinhood E6): simulate a free mint for your wallets; never signs or sends', (args) => args
+    .option('contract', { type: 'string', demandOption: true })
+    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
+    .option('quantity', { type: 'number', default: 1 })
+    .option('rpc-url', { type: 'string' }), async (args) => {
+      try { process.stdout.write(`${json(await dryRunDrop(robinhoodReadClient(args.rpcUrl) as never, args.contract, checkWallets(args.wallets), { quantity: args.quantity }))}\n`); }
+      catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'robinhood' })
