@@ -425,7 +425,8 @@ const GLOB_SEGMENT = /[*?[{]|[@!+](\()/;
 // A shell glob segment as a regex. Like bash without dotglob, a leading * ? or [ never matches a dot.
 function globRegex(seg) {
   // Extended globs (@(..), !(..), +(..), *(..), ?(..)) can match nearly anything: treat as any name.
-  if (/[@!+*?]\(/.test(seg)) return seg.startsWith('.') ? /^/ : /^(?!\.)/;
+  // An alternative that starts with a dot inside the group (@(.claude|x)) can match a dot name (checked in Bash 5.3).
+  if (/[@!+*?]\(/.test(seg)) return seg.startsWith('.') || /[(|]\\?\./.test(seg) ? /^/ : /^(?!\.)/;
   let re = '';
   for (let i = 0; i < seg.length; i += 1) {
     const c = seg[i];
@@ -448,7 +449,8 @@ function globRegex(seg) {
       i = j;
     } else re += c.replace(/[.+^${}()|\\]/g, '\\$&');
   }
-  const dotSafe = seg.startsWith('.') ? '' : '(?!\\.)';
+  // Bash 5.3 does not let [.]x match a leading dot, but other versions may: stay on the safe side for classes.
+  const dotSafe = seg.startsWith('.') || seg.startsWith('[') ? '' : '(?!\\.)';
   try { return new RegExp(`^${dotSafe}${re}$`); } catch { return /^/; }
 }
 
@@ -642,12 +644,14 @@ function makeJudge(home, exists = existsSync) {
   // Does this word point at a permission list (settings.json or settings.local.json inside a .claude
   // folder) or at the .claude folder itself? Variables, braces and wildcards count; an unknown
   // directory counts when the word is a bare file name.
-  const permissionAt = (abs) => {
+  // isGlob is the lexer's answer: the word has an unquoted wildcard. Wildcard characters inside quotes (a jq
+  // filter such as '.[] | .x') are plain text, so segments are matched as wildcards only when it is true.
+  const permissionAt = (abs, isGlob) => {
     const parts = abs.split('/');
     const last = parts[parts.length - 1];
     const dir = parts[parts.length - 2];
-    const lastRe = GLOB_SEGMENT.test(last) ? globRegex(last) : null;
-    const dirRe = dir !== undefined && GLOB_SEGMENT.test(dir) ? globRegex(dir) : null;
+    const lastRe = isGlob && GLOB_SEGMENT.test(last) ? globRegex(last) : null;
+    const dirRe = isGlob && dir !== undefined && GLOB_SEGMENT.test(dir) ? globRegex(dir) : null;
     const dirOk = dir !== undefined && (dirRe ? dirRe.test('.claude') : dir === '.claude');
     const lastIsFile = lastRe ? PERMISSION_NAMES.some((n) => lastRe.test(n)) : PERMISSION_NAMES.includes(last);
     const lastIsFolder = lastRe ? lastRe.test('.claude') : last === '.claude';
@@ -661,7 +665,7 @@ function makeJudge(home, exists = existsSync) {
       const eq = a.v.match(/^-{0,2}[A-Za-z_][\w-]*=(.+)$/);
       for (const w of eq ? [a, { ...a, v: eq[1], tilde0: false }] : [a]) {
         const abs = locateOne(w, base);
-        if (abs !== null) { if (permissionAt(abs)) return true; continue; }
+        if (abs !== null) { if (permissionAt(abs, w.glob === true)) return true; continue; }
         const parts = w.v.split('/');
         const last = parts[parts.length - 1];
         if ((PERMISSION_NAMES.includes(last) && (parts.length === 1 || parts[parts.length - 2] === '.claude' || /\$|\u0000/.test(parts[parts.length - 2]))) || last === '.claude') return true;

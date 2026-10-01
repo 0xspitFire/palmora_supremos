@@ -186,6 +186,23 @@ describe('Bash guard: writes to permission lists are refused (fail closed)', () 
     'find . | xargs rm',
     'cd .claude && ls | xargs rm',
     'cd .claude && find . | xargs rm',
+    // spaced path segments still resolve to the list; wildcards on the resolved name still match
+    'echo x > "d d/../.claude/settings.json"',
+    'echo x > d\\ d/../.claude/settings.j*',
+    // T-020 review: a space can sit inside a real wildcard (bracket class or extglob), so it is still a wildcard
+    'echo x > .claude/s[e\\ ]ttings.json',
+    'echo x > .cl[a\\ ]ude/settings.json',
+    'echo x > .cl[a" "]ude/settings.json',
+    'echo x > .claude/settings.local.js[o\\ ]n',
+    'echo x > .claude/settings.[j\\ ]son',
+    'tee .claude/settings.[j\\ ]son',
+    'echo x > "a b"/.cl[a\\ ]ude',
+    'echo x > .claude/@(settings.json|\\ x)',
+    // an extglob group with an explicit dot matches the dot folder in Bash 5.3; a bracket class is kept safe
+    'echo x > @(.claude|\\ x)/settings.json',
+    'echo x > ?(.claude)/settings.json',
+    'echo x > [.]claude/settings.json',
+    'cp x "my dir/../.claude/settings.local.json"',
     // security review: names built inside $(...), wrapper strings, script text on stdin, heredocs, patches
     'cp x "$(echo .claude/settings.json)"',
     'echo x > $(echo .claude/settings.json)',
@@ -297,6 +314,13 @@ describe('Bash guard: read-only commands on permission lists and everyday comman
     'git commit -F - <<EOF\nupdate .claude/settings.json docs\nEOF',
     'gh pr create --body-file - <<EOF\nmentions .claude/settings.json\nEOF',
     'cp Docs/permission-patch/settings.local.json /tmp/copy.json',
+    // everyday gh and curl output filters have [ ] and spaces inside quotes: quoted wildcard characters are
+    // plain text, so they must not read as wildcard paths (the refusals above cover real wildcards)
+    "gh run list --branch main --limit 6 --json databaseId,status --jq '.[] | \"\\(.databaseId) \\(.status[0:7])\"'",
+    "gh pr list --json number,title --jq '.[] | \"#\\(.number) \\(.title)\"'",
+    "gh pr view 1 --json statusCheckRollup --jq '[.statusCheckRollup[]|select(.name==\"x\")|.status]|first'",
+    'curl -sS -o /dev/null -w "%{size_download} bytes in %{time_total}s\\n" https://x.example/a',
+    "gh api repos/o/r/branches/main/protection --jq '{strict: .required_status_checks.strict}'",
     'git commit -m "T-019: add grant-edit.mjs, the owner-run function"',
     'gh pr create --title "x" --body "run grant-edit.mjs yourself, in a terminal"',
     'cat .claude/hooks/grant-edit.mjs',
