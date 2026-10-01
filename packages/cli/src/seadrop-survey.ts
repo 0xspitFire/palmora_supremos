@@ -129,5 +129,19 @@ function spread<T>(items: readonly T[], count: number): T[] {
 /** The only text the survey command may print for a failure: known survey codes as-is, anything else cleaned, because provider errors can contain the RPC URL and key. */
 export function surveyErrorMessage(error: unknown): string {
   if (error instanceof Error && /^[A-Z][A-Z0-9_]+(:|$)/.test(error.message) && !/:\/\/|0x[0-9a-f]{20,}|[A-Za-z0-9_-]{32,}/i.test(error.message)) return error.message;
-  return `SURVEY_FAILED: ${providerErrorDetail(error)}`;
+  return `SURVEY_FAILED: ${providerErrorDetail(error)}${connectionHint(error)}`;
+}
+
+/** Short, secret-free clues about why a request failed: the error type, HTTP status and network code (for example ENOTFOUND), never the URL. */
+function connectionHint(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === 'object'; depth += 1) {
+    const item = current as { name?: unknown; code?: unknown; status?: unknown; cause?: unknown };
+    if (typeof item.name === 'string' && /^[A-Za-z]{1,40}$/.test(item.name) && item.name !== 'Error') parts.push(item.name);
+    if (typeof item.status === 'number') parts.push(`HTTP ${item.status}`);
+    if (typeof item.code === 'string' && /^[A-Z_]{3,30}$/.test(item.code)) parts.push(item.code);
+    current = item.cause;
+  }
+  return parts.length > 0 ? ` [${[...new Set(parts)].join(', ')}]` : '';
 }
