@@ -18,6 +18,7 @@
     "ops:restore-check": "node scripts/restore-check.mjs",
     "ops:negative-cases": "node scripts/negative-cases.mjs",
     "ops:fork-replay": "node scripts/ops-fork-replay.mjs",
+    "ops:robinhood-rehearsal": "node scripts/robinhood-bot-path-rehearsal.mjs",
     "ops:clean-checkout": "node scripts/clean-checkout.mjs",
     "ops:recovery-drill": "node scripts/recovery-drill.mjs",
     "ops:ethereum-fork": "node scripts/ethereum-fork-replay.mjs",
