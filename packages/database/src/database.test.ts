@@ -575,7 +575,8 @@ describe('database migrations and spend reservations', () => {
     db.prepare("INSERT INTO raw_observation (id, source, observed_at, payload_json, deduplication_key) VALUES ('retention-old', 'test', '2020-01-01T00:00:00.000Z', '{}', 'retention-old')").run();
     expect(pruneRawObservations(db, new Date('2025-01-01T00:00:00.000Z'))).toBe(1);
     expect(db.prepare("SELECT rows_deleted, outcome FROM retention_evidence WHERE entity_type = 'raw_observation' ORDER BY recorded_at DESC LIMIT 1").get()).toEqual({ rows_deleted: 1, outcome: 'passed' });
-    expect(() => pruneRawObservations(db, new Date('2026-09-01T00:00:00.000Z'))).toThrow('retention cutoff exceeds');
+    // One day ago is always inside the retention window, whatever today's date is (a fixed date stopped throwing once it aged out).
+    expect(() => pruneRawObservations(db, new Date(Date.now() - 86_400_000))).toThrow('retention cutoff exceeds');
     db.close();
   });
 
