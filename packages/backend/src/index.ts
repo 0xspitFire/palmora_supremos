@@ -88,3 +88,5 @@ export * from './intelligence/index.js';
 export type { IntelligenceAlertInput, IntelligenceAlertKind } from './alerts.js';
 export { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, ownerTypedAuthority, ownerTypedProof, recordWalletSimulations, PERSONAL_LIVE_PROBE_MS, PERSONAL_LIVE_SIMULATION_MS, PERSONAL_LIVE_CHAIN_EVIDENCE_MS } from './personal-live-readiness.js';
 export type { PersonalLiveProbes, ReadinessFailure, ReadinessOutcome } from './personal-live-readiness.js';
+export { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds } from './kill-switch-release.js';
+export type { KillSwitchStatus } from './kill-switch-release.js';

@@ -656,6 +656,7 @@ const cli = yargs(hideBin(process.argv))
           walletFile: file,
           backupStatusPath: args.backupStatus ?? process.env.MINT_BOT_BACKUP_STATUS_PATH ?? join(process.env.MINT_BOT_BACKUP_DIR ?? join(runtimeRoot, 'Rets', 'state', 'backups'), 'status.json'),
           killSwitchFile: DEFAULT_KILL_FILE,
+          killSwitchStoredFlag: () => runtime.store.snapshot().killed,
           // A valid bot token is not enough: a short test message must actually be delivered to the owner (D-043).
           telegramHealthy: async () => {
             try {

@@ -14,6 +14,8 @@ export function createPersonalLiveProbes(options: {
   walletFile: string;
   backupStatusPath: string;
   killSwitchFile: string;
+  /** The kill switch is also stored in the database (the kill command sets both); either one counts. */
+  killSwitchStoredFlag?: () => boolean;
   telegramHealthy: () => Promise<boolean>;
   now?: () => number;
 }): PersonalLiveProbes {
@@ -38,7 +40,7 @@ export function createPersonalLiveProbes(options: {
       if (!Number.isFinite(recorded)) throw new Error('BACKUP_STATUS_UNREADABLE');
       return { ok: parsed.status === 'ok', ageMs: Math.max(0, now() - recorded) };
     },
-    killSwitchEngaged: async () => existsSync(options.killSwitchFile),
+    killSwitchEngaged: async () => existsSync(options.killSwitchFile) || options.killSwitchStoredFlag?.() === true,
   };
 }
 
