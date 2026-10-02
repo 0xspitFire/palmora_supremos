@@ -1,4 +1,4 @@
-import { PERSONAL_LIVE_FLEET_POLICY, formatEth } from '@mint-bot/backend';
+import { MAX_FREE_TIP_WEI, PERSONAL_LIVE_FLEET_POLICY, formatEth } from '@mint-bot/backend';
 import { parseEther } from 'viem';
 import type { DropCheckReport } from './drop-check.js';
 
@@ -66,12 +66,14 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
   const ready = blockers.length === 0;
   const total = formatEth(totalWei);
   const summary = ready
-    ? `Drop and wallets are ready: ${walletsReady.length} wallet(s) would each mint ${report.quantity} NFT(s) and could spend at most ${total} ETH in total (budget ${formatEth(dailyBudgetWei)} ETH). Going live itself is not available yet (open decisions, see nextSteps). Nothing has been sent.`
+    ? `Drop and wallets are ready: ${walletsReady.length} wallet(s) would each mint ${report.quantity} NFT(s) and could spend at most ${total} ETH in total (budget ${formatEth(dailyBudgetWei)} ETH). Nothing has been sent.`
     : `Not ready: ${blockers.length} thing(s) to fix before a live mint. Nothing has been sent.`;
   const nextSteps = ready
     ? [
-        'The drop and the wallets are ready. Recording and running a live campaign is NOT available yet: it waits for open owner decisions (the live fee model and the engine free-mint caps, task T-024).',
-        'Keep the wallets funded (see walletsNeedingEth when it is not empty) and run live-plan again before any live step.',
+        'Run live-prepare with the confirmation phrase this plan printed. It only records the campaign; nothing is spent.',
+        'Check fee-policy status first: the stored fee policy must match the approved one, or the campaign will be refused.',
+        'Then run approve for that campaign and arm with --mode live. Both refuse unless every guard passes.',
+        'Remove the kill-switch file only when you are ready, then run the armed run with --max-fee-gwei set to the planning fee shown. You can create the kill-switch file again at any time to stop.',
       ]
     : ['Fix the items under blockers, then run live-plan again.'];
   return {
@@ -114,4 +116,32 @@ export function assertLivePrepareAllowed(args: { plan: LivePlan; contract: strin
     throw new Error('WALLET_FILE_DOES_NOT_MATCH_READY_WALLETS: the wallet file must hold exactly the wallets that passed the test mint; make it match, then run live-plan again');
   }
   return ready;
+}
+
+export interface LiveFreeCampaignFields {
+  quantity: number;
+  maxRunWei: bigint;
+  dailyCapWei: bigint;
+  gasCeilingWei: bigint;
+  mintPriceWei: bigint;
+  feePolicy: { kind: 'free'; configuredPriorityFeeWei: bigint; freeTotalSpendCapWei: bigint; l2ExecutionGasBudgetWei: bigint; l1DataGasBudgetWei: bigint; totalFeeBudgetWei: bigint };
+}
+
+/**
+ * Numbers for a FREE Ethereum live campaign under the fee model of D-042: the whole per-wallet fee budget is the approved
+ * free fee allowance (D-037), and the per-gas tip is separate and small. No mint value; the allowance is the only exposure.
+ */
+export function liveFreeCampaignFields(args: { quantity: number; wallets: number; tipWei: bigint }): LiveFreeCampaignFields {
+  const allowance = PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei;
+  if (!Number.isSafeInteger(args.quantity) || args.quantity < 1) throw new Error('LIVE_QUANTITY_INVALID');
+  if (!Number.isSafeInteger(args.wallets) || args.wallets < 1 || BigInt(args.wallets) * allowance > PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei) throw new Error('LIVE_WALLET_COUNT_EXCEEDS_DAILY_BUDGET');
+  if (args.tipWei <= 0n || args.tipWei > MAX_FREE_TIP_WEI || args.tipWei >= allowance) throw new Error('LIVE_TIP_OUT_OF_RANGE');
+  return {
+    quantity: args.quantity,
+    maxRunWei: BigInt(args.wallets) * allowance,
+    dailyCapWei: allowance,
+    gasCeilingWei: allowance,
+    mintPriceWei: 0n,
+    feePolicy: { kind: 'free', configuredPriorityFeeWei: args.tipWei, freeTotalSpendCapWei: allowance, l2ExecutionGasBudgetWei: allowance - args.tipWei, l1DataGasBudgetWei: 0n, totalFeeBudgetWei: allowance },
+  };
 }

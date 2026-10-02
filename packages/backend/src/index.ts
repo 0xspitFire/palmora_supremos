@@ -13,7 +13,7 @@ export type { NotificationMessage, NotificationSink } from './notifications.js';
 export { ExecutionCoordinator } from './coordinator.js';
 export { Orchestrator, ExecutionOrchestrator, BackendOrchestrator } from './orchestrator.js';
 export type { OrchestratorOptions, OrchestratorStatus, ScheduleExecutionInput, ScheduleJobInput, TickResult } from './orchestrator.js';
-export { BackendApplication } from './application.js';
+export { BackendApplication, MAX_FREE_TIP_WEI } from './application.js';
 export type { CampaignInput, CommandResponse } from './application.js';
 export { normalizeError } from './errors.js';
 export type { BackendErrorCode, NormalizedError } from './errors.js';
