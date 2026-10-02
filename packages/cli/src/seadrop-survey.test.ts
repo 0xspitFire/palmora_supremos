@@ -44,7 +44,8 @@ describe('surveySeaDropMints (T-013)', () => {
     const { client } = fakeClient(logs, inputs);
     const result = await surveySeaDropMints(client, { fromBlock: 1n, toBlock: 20n });
     expect(result).toMatchObject({ mintEvents: 5, transactionsSampled: 4, sampleCapped: false, byMethod: { public: 2, signed: 1, allowlist: 0, other: 1 }, publicShare: 0.5, contracts: 2, contractsWithPublic: 1 });
-    expect(result.summary).toBe('5 SeaDrop mint events in 4 sampled transaction(s): 50% public, 25% signed, 0% allowlist, 25% other. 1 of 2 contract(s) had public mints.');
+    expect(result.summary).toBe('5 SeaDrop mint events in 4 sampled transaction(s): 50% public, 25% signed, 0% allowlist, 25% other. 1 of 2 contract(s) had public mints. By drop: 1 public only, 1 signed only, 0 both, 0 other only. Public mints: 2 free, 0 paid. All 4 transactions were classified, so these counts are exact for the window.');
+    expect(result).toMatchObject({ drops: { total: 2, publicOnly: 1, signedOnly: 1, mixed: 0, otherOnly: 0 }, publicMintsFree: 2, publicMintsPaid: 0, publicShareMarginPoints: 0, transactionsInWindow: 4 });
     expect(result.topContracts[0]).toMatchObject({ nft: NFT_A, public: 2 });
   });
 
@@ -54,7 +55,9 @@ describe('surveySeaDropMints (T-013)', () => {
     const { client } = fakeClient(logs, inputs);
     const result = await surveySeaDropMints(client, { fromBlock: 1n, toBlock: 60n, maxTransactions: 10 });
     expect(result).toMatchObject({ mintEvents: 50, transactionsSampled: 10, sampleCapped: true });
-    expect(result.summary).toContain('Sample capped at 10 of 50 transactions.');
+    expect(result.summary).toContain('Estimated from a sample of 10 of 50 transactions (public share within about');
+    expect(result.publicShareMarginPoints).toBe(0); // every sampled transaction is public, so the share is certain at 100%
+    expect(result.transactionsInWindow).toBe(50);
   });
 
   it('halves the log range when the provider rejects it, and gives up on a single rejected block without failing the survey', async () => {
@@ -76,6 +79,7 @@ describe('surveySeaDropMints (T-013)', () => {
     expect(limited.requests).toHaveLength(1);
     await expect(surveySeaDropMints(fakeClient([], {}).client, { fromBlock: 10n, toBlock: 1n })).rejects.toThrow('SURVEY_OPTIONS_INVALID');
     await expect(surveySeaDropMints(fakeClient([], {}).client, { fromBlock: 1n, toBlock: 2n, maxTransactions: 0 })).rejects.toThrow('SURVEY_OPTIONS_INVALID');
+    for (const lookupConcurrency of [0, 33, 1.5]) await expect(surveySeaDropMints(fakeClient([], {}).client, { fromBlock: 1n, toBlock: 2n, lookupConcurrency })).rejects.toThrow('SURVEY_OPTIONS_INVALID');
   });
 
   it('stops with a clear message when the provider keeps rejecting single blocks, and flags partial counts', async () => {
@@ -100,5 +104,52 @@ describe('surveySeaDropMints (T-013)', () => {
     expect(surveyErrorMessage(new Error('RPC_MUST_BE_HTTPS'))).toBe('RPC_MUST_BE_HTTPS');
     expect(surveyErrorMessage(new Error('ROBINHOOD_RPC_UNAVAILABLE'))).toBe('ROBINHOOD_RPC_UNAVAILABLE');
     expect(surveyErrorMessage(new Error('URL: https://secret.example/key1234567890123456789012345678901234'))).toMatch(/^SURVEY_FAILED/);
+  });
+
+  it('splits drops by how they were minted, separates free from paid public mints, and gives a margin when sampling', async () => {
+    const paidInput = { to: SEADROP_V1_ADDRESS, input: publicInput, value: 5n };
+    const logs = [
+      { tx: tx(1), nft: NFT_A, block: 1n }, { tx: tx(2), nft: NFT_A, block: 2n }, // drop A: one free and one paid public mint
+      { tx: tx(3), nft: NFT_B, block: 3n }, // drop B: signed only
+      { tx: tx(4), nft: '0x3333333333333333333333333333333333333333', block: 4n }, { tx: tx(5), nft: '0x3333333333333333333333333333333333333333', block: 5n }, // drop C: public and signed
+      { tx: tx(6), nft: '0x4444444444444444444444444444444444444444', block: 6n }, // drop D: other only
+    ];
+    const inputs = {
+      [tx(1)]: { to: SEADROP_V1_ADDRESS, input: publicInput }, [tx(2)]: paidInput, [tx(3)]: { to: SEADROP_V1_ADDRESS, input: `${signedSelector}00` },
+      [tx(4)]: { to: SEADROP_V1_ADDRESS, input: publicInput }, [tx(5)]: { to: SEADROP_V1_ADDRESS, input: `${signedSelector}00` }, [tx(6)]: { to: NFT_B, input: '0x1234567890' },
+    };
+    const { client } = fakeClient(logs, inputs);
+    const exact = await surveySeaDropMints(client, { fromBlock: 1n, toBlock: 10n });
+    expect(exact.drops).toEqual({ total: 4, publicOnly: 1, signedOnly: 1, mixed: 1, otherOnly: 1, withFreePublic: 2, withPaidPublic: 1 });
+    expect(exact).toMatchObject({ publicMintsFree: 2, publicMintsPaid: 1, publicShareMarginPoints: 0 });
+    // Sampling half of them gives a non-zero margin for the public share, and it is reported.
+    const sampled = await surveySeaDropMints(client, { fromBlock: 1n, toBlock: 10n, maxTransactions: 3 });
+    expect(sampled.sampleCapped).toBe(true);
+    expect(sampled.transactionsInWindow).toBe(6);
+    expect(sampled.publicShareMarginPoints).toBeGreaterThan(0);
+    expect(sampled.summary).toContain('Estimated from a sample of 3 of 6 transactions');
+  });
+
+  it('gives the same answer whatever the lookup batch size', async () => {
+    const logs = Array.from({ length: 25 }, (_, index) => ({ tx: tx(index + 1), nft: index % 2 ? NFT_A : NFT_B, block: BigInt(index + 1) }));
+    const inputs = Object.fromEntries(logs.map((log, index) => [log.tx, index % 3 === 0 ? { to: SEADROP_V1_ADDRESS, input: `${signedSelector}00` } : { to: SEADROP_V1_ADDRESS, input: publicInput }]));
+    const { client } = fakeClient(logs, inputs);
+    const one = await surveySeaDropMints(client, { fromBlock: 1n, toBlock: 30n, lookupConcurrency: 1 });
+    const many = await surveySeaDropMints(client, { fromBlock: 1n, toBlock: 30n, lookupConcurrency: 32 });
+    expect({ ...many, topContracts: many.topContracts.map((row) => ({ ...row })) }).toEqual({ ...one, topContracts: one.topContracts.map((row) => ({ ...row })) });
+    expect(many.byMethod.signed + many.byMethod.public).toBe(25);
+  });
+
+  it('aborts when a transaction lookup is rate limited, and says the counts are not exact when some lookups fail', async () => {
+    const logs = [{ tx: tx(1), nft: NFT_A, block: 1n }, { tx: tx(2), nft: NFT_A, block: 2n }];
+    const limited = fakeClient(logs, { [tx(1)]: { to: SEADROP_V1_ADDRESS, input: publicInput }, [tx(2)]: { to: SEADROP_V1_ADDRESS, input: publicInput } });
+    const rateLimitedClient = { ...limited.client, getTransaction: async () => { throw Object.assign(new Error('Too Many Requests'), { status: 429 }); } } as never;
+    await expect(surveySeaDropMints(rateLimitedClient, { fromBlock: 1n, toBlock: 5n })).rejects.toThrow('SURVEY_RATE_LIMITED');
+    const partial = fakeClient(logs, { [tx(1)]: { to: SEADROP_V1_ADDRESS, input: publicInput } });
+    const result = await surveySeaDropMints(partial.client, { fromBlock: 1n, toBlock: 5n });
+    expect(result.lookupFailures).toBe(1);
+    expect(result.summary).toContain('WARNING');
+    expect(result.summary).toContain('close but not exact');
+    expect(result.summary).not.toContain('exact for the window');
   });
 });

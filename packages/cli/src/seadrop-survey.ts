@@ -30,9 +30,14 @@ export interface SurveyOptions {
   /** Starting blocks per log request; halves on rejection (default 2,000). */
   initialRange?: bigint;
   seaDrop?: Address;
+  /** Transactions looked up at once (default 8, maximum 32). */
+  lookupConcurrency?: number;
 }
 
-export interface ContractMethodCounts { nft: string; public: number; signed: number; allowlist: number; other: number; }
+export interface ContractMethodCounts { nft: string; public: number; signed: number; allowlist: number; other: number; /** Sampled public mints with no value sent / with value sent. */ freePublic: number; paidPublic: number; }
+
+/** How the drops (contracts) split by the way they were minted in the sample. */
+export interface DropKinds { total: number; publicOnly: number; signedOnly: number; mixed: number; otherOnly: number; withFreePublic: number; withPaidPublic: number; }
 export interface SurveyResult {
   fromBlock: string;
   toBlock: string;
@@ -45,6 +50,15 @@ export interface SurveyResult {
   contracts: number;
   contractsWithPublic: number;
   topContracts: ContractMethodCounts[];
+  /** Every drop seen, by how it was minted. This is the count that matters for finding opportunities. */
+  drops: DropKinds;
+  /** Public mints in the sample that sent no value / some value. */
+  publicMintsFree: number;
+  publicMintsPaid: number;
+  /** 95% margin of error, in percentage points, on the public share of mints (0 when every transaction was classified). */
+  publicShareMarginPoints: number;
+  /** All distinct mint transactions in the window, and how many were classified. */
+  transactionsInWindow: number;
   /** Block ranges a provider refused even at one block; results exclude them. */
   skippedRanges: number;
   /** Mint transactions whose method could not be looked up; they are left out of the method counts. */
@@ -58,7 +72,7 @@ export async function surveySeaDropMints(client: PublicClient, options: SurveyOp
   const seaDrop = options.seaDrop ?? SEADROP_V1_ADDRESS;
   const cap = options.maxTransactions ?? 300;
   let range = options.initialRange ?? 2_000n;
-  if (options.toBlock < options.fromBlock || range < 1n || cap < 1) throw new Error('SURVEY_OPTIONS_INVALID');
+  if (options.toBlock < options.fromBlock || range < 1n || cap < 1 || (options.lookupConcurrency !== undefined && (!Number.isSafeInteger(options.lookupConcurrency) || options.lookupConcurrency < 1 || options.lookupConcurrency > 32))) throw new Error('SURVEY_OPTIONS_INVALID');
   const txToNft = new Map<string, string>();
   let mintEvents = 0;
   let skippedRanges = 0;
@@ -90,33 +104,53 @@ export async function surveySeaDropMints(client: PublicClient, options: SurveyOp
   const allTransactions = [...txToNft.entries()];
   const sample = allTransactions.length > cap ? spread(allTransactions, cap) : allTransactions;
   const byMethod: Record<MintMethod, number> = { public: 0, signed: 0, allowlist: 0, other: 0 };
+  let publicMintsFree = 0; let publicMintsPaid = 0;
   const perContract = new Map<string, ContractMethodCounts>();
   let lookupFailures = 0;
-  for (const [hash, nft] of sample) {
-    let method: MintMethod;
-    try {
-      const transaction = await client.getTransaction({ hash: hash as Hex });
-      method = classifyMint(transaction.to, transaction.input, seaDrop);
-    } catch (error) {
-      if (/rate.?limit|429|too many/i.test(providerErrorDetail(error))) throw new Error(`SURVEY_RATE_LIMITED: ${providerErrorDetail(error)}`);
-      lookupFailures += 1;
-      continue;
+  const lookups = options.lookupConcurrency ?? 8;
+  // Look transactions up in small parallel batches: a window of a thousand transactions is slow one at a time.
+  for (let offset = 0; offset < sample.length; offset += lookups) {
+    const batch = sample.slice(offset, offset + lookups);
+    const results = await Promise.all(batch.map(async ([hash, nft]) => {
+      try {
+        const transaction = await client.getTransaction({ hash: hash as Hex });
+        return { nft, method: classifyMint(transaction.to, transaction.input, seaDrop), paid: (transaction.value ?? 0n) > 0n } as const;
+      } catch (error) {
+        if (/rate.?limit|429|too many/i.test(providerErrorDetail(error))) throw new Error(`SURVEY_RATE_LIMITED: ${providerErrorDetail(error)}`);
+        return null;
+      }
+    }));
+    for (const result of results) {
+      if (result === null) { lookupFailures += 1; continue; }
+      const { nft, method, paid } = result;
+      byMethod[method] += 1;
+      const row = perContract.get(nft) ?? { nft, public: 0, signed: 0, allowlist: 0, other: 0, freePublic: 0, paidPublic: 0 };
+      row[method] += 1;
+      if (method === 'public') { if (paid) { row.paidPublic += 1; publicMintsPaid += 1; } else { row.freePublic += 1; publicMintsFree += 1; } }
+      perContract.set(nft, row);
     }
-    byMethod[method] += 1;
-    const row = perContract.get(nft) ?? { nft, public: 0, signed: 0, allowlist: 0, other: 0 };
-    row[method] += 1;
-    perContract.set(nft, row);
   }
   const total = sample.length - lookupFailures;
   const publicShare = total === 0 ? null : byMethod.public / total;
   const contractRows = [...perContract.values()];
   const topContracts = contractRows.sort((left, right) => (right.public + right.signed + right.allowlist + right.other) - (left.public + left.signed + left.allowlist + left.other)).slice(0, 20);
   const contractsWithPublic = contractRows.filter((row) => row.public > 0).length;
+  const drops: DropKinds = { total: contractRows.length, publicOnly: 0, signedOnly: 0, mixed: 0, otherOnly: 0, withFreePublic: contractRows.filter((row) => row.freePublic > 0).length, withPaidPublic: contractRows.filter((row) => row.paidPublic > 0).length };
+  for (const row of contractRows) {
+    const kinds = [row.public > 0, row.signed > 0 || row.allowlist > 0].filter(Boolean).length;
+    if (kinds === 2) drops.mixed += 1;
+    else if (row.public > 0) drops.publicOnly += 1;
+    else if (row.signed > 0 || row.allowlist > 0) drops.signedOnly += 1;
+    else drops.otherOnly += 1;
+  }
+  // 95% margin of error for a share drawn without replacement from a known population (finite-population correction).
+  const population = allTransactions.length;
+  const margin = total === 0 || total >= population || publicShare === null ? 0 : 1.96 * Math.sqrt((publicShare * (1 - publicShare)) / total) * Math.sqrt((population - total) / (population - 1)) * 100;
   const pct = (count: number): string => total === 0 ? '0%' : `${Math.round((100 * count) / total)}%`;
   const summary = total === 0
     ? `${skippedRanges > 0 || lookupFailures > 0 ? `WARNING: ${skippedRanges} block range(s) and ${lookupFailures} transaction lookup(s) failed. ` : ''}No SeaDrop mints were found in blocks ${options.fromBlock}-${options.toBlock}.`
-    : `${skippedRanges > 0 || lookupFailures > 0 ? `WARNING: ${skippedRanges} block range(s) and ${lookupFailures} transaction lookup(s) failed, so these counts are partial. ` : ''}${mintEvents} SeaDrop mint events in ${total} sampled transaction(s): ${pct(byMethod.public)} public, ${pct(byMethod.signed)} signed, ${pct(byMethod.allowlist)} allowlist, ${pct(byMethod.other)} other. ${contractsWithPublic} of ${contractRows.length} contract(s) had public mints.${sample.length < allTransactions.length ? ` Sample capped at ${cap} of ${allTransactions.length} transactions.` : ''}`;
-  return { fromBlock: options.fromBlock.toString(), toBlock: options.toBlock.toString(), mintEvents, transactionsSampled: total, sampleCapped: sample.length < allTransactions.length, byMethod, publicShare, contracts: contractRows.length, contractsWithPublic, topContracts, skippedRanges, lookupFailures, summary };
+    : `${skippedRanges > 0 || lookupFailures > 0 ? `WARNING: ${skippedRanges} block range(s) and ${lookupFailures} transaction lookup(s) failed, so these counts are partial. ` : ''}${mintEvents} SeaDrop mint events in ${total} sampled transaction(s): ${pct(byMethod.public)} public, ${pct(byMethod.signed)} signed, ${pct(byMethod.allowlist)} allowlist, ${pct(byMethod.other)} other. ${contractsWithPublic} of ${contractRows.length} contract(s) had public mints. By drop: ${drops.publicOnly} public only, ${drops.signedOnly} signed only, ${drops.mixed} both, ${drops.otherOnly} other only. Public mints: ${publicMintsFree} free, ${publicMintsPaid} paid.${sample.length < allTransactions.length ? ` Estimated from a sample of ${total} of ${allTransactions.length} transactions (public share within about ${Math.round(margin * 10) / 10} points).` : (lookupFailures === 0 ? ` All ${allTransactions.length} transactions were classified, so these counts are exact for the window.` : ` ${lookupFailures} of ${allTransactions.length} transactions could not be looked up, so these counts are close but not exact.`)}`;
+  return { fromBlock: options.fromBlock.toString(), toBlock: options.toBlock.toString(), mintEvents, transactionsSampled: total, sampleCapped: sample.length < allTransactions.length, byMethod, publicShare, contracts: contractRows.length, contractsWithPublic, topContracts, drops, publicMintsFree, publicMintsPaid, publicShareMarginPoints: Math.round(margin * 10) / 10, transactionsInWindow: population, skippedRanges, lookupFailures, summary };
 }
 
 /** Evenly spread sample across the window, so a cap does not only see the start. */
