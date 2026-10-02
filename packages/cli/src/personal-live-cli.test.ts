@@ -62,4 +62,15 @@ describe('the real checks behind live-readiness record (D-043)', () => {
     expect(liveReadinessPhrase(6)).toBe('RECORD-LIVE-READINESS 6 wallets');
     expect(liveReadinessPhrase(6)).not.toBe(liveReadinessPhrase(2));
   });
+
+  it('counts the stored kill switch flag as well as the file', async () => {
+    const { directory } = await setup({});
+    try {
+      const client = { getChainId: async () => 1, getBlock: async () => ({ timestamp: 0n }) } as never;
+      const base = { client, walletFile: join(directory, 'w.json'), backupStatusPath: join(directory, 's.json'), killSwitchFile: join(directory, 'none'), telegramHealthy: async () => true };
+      expect(await createPersonalLiveProbes({ ...base }).killSwitchEngaged()).toBe(false);
+      expect(await createPersonalLiveProbes({ ...base, killSwitchStoredFlag: () => false }).killSwitchEngaged()).toBe(false);
+      expect(await createPersonalLiveProbes({ ...base, killSwitchStoredFlag: () => true }).killSwitchEngaged()).toBe(true);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 });
