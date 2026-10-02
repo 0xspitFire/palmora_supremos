@@ -51,6 +51,8 @@ describe('releasing the stored kill switch', () => {
       const store = value.store as CanonicalStoreBridge;
       expect(store.killSwitchStatus().engaged).toBe(false);
       expect(await store.releaseKillSwitch('owner-cli', 'x')).toEqual({ released: false }); // nothing to release
+      await store.transaction((state) => { state.runtime.operational = { signerReady: true, killSwitchEngaged: false, notificationReady: true, chainVerification: 'verified', lastReconciliationAt: new Date().toISOString(), observedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 900_000).toISOString() }; });
+      expect(store.snapshot().runtime.operational).toBeDefined();
       await value.application.command('kill', { reason: 'test stop' });
       expect(store.killSwitchStatus()).toMatchObject({ engaged: true });
       expect(store.snapshot().killed).toBe(true);
@@ -59,6 +61,7 @@ describe('releasing the stored kill switch', () => {
       expect(store.killSwitchStatus()).toMatchObject({ engaged: false, changedBy: 'owner-cli' });
       expect(store.snapshot().killed).toBe(false);
       expect(store.snapshot().runtime.blockingReasons).not.toContain('KILLED');
+      expect(store.snapshot().runtime.operational).toBeUndefined(); // readiness must be recorded again after a stop
       expect(store.snapshot().events.some((event) => event.type === 'kill_released' && event.data.actor === 'owner-cli')).toBe(true);
     } finally { await close(value); }
   });

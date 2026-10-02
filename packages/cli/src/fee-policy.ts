@@ -28,6 +28,8 @@ export function assertFeePolicyApplyAllowed(args: { status: FeePolicyStatusView;
 const PLAIN: Record<string, string> = {
   FLEET_SPEND_POLICY_REQUIRED: 'No approved spending policy is configured here, so there is nothing to compare or apply.',
   CANONICAL_STORE_REQUIRED: 'This command needs the normal database store, which is not in use.',
+  KILL_RELEASE_BLOCKED_UNRESOLVED_RUNS: 'The kill switch cannot be released while runs are still in flight or unresolved. Run reconcile, wait until they settle, then try again.',
+  CONFIRMATION_PHRASE_MISMATCH: 'The confirmation phrase did not match. Run the command again without --confirm and copy the line it prints exactly.',
   CANONICAL_CHAIN_PROFILE_REQUIRED: 'Ethereum has not been set up in this database yet, so there is no stored fee policy to replace.',
 };
 

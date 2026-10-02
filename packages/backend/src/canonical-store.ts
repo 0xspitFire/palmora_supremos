@@ -1157,7 +1157,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     await this.transaction((next) => {
       next.killed = false;
       delete next.killReason;
-      next.runtime = { ...next.runtime, blockingReasons: next.runtime.blockingReasons.filter((item) => item !== 'KILLED') };
+      // A readiness record made before the stop is not trusted after it: the owner records readiness again (T-028 security review).
+      const { operational: _discarded, ...runtimeWithoutProbe } = next.runtime;
+      next.runtime = { ...runtimeWithoutProbe, blockingReasons: next.runtime.blockingReasons.filter((item) => item !== 'KILLED') };
       next.events.push({ id: `kill_release_${this.now().getTime()}`, type: 'kill_released', at: this.now().toISOString(), data: { actor, reason, engagedAt: stored.changedAt, engagedBy: stored.changedBy } });
     });
     return { released: true };
