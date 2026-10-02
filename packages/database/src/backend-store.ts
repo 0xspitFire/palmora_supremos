@@ -35,6 +35,7 @@ export interface BackendStore {
   chainVerification(chainProfileId: string): ChainVerificationRow | null;
   setKillSwitch(engaged: boolean, changedBy: string, at?: Date): void;
   isKillSwitchEngaged(): boolean;
+  killSwitchStatus(): { engaged: boolean; changedBy: string; changedAt: string };
   saveWalletMetadata(record: WalletMetadataRecord): void;
   recordWalletBalance(record: WalletBalanceRecord): void;
   setTrackedWallet(record: TrackedWalletRecord): void;
@@ -110,6 +111,7 @@ export class SqliteBackendStore implements BackendStore {
   public chainVerification(chainProfileId: string): ChainVerificationRow | null { return this.readModels.chainVerification(chainProfileId); }
   public setKillSwitch(engaged: boolean, changedBy: string, at?: Date): void { this.reservations.setKillSwitch(engaged, changedBy, at); }
   public isKillSwitchEngaged(): boolean { return this.reservations.isKillSwitchEngaged(); }
+  public killSwitchStatus(): { engaged: boolean; changedBy: string; changedAt: string } { return this.reservations.killSwitchStatus(); }
   public saveWalletMetadata(record: WalletMetadataRecord): void { this.repository.saveWalletMetadata(record); }
   public recordWalletBalance(record: WalletBalanceRecord): void { this.repository.recordWalletBalance(record); }
   public setTrackedWallet(record: TrackedWalletRecord): void { this.repository.setTrackedWallet(record); }

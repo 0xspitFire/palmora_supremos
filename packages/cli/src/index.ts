@@ -24,6 +24,7 @@ import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
 import { createPersonalLiveProbes, liveReadinessPhrase } from './personal-live-cli.js';
+import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
 import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, recordWalletSimulations, TelegramNotifier } from '@mint-bot/backend';
 import { assertFeePolicyApplyAllowed, assertTipMatchesStoredPolicy, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
@@ -584,6 +585,36 @@ const cli = yargs(hideBin(process.argv))
         process.stdout.write(`${json({ state: result.replaced ? 'Replaced' : 'AlreadyCurrent', message: result.replaced ? 'Ethereum\'s stored fee policy now matches the approved one.' : 'Nothing to change: the stored policy already matches.' })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
+  .command('kill-release', 'Owner-run: turn the kill switch off (the file and the stored flag) after checking nothing is in flight; asks for a typed confirmation', (args) => args
+    .option('file', { type: 'string', default: DEFAULT_KILL_FILE })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase this command printed' }), async (args) => {
+      try {
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
+        const store = runtime.store as unknown as { killSwitchStatus?: () => KillSwitchStatus; releaseKillSwitch?: (actor: string, reason: string) => Promise<{ released: boolean }> };
+        if (typeof store.killSwitchStatus !== 'function' || typeof store.releaseKillSwitch !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
+        const status = store.killSwitchStatus();
+        const fileExists = existsSync(args.file);
+        const engaged = status.engaged || runtime.store.snapshot().killed || fileExists;
+        if (!engaged) { process.stdout.write(`${json({ state: 'Off', message: 'The kill switch is already off (no file and no stored flag).' })}\n`); return; }
+        const unresolved = unresolvedRunIds(runtime.store.snapshot());
+        const phrase = killReleasePhrase(status);
+        if (args.confirm === undefined) {
+          process.stdout.write(`${json({ state: 'On', message: unresolved.length > 0 ? `The kill switch is on, and ${unresolved.length} run(s) are still in flight or unresolved, so it cannot be released yet. Run reconcile and wait until they settle.` : 'The kill switch is on. Releasing it lets live runs happen again once everything else is ready. Only do this when you mean to.', engagedAt: status.engaged ? status.changedAt : null, file: args.file, fileExists, unresolvedRuns: unresolved, ...(unresolved.length === 0 ? { copyThisToRelease: `kill-release --confirm "${phrase}"` } : {}) })}\n`);
+          return;
+        }
+        assertKillReleaseAllowed({ status, confirm: args.confirm, unresolved });
+        const result = await store.releaseKillSwitch('owner-cli', 'operator release');
+        await unlink(args.file).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+        // A short note to Telegram, best effort: the release stands even if it cannot be delivered.
+        let noticeSent = false;
+        try {
+          const secretStorePath = process.env.SECRET_STORE_PATH ?? join(configuredSecretRoot(runtimeRoot), 'MINT_BOT_SECRETS.env');
+          await new TelegramNotifier({ secretStore: await loadHostSecretStore(secretStorePath) }).send({ eventId: `kill-release-${Date.now()}`, type: 'kill_switch_released', text: 'MintBot: the kill switch was released from the command line. Live runs are possible again once readiness is recorded.' });
+          noticeSent = true;
+        } catch { noticeSent = false; }
+        process.stdout.write(`${json({ state: 'Released', message: `The kill switch is off${result.released ? '' : ' (only the file was left)'}. Run live-readiness record next; create the kill switch again with the kill command at any time to stop.`, telegramNoticeSent: noticeSent })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
   .command('chain-evidence <action>', 'Owner-run: record Ethereum SeaDrop chain evidence for 7 days after a typed confirmation (needed before a live arm)', (args) => args
     .positional('action', { type: 'string', choices: ['status', 'accept'] as const, demandOption: true })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (accept only)' })
@@ -656,6 +687,7 @@ const cli = yargs(hideBin(process.argv))
           walletFile: file,
           backupStatusPath: args.backupStatus ?? process.env.MINT_BOT_BACKUP_STATUS_PATH ?? join(process.env.MINT_BOT_BACKUP_DIR ?? join(runtimeRoot, 'Rets', 'state', 'backups'), 'status.json'),
           killSwitchFile: DEFAULT_KILL_FILE,
+          killSwitchStoredFlag: () => runtime.store.snapshot().killed,
           // A valid bot token is not enough: a short test message must actually be delivered to the owner (D-043).
           telegramHealthy: async () => {
             try {

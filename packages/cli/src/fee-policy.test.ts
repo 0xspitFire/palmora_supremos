@@ -57,6 +57,8 @@ describe('live campaign tip and plain error text', () => {
   it('turns known codes into plain sentences and leaves other messages alone', () => {
     expect(plainFeePolicyMessage('FLEET_SPEND_POLICY_REQUIRED')).toContain('No approved spending policy');
     expect(plainFeePolicyMessage('CANONICAL_STORE_REQUIRED')).toContain('normal database store');
+    expect(plainFeePolicyMessage('KILL_RELEASE_BLOCKED_UNRESOLVED_RUNS: 2 run(s)')).toContain('Run reconcile');
+    expect(plainFeePolicyMessage('CONFIRMATION_PHRASE_MISMATCH: x')).toContain('copy the line it prints exactly');
     expect(plainFeePolicyMessage('SOMETHING_ELSE: details')).toBe('SOMETHING_ELSE: details');
   });
 });

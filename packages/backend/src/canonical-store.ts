@@ -1,3 +1,4 @@
+import { unresolvedRunIds } from './kill-switch-release.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type {
   AuditEventRecord,
@@ -1135,6 +1136,33 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const sequence = (this.db.prepare('SELECT COUNT(*) AS n FROM fee_policy WHERE chain_profile_id = ?').get(chainProfileId) as { n: number }).n;
     const snapshot = { chainProfileId, sequence, ...Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value)])) };
     this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)').run(canonicalId('fee', `${chainProfileId}:${encode(snapshot)}:${this.now().toISOString()}`), chainProfileId, `backend-${digest(encode({ ...snapshot, at: this.now().toISOString() }))}`, chainId === ETHEREUM_CHAIN_ID ? 'ordering' : 'fee_only', values.maxTotalFeeWei.toString(), values.freeCapWei.toString(), values.priorityComponentWei.toString(), 2, values.paidMintsEnabled ? 1 : 0, this.now().toISOString(), values.priorityComponentWei === 0n ? 'requires_po_resolution' : 'allowed');
+  }
+
+  /** Whether the stored kill switch is on, and who last changed it and when. */
+  public killSwitchStatus(): { engaged: boolean; changedBy: string; changedAt: string } {
+    return this.databaseStore.killSwitchStatus();
+  }
+
+  /**
+   * Releases the kill switch (T-028). Refuses while any run is in flight or unresolved, clears the stored flag and the
+   * in-memory state together, and records who released it. Owner-run only: the CLI asks for a typed phrase first.
+   */
+  public async releaseKillSwitch(actor: string, reason: string): Promise<{ released: boolean }> {
+    const state = this.snapshot();
+    const unresolved = unresolvedRunIds(state);
+    if (unresolved.length > 0) throw new Error(`KILL_RELEASE_BLOCKED_UNRESOLVED_RUNS: ${unresolved.length} run(s) are still in flight or unresolved`);
+    const stored = this.databaseStore.killSwitchStatus();
+    if (!stored.engaged && !state.killed) return { released: false };
+    this.databaseStore.setKillSwitch(false, actor, this.now());
+    await this.transaction((next) => {
+      next.killed = false;
+      delete next.killReason;
+      // A readiness record made before the stop is not trusted after it: the owner records readiness again (T-028 security review).
+      const { operational: _discarded, ...runtimeWithoutProbe } = next.runtime;
+      next.runtime = { ...runtimeWithoutProbe, blockingReasons: next.runtime.blockingReasons.filter((item) => item !== 'KILLED') };
+      next.events.push({ id: `kill_release_${this.now().getTime()}`, type: 'kill_released', at: this.now().toISOString(), data: { actor, reason, engagedAt: stored.changedAt, engagedBy: stored.changedBy } });
+    });
+    return { released: true };
   }
 
   /** What Ethereum's stored fee policy holds now, and what the approved fleet policy says it should hold. */

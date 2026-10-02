@@ -136,6 +136,12 @@ export class SpendReservations {
     });
   }
 
+  /** Whether the stored kill switch is on, and who last changed it and when. */
+  public killSwitchStatus(): { engaged: boolean; changedBy: string; changedAt: string } {
+    const row = this.db.prepare("SELECT kill_switch_engaged, changed_by, changed_at FROM runtime_control WHERE id = 'global'").get() as { kill_switch_engaged: number; changed_by: string; changed_at: string };
+    return { engaged: row.kill_switch_engaged === 1, changedBy: row.changed_by, changedAt: row.changed_at };
+  }
+
   public isKillSwitchEngaged(): boolean {
     const row = this.db.prepare("SELECT kill_switch_engaged FROM runtime_control WHERE id = 'global'").get() as { kill_switch_engaged: number };
     return row.kill_switch_engaged === 1;
