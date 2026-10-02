@@ -139,4 +139,17 @@ describe('surveySeaDropMints (T-013)', () => {
     expect({ ...many, topContracts: many.topContracts.map((row) => ({ ...row })) }).toEqual({ ...one, topContracts: one.topContracts.map((row) => ({ ...row })) });
     expect(many.byMethod.signed + many.byMethod.public).toBe(25);
   });
+
+  it('aborts when a transaction lookup is rate limited, and says the counts are not exact when some lookups fail', async () => {
+    const logs = [{ tx: tx(1), nft: NFT_A, block: 1n }, { tx: tx(2), nft: NFT_A, block: 2n }];
+    const limited = fakeClient(logs, { [tx(1)]: { to: SEADROP_V1_ADDRESS, input: publicInput }, [tx(2)]: { to: SEADROP_V1_ADDRESS, input: publicInput } });
+    const rateLimitedClient = { ...limited.client, getTransaction: async () => { throw Object.assign(new Error('Too Many Requests'), { status: 429 }); } } as never;
+    await expect(surveySeaDropMints(rateLimitedClient, { fromBlock: 1n, toBlock: 5n })).rejects.toThrow('SURVEY_RATE_LIMITED');
+    const partial = fakeClient(logs, { [tx(1)]: { to: SEADROP_V1_ADDRESS, input: publicInput } });
+    const result = await surveySeaDropMints(partial.client, { fromBlock: 1n, toBlock: 5n });
+    expect(result.lookupFailures).toBe(1);
+    expect(result.summary).toContain('WARNING');
+    expect(result.summary).toContain('close but not exact');
+    expect(result.summary).not.toContain('exact for the window');
+  });
 });

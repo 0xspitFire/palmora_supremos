@@ -38,7 +38,7 @@ describe('live arm gate ladder (what a Personal Live arm needs today)', () => {
     } finally { await close(value); }
   });
 
-  it('with approved custody the next wall is the per-wallet simulation and chain evidence records', async () => {
+  it('with approved custody the next wall is the per-wallet simulation records (the fixture already holds accepted chain evidence; nothing in the CLI records either)', async () => {
     const value = await fixture(ETHEREUM);
     try {
       const created = await campaign(value, ETHEREUM);

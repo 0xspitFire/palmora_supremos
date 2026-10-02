@@ -626,7 +626,7 @@ const cli = yargs(hideBin(process.argv))
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'robinhood' })
     .option('blocks', { type: 'number', default: 20_000, describe: 'How many recent blocks to survey (maximum 400000)' })
-    .option('rpc-url', { type: 'string', describe: 'Use this RPC instead of the saved one (https only); Robinhood has a public one' })
+    .option('rpc-url', { type: 'string', describe: 'Use this RPC instead of the saved one (https, or http on this machine only); Robinhood has a public one' })
     .option('max-transactions', { type: 'number', default: 1500, describe: 'Most mint transactions to look up (maximum 5000); when the window has fewer, every one is classified and the counts are exact' }), async (args) => {
       try {
         if (!Number.isSafeInteger(args.blocks) || args.blocks < 1 || args.blocks > 400_000) throw new Error('BLOCKS_OUT_OF_RANGE: use 1 to 400000');
@@ -639,6 +639,9 @@ const cli = yargs(hideBin(process.argv))
         if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('RPC_MUST_BE_HTTPS');
         const chain = defineChain({ id: config.chainId, name: args.chain, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } });
         const client = createPublicClient({ chain, transport: httpTransport(endpoint, { timeout: 20_000, retryCount: 1 }) });
+        // A wrong URL would be labelled with the chain name given, so check the endpoint really is that chain.
+        const observedChainId = await client.getChainId();
+        if (observedChainId !== config.chainId) throw new Error(`RPC_CHAIN_MISMATCH: that RPC is chain ${observedChainId}, not ${config.chainId} (${args.chain})`);
         const head = await client.getBlockNumber();
         const from = head >= BigInt(args.blocks) ? head - BigInt(args.blocks) + 1n : 0n;
         const result = await surveySeaDropMints(client as never, { fromBlock: from, toBlock: head, maxTransactions: args.maxTransactions });
