@@ -23,6 +23,8 @@ import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
+import { createPersonalLiveProbes, liveReadinessPhrase } from './personal-live-cli.js';
+import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, recordWalletSimulations, TelegramNotifier } from '@mint-bot/backend';
 import { assertFeePolicyApplyAllowed, assertTipMatchesStoredPolicy, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -231,7 +233,16 @@ function persistedCampaign(runtime: Awaited<ReturnType<typeof createCliRuntime>>
 }
 
 async function validatedCampaign(runtime: Awaited<ReturnType<typeof createCliRuntime>>, campaignId: string, wallets: readonly string[] = []): Promise<ValidatedCampaign> {
-  return { campaign: persistedCampaign(runtime, campaignId), wallets, simulationIds: [], evidenceAt: new Date().toISOString() };
+  // Live arm needs one fresh passing simulation record per wallet (record-simulation writes them); dry runs ignore the ids.
+  const nowIso = new Date().toISOString();
+  const latest = new Map<string, { id: string; checkedAt: string }>();
+  for (const simulation of runtime.store.snapshot().simulations) {
+    if (simulation.campaignId !== campaignId || !simulation.success || simulation.expiresAt <= nowIso) continue;
+    const key = simulation.wallet.toLowerCase();
+    if (!latest.has(key) || simulation.checkedAt > latest.get(key)!.checkedAt) latest.set(key, { id: simulation.id, checkedAt: simulation.checkedAt });
+  }
+  const simulationIds = wallets.flatMap((wallet) => latest.get(wallet.toLowerCase())?.id ?? []);
+  return { campaign: persistedCampaign(runtime, campaignId), wallets, simulationIds: simulationIds.length === wallets.length ? simulationIds : [], evidenceAt: nowIso };
 }
 
 const cli = yargs(hideBin(process.argv))
@@ -573,7 +584,93 @@ const cli = yargs(hideBin(process.argv))
         process.stdout.write(`${json({ state: result.replaced ? 'Replaced' : 'AlreadyCurrent', message: result.replaced ? 'Ethereum\'s stored fee policy now matches the approved one.' : 'Nothing to change: the stored policy already matches.' })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
-  .command('live-plan', 'Read-only: is a FREE Ethereum mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
+  .command('chain-evidence <action>', 'Owner-run: record Ethereum SeaDrop chain evidence for 7 days after a typed confirmation (needed before a live arm)', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'accept'] as const, demandOption: true })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (accept only)' })
+    .option('rpc-url', { type: 'string' }), async (args) => {
+      try {
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
+        const now = new Date();
+        const existing = runtime.store.snapshot().chainEvidence.find((item) => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled && item.expiresAt > now.toISOString());
+        if (args.action === 'status' && existing) { process.stdout.write(`${json({ state: 'Accepted', message: `Ethereum chain evidence is accepted until ${existing.expiresAt}.`, evidenceId: existing.id, expiresAt: existing.expiresAt })}\n`); return; }
+        const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
+        const endpoint = config.rpcEndpoints[0];
+        if (!endpoint) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
+        const client = createPublicClient({ transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 1 }) });
+        if ((await client.getChainId()) !== 1) throw new Error('RPC_CHAIN_MISMATCH: that RPC is not Ethereum');
+        const block = await client.getBlock({ blockTag: 'latest' });
+        const phrase = ethereumChainEvidencePhrase();
+        if (args.action === 'status') { process.stdout.write(`${json({ state: 'NotAccepted', message: 'No accepted Ethereum chain evidence. Accepting it is your own statement, valid for 7 days, that SeaDrop v1 public mints on Ethereum have been rehearsed on a fork and read live (the rehearsal results are in the project evidence notes; this command does not re-run them).', copyThisToAccept: `chain-evidence accept --confirm "${phrase}"`, note: 'The phrase is always the same, so you can copy it at any time.' })}\n`); return; }
+        if (existing) { process.stdout.write(`${json({ state: 'AlreadyAccepted', evidenceId: existing.id, expiresAt: existing.expiresAt })}\n`); return; }
+        if (args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run chain-evidence status and copy the phrase it prints exactly');
+        const record = buildEthereumChainEvidence({ now, sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public' });
+        await acceptEthereumChainEvidence(runtime.store, record, phrase);
+        process.stdout.write(`${json({ state: 'Accepted', message: `Ethereum chain evidence accepted until ${record.expiresAt}.`, evidenceId: record.id })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
+  .command('record-simulation', 'Run the test mint for every wallet of a prepared live campaign and record the result (needed before a live arm)', (args) => args
+    .option('campaign-id', { type: 'string', demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
+    .option('rpc-url', { type: 'string' }), async (args) => {
+      try {
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
+        const campaign = persistedCampaign(runtime, args.campaignId);
+        if (campaign.dryRun || campaign.chainId !== 1) throw new Error('LIVE_ETHEREUM_CAMPAIGN_REQUIRED');
+        const wallets = await publicWallets(walletFile(args.walletFile));
+        const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : await ethereumPort();
+        const report = await checkDrop(port, campaign.contract, wallets, { simulate: true, quantity: campaign.quantity });
+        const results = report.wallets.map((row) => ({ wallet: row.wallet, success: row.verdict === 'ready' }));
+        if (results.length !== wallets.length || results.some((item) => !item.success)) throw new Error(`SIMULATION_NOT_PASSED: ${report.summary}`);
+        const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
+        const client = createPublicClient({ transport: httpTransport(config.rpcEndpoints[0]!, { timeout: 15_000, retryCount: 1 }) });
+        const block = await client.getBlock({ blockTag: 'latest' });
+        const ids = await recordWalletSimulations(runtime.store, campaign, results, { blockNumber: block.number, blockHash: block.hash });
+        process.stdout.write(`${json({ state: 'Recorded', message: `${ids.length} wallet(s) passed the test mint. The records are good for 30 minutes, so approve, arm and run soon.`, simulationIds: ids })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
+  .command('live-readiness <action>', 'Owner-run: check the machine, the RPC, Telegram, the backup and your wallet file, and record that live is ready for 15 minutes', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'record'] as const, demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
+    .option('backup-status', { type: 'string', describe: 'Backup status file (default: the service default under the backup folder)' })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (record only)' })
+    .option('rpc-url', { type: 'string' }), async (args) => {
+      try {
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { acceptPersonalLiveLocalCustody: true });
+        const file = walletFile(args.walletFile);
+        const wallets = await publicWallets(file);
+        const phrase = liveReadinessPhrase(wallets.length);
+        if (args.action === 'status') {
+          const operational = runtime.store.snapshot().runtime.operational;
+          process.stdout.write(`${json({ state: operational ? 'Recorded' : 'NotRecorded', message: operational ? (operational.expiresAt > new Date().toISOString() ? `Readiness was recorded and is good until ${operational.expiresAt}.` : `Readiness was recorded but expired at ${operational.expiresAt}; record it again before arming.`) : 'Readiness is not recorded. Recording checks the RPC, Telegram, the backup, the kill switch and your wallet file, then records the result for 15 minutes.', wallets, copyThisToRecord: `live-readiness record --confirm "${phrase}"` })}\n`);
+          return;
+        }
+        if (turnkeyCustodyEnabled()) throw new Error('TURNKEY_CUSTODY_ACTIVE: this record is for a local wallet file; with Turnkey in use, live needs the Turnkey custody proof instead');
+        if (args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run live-readiness status and copy the phrase it prints exactly');
+        const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
+        const endpoint = config.rpcEndpoints[0];
+        if (!endpoint) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
+        const client = createPublicClient({ transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 1 }) });
+        const secretStorePath = process.env.SECRET_STORE_PATH ?? join(configuredSecretRoot(runtimeRoot), 'MINT_BOT_SECRETS.env');
+        const probes = createPersonalLiveProbes({
+          client,
+          walletFile: file,
+          backupStatusPath: args.backupStatus ?? process.env.MINT_BOT_BACKUP_STATUS_PATH ?? join(process.env.MINT_BOT_BACKUP_DIR ?? join(runtimeRoot, 'Rets', 'state', 'backups'), 'status.json'),
+          killSwitchFile: DEFAULT_KILL_FILE,
+          // A valid bot token is not enough: a short test message must actually be delivered to the owner (D-043).
+          telegramHealthy: async () => {
+            try {
+              const notifier = new TelegramNotifier({ secretStore: await loadHostSecretStore(secretStorePath) });
+              if ((await notifier.health()).status !== 'ok') return false;
+              await notifier.send({ eventId: `live-readiness-${Date.now()}`, type: 'live_readiness_check', text: 'MintBot: live readiness check. If you can read this, Telegram works. Nothing has been sent or spent.' });
+              return true;
+            } catch { return false; }
+          },
+        });
+        const outcome = await new PersonalLiveReadinessService(runtime.store, probes).record({ wallets, confirmedBy: 'owner-cli', storePath: process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', secretStoreReference: 'SECRET_STORE_PATH' });
+        process.stdout.write(`${json(outcome.recorded ? { state: 'Recorded', message: `Live readiness recorded. It is good until ${outcome.expiresAt}; approve, arm and run before then, or record it again.`, expiresAt: outcome.expiresAt } : { state: 'NotReady', message: `${outcome.failures.length} check(s) failed, so nothing was recorded.`, failures: outcome.failures })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
+  .command('live-plan','Read-only: is a FREE Ethereum mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
     .option('contract', { type: 'string', demandOption: true })
     .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
     .option('rpc-url', { type: 'string', describe: 'Override the Ethereum RPC (https only)' }), async (args) => {
@@ -606,6 +703,8 @@ const cli = yargs(hideBin(process.argv))
         const policy = store.ethereumFeePolicyStatus();
         if (policy.stored !== null && !policy.matchesApproved) throw new Error('FEE_POLICY_DIFFERS_FROM_APPROVED: run fee-policy status, then fee-policy apply with its confirmation phrase');
         assertTipMatchesStoredPolicy(policy, parseGwei(args.priorityFeeGwei.toString()));
+        const evidence = runtime.store.snapshot().chainEvidence.find((item) => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled && item.expiresAt > new Date().toISOString());
+        if (!evidence) throw new Error('CHAIN_EVIDENCE_NOT_ACCEPTED: run chain-evidence status, then chain-evidence accept with its phrase, before live-prepare');
         const campaign = await runtime.application.createCampaign({
           chainId: 1,
           contract: args.contract,
@@ -616,7 +715,7 @@ const cli = yargs(hideBin(process.argv))
           dailyCapWei: fields.dailyCapWei,
           gasCeilingWei: fields.gasCeilingWei,
           broadcastMode: 'public',
-          chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, endpointReference: 'ETHEREUM_RPC_REFERENCE' },
+          chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, evidenceId: evidence.id, checkedAt: evidence.checkedAt, sourceBlock: evidence.sourceBlock, endpointReference: evidence.endpointIdentity },
           mintPriceWei: fields.mintPriceWei,
           feePolicy: fields.feePolicy,
         });
@@ -700,7 +799,7 @@ const cli = yargs(hideBin(process.argv))
     .option('mode', { type: 'string', choices: ['dry-run', 'live'] as const, default: 'dry-run' })
     .option('idempotency-key', { type: 'string' })
     .option('approval-id', { type: 'string' }), async (args) => {
-    const runtime = await createCliRuntime(runtimeRoot);
+    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { acceptPersonalLiveLocalCustody: true });
     try {
       const wallets = await publicWallets(walletFile(args.walletFile));
       const validated = await validatedCampaign(runtime, args.campaignId, wallets);
@@ -714,7 +813,7 @@ const cli = yargs(hideBin(process.argv))
     .option('max-fee-gwei', { type: 'number', describe: 'Highest fee per gas the run may sign with. Use the value live-plan printed; the default (100) is far above the free-mint fee allowance, so a live free mint with the default is refused.' })
     .option('idempotency-key', { type: 'string' }), async (args) => {
     if (args.maxFeeGwei !== undefined && (!Number.isFinite(args.maxFeeGwei) || args.maxFeeGwei <= 0 || args.maxFeeGwei > 500)) { process.stdout.write(`${blocked(new Error('MAX_FEE_GWEI_OUT_OF_RANGE: use more than 0 and at most 500'))}\n`); return; }
-    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, args.maxFeeGwei === undefined ? undefined : { maxFeePerGasGwei: args.maxFeeGwei });
+    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, args.maxFeeGwei === undefined ? undefined : { maxFeePerGasGwei: args.maxFeeGwei }, { acceptPersonalLiveLocalCustody: true });
     try {
       const wallets = await publicWallets(walletFile(args.walletFile));
       const response = await runtime.application.command('run', { runId: args.runId, wallets, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
@@ -724,7 +823,7 @@ const cli = yargs(hideBin(process.argv))
   .command('execute', 'Compatibility alias for run', (args) => args
     .option('run-id', { type: 'string', demandOption: true })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
-    const runtime = await createCliRuntime(runtimeRoot);
+    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { acceptPersonalLiveLocalCustody: true });
     try {
       const wallets = await publicWallets(walletFile(args.walletFile));
       const response = await runtime.application.command('execute', { runId: args.runId, wallets });

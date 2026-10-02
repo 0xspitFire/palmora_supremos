@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertWithinAdmittedExposure, freeMintReserveCapsFor, preSignReservationGate } from './engine-adapter.js';
+import { assertWithinAdmittedExposure, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
 import { canonicalExecutionIdentity } from '@mint-bot/engine';
 
 const campaign = { mintPriceWei: 1_000n, quantity: 2 };
@@ -82,5 +82,24 @@ describe('free-mint reserve caps per chain (D-042)', () => {
     expect(freeMintReserveCapsFor(4663)).toBeUndefined();
     expect(freeMintReserveCapsFor(8453)).toBeUndefined();
     expect(freeMintReserveCapsFor(0)).toBeUndefined();
+  });
+});
+
+describe('wallet selection ignores the order wallets arrive in (T-027 rehearsal finding)', () => {
+  const list = [{ index: 0, address: '0xAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaa' }, { index: 1, address: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }, { index: 2, address: '0xcccccccccccccccccccccccccccccccccccccccc' }];
+  it('accepts the first N wallets in any order and returns their indexes in key-list order', () => {
+    expect(selectKeyListPrefix(list, [list[0]!.address, list[1]!.address])).toEqual([0, 1]);
+    expect(selectKeyListPrefix(list, [list[1]!.address.toUpperCase().replace('0X', '0x'), list[0]!.address.toLowerCase()])).toEqual([0, 1]);
+    expect(selectKeyListPrefix(list, list.map((wallet) => wallet.address).reverse())).toEqual([0, 1, 2]);
+  });
+  it('still refuses a wallet outside the first N, a repeat, a stranger, an empty list and too many', () => {
+    expect(() => selectKeyListPrefix(list, [list[1]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE'); // wallet 1 alone is not the first wallet
+    expect(() => selectKeyListPrefix(list, [list[0]!.address, list[2]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListPrefix(list, [list[0]!.address, list[0]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListPrefix(list, [list[0]!.address, '0xdddddddddddddddddddddddddddddddddddddddd'])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListPrefix(list, [])).toThrow('EMPTY_EXECUTION_FLEET');
+    // A key list with a repeated address among its first N is refused.
+    expect(() => selectKeyListPrefix([list[0]!, { index: 1, address: list[0]!.address.toLowerCase() }], [list[0]!.address, list[1]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListPrefix(list.slice(0, 1), list.map((wallet) => wallet.address))).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
   });
 });

@@ -44,7 +44,12 @@ export async function configuredWallets(projectRoot: string, localWalletFile: st
   }
 }
 
-export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean } = {}): Promise<CliRuntime> {
+/** The owner's CLI may accept a recorded local key file (D-043) only when it was asked to and Turnkey custody is not in use. */
+export function personalLiveLocalCustodyAllowed(requested: boolean | undefined, useTurnkey: boolean): boolean {
+  return requested === true && !useTurnkey;
+}
+
+export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean; acceptPersonalLiveLocalCustody?: boolean } = {}): Promise<CliRuntime> {
   const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
   const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
   await store.open();
@@ -78,7 +83,8 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     settleComponents: adapterOptions?.settleComponents ?? ((reservationId, components) => store.settleExecutionComponents(reservationId, components)),
   });
   let alertSink: SpendAlertSink = new AlertManager(store);
-  const coordinator = new ExecutionCoordinator(store, actualEngine, { alerts: { cap: (reason, runId) => alertSink.cap(reason, runId) } });
+  // The owner's CLI may accept a recorded local key file for Personal Live (D-043); the service never passes this, so unattended runs still need Turnkey or a cloud key service.
+  const coordinator = new ExecutionCoordinator(store, actualEngine, { alerts: { cap: (reason, runId) => alertSink.cap(reason, runId) }, ...(personalLiveLocalCustodyAllowed(runtimeOptions.acceptPersonalLiveLocalCustody, useTurnkey) ? { acceptPersonalLiveLocalCustody: true } : {}) });
   if (runtimeOptions.startCoordinator !== false) await coordinator.start();
   return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY }), walletRoot: resolveWalletPath(projectRoot), setAlertSink: (sink) => { alertSink = sink; } };
 }

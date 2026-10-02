@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createCliRuntime, type SpendAlertSink } from './runtime.js';
+import { createCliRuntime, personalLiveLocalCustodyAllowed, type SpendAlertSink } from './runtime.js';
 import { PERSONAL_LIVE_FLEET_POLICY, type EngineAdapter } from '@mint-bot/backend';
 
 describe('CLI runtime custody boundaries', () => {
@@ -42,5 +42,15 @@ describe('CLI runtime spend limits (T-003)', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('local key file custody option (D-043)', () => {
+  it('is on only when asked for and Turnkey custody is not in use', () => {
+    expect(personalLiveLocalCustodyAllowed(true, false)).toBe(true);
+    expect(personalLiveLocalCustodyAllowed(true, true)).toBe(false);
+    expect(personalLiveLocalCustodyAllowed(false, false)).toBe(false);
+    expect(personalLiveLocalCustodyAllowed(undefined, false)).toBe(false);
+    expect(personalLiveLocalCustodyAllowed(undefined, true)).toBe(false);
   });
 });
