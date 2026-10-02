@@ -57,25 +57,55 @@ export type FreeMintReserveVerdict =
   | { allowed: true; perWalletCapWei: bigint; activePeriodCapWei: bigint }
   | { allowed: false; reason: string };
 
-/** Validate independent gas reservations against the final FREE-mint caps. */
+/** Caps for one chain's FREE-mint gas reservations. When none are supplied, the strict Robinhood caps apply. */
+export interface FreeMintReserveCaps {
+  readonly perWalletCapWei: bigint;
+  readonly activePeriodCapWei: bigint;
+}
+
+export const DEFAULT_FREE_MINT_RESERVE_CAPS: FreeMintReserveCaps = Object.freeze({
+  perWalletCapWei: FREE_MINT_PER_WALLET_RESERVE_CAP_WEI,
+  activePeriodCapWei: FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI,
+});
+
+/**
+ * Validate independent gas reservations against the FREE-mint caps (T-025, D-042). The caps come from the caller
+ * per chain; a missing or invalid cap falls back to the strict default, so a mistake can only refuse more.
+ */
+export function effectiveFreeMintReserveCaps(caps: FreeMintReserveCaps | undefined): FreeMintReserveCaps {
+  if (caps === undefined) return DEFAULT_FREE_MINT_RESERVE_CAPS;
+  const valid = caps.perWalletCapWei > 0n && caps.activePeriodCapWei >= caps.perWalletCapWei;
+  return valid ? caps : DEFAULT_FREE_MINT_RESERVE_CAPS;
+}
+
+/**
+ * The caps the engine uses for one job (D-042). Only Ethereum may use caps the caller supplies, and they are validated;
+ * every other chain gets the strict default no matter what is passed.
+ */
+export function freeMintReserveCapsForChain(chain: 'ethereum' | 'base' | 'robinhood', supplied: FreeMintReserveCaps | undefined): FreeMintReserveCaps {
+  return effectiveFreeMintReserveCaps(chain === 'ethereum' ? supplied : undefined);
+}
+
+/** True when admitting this wallet's reserve would take the run's total free-mint reserve above the run cap. */
+export function exceedsRunReserveCap(admittedSoFarWei: bigint, nextReserveWei: bigint, caps: FreeMintReserveCaps): boolean {
+  return admittedSoFarWei + nextReserveWei > caps.activePeriodCapWei;
+}
+
 export function validateFreeMintReserve(input: {
   perWalletReserveWei: bigint;
   activePeriodReserveWei: bigint;
-}): FreeMintReserveVerdict {
+}, caps: FreeMintReserveCaps = DEFAULT_FREE_MINT_RESERVE_CAPS): FreeMintReserveVerdict {
+  const { perWalletCapWei, activePeriodCapWei } = effectiveFreeMintReserveCaps(caps);
   if (input.perWalletReserveWei < 0n || input.activePeriodReserveWei < 0n) {
     return { allowed: false, reason: 'FREE-mint reservation cannot be negative' };
   }
-  if (input.perWalletReserveWei > FREE_MINT_PER_WALLET_RESERVE_CAP_WEI) {
-    return { allowed: false, reason: 'FREE-mint per-wallet reserve exceeds 0.0002 ETH' };
+  if (input.perWalletReserveWei > perWalletCapWei) {
+    return { allowed: false, reason: `FREE-mint per-wallet reserve exceeds ${formatEther(perWalletCapWei)} ETH` };
   }
-  if (input.activePeriodReserveWei > FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI) {
-    return { allowed: false, reason: 'FREE-mint active-period reserve exceeds 0.002 ETH' };
+  if (input.activePeriodReserveWei > activePeriodCapWei) {
+    return { allowed: false, reason: `FREE-mint active-period reserve exceeds ${formatEther(activePeriodCapWei)} ETH` };
   }
-  return {
-    allowed: true,
-    perWalletCapWei: FREE_MINT_PER_WALLET_RESERVE_CAP_WEI,
-    activePeriodCapWei: FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI,
-  };
+  return { allowed: true, perWalletCapWei, activePeriodCapWei };
 }
 
 /**

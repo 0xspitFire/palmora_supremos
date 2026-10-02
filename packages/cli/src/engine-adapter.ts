@@ -23,6 +23,7 @@ import type {
   ReconciliationUpdate,
   RunRecord,
 } from '@mint-bot/backend';
+import { PERSONAL_LIVE_FLEET_POLICY } from '@mint-bot/backend';
 import { promptHiddenPassphrase } from './secure-prompt.js';
 
 interface WalletFile {
@@ -121,8 +122,17 @@ async function assertWalletSelection(options: MintEngineAdapterOptions, addresse
   return assertPrefixSelection(options.walletFile, addresses);
 }
 
+/**
+ * FREE-mint gas reserve caps for the engine, per chain (D-042). Ethereum follows the approved fleet policy
+ * (D-033, D-037); every other chain, Robinhood included, keeps the engine's strict default.
+ */
+export function freeMintReserveCapsFor(chainId: number): { perWalletCapWei: bigint; activePeriodCapWei: bigint } | undefined {
+  return chainId === 1 ? { perWalletCapWei: PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei, activePeriodCapWei: PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei } : undefined;
+}
+
 function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
   const chain = chainName(campaign.chainId);
+  const reserveCaps = freeMintReserveCapsFor(campaign.chainId);
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
   return {
@@ -138,6 +148,7 @@ function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRu
       killSwitchFile: options.killSwitchFile,
       paidMaxQuantityPerWallet: 15,
       paidRunMintValueCapEth: paidRunMintValueCapEth(campaign),
+      ...(reserveCaps ? { freeMintReserveCaps: reserveCaps } : {}),
     },
     broadcast: {
       // Dry runs must not require relay credentials. Live Ethereum still

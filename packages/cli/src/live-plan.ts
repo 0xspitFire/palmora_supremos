@@ -46,7 +46,6 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
   if (report.verdict === 'blocked' && blockers.length === 0) blockers.push(report.summary);
   if (context.killSwitchPresent === true) blockers.push('The kill switch is on, which refuses every live run. Remove it deliberately only when you are ready to mint.');
   if (context.killSwitchPresent === null) warnings.push('The kill-switch file could not be checked.');
-  warnings.push('Known limit (T-024 finding 1): the engine itself refuses a free mint whose padded gas cost is above 0.0002 ETH per wallet, or above 0.002 ETH across the run, which is lower than the approved 0.0004 / 0.0024 ETH policy. At today\'s fees a run can be refused at the last step. The owner decision on this is open.');
   if (context.custody === 'local') warnings.push('Wallets are signed from the local encrypted keystore (accepted for Personal Live, D-028).');
 
   const walletsReady = report.wallets.filter((row) => row.verdict === 'ready').map((row) => row.wallet);

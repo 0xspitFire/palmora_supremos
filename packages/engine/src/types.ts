@@ -564,6 +564,11 @@ export interface MintJobConfig {
     readonly paidMaxQuantityPerWallet?: number;
     /** Adjustable paid mint-value cap per run; defaults to 0.3 ETH. */
     readonly paidRunMintValueCapEth?: number;
+    /**
+     * FREE-mint gas reserve caps for this chain (D-042). Omit for the strict default (0.0002 ETH per wallet, 0.002 ETH per run).
+     * The caller sets them from the approved policy; the engine never raises them itself.
+     */
+    readonly freeMintReserveCaps?: { readonly perWalletCapWei: bigint; readonly activePeriodCapWei: bigint };
   };
 readonly broadcast: {
     readonly mode: BroadcastMode;
