@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DropCheckReport, DropCheckWallet } from './drop-check.js';
-import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase } from './live-plan.js';
+import { BackendApplication, DurableStore, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY } from '@mint-bot/backend';
+import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
 
 const CONTRACT = '0x21d90c1ea94b7f8b0bea50df540bac9f04ada760';
 const row = (index: number, verdict: DropCheckWallet['verdict'], extra: Partial<DropCheckWallet> = {}): DropCheckWallet => ({ wallet: `0x${String(index).repeat(40)}`, balanceEth: '0.0006', requiredEth: '0.0004', topUpEth: null, simulation: verdict === 'ready' ? 'passed' : 'not run', verdict, note: '', ...extra }) as DropCheckWallet;
@@ -13,8 +14,7 @@ describe('Personal Live plan (read-only)', () => {
     expect(plan).toMatchObject({ verdict: 'ready', blockers: [], quantity: 3, perWalletMaxCostEth: '0.0004', totalMaxExposureEth: '0.0012', dailyBudgetEth: '0.0024', withinDailyBudget: true });
     expect(plan.walletsReady).toHaveLength(3);
     expect(plan.summary).toContain('Nothing has been sent');
-    expect(plan.summary).toContain('not available yet');
-    expect(plan.nextSteps.join(' ')).toContain('NOT available yet');
+    expect(plan.nextSteps.join(' ')).toContain('live-prepare');
     expect(plan.warnings.join(' ')).toContain('local encrypted keystore');
   });
 
@@ -93,5 +93,30 @@ describe('every gate on recording a live campaign (live-prepare)', () => {
     for (const walletFileAddresses of [[...good.walletFileAddresses, extra], good.walletFileAddresses.slice(1), [...good.walletFileAddresses.slice(1), extra], []]) {
       expect(() => assertLivePrepareAllowed({ ...good, walletFileAddresses })).toThrow('WALLET_FILE_DOES_NOT_MATCH_READY_WALLETS');
     }
+  });
+});
+
+
+describe('live free campaign numbers (D-042)', () => {
+  const ALLOWANCE = PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei;
+  const engine = { prepare: async () => ({ executionIds: [], attempts: [], receipts: [], state: 'Prepared' as const }), execute: async () => ({ executionIds: [], attempts: [], receipts: [], state: 'Confirmed' as const }), reconcile: async () => ({ result: 'unknown' as const, attempts: [], receipts: [] }) };
+
+  it('are accepted by the real campaign-creation rules, which is what the first version of live-prepare missed', async () => {
+    const store = new DurableStore();
+    await store.open();
+    const app = new BackendApplication(store, new ExecutionCoordinator(store, engine as never), { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+    const fields = liveFreeCampaignFields({ quantity: 3, wallets: 3, tipWei: 100_000_000n });
+    expect(fields).toMatchObject({ maxRunWei: 3n * ALLOWANCE, dailyCapWei: ALLOWANCE, gasCeilingWei: ALLOWANCE, mintPriceWei: 0n });
+    const campaign = await app.createCampaign({ chainId: 1, contract: CONTRACT, strategy: 'seadrop-v1-public', quantity: fields.quantity, dryRun: false, maxRunWei: fields.maxRunWei, dailyCapWei: fields.dailyCapWei, gasCeilingWei: fields.gasCeilingWei, broadcastMode: 'public', chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, endpointReference: 'ETHEREUM_RPC_REFERENCE' }, mintPriceWei: fields.mintPriceWei, feePolicy: fields.feePolicy });
+    expect(campaign.feePolicy.totalFeeBudgetWei).toBe(ALLOWANCE);
+    expect(campaign.feePolicy.configuredPriorityFeeWei).toBe(100_000_000n);
+  });
+
+  it('refuse a bad tip, too many wallets for the daily budget, and a zero quantity or wallet count', () => {
+    expect(() => liveFreeCampaignFields({ quantity: 1, wallets: 1, tipWei: 0n })).toThrow('LIVE_TIP_OUT_OF_RANGE');
+    expect(() => liveFreeCampaignFields({ quantity: 1, wallets: 1, tipWei: 2_000_000_001n })).toThrow('LIVE_TIP_OUT_OF_RANGE');
+    expect(() => liveFreeCampaignFields({ quantity: 1, wallets: 7, tipWei: 1n })).toThrow('LIVE_WALLET_COUNT_EXCEEDS_DAILY_BUDGET');
+    expect(() => liveFreeCampaignFields({ quantity: 1, wallets: 0, tipWei: 1n })).toThrow('LIVE_WALLET_COUNT_EXCEEDS_DAILY_BUDGET');
+    expect(() => liveFreeCampaignFields({ quantity: 0, wallets: 1, tipWei: 1n })).toThrow('LIVE_QUANTITY_INVALID');
   });
 });

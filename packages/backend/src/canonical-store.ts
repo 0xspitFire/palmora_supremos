@@ -1095,7 +1095,56 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       if (policy.kind === 'paid' && existing.paid_mints_enabled !== 1) throw new Error('PAID_MINT_POLICY_REQUIRED');
       return;
     }
-    this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)').run(canonicalId('fee', `${chainProfileId}:${encode(policy)}`), chainProfileId, `backend-${digest(encode(policy))}`, chainId === ETHEREUM_CHAIN_ID ? 'ordering' : 'fee_only', (policy.totalFeeBudgetWei ?? 0n).toString(), (policy.freeTotalSpendCapWei ?? 0n).toString(), policy.configuredPriorityFeeWei.toString(), 2, policy.kind === 'paid' ? 1 : 0, this.now().toISOString(), policy.configuredPriorityFeeWei === 0n ? 'requires_po_resolution' : 'allowed');
+    const seed = this.feePolicySeed(policy, chainId);
+    this.insertFeePolicyRow(chainProfileId, chainId, { ...seed, paidMintsEnabled: policy.kind === 'paid' });
+  }
+
+  /**
+   * Numbers for a chain's stored fee policy (D-042). On Ethereum, with a fleet policy configured, they come from the
+   * approved fleet policy, never from whichever campaign happens to be created first. Other chains keep the old rule.
+   */
+  private feePolicySeed(policy: FeePolicy, chainId: 1 | 4663): { maxTotalFeeWei: bigint; freeCapWei: bigint; priorityComponentWei: bigint } {
+    if (chainId === ETHEREUM_CHAIN_ID && this.fleetPolicy) {
+      const largest = this.fleetPolicy.freeFeeAllowanceWei > this.fleetPolicy.paidFeeAllowanceWei ? this.fleetPolicy.freeFeeAllowanceWei : this.fleetPolicy.paidFeeAllowanceWei;
+      return { maxTotalFeeWei: largest, freeCapWei: this.fleetPolicy.freeFeeAllowanceWei, priorityComponentWei: policy.configuredPriorityFeeWei };
+    }
+    return { maxTotalFeeWei: policy.totalFeeBudgetWei ?? 0n, freeCapWei: policy.freeTotalSpendCapWei ?? 0n, priorityComponentWei: policy.configuredPriorityFeeWei };
+  }
+
+  private insertFeePolicyRow(chainProfileId: string, chainId: 1 | 4663, values: { maxTotalFeeWei: bigint; freeCapWei: bigint; priorityComponentWei: bigint; paidMintsEnabled: boolean }): void {
+    const snapshot = { chainProfileId, ...Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value)])) };
+    this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)').run(canonicalId('fee', `${chainProfileId}:${encode(snapshot)}:${this.now().toISOString()}`), chainProfileId, `backend-${digest(encode(snapshot))}`, chainId === ETHEREUM_CHAIN_ID ? 'ordering' : 'fee_only', values.maxTotalFeeWei.toString(), values.freeCapWei.toString(), values.priorityComponentWei.toString(), 2, values.paidMintsEnabled ? 1 : 0, this.now().toISOString(), values.priorityComponentWei === 0n ? 'requires_po_resolution' : 'allowed');
+  }
+
+  /** What Ethereum's stored fee policy holds now, and what the approved fleet policy says it should hold. */
+  public ethereumFeePolicyStatus(): { fleetPolicyConfigured: boolean; stored: { maxTotalFeeWei: string; freeCapWei: string } | null; approved: { maxTotalFeeWei: string; freeCapWei: string } | null; matchesApproved: boolean } {
+    const profile = this.db.prepare('SELECT id FROM chain_profile WHERE chain_id = ?').get(ETHEREUM_CHAIN_ID) as { id: string } | undefined;
+    const row = profile ? this.db.prepare('SELECT max_total_fee_wei, free_mint_total_fee_cap_wei FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(profile.id) as { max_total_fee_wei: string; free_mint_total_fee_cap_wei: string } | undefined : undefined;
+    const approved = this.fleetPolicy ? { maxTotalFeeWei: (this.fleetPolicy.freeFeeAllowanceWei > this.fleetPolicy.paidFeeAllowanceWei ? this.fleetPolicy.freeFeeAllowanceWei : this.fleetPolicy.paidFeeAllowanceWei).toString(), freeCapWei: this.fleetPolicy.freeFeeAllowanceWei.toString() } : null;
+    const stored = row ? { maxTotalFeeWei: row.max_total_fee_wei, freeCapWei: row.free_mint_total_fee_cap_wei } : null;
+    return { fleetPolicyConfigured: this.fleetPolicy !== undefined, stored, approved, matchesApproved: stored !== null && approved !== null && stored.maxTotalFeeWei === approved.maxTotalFeeWei && stored.freeCapWei === approved.freeCapWei };
+  }
+
+  /**
+   * Replaces Ethereum's stored fee policy with the approved fleet policy (D-042). Owner-run only: the CLI asks for a typed
+   * confirmation first. Reservations keep the snapshot they were admitted with, so nothing already reserved changes.
+   */
+  public applyApprovedEthereumFeePolicy(priorityComponentWei: bigint): { replaced: boolean } {
+    if (!this.fleetPolicy) throw new Error('FLEET_SPEND_POLICY_REQUIRED');
+    if (priorityComponentWei <= 0n) throw new Error('FEE_POLICY_PRIORITY_COMPONENT_INVALID');
+    const status = this.ethereumFeePolicyStatus();
+    if (status.matchesApproved) return { replaced: false };
+    const profile = this.db.prepare('SELECT id FROM chain_profile WHERE chain_id = ?').get(ETHEREUM_CHAIN_ID) as { id: string } | undefined;
+    if (!profile) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
+    const previous = this.db.prepare('SELECT paid_mints_enabled FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(profile.id) as { paid_mints_enabled: number } | undefined;
+    const approved = this.feePolicySeed({ kind: 'free', configuredPriorityFeeWei: priorityComponentWei }, ETHEREUM_CHAIN_ID);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ? AND active = 1').run(profile.id);
+      this.insertFeePolicyRow(profile.id, ETHEREUM_CHAIN_ID, { ...approved, paidMintsEnabled: previous?.paid_mints_enabled === 1 });
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    return { replaced: true };
   }
 
   private activeFeePolicy(chainProfileId: string): { id: string; version: string; priority_fee_semantics: 'ordering' | 'fee_only'; max_total_fee_wei: string; free_mint_total_fee_cap_wei: string; free_mint_priority_fee_component_wei: string; free_mint_priority_fee_multiplier: number; paid_mints_enabled: number; zero_priority_fee_policy: string } {

@@ -80,5 +80,5 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   let alertSink: SpendAlertSink = new AlertManager(store);
   const coordinator = new ExecutionCoordinator(store, actualEngine, { alerts: { cap: (reason, runId) => alertSink.cap(reason, runId) } });
   if (runtimeOptions.startCoordinator !== false) await coordinator.start();
-  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true' }), walletRoot: resolveWalletPath(projectRoot), setAlertSink: (sink) => { alertSink = sink; } };
+  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY }), walletRoot: resolveWalletPath(projectRoot), setAlertSink: (sink) => { alertSink = sink; } };
 }

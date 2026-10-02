@@ -5,6 +5,7 @@ import { ExecutionCoordinator } from './coordinator.js';
 import { HealthService } from './health.js';
 import { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI } from './policy.js';
 import { liveRequestDigest } from './evidence.js';
+import type { FleetSpendPolicy } from './fleet-policy.js';
 
 export interface CommandResponse<T> { id: string; state: string; nextAction: string; createdAt: string; retryable: boolean; blockingReason?: string; data?: T; }
 export interface CampaignInput { chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; }
@@ -14,8 +15,11 @@ export interface RunCommandInput { runId: string; wallets: string[]; idempotency
 export interface SummaryCommandInput { runId?: string; }
 export interface FundCommandInput { runId?: string; wallets?: string[]; }
 export type TypedCommandInput = ApprovalCommandInput | ArmCommandInput | RunCommandInput | SummaryCommandInput | FundCommandInput | { reason?: string; idempotencyKey?: string };
+/** Highest per-gas tip a free Ethereum campaign may carry under the per-wallet fee budget shape: 2 gwei (D-042). */
+export const MAX_FREE_TIP_WEI = 2_000_000_000n;
+
 export class BackendApplication {
-  constructor(private readonly store: BackendStore, private readonly coordinator: ExecutionCoordinator, private readonly options: { phase2ReadOnly?: boolean } = {}) {}
+  constructor(private readonly store: BackendStore, private readonly coordinator: ExecutionCoordinator, private readonly options: { phase2ReadOnly?: boolean; fleetPolicy?: FleetSpendPolicy } = {}) {}
   async command<T = unknown>(name: CommandName, input: Record<string, unknown> = {}): Promise<CommandResponse<T>> {
     const now = new Date().toISOString();
     if (this.options.phase2ReadOnly === true && ['approve', 'arm', 'run', 'execute', 'fund', 'kill'].includes(name)) throw new Error('PHASE2_MUTATION_DISABLED');
@@ -136,9 +140,18 @@ export class BackendApplication {
       if (allInExposure > input.maxRunWei || allInExposure > input.dailyCapWei) throw new Error('PAID_ETHEREUM_CAP_REQUIRED');
     } else {
       if (mintPriceWei !== 0n) throw new Error('FREE_MINT_VALUE_MUST_BE_ZERO');
-      const freeCap = input.feePolicy.configuredPriorityFeeWei * 2n;
-      if (input.feePolicy.freeTotalSpendCapWei !== freeCap) throw new Error('FREE_TOTAL_SPEND_POLICY_INVALID');
-      if (totalFeeBudget > freeCap) throw new Error('FREE_TOTAL_SPEND_CAP_EXCEEDED');
+      // D-042: an Ethereum free campaign may carry the approved per-wallet fee allowance as its fee budget, with the tip
+      // kept separate and small. Anything else uses the old rule (cap = twice the tip, budget within the cap).
+      const approvedAllowanceWei = this.options.fleetPolicy?.freeFeeAllowanceWei;
+      const perWalletBudgetShape = input.chainId === 1 && approvedAllowanceWei !== undefined && input.feePolicy.freeTotalSpendCapWei === approvedAllowanceWei;
+      if (perWalletBudgetShape) {
+        if (input.feePolicy.configuredPriorityFeeWei <= 0n || input.feePolicy.configuredPriorityFeeWei > MAX_FREE_TIP_WEI) throw new Error('FREE_TIP_OUT_OF_RANGE');
+        if (totalFeeBudget > approvedAllowanceWei!) throw new Error('FREE_TOTAL_SPEND_CAP_EXCEEDED');
+      } else {
+        const freeCap = input.feePolicy.configuredPriorityFeeWei * 2n;
+        if (input.feePolicy.freeTotalSpendCapWei !== freeCap) throw new Error('FREE_TOTAL_SPEND_POLICY_INVALID');
+        if (totalFeeBudget > freeCap) throw new Error('FREE_TOTAL_SPEND_CAP_EXCEEDED');
+      }
       if (input.chainId === 4663) assertRobinhoodFreePolicy(input.gasCeilingWei, input.dailyCapWei, totalFeeBudget);
       if (input.chainId === 4663 && input.dailyCapWei > ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI) throw new Error('ROBINHOOD_ACTIVE_PERIOD_CAP_EXCEEDED');
     }
