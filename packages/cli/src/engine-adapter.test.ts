@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertWithinAdmittedExposure, preSignReservationGate } from './engine-adapter.js';
+import { assertWithinAdmittedExposure, freeMintReserveCapsFor, preSignReservationGate } from './engine-adapter.js';
 import { canonicalExecutionIdentity } from '@mint-bot/engine';
 
 const campaign = { mintPriceWei: 1_000n, quantity: 2 };
@@ -73,5 +73,14 @@ describe('adapter wiring (T-010)', () => {
     }
     // A reservation that vanished from the fresh state entirely is refused too.
     expect(() => preSignReservationGate({ ...args, byWallet: new Map() })).toThrow('DURABLE_RESERVATION_REQUIRED');
+  });
+});
+
+describe('free-mint reserve caps per chain (D-042)', () => {
+  it('follows the approved fleet policy on Ethereum and leaves every other chain on the strict engine default', () => {
+    expect(freeMintReserveCapsFor(1)).toEqual({ perWalletCapWei: 400_000_000_000_000n, activePeriodCapWei: 2_400_000_000_000_000n });
+    expect(freeMintReserveCapsFor(4663)).toBeUndefined();
+    expect(freeMintReserveCapsFor(8453)).toBeUndefined();
+    expect(freeMintReserveCapsFor(0)).toBeUndefined();
   });
 });
