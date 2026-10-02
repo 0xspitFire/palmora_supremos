@@ -23,7 +23,7 @@ import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
-import { describeFeePolicy, feePolicyConfirmationPhrase } from './fee-policy.js';
+import { assertFeePolicyApplyAllowed, assertTipMatchesStoredPolicy, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 
@@ -560,21 +560,18 @@ const cli = yargs(hideBin(process.argv))
     })
   .command('fee-policy <action>', 'Owner-run: show Ethereum\'s stored fee policy against the approved one, or replace it (needs a typed confirmation)', (args) => args
     .positional('action', { type: 'string', choices: ['status', 'apply'] as const, demandOption: true })
-    .option('priority-fee-gwei', { type: 'number', default: 0.1, describe: 'Tip stored with the policy (more than 0, at most 2)' })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (apply only)' }), async (args) => {
       try {
-        if (!(args.priorityFeeGwei > 0 && args.priorityFeeGwei <= 2)) throw new Error('PRIORITY_FEE_GWEI_OUT_OF_RANGE: use more than 0 and at most 2');
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
-        const store = runtime.store as unknown as { ethereumFeePolicyStatus?: () => Parameters<typeof describeFeePolicy>[0]; applyApprovedEthereumFeePolicy?: (priorityComponentWei: bigint) => { replaced: boolean } };
+        const store = runtime.store as unknown as { ethereumFeePolicyStatus?: () => Parameters<typeof describeFeePolicy>[0]; applyApprovedEthereumFeePolicy?: () => { replaced: boolean } };
         if (typeof store.ethereumFeePolicyStatus !== 'function' || typeof store.applyApprovedEthereumFeePolicy !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
         const status = store.ethereumFeePolicyStatus();
         const view = describeFeePolicy(status);
-        if (args.action === 'status') { process.stdout.write(`${json({ ...view, stored: status.stored, approved: status.approved })}\n`); return; }
-        if (status.approved === null) throw new Error('FLEET_SPEND_POLICY_REQUIRED');
-        if (args.confirm !== feePolicyConfirmationPhrase(status.approved)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run fee-policy status and copy the phrase it prints exactly');
-        const result = store.applyApprovedEthereumFeePolicy(parseGwei(args.priorityFeeGwei.toString()));
+        if (args.action === 'status') { process.stdout.write(`${json({ ...view, ...(view.confirmation ? { copyThisToApply: `fee-policy apply --confirm "${view.confirmation}"` } : {}), stored: status.stored, approved: status.approved })}\n`); return; }
+        assertFeePolicyApplyAllowed({ status, confirm: args.confirm });
+        const result = store.applyApprovedEthereumFeePolicy();
         process.stdout.write(`${json({ state: result.replaced ? 'Replaced' : 'AlreadyCurrent', message: result.replaced ? 'Ethereum\'s stored fee policy now matches the approved one.' : 'Nothing to change: the stored policy already matches.' })}\n`);
-      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('live-plan', 'Read-only: is a FREE Ethereum mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
     .option('contract', { type: 'string', demandOption: true })
@@ -604,9 +601,11 @@ const cli = yargs(hideBin(process.argv))
         const readyWallets = assertLivePrepareAllowed({ plan, contract: args.contract, confirm: args.confirm, priorityFeeGwei: args.priorityFeeGwei, walletFileAddresses: await publicWallets(file) });
         const fields = liveFreeCampaignFields({ quantity: plan.quantity, wallets: readyWallets.length, tipWei: parseGwei(args.priorityFeeGwei.toString()) });
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file }, { startCoordinator: false });
-        const store = runtime.store as unknown as { ethereumFeePolicyStatus?: () => { matchesApproved: boolean; stored: unknown } };
-        const policy = store.ethereumFeePolicyStatus?.();
-        if (policy && policy.stored !== null && !policy.matchesApproved) throw new Error('FEE_POLICY_DIFFERS_FROM_APPROVED: run fee-policy status, then fee-policy apply with its confirmation phrase');
+        const store = runtime.store as unknown as { ethereumFeePolicyStatus?: () => Parameters<typeof describeFeePolicy>[0] };
+        if (typeof store.ethereumFeePolicyStatus !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
+        const policy = store.ethereumFeePolicyStatus();
+        if (policy.stored !== null && !policy.matchesApproved) throw new Error('FEE_POLICY_DIFFERS_FROM_APPROVED: run fee-policy status, then fee-policy apply with its confirmation phrase');
+        assertTipMatchesStoredPolicy(policy, parseGwei(args.priorityFeeGwei.toString()));
         const campaign = await runtime.application.createCampaign({
           chainId: 1,
           contract: args.contract,
@@ -622,7 +621,7 @@ const cli = yargs(hideBin(process.argv))
           feePolicy: fields.feePolicy,
         });
         process.stdout.write(`${json({ state: 'Prepared', campaignId: campaign.id, wallets: readyWallets, quantity: fields.quantity, maxExposureEth: plan.totalMaxExposureEth, planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null, nextSteps: [`approve --campaign-id ${campaign.id}`, `arm --campaign-id ${campaign.id} --mode live`, 'remove the kill-switch file only when you are ready', 'run --run-id <the run id arm prints> --max-fee-gwei <the planning max fee above>'] })}\n`);
-      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'robinhood' })
