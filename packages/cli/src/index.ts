@@ -625,12 +625,13 @@ const cli = yargs(hideBin(process.argv))
     })
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'robinhood' })
-    .option('blocks', { type: 'number', default: 20_000, describe: 'How many recent blocks to survey (maximum 200000)' })
-    .option('max-transactions', { type: 'number', default: 300, describe: 'Most mint transactions to look up (maximum 1000)' }), async (args) => {
+    .option('blocks', { type: 'number', default: 20_000, describe: 'How many recent blocks to survey (maximum 400000)' })
+    .option('rpc-url', { type: 'string', describe: 'Use this RPC instead of the saved one (https only); Robinhood has a public one' })
+    .option('max-transactions', { type: 'number', default: 1500, describe: 'Most mint transactions to look up (maximum 5000); when the window has fewer, every one is classified and the counts are exact' }), async (args) => {
       try {
-        if (!Number.isSafeInteger(args.blocks) || args.blocks < 1 || args.blocks > 200_000) throw new Error('BLOCKS_OUT_OF_RANGE: use 1 to 200000');
-        if (!Number.isSafeInteger(args.maxTransactions) || args.maxTransactions < 1 || args.maxTransactions > 1_000) throw new Error('MAX_TRANSACTIONS_OUT_OF_RANGE: use 1 to 1000');
-        const config = await resolveChainByNameFromSecrets(args.chain, 'mainnet', configuredSecretRoot(runtimeRoot));
+        if (!Number.isSafeInteger(args.blocks) || args.blocks < 1 || args.blocks > 400_000) throw new Error('BLOCKS_OUT_OF_RANGE: use 1 to 400000');
+        if (!Number.isSafeInteger(args.maxTransactions) || args.maxTransactions < 1 || args.maxTransactions > 5_000) throw new Error('MAX_TRANSACTIONS_OUT_OF_RANGE: use 1 to 5000');
+        const config = args.rpcUrl ? { chainId: args.chain === 'ethereum' ? 1 : 4663, rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets(args.chain, 'mainnet', configuredSecretRoot(runtimeRoot));
         const endpoint = config.rpcEndpoints[0];
         if (!endpoint) throw new Error(`${args.chain.toUpperCase()}_RPC_UNAVAILABLE`);
         let parsed: URL;
@@ -641,7 +642,10 @@ const cli = yargs(hideBin(process.argv))
         const head = await client.getBlockNumber();
         const from = head >= BigInt(args.blocks) ? head - BigInt(args.blocks) + 1n : 0n;
         const result = await surveySeaDropMints(client as never, { fromBlock: from, toBlock: head, maxTransactions: args.maxTransactions });
-        process.stdout.write(`${json({ chain: args.chain, ...result })}\n`);
+        // How long the window is, from the chain's own timestamps, so the result reads in minutes and not only blocks.
+        const [first, last] = await Promise.all([client.getBlock({ blockNumber: from }), client.getBlock({ blockNumber: head })]).catch(() => [null, null] as const);
+        const windowMinutes = first && last ? Math.round((Number(last.timestamp) - Number(first.timestamp)) / 60) : null;
+        process.stdout.write(`${json({ chain: args.chain, windowMinutes, ...result })}\n`);
       } catch (error) {
         // Provider errors can carry the RPC URL (and its key), so only a cleaned short description is printed.
         process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`);
