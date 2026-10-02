@@ -21,7 +21,8 @@ import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
 import { probeRpc } from './rpc-probe.js';
 import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { buildLivePlan, liveConfirmationPhrase } from './live-plan.js';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 
@@ -556,6 +557,18 @@ const cli = yargs(hideBin(process.argv))
       try { process.stdout.write(`${json(await dryRunDrop(robinhoodReadClient(args.rpcUrl) as never, args.contract, checkWallets(args.wallets), { quantity: args.quantity }))}\n`); }
       catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
+  .command('live-plan', 'Read-only: is a FREE Ethereum mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
+    .option('contract', { type: 'string', demandOption: true })
+    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
+    .option('rpc-url', { type: 'string', describe: 'Override the Ethereum RPC (https only)' }), async (args) => {
+      try {
+        const wallets = checkWallets(args.wallets);
+        const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : await ethereumPort();
+        const report = await checkDrop(port, args.contract, wallets, { simulate: true });
+        const plan = buildLivePlan(report, { killSwitchPresent: existsSync(DEFAULT_KILL_FILE), custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local' });
+        process.stdout.write(`${json({ ...plan, ...(plan.verdict === 'ready' ? { confirmationPhrase: liveConfirmationPhrase(args.contract, plan.totalMaxExposureEth), planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null } : {}) })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+    })
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'robinhood' })
     .option('blocks', { type: 'number', default: 20_000, describe: 'How many recent blocks to survey (maximum 200000)' })
@@ -637,8 +650,10 @@ const cli = yargs(hideBin(process.argv))
   .command('run', 'Execute an admitted run through Backend admission', (args) => args
     .option('run-id', { type: 'string', demandOption: true })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
+    .option('max-fee-gwei', { type: 'number', describe: 'Highest fee per gas the run may sign with. Use the value live-plan printed; the default (100) is far above the free-mint fee allowance, so a live free mint with the default is refused.' })
     .option('idempotency-key', { type: 'string' }), async (args) => {
-    const runtime = await createCliRuntime(runtimeRoot);
+    if (args.maxFeeGwei !== undefined && (!Number.isFinite(args.maxFeeGwei) || args.maxFeeGwei <= 0 || args.maxFeeGwei > 500)) { process.stdout.write(`${blocked(new Error('MAX_FEE_GWEI_OUT_OF_RANGE: use more than 0 and at most 500'))}\n`); return; }
+    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, args.maxFeeGwei === undefined ? undefined : { maxFeePerGasGwei: args.maxFeeGwei });
     try {
       const wallets = await publicWallets(walletFile(args.walletFile));
       const response = await runtime.application.command('run', { runId: args.runId, wallets, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
