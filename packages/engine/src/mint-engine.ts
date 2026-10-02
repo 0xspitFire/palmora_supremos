@@ -57,7 +57,7 @@ import type {
 } from './types.js';
 import { MintError, MintErrorType } from './types.js';
 import { getChainConfig, resolveChainByNameFromSecrets } from './chains.js';
-import { effectiveFreeMintReserveCaps, replacementPriorityBudget, validateFeeBudget, validateFreeMintReserve, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
+import { exceedsRunReserveCap, freeMintReserveCapsForChain, replacementPriorityBudget, validateFeeBudget, validateFreeMintReserve, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
 import { reserveThenSign, robinhoodL1DataGasWei } from './pre-sign.js';
 import { NonceManagerImpl } from './nonce-manager.js';
@@ -447,7 +447,7 @@ export class MintEngine {
       let admittedMintValueWei = 0n;
       let admittedFreeReserveWei = 0n;
       // Only Ethereum may use supplied caps, and they are validated once here; anything else gets the strict default (D-042).
-      const freeReserveCaps = effectiveFreeMintReserveCaps(this.config.target.chain === 'ethereum' ? this.config.safety.freeMintReserveCaps : undefined);
+      const freeReserveCaps = freeMintReserveCapsForChain(this.config.target.chain, this.config.safety.freeMintReserveCaps);
       const freeReserveByWallet = new Map<number, bigint>();
       const freeReserveErrorByWallet = new Map<number, string>();
       if (mintCostPerWallet === 0n) {
@@ -471,8 +471,8 @@ export class MintEngine {
         const freeReserve = freeReserveByWallet.get(wallet.index) ?? 0n;
         if (freeReserveErrorByWallet.has(wallet.index)) {
           preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: freeReserveErrorByWallet.get(wallet.index), simulation: simulations.get(wallet.index), durationMs: 0 });
-        } else if (mintCostPerWallet === 0n && admittedFreeReserveWei + freeReserve > freeReserveCaps.activePeriodCapWei) {
-          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: 'FREE-mint active-period reserve cap reached; wallet capacity is not transferable', simulation: simulations.get(wallet.index), durationMs: 0 });
+        } else if (mintCostPerWallet === 0n && exceedsRunReserveCap(admittedFreeReserveWei, freeReserve, freeReserveCaps)) {
+          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `FREE-mint active-period reserve cap (${formatEther(freeReserveCaps.activePeriodCapWei)} ETH) reached; wallet capacity is not transferable`, simulation: simulations.get(wallet.index), durationMs: 0 });
         } else if (balance < walletMaxCost) {
           preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `Insufficient funds: required ${formatEther(walletMaxCost)} ETH`, simulation: simulations.get(wallet.index), durationMs: 0 });
         } else if (mintCostPerWallet > 0n && admittedMintValueWei + mintCostPerWallet > runMintValueCapWei) {

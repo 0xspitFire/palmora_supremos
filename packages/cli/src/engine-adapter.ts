@@ -132,6 +132,7 @@ export function freeMintReserveCapsFor(chainId: number): { perWalletCapWei: bigi
 
 function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
   const chain = chainName(campaign.chainId);
+  const reserveCaps = freeMintReserveCapsFor(campaign.chainId);
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
   return {
@@ -147,7 +148,7 @@ function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRu
       killSwitchFile: options.killSwitchFile,
       paidMaxQuantityPerWallet: 15,
       paidRunMintValueCapEth: paidRunMintValueCapEth(campaign),
-      ...(freeMintReserveCapsFor(campaign.chainId) ? { freeMintReserveCaps: freeMintReserveCapsFor(campaign.chainId)! } : {}),
+      ...(reserveCaps ? { freeMintReserveCaps: reserveCaps } : {}),
     },
     broadcast: {
       // Dry runs must not require relay credentials. Live Ethereum still

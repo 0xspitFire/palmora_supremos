@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_FREE_MINT_RESERVE_CAPS, effectiveFreeMintReserveCaps, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, validateFeeBudget, assertPriorityFeeIsNotBudget, validateFreeMintReserve, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget } from './fee-guard.js';
+import { DEFAULT_FREE_MINT_RESERVE_CAPS, effectiveFreeMintReserveCaps, exceedsRunReserveCap, freeMintReserveCapsForChain, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, validateFeeBudget, assertPriorityFeeIsNotBudget, validateFreeMintReserve, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget } from './fee-guard.js';
 
 describe('validateFeeBudget', () => {
   it('accepts a budget that covers gas + value as worst-case total', () => {
@@ -133,5 +133,33 @@ describe('validateFreeMintReserve with per-chain caps (D-042)', () => {
     // A malformed pair (per-wallet 0, huge per-run) must not leave the per-run cap loose.
     expect(effectiveFreeMintReserveCaps({ perWalletCapWei: 0n, activePeriodCapWei: 10n ** 18n })).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
     expect(effectiveFreeMintReserveCaps({ perWalletCapWei: 10n ** 18n, activePeriodCapWei: 1n })).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
+  });
+
+  it('applies supplied caps on Ethereum only; Robinhood and Base stay strict whatever is passed (the gate the engine uses)', () => {
+    expect(freeMintReserveCapsForChain('ethereum', ETHEREUM_CAPS)).toBe(ETHEREUM_CAPS);
+    expect(freeMintReserveCapsForChain('ethereum', undefined)).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
+    expect(freeMintReserveCapsForChain('robinhood', ETHEREUM_CAPS)).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
+    expect(freeMintReserveCapsForChain('base', ETHEREUM_CAPS)).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
+  });
+
+  it('refuses the wallet that would take the run past the run cap and allows the one that reaches it exactly', () => {
+    const wallet = ETHEREUM_CAPS.perWalletCapWei; // 0.0004 ETH each, run cap 0.0024 ETH = six wallets
+    expect(exceedsRunReserveCap(5n * wallet, wallet, ETHEREUM_CAPS)).toBe(false);
+    expect(exceedsRunReserveCap(6n * wallet, 1n, ETHEREUM_CAPS)).toBe(true);
+    // Robinhood's strict cap: five wallets of 0.0004 do not fit 0.002 ETH.
+    const strict = freeMintReserveCapsForChain('robinhood', ETHEREUM_CAPS);
+    expect(exceedsRunReserveCap(0n, wallet * 5n + 1n, strict)).toBe(true);
+    expect(exceedsRunReserveCap(strict.activePeriodCapWei - 1n, 1n, strict)).toBe(false);
+    expect(exceedsRunReserveCap(strict.activePeriodCapWei, 1n, strict)).toBe(true);
+  });
+
+  it('is wired into the engine: it calls the chain gate and the run-cap check, and no longer reads the fixed constants', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('./mint-engine.ts', import.meta.url), 'utf8');
+    expect(source).toContain('freeMintReserveCapsForChain(this.config.target.chain, this.config.safety.freeMintReserveCaps)');
+    expect(source).toContain('exceedsRunReserveCap(admittedFreeReserveWei, freeReserve, freeReserveCaps)');
+    expect(source).toContain('validateFreeMintReserve({ perWalletReserveWei: reserve, activePeriodReserveWei: reserve }, freeReserveCaps)');
+    expect(source).not.toContain('FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI');
+    expect(source).not.toContain('FREE_MINT_PER_WALLET_RESERVE_CAP_WEI');
   });
 });

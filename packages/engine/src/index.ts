@@ -149,7 +149,7 @@ export type { LogSource, LogPosition, SeaDropMintObservation, PublicDropUpdateOb
 
 // Safety
 export { KillSwitch, SpendTracker } from './safety.js';
-export { validateFeeBudget, validateFreeMintSpend, validateFreeMintReserve, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget, assertPriorityFeeIsNotBudget, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, DEFAULT_FREE_MINT_RESERVE_CAPS, effectiveFreeMintReserveCaps } from './fee-guard.js';
+export { validateFeeBudget, validateFreeMintSpend, validateFreeMintReserve, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget, assertPriorityFeeIsNotBudget, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, DEFAULT_FREE_MINT_RESERVE_CAPS, effectiveFreeMintReserveCaps, freeMintReserveCapsForChain, exceedsRunReserveCap } from './fee-guard.js';
 export { robinhoodL1DataGasWei, assertRequestMatchesIntent, assertSignedMatchesIntent, reserveThenSign } from './pre-sign.js';
 export { ROBINHOOD_SEADROP_POSITIVE_FIXTURE, ROBINHOOD_EXTERNAL_FAILED_HASHES_ARE_FLEET_EVIDENCE } from './robinhood-evidence.js';
 export { evaluateRobinhoodVerification, applyRobinhoodVerification } from './robinhood-gate.js';

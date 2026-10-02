@@ -78,6 +78,19 @@ export function effectiveFreeMintReserveCaps(caps: FreeMintReserveCaps | undefin
   return valid ? caps : DEFAULT_FREE_MINT_RESERVE_CAPS;
 }
 
+/**
+ * The caps the engine uses for one job (D-042). Only Ethereum may use caps the caller supplies, and they are validated;
+ * every other chain gets the strict default no matter what is passed.
+ */
+export function freeMintReserveCapsForChain(chain: 'ethereum' | 'base' | 'robinhood', supplied: FreeMintReserveCaps | undefined): FreeMintReserveCaps {
+  return effectiveFreeMintReserveCaps(chain === 'ethereum' ? supplied : undefined);
+}
+
+/** True when admitting this wallet's reserve would take the run's total free-mint reserve above the run cap. */
+export function exceedsRunReserveCap(admittedSoFarWei: bigint, nextReserveWei: bigint, caps: FreeMintReserveCaps): boolean {
+  return admittedSoFarWei + nextReserveWei > caps.activePeriodCapWei;
+}
+
 export function validateFreeMintReserve(input: {
   perWalletReserveWei: bigint;
   activePeriodReserveWei: bigint;
