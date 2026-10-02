@@ -48,7 +48,10 @@ describe('live campaign tip and plain error text', () => {
   it('requires the tip to equal the stored one, because later campaigns read the stored tip', () => {
     expect(() => assertTipMatchesStoredPolicy(status({ stored: approved, matchesApproved: true }), 100_000_000n)).not.toThrow();
     expect(() => assertTipMatchesStoredPolicy(status({ stored: approved, matchesApproved: true }), 200_000_000n)).toThrow('TIP_DIFFERS_FROM_STORED_POLICY');
-    expect(() => assertTipMatchesStoredPolicy(status({ stored: null }), 1n)).not.toThrow();
+    // Nothing stored yet: the approved tip will be installed, so only that tip is accepted.
+    expect(() => assertTipMatchesStoredPolicy(status({ stored: null }), 100_000_000n)).not.toThrow();
+    expect(() => assertTipMatchesStoredPolicy(status({ stored: null }), 1n)).toThrow('TIP_DIFFERS_FROM_STORED_POLICY');
+    expect(() => assertTipMatchesStoredPolicy(status({ stored: null, approved: null, fleetPolicyConfigured: false }), 1n)).not.toThrow();
   });
 
   it('turns known codes into plain sentences and leaves other messages alone', () => {

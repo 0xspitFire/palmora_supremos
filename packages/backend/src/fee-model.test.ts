@@ -73,13 +73,19 @@ describe('stored Ethereum fee policy (D-042)', () => {
       const blocked = await armed(value, live, [WALLET_ONE]);
       await expect(value.store.admitExecution(blocked.input)).rejects.toThrow('FREE_TOTAL_SPEND_CAP_EXCEEDED');
 
+      const before = value.db.prepare('SELECT COUNT(*) AS n FROM spend_reservation').get() as { n: number };
       expect(store.applyApprovedEthereumFeePolicy()).toEqual({ replaced: true });
+      expect((value.db.prepare('SELECT COUNT(*) AS n FROM spend_reservation').get() as { n: number }).n).toBe(before.n); // apply touches no reservation
       expect(store.ethereumFeePolicyStatus()).toMatchObject({ matchesApproved: true });
       expect(store.applyApprovedEthereumFeePolicy()).toEqual({ replaced: false }); // idempotent
       const admission = await value.store.admitExecution(blocked.input);
       expect(admission.reservations).toHaveLength(1);
       expect(admission.reservations[0]!.amountWei).toBe(ALLOWANCE); // the worst case is reserved up front (D-019)
       expect((value.db.prepare('SELECT COUNT(*) AS n FROM fee_policy WHERE active = 1').get() as { n: number }).n).toBe(1);
+      // The reservation made after the replacement points at the new policy; the stale one was never reserved against.
+      const reservation = value.db.prepare('SELECT fee_policy_id FROM spend_reservation').get() as { fee_policy_id: string };
+      const active = value.db.prepare('SELECT id FROM fee_policy WHERE active = 1').get() as { id: string };
+      expect(reservation.fee_policy_id).toBe(active.id);
     } finally { await close(value); }
   });
 

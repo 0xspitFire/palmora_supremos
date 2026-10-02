@@ -39,7 +39,9 @@ export function plainFeePolicyMessage(message: string): string {
 
 /** A live campaign's tip must be the one stored with the policy; later campaigns read the stored tip, not their own. */
 export function assertTipMatchesStoredPolicy(status: FeePolicyStatusView, chosenTipWei: bigint): void {
-  if (status.stored !== null && BigInt(status.stored.tipWei) !== chosenTipWei) throw new Error(`TIP_DIFFERS_FROM_STORED_POLICY: the stored policy uses ${gwei(status.stored.tipWei)} gwei, so ask for ${gwei(status.stored.tipWei)} (run fee-policy status)`);
+  // With nothing stored yet, the first campaign installs the approved tip, so the chosen tip must equal that one.
+  const expected = status.stored?.tipWei ?? status.approved?.tipWei;
+  if (expected !== undefined && BigInt(expected) !== chosenTipWei) throw new Error(`TIP_DIFFERS_FROM_STORED_POLICY: the policy uses ${gwei(expected)} gwei, so ask for ${gwei(expected)} (run fee-policy status)`);
 }
 
 /** Plain-language view of the stored policy against the approved one, for the owner. */
