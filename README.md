@@ -6,7 +6,7 @@ The product optimizes **selection quality and explainability over blind speed**.
 
 ## Status
 
-Phase 1 (execution foundation) is complete for local/controlled use. Phase 2 (read-only intelligence: discovery, scoring, calendar, wallet readiness, Telegram alerts and a loopback dashboard) is merged and in its live exit trial; the exit requires a multi-day run on real Ethereum data. Production and live execution remain separately gated and are not implied by local tests, fork replays, or working Turnkey health.
+Phase 1 (execution foundation) is complete for local/controlled use. Phase 2 (read-only intelligence: discovery, scoring, calendar, wallet readiness, Telegram alerts and a loopback dashboard) is merged and in its live exit trial; the exit requires a multi-day run on real Ethereum data. Phase 3 (Personal Live: small, owner-confirmed free mints on Ethereum from the CLI) is built and rehearsed on an Ethereum fork, and waits for the Phase 2 exit. Unattended production use remains separately gated and are not implied by local tests, fork replays, or working Turnkey health.
 
 Current live boundary:
 
@@ -14,7 +14,7 @@ Current live boundary:
 - Robinhood chain `4663` is characterized for inspection but live-disabled.
 - Base `8453` is defined but unverified, disabled, and not currently admitted by Backend.
 - Turnkey is the approved initial remote signer; Verifiable Cloud Boot/App Proofs are conditionally waived while access is pending.
-- Phase 2 web and Telegram are read-only/outbound-only. Execution controls are a later, separately approved phase.
+- Web and Telegram are read-only/outbound-only. Live execution is owner-run from the CLI only.
 
 ## Product Flow
 
@@ -56,8 +56,8 @@ Execution is intentionally narrow and deep:
 - Spend reservations are durable and componentized.
 - Attempts, replacements, receipts, canonicality, confirmation depth, reorgs, settlement, and recovery are persisted separately.
 - Kill-switch checks occur before future admission and do not erase already-submitted facts.
-- Phase 2 services are forced into dry-run/read-only mode and reject live job/run mismatches.
-- Web and Telegram cannot approve, arm, run, pause, kill, fund, retry, sign, broadcast, or mutate policy in Phase 2.
+- The supervised service is forced into dry-run/read-only mode and rejects live job/run mismatches.
+- Web and Telegram cannot approve, arm, run, pause, kill, fund, retry, sign, broadcast, or mutate policy.
 
 ## Custody
 
@@ -68,7 +68,7 @@ Turnkey is the approved initial policy-bound remote signer. MintBot validates:
 - Chain, destination, calldata, value, quantity, gas, and fee limits.
 - Returned signature fields and recovered sender address.
 
-Local encrypted keystores and imported fixtures are for controlled testing. They are not production custody evidence. Private keys, API credentials, mnemonics, credential-bearing URLs, raw calldata, and serialized transactions must not appear in source, UI, read models, logs, backups, or CI artifacts.
+Local encrypted keystores are accepted for Ethereum Personal Live only through an owner-recorded, short-lived readiness record that names the exact wallets; otherwise they and imported fixtures are for controlled testing and are not production custody evidence. Private keys, API credentials, mnemonics, credential-bearing URLs, raw calldata, and serialized transactions must not appear in source, UI, read models, logs, backups, or CI artifacts.
 
 ## Phase Boundaries
 
@@ -100,17 +100,20 @@ Read-only intelligence and operational projections:
 
 Component schemas, projections, or injected clients do not by themselves prove a connected discovery-to-score-to-calendar pipeline or deployed read-model API.
 
-### Phase 3: Controlled Operations
+### Phase 3: Personal Live
 
-A future phase for separately approved mutation contracts:
+Owner-run CLI flow for small free mints on Ethereum, using the same guarded path:
 
-- Campaign and fire-lane preparation.
-- Authenticated approval/arming.
-- Operational controls and adaptive stops.
-- Execution monitoring and restart-safe live integration.
-- Two-way Telegram commands only after explicit security and Product Owner approval.
+- Approved fee policy and accepted chain evidence.
+- A plan that sizes the quantity for current fees and explains any reduction.
+- Fresh per-wallet simulations, a checked kill-switch release, and a recorded readiness check.
+- Approve, arm, then a guided `live-run` with a second typed confirmation and a plain-language post-run summary.
 
-Phase 3 implementation does not independently authorize live broadcast.
+Building Phase 3 does not by itself authorize a live mint; the owner runs each step.
+
+### Later phases
+
+Controlled operations (fire lanes, replacement and retry, adaptive stops, two-way Telegram only after explicit approval), qualified automation, and a feedback loop are future work.
 
 ## Development and Operations
 
