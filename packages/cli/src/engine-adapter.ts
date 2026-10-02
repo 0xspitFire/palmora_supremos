@@ -107,6 +107,8 @@ export function selectKeyListPrefix(available: ReadonlyArray<{ index: number; ad
   if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
   const selected = available.slice(0, addresses.length);
   const requested = new Set(addresses.map((address) => address.toLowerCase()));
+  // A key list that repeats an address in its first N cannot be matched exactly, so refuse it.
+  if (new Set(selected.map((wallet) => wallet.address.toLowerCase())).size !== selected.length) throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
   if (selected.length !== addresses.length || requested.size !== addresses.length || selected.some((wallet) => !requested.has(wallet.address.toLowerCase()))) {
     throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
   }

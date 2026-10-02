@@ -48,19 +48,20 @@ class LocalSigner implements Signer {
 }
 
 describe.skipIf(!enabled)('Personal Live path on a local Ethereum fork (T-027)', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'mintbot-live-path-'));
+  let directory = '';
   const accounts = [privateKeyToAccount(generatePrivateKey()), privateKeyToAccount(generatePrivateKey())];
   const wallets = accounts.map((account) => account.address);
   let miner: ReturnType<typeof setInterval> | undefined;
 
   beforeAll(async () => {
+    directory = mkdtempSync(join(tmpdir(), 'mintbot-live-path-'));
     expect(await rpc('eth_chainId')).toBe('0x1');
     for (const wallet of wallets) await rpc('anvil_setBalance', [wallet, '0x16345785D8A0000']); // 0.1 ETH on the fork only
     await rpc('anvil_setNextBlockBaseFeePerGas', ['0x2faf080']); // 0.05 gwei, so a low max fee clears it on the fork
     await rpc('evm_mine');
     miner = setInterval(() => { void rpc('evm_mine').catch(() => undefined); }, 700);
   });
-  afterAll(() => { if (miner) clearInterval(miner); rmSync(directory, { recursive: true, force: true }); });
+  afterAll(() => { if (miner) clearInterval(miner); if (directory) rmSync(directory, { recursive: true, force: true }); });
 
   it('goes from a ready plan to settled receipts through every recorded gate', async () => {
     // A secrets folder that points the engine at the fork (loopback only), exactly as the owner's folder points it at their RPC.
@@ -88,7 +89,7 @@ describe.skipIf(!enabled)('Personal Live path on a local Ethereum fork (T-027)',
     // 2. Chain evidence, accepted by typed phrase.
     const client = createPublicClient({ transport: http(rpcUrl!) });
     const block = await client.getBlock({ blockTag: 'latest' });
-    await acceptEthereumChainEvidence(runtime.store, buildEthereumChainEvidence({ now: new Date(), sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public' }), ethereumChainEvidencePhrase(block.number));
+    await acceptEthereumChainEvidence(runtime.store, buildEthereumChainEvidence({ now: new Date(), sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public' }), ethereumChainEvidencePhrase());
     const evidence = runtime.store.snapshot().chainEvidence.find((item) => item.status === 'accepted')!;
 
     // 3. The campaign (what live-prepare records), gated by the exact phrase and the wallet file.

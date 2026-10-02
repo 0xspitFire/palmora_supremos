@@ -110,8 +110,9 @@ export function ownerTypedAuthority(phrase: string): EvidenceAuthority {
 }
 export function ownerTypedProof(phrase: string, recordId: string): string { return sha(`${phrase}|${recordId}`); }
 
-export function ethereumChainEvidencePhrase(sourceBlock: bigint): string {
-  return `ACCEPT-ETHEREUM-EVIDENCE block ${sourceBlock.toString()}`;
+/** The same phrase every time: it states what is being accepted, so it cannot go stale while a block arrives. */
+export function ethereumChainEvidencePhrase(): string {
+  return 'ACCEPT-ETHEREUM-SEADROP-EVIDENCE 7 days';
 }
 
 /** A pending Ethereum SeaDrop evidence record built from a live read, for 7 days. */

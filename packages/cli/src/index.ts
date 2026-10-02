@@ -599,10 +599,10 @@ const cli = yargs(hideBin(process.argv))
         const client = createPublicClient({ transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 1 }) });
         if ((await client.getChainId()) !== 1) throw new Error('RPC_CHAIN_MISMATCH: that RPC is not Ethereum');
         const block = await client.getBlock({ blockTag: 'latest' });
-        const phrase = ethereumChainEvidencePhrase(block.number);
-        if (args.action === 'status') { process.stdout.write(`${json({ state: 'NotAccepted', message: 'No accepted Ethereum chain evidence. Accepting it records that SeaDrop v1 public mints on Ethereum were rehearsed on a fork and read live, for 7 days.', copyThisToAccept: `chain-evidence accept --confirm "${phrase}"`, note: 'The phrase names the newest block, so run accept soon after status; if the block moved, run status again.' })}\n`); return; }
+        const phrase = ethereumChainEvidencePhrase();
+        if (args.action === 'status') { process.stdout.write(`${json({ state: 'NotAccepted', message: 'No accepted Ethereum chain evidence. Accepting it is your own statement, valid for 7 days, that SeaDrop v1 public mints on Ethereum have been rehearsed on a fork and read live (the rehearsal results are in the project evidence notes; this command does not re-run them).', copyThisToAccept: `chain-evidence accept --confirm "${phrase}"`, note: 'The phrase is always the same, so you can copy it at any time.' })}\n`); return; }
         if (existing) { process.stdout.write(`${json({ state: 'AlreadyAccepted', evidenceId: existing.id, expiresAt: existing.expiresAt })}\n`); return; }
-        if (args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run chain-evidence status and copy the phrase it prints exactly (the block may have moved)');
+        if (args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run chain-evidence status and copy the phrase it prints exactly');
         const record = buildEthereumChainEvidence({ now, sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public' });
         await acceptEthereumChainEvidence(runtime.store, record, phrase);
         process.stdout.write(`${json({ state: 'Accepted', message: `Ethereum chain evidence accepted until ${record.expiresAt}.`, evidenceId: record.id })}\n`);
@@ -641,9 +641,10 @@ const cli = yargs(hideBin(process.argv))
         const phrase = liveReadinessPhrase(wallets.length);
         if (args.action === 'status') {
           const operational = runtime.store.snapshot().runtime.operational;
-          process.stdout.write(`${json({ state: operational ? 'Recorded' : 'NotRecorded', message: operational ? `Readiness was recorded and is good until ${operational.expiresAt}.` : 'Readiness is not recorded. Recording checks the RPC, Telegram, the backup, the kill switch and your wallet file, then records the result for 15 minutes.', wallets, copyThisToRecord: `live-readiness record --confirm "${phrase}"` })}\n`);
+          process.stdout.write(`${json({ state: operational ? 'Recorded' : 'NotRecorded', message: operational ? (operational.expiresAt > new Date().toISOString() ? `Readiness was recorded and is good until ${operational.expiresAt}.` : `Readiness was recorded but expired at ${operational.expiresAt}; record it again before arming.`) : 'Readiness is not recorded. Recording checks the RPC, Telegram, the backup, the kill switch and your wallet file, then records the result for 15 minutes.', wallets, copyThisToRecord: `live-readiness record --confirm "${phrase}"` })}\n`);
           return;
         }
+        if (turnkeyCustodyEnabled()) throw new Error('TURNKEY_CUSTODY_ACTIVE: this record is for a local wallet file; with Turnkey in use, live needs the Turnkey custody proof instead');
         if (args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run live-readiness status and copy the phrase it prints exactly');
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
         const endpoint = config.rpcEndpoints[0];
@@ -655,7 +656,15 @@ const cli = yargs(hideBin(process.argv))
           walletFile: file,
           backupStatusPath: args.backupStatus ?? process.env.MINT_BOT_BACKUP_STATUS_PATH ?? join(process.env.MINT_BOT_BACKUP_DIR ?? join(runtimeRoot, 'Rets', 'state', 'backups'), 'status.json'),
           killSwitchFile: DEFAULT_KILL_FILE,
-          telegramHealthy: async () => { try { return (await new TelegramNotifier({ secretStore: await loadHostSecretStore(secretStorePath) }).health()).status === 'ok'; } catch { return false; } },
+          // A valid bot token is not enough: a short test message must actually be delivered to the owner (D-043).
+          telegramHealthy: async () => {
+            try {
+              const notifier = new TelegramNotifier({ secretStore: await loadHostSecretStore(secretStorePath) });
+              if ((await notifier.health()).status !== 'ok') return false;
+              await notifier.send({ eventId: `live-readiness-${Date.now()}`, type: 'live_readiness_check', text: 'MintBot: live readiness check. If you can read this, Telegram works. Nothing has been sent or spent.' });
+              return true;
+            } catch { return false; }
+          },
         });
         const outcome = await new PersonalLiveReadinessService(runtime.store, probes).record({ wallets, confirmedBy: 'owner-cli', storePath: process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', secretStoreReference: 'SECRET_STORE_PATH' });
         process.stdout.write(`${json(outcome.recorded ? { state: 'Recorded', message: `Live readiness recorded. It is good until ${outcome.expiresAt}; approve, arm and run before then, or record it again.`, expiresAt: outcome.expiresAt } : { state: 'NotReady', message: `${outcome.failures.length} check(s) failed, so nothing was recorded.`, failures: outcome.failures })}\n`);

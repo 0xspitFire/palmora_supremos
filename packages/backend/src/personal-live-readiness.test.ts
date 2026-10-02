@@ -5,6 +5,11 @@ import { ExecutionCoordinator } from './coordinator.js';
 import { ETHEREUM, WALLET_ONE, WALLET_TWO, campaign, close, fixture, noopEngine } from './canonical-fixtures.js';
 import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, recordWalletSimulations, type PersonalLiveProbes } from './personal-live-readiness.js';
 import { DurableStore } from './store.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { openDatabase } from '@mint-bot/database';
+import { CanonicalStoreBridge } from './canonical-store.js';
 
 const NOW = new Date('2026-09-14T14:00:00.000Z');
 const DIGEST = `0x${'cd'.repeat(32)}`;
@@ -74,6 +79,9 @@ describe('recording readiness (live-readiness record)', () => {
         [{ keystore: async () => ({ digest: DIGEST, addresses: [WALLET_ONE, WALLET_TWO] }) }, 'wallets'],
         [{ keystore: async () => ({ digest: DIGEST, addresses: [WALLET_TWO] }) }, 'wallets'],
         [{ notifications: async () => false }, 'notifications'],
+        [{ notifications: async () => { throw new Error('TELEGRAM_UNREACHABLE: x'); } }, 'notifications'],
+        [{ backup: async () => { throw new Error('BACKUP_STATUS_UNREADABLE'); } }, 'backup'],
+        [{ killSwitchEngaged: async () => { throw new Error('KILL_CHECK_FAILED'); } }, 'kill_switch'],
         [{ backup: async () => ({ ok: false, ageMs: 1 }) }, 'backup'],
         [{ backup: async () => ({ ok: true, ageMs: 25 * 3_600_000 }) }, 'backup'],
         [{ killSwitchEngaged: async () => true }, 'kill_switch'],
@@ -134,7 +142,7 @@ describe('owner-accepted chain evidence and simulation records', () => {
     await store.open();
     const record = buildEthereumChainEvidence({ now: NOW, sourceBlock: 123n, sourceBlockHash: `0x${'22'.repeat(32)}`, strategy: 'seadrop-v1-public' });
     expect(record).toMatchObject({ chainId: 1, status: 'pending', executionEnabled: false });
-    const phrase = ethereumChainEvidencePhrase(123n);
+    const phrase = ethereumChainEvidencePhrase();
     await acceptEthereumChainEvidence(store, record, phrase, () => NOW);
     expect(store.snapshot().chainEvidence[0]).toMatchObject({ status: 'accepted', executionEnabled: true, acceptedBy: 'owner-cli' });
     expect(Date.parse(store.snapshot().chainEvidence[0]!.expiresAt) - NOW.getTime()).toBe(7 * 24 * 3_600_000);
@@ -142,9 +150,72 @@ describe('owner-accepted chain evidence and simulation records', () => {
     const other = { ...buildEthereumChainEvidence({ now: NOW, sourceBlock: 124n, sourceBlockHash: `0x${'33'.repeat(32)}`, strategy: 'seadrop-v1-public' }) };
     const { EvidenceService } = await import('./evidence.js');
     const { ownerTypedAuthority } = await import('./personal-live-readiness.js');
-    const service = new EvidenceService(store, () => NOW, ownerTypedAuthority(ethereumChainEvidencePhrase(124n)));
+    const service = new EvidenceService(store, () => NOW, ownerTypedAuthority(ethereumChainEvidencePhrase()));
     await service.recordChainEvidence(other);
     await expect(service.acceptChainEvidence(other.id, { verifierId: 'owner-cli', proof: 'not-the-proof', acceptedAt: NOW.toISOString() })).rejects.toThrow('EVIDENCE_APPROVAL_REJECTED');
     await expect(service.acceptChainEvidence(other.id, { verifierId: 'someone-else', proof: 'x', acceptedAt: NOW.toISOString() })).rejects.toThrow('EVIDENCE_APPROVAL_REJECTED');
+  });
+});
+
+describe('chain evidence for a fresh database (T-027 review points)', () => {
+  async function freshStore() {
+    const directory = await mkdtemp(join(tmpdir(), 'mint-evidence-'));
+    const store = new CanonicalStoreBridge(openDatabase(join(directory, 'state.sqlite')), { now: () => new Date() });
+    await store.open();
+    return { directory, store };
+  }
+  const probes = goodProbes();
+  const args = { wallets: [WALLET_ONE], confirmedBy: 'owner-cli', storePath: '/tmp/state.sqlite', secretStoreReference: 'secret-store-ref' };
+
+  it('can be accepted again, so the owner is not locked out when the first record expires', async () => {
+    const { directory, store } = await freshStore();
+    try {
+      const first = buildEthereumChainEvidence({ now: new Date(), sourceBlock: 123n, sourceBlockHash: `0x${'22'.repeat(32)}`, strategy: 'seadrop-v1-public' });
+      await acceptEthereumChainEvidence(store, first, ethereumChainEvidencePhrase());
+      const second = buildEthereumChainEvidence({ now: new Date(Date.now() + 1_000), sourceBlock: 124n, sourceBlockHash: `0x${'33'.repeat(32)}`, strategy: 'seadrop-v1-public' });
+      await acceptEthereumChainEvidence(store, second, ethereumChainEvidencePhrase());
+      const accepted = store.snapshot().chainEvidence.filter((item) => item.status === 'accepted');
+      expect(accepted.map((item) => item.id).sort()).toEqual([first.id, second.id].sort());
+      expect(accepted.find((item) => item.id === second.id)?.executionEnabled).toBe(true);
+      // One record per id: the pending submission does not hide the decision.
+      expect(store.snapshot().chainEvidence.filter((item) => item.id === second.id)).toHaveLength(1);
+    } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps the phrase the same whatever the block, so it cannot go stale while a block arrives', () => {
+    expect(ethereumChainEvidencePhrase()).toBe('ACCEPT-ETHEREUM-SEADROP-EVIDENCE 7 days');
+  });
+
+  it('records no readiness when chain evidence is missing or has expired', async () => {
+    const { directory, store } = await freshStore();
+    try {
+      const coordinator = new ExecutionCoordinator(store, noopEngine, { acceptPersonalLiveLocalCustody: true });
+      await coordinator.start();
+      const none = await new PersonalLiveReadinessService(store, probes, () => new Date()).record(args);
+      expect(none.recorded).toBe(false);
+      if (!none.recorded) expect(none.failures.map((failure) => failure.check)).toContain('chain_evidence');
+      // Accepted 8 days ago, so it expired a day ago.
+      const old = buildEthereumChainEvidence({ now: new Date(Date.now() - 8 * 24 * 3_600_000), sourceBlock: 100n, sourceBlockHash: `0x${'44'.repeat(32)}`, strategy: 'seadrop-v1-public' });
+      await acceptEthereumChainEvidence(store, old, ethereumChainEvidencePhrase(), () => new Date(Date.now() - 8 * 24 * 3_600_000 + 1_000));
+      const expired = await new PersonalLiveReadinessService(store, probes, () => new Date()).record(args);
+      expect(expired.recorded).toBe(false);
+      if (!expired.recorded) expect(expired.failures.map((failure) => failure.check)).toContain('chain_evidence');
+      expect(store.snapshot().runtime.operational).toBeUndefined();
+    } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+});
+
+describe('Robinhood is never enabled by Ethereum-style evidence', () => {
+  it('leaves Robinhood execution disabled even when accepted evidence is submitted for it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mint-robinhood-evidence-'));
+    const db = openDatabase(join(directory, 'state.sqlite'));
+    db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run('profile-robinhood', 4663, 'Robinhood', '[]', 1, NOW.toISOString());
+    const store = new CanonicalStoreBridge(db, { now: () => NOW });
+    await store.open();
+    try {
+      const record = { ...buildEthereumChainEvidence({ now: NOW, sourceBlock: 5n, sourceBlockHash: `0x${'55'.repeat(32)}`, strategy: 'seadrop-v1-public' }), chainId: 4663 as const, id: 'robinhood-evidence' };
+      await acceptEthereumChainEvidence(store, record, ethereumChainEvidencePhrase(), () => NOW).catch(() => undefined);
+      expect((db.prepare('SELECT execution_enabled FROM chain_profile WHERE chain_id = 4663').get() as { execution_enabled: number }).execution_enabled).toBe(0);
+    } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });

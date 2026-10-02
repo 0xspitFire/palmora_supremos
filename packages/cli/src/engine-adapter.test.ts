@@ -98,6 +98,8 @@ describe('wallet selection ignores the order wallets arrive in (T-027 rehearsal 
     expect(() => selectKeyListPrefix(list, [list[0]!.address, list[0]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
     expect(() => selectKeyListPrefix(list, [list[0]!.address, '0xdddddddddddddddddddddddddddddddddddddddd'])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
     expect(() => selectKeyListPrefix(list, [])).toThrow('EMPTY_EXECUTION_FLEET');
+    // A key list with a repeated address among its first N is refused.
+    expect(() => selectKeyListPrefix([list[0]!, { index: 1, address: list[0]!.address.toLowerCase() }], [list[0]!.address, list[1]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
     expect(() => selectKeyListPrefix(list.slice(0, 1), list.map((wallet) => wallet.address))).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
   });
 });
