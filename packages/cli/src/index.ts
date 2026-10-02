@@ -23,6 +23,7 @@ import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
+import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase } from './personal-live-cli.js';
 import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
 import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, recordWalletSimulations, TelegramNotifier } from '@mint-bot/backend';
@@ -751,6 +752,11 @@ const cli = yargs(hideBin(process.argv))
           mintPriceWei: fields.mintPriceWei,
           feePolicy: fields.feePolicy,
         });
+        // Record why the quantity is what it is (D-037); live-run copies this onto the run so the summary can explain it.
+        if (report.quantityPlan) {
+          const planData = { campaignId: campaign.id, desired: report.quantityPlan.desired, planned: report.quantityPlan.planned, reduced: report.quantityPlan.reduced, reason: report.quantityPlan.reason, maxFeeGwei: report.quantityPlan.maxFeeGwei, message: report.quantityPlan.message };
+          await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, type: 'quantity_plan', at: new Date().toISOString(), data: planData }); });
+        }
         process.stdout.write(`${json({ state: 'Prepared', campaignId: campaign.id, wallets: readyWallets, quantity: fields.quantity, maxExposureEth: plan.totalMaxExposureEth, planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null, nextSteps: [`approve --campaign-id ${campaign.id}`, `arm --campaign-id ${campaign.id} --mode live`, 'remove the kill-switch file only when you are ready', 'run --run-id <the run id arm prints> --max-fee-gwei <the planning max fee above>'] })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
@@ -852,6 +858,31 @@ const cli = yargs(hideBin(process.argv))
       process.stdout.write(`${json(response)}\n`);
     } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
   })
+  .command('live-run', 'Guided live run: shows exactly what is at stake, asks for a second typed confirmation, runs, then explains the result in plain words', (args) => args
+    .option('run-id', { type: 'string', demandOption: true })
+    .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
+    .option('max-fee-gwei', { type: 'number', describe: 'The planning fee live-plan printed (or lower)' })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase this command printed' }), async (args) => {
+      try {
+        const preview = previewLiveRun((await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false })).store.snapshot(), args.runId);
+        if (args.confirm === undefined) {
+          process.stdout.write(`${json({ state: 'ReadyToRun', message: `This run will send real mints from ${preview.wallets.length} wallet(s), ${preview.quantityPerWallet} NFT(s) each. The most that can be spent is ${preview.maxExposureEth} ETH. ${preview.quantityNote ?? ''}`.trim(), ...preview, copyThisToRun: `live-run --run-id ${args.runId} --max-fee-gwei ${preview.planningMaxFeeGwei ?? '<planning fee>'} --confirm "${preview.phrase}"` })}\n`);
+          return;
+        }
+        assertLiveRunAllowed({ preview, confirm: args.confirm, maxFeeGwei: args.maxFeeGwei });
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { maxFeePerGasGwei: args.maxFeeGwei as number }, { acceptPersonalLiveLocalCustody: true });
+        // Copy the plan onto the run so the summary command shows it too.
+        const wallets = await publicWallets(walletFile(args.walletFile));
+        assertWalletFileMatchesRun(preview, wallets);
+        const plan = quantityPlanForRun(runtime.store.snapshot().events, args.runId, preview.campaignId);
+        if (plan) await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, runId: args.runId, type: 'quantity_plan', at: new Date().toISOString(), data: { ...plan, campaignId: preview.campaignId } }); });
+        let runResponse: unknown;
+        let runError: string | undefined;
+        try { runResponse = await runtime.application.command('run', { runId: args.runId, wallets }); } catch (error) { runError = plainFeePolicyMessage(surveyErrorMessage(error)); }
+        const report = describeLiveRunResult(runtime.store.snapshot(), args.runId);
+        process.stdout.write(`${json({ state: runError === undefined ? 'RunFinished' : 'RunStopped', ...(runError === undefined ? {} : { stoppedBecause: runError }), message: report.summary, report, run: runResponse ?? null })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
   .command('execute', 'Compatibility alias for run', (args) => args
     .option('run-id', { type: 'string', demandOption: true })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
