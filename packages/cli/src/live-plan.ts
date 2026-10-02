@@ -70,10 +70,12 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
     : `Not ready: ${blockers.length} thing(s) to fix before a live mint. Nothing has been sent.`;
   const nextSteps = ready
     ? [
-        'Run live-prepare with the confirmation phrase this plan printed. It only records the campaign; nothing is spent.',
-        'Check fee-policy status first: the stored fee policy must match the approved one, or the campaign will be refused.',
-        'Then run approve for that campaign and arm with --mode live. Both refuse unless every guard passes.',
-        'Remove the kill-switch file only when you are ready, then run the armed run with --max-fee-gwei set to the planning fee shown. You can create the kill-switch file again at any time to stop.',
+        '1. Run fee-policy status. If it says the stored policy differs, run fee-policy apply with the line it prints.',
+        '2. Run chain-evidence status, then chain-evidence accept with the line it prints (good for 7 days).',
+        '3. Run live-prepare with the confirmation phrase this plan printed. It only records the campaign; nothing is spent.',
+        '4. Run record-simulation for that campaign (good for 30 minutes).',
+        '5. Remove the kill-switch file only when you are ready, then run live-readiness status and live-readiness record with the line it prints (good for 15 minutes). You can create the kill-switch file again at any time to stop.',
+        '6. Run approve, then arm with --mode live, then run with --max-fee-gwei set to the planning fee shown. Each refuses unless every guard passes.',
       ]
     : ['Fix the items under blockers, then run live-plan again.'];
   return {

@@ -700,7 +700,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private readCampaigns(): Campaign[] {
-    const rows = this.db.prepare(`SELECT c.id, c.state, c.policy_snapshot_json, c.created_at, d.strategy, d.mint_price_wei, ct.address, cp.id AS chain_profile_id, cp.chain_id, (SELECT cv.status FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.id DESC LIMIT 1) AS verification_status, (SELECT cv.checked_at FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.id DESC LIMIT 1) AS verification_checked_at, (SELECT cv.evidence_json FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.id DESC LIMIT 1) AS verification_evidence_json, (SELECT cv.sequencer_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.id DESC LIMIT 1) AS sequencer_endpoint_reference, (SELECT cv.archive_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.id DESC LIMIT 1) AS archive_endpoint_reference, (SELECT cv.feed_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.id DESC LIMIT 1) AS feed_endpoint_reference FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id ORDER BY c.created_at, c.id`).all() as Array<{ id: string; state: string; policy_snapshot_json: string | null; created_at: string; strategy: string; mint_price_wei: string; address: string; chain_profile_id: string; chain_id: number; verification_status: string | null; verification_checked_at: string | null; verification_evidence_json: string | null; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; feed_endpoint_reference: string | null }>;
+    const rows = this.db.prepare(`SELECT c.id, c.state, c.policy_snapshot_json, c.created_at, d.strategy, d.mint_price_wei, ct.address, cp.id AS chain_profile_id, cp.chain_id, (SELECT cv.status FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS verification_status, (SELECT cv.checked_at FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS verification_checked_at, (SELECT cv.evidence_json FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS verification_evidence_json, (SELECT cv.sequencer_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS sequencer_endpoint_reference, (SELECT cv.archive_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS archive_endpoint_reference, (SELECT cv.feed_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS feed_endpoint_reference FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id ORDER BY c.created_at, c.id`).all() as Array<{ id: string; state: string; policy_snapshot_json: string | null; created_at: string; strategy: string; mint_price_wei: string; address: string; chain_profile_id: string; chain_id: number; verification_status: string | null; verification_checked_at: string | null; verification_evidence_json: string | null; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; feed_endpoint_reference: string | null }>;
     return rows.map((row) => {
       const snapshot = decode<PolicySnapshot>(row.policy_snapshot_json);
       const source = snapshot?.campaignSnapshot ?? snapshot?.campaign;
@@ -815,12 +815,15 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private readChainEvidence(): ChainEvidenceRecord[] {
-    const rows = this.db.prepare('SELECT cv.id, cp.chain_id, cv.status, cp.execution_enabled, cv.evidence_json, cv.checked_at, cv.sequencer_endpoint_reference, cv.archive_endpoint_reference, cv.feed_endpoint_reference FROM chain_verification cv JOIN chain_profile cp ON cp.id = cv.chain_profile_id ORDER BY cv.checked_at, cv.id').all() as Array<{ id: string; chain_id: number; status: string; execution_enabled: number; evidence_json: string; checked_at: string; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; feed_endpoint_reference: string | null }>;
-    return rows.map((row) => {
+    const rows = this.db.prepare('SELECT cv.id, cp.chain_id, cv.status, cp.execution_enabled, cv.evidence_json, cv.checked_at, cv.sequencer_endpoint_reference, cv.archive_endpoint_reference, cv.feed_endpoint_reference FROM chain_verification cv JOIN chain_profile cp ON cp.id = cv.chain_profile_id ORDER BY cv.checked_at, cv.rowid').all() as Array<{ id: string; chain_id: number; status: string; execution_enabled: number; evidence_json: string; checked_at: string; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; feed_endpoint_reference: string | null }>;
+    // One record per evidence id, the latest decision winning: a record is stored once when submitted and again when decided.
+    const latestById = new Map<string, ChainEvidenceRecord>();
+    for (const record of rows.map((row): ChainEvidenceRecord => {
       const evidence = decode<Record<string, unknown>>(row.evidence_json) ?? {};
       const checkedAt = row.checked_at;
       return { id: String(evidence.backendEvidenceId ?? row.id), chainId: row.chain_id as 1 | 4663, status: row.status === 'verified' ? 'accepted' : row.status === 'execution_blocked' ? 'rejected' : 'pending', executionEnabled: row.execution_enabled === 1, seaDropCompatible: Boolean(evidence.seaDropCompatible), positiveLivePath: Boolean(evidence.positiveLivePath), archiveForkPassed: Boolean(evidence.archiveForkPassed), negativeCases: (evidence.negativeCases ?? {}) as ChainEvidenceRecord['negativeCases'], reconciliationPassed: Boolean(evidence.reconciliationPassed), finalityPassed: Boolean(evidence.finalityPassed), endpointIdentity: String(evidence.endpointIdentity ?? row.feed_endpoint_reference ?? row.sequencer_endpoint_reference ?? ''), ...(evidence.archiveEndpointIdentity ? { archiveEndpointIdentity: String(evidence.archiveEndpointIdentity) } : {}), strategyVersion: String(evidence.strategyVersion ?? 'database'), checkedAt, expiresAt: String(evidence.expiresAt ?? checkedAt), sourceBlock: asBigInt(evidence.sourceBlock), sourceBlockHash: String(evidence.sourceBlockHash ?? ''), ...(evidence.acceptedAt ? { acceptedAt: String(evidence.acceptedAt) } : {}), ...(evidence.acceptedBy ? { acceptedBy: String(evidence.acceptedBy) } : {}), ...(evidence.approvalProof ? { approvalProof: String(evidence.approvalProof) } : {}) };
-    });
+    })) latestById.set(record.id, record);
+    return [...latestById.values()];
   }
 
   private readSimulations(): SimulationEvidenceRecord[] {
@@ -1024,7 +1027,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const existing = this.db.prepare('SELECT id, evidence_json FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, id DESC').all(profile.id) as Array<{ id: string; evidence_json: string }>;
     if (existing.some((row) => decode<{ backendEvidenceId?: string; status?: string }>(row.evidence_json)?.backendEvidenceId === evidence.id && decode<{ backendEvidenceId?: string; status?: string }>(row.evidence_json)?.status === evidence.status)) return;
     if (evidence.chainId === ROBINHOOD_CHAIN_ID && !evidence.archiveEndpointIdentity) throw new Error('ROBINHOOD_ARCHIVE_REFERENCE_REQUIRED');
-    this.databaseStore.recordChainVerification({ id: canonicalId('verification', `${evidence.id}:${evidence.status}:${evidence.checkedAt}`), chainProfileId: profile.id, chainId: evidence.chainId, sequencerEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.endpointIdentity : undefined, archiveEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.archiveEndpointIdentity : evidence.endpointIdentity, feedEndpointReference: evidence.chainId === ETHEREUM_CHAIN_ID ? evidence.endpointIdentity : undefined, status, evidence: { ...evidence, backendEvidenceId: evidence.id }, checkedAt: evidence.checkedAt, ...(evidence.acceptedBy ? { approvedBy: evidence.acceptedBy } : {}), ...(evidence.acceptedAt ? { approvedAt: evidence.acceptedAt } : {}) });
+    this.databaseStore.recordChainVerification({ id: canonicalId('verification', `${evidence.id}:${evidence.status}:${evidence.checkedAt}`), chainProfileId: profile.id, chainId: evidence.chainId, sequencerEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.endpointIdentity : undefined, archiveEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.archiveEndpointIdentity : evidence.endpointIdentity, feedEndpointReference: evidence.chainId === ETHEREUM_CHAIN_ID ? evidence.endpointIdentity : undefined, status, evidence: { ...evidence, backendEvidenceId: evidence.id }, checkedAt: evidence.checkedAt, ...(evidence.chainId === ETHEREUM_CHAIN_ID && evidence.status === 'accepted' ? { executionEnabled: evidence.executionEnabled } : {}), ...(evidence.acceptedBy ? { approvedBy: evidence.acceptedBy } : {}), ...(evidence.acceptedAt ? { approvedAt: evidence.acceptedAt } : {}) });
   }
 
   private persistSimulation(simulation: SimulationEvidenceRecord, prior: SimulationEvidenceRecord | undefined): void {
@@ -1074,7 +1077,20 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.databaseStore.recordAuditEvent(record);
   }
 
+  /**
+   * Creates Ethereum's chain profile row when the database has none (D-043 rehearsal finding: nothing else ever creates one,
+   * so a fresh database could not hold any campaign). The row starts with execution disabled and unverified; accepted chain
+   * evidence is what enables it. Robinhood is never created here.
+   */
+  public ensureEthereumChainProfile(): { created: boolean } {
+    const existing = this.db.prepare('SELECT id FROM chain_profile WHERE chain_id = ?').get(ETHEREUM_CHAIN_ID) as { id: string } | undefined;
+    if (existing) return { created: false };
+    this.db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(canonicalId('chain', 'ethereum-1'), ETHEREUM_CHAIN_ID, 'Ethereum', '[]', 2, this.now().toISOString());
+    return { created: true };
+  }
+
   private ensureCampaignGraph(campaign: Campaign): { chainProfileId: string; contractId: string; dropId: string } {
+    if (campaign.chainId === ETHEREUM_CHAIN_ID) this.ensureEthereumChainProfile();
     const profile = this.db.prepare('SELECT id, chain_id FROM chain_profile WHERE chain_id = ?').get(campaign.chainId) as { id: string; chain_id: number } | undefined;
     if (!profile) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
     if (profile.chain_id !== campaign.chainId) throw new Error('CHAIN_PROFILE_IDENTITY_MISMATCH');
@@ -1301,7 +1317,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (profile.chain_id !== campaign.chainId) throw new Error('CHAIN_PROFILE_IDENTITY_MISMATCH');
     if (campaign.chainId === ROBINHOOD_CHAIN_ID) throw new Error('ROBINHOOD_EXECUTION_DISABLED');
     if (profile.execution_enabled !== 1) throw new Error('CHAIN_EXECUTION_DISABLED');
-    const verification = this.db.prepare('SELECT status, evidence_json FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, id DESC LIMIT 1').get(profile.id) as { status: string; evidence_json: string } | undefined;
+    const verification = this.db.prepare('SELECT status, evidence_json FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1').get(profile.id) as { status: string; evidence_json: string } | undefined;
     const evidence = decodeRecord<{ expiresAt?: string }>(verification?.evidence_json);
     if (verification?.status !== 'verified' || !evidence?.expiresAt || !Number.isFinite(Date.parse(evidence.expiresAt)) || Date.parse(evidence.expiresAt) <= this.now().getTime()) throw new Error('CHAIN_VERIFICATION_REQUIRED');
   }

@@ -98,25 +98,30 @@ async function loadWallets(path: string): Promise<Array<{ index: number; address
   });
 }
 
-async function assertPrefixSelection(path: string, addresses: readonly string[]): Promise<number[]> {
+/**
+ * The engine signs with the first N wallets of the key list, so the requested wallets must be exactly those N. The order
+ * they arrive in does not matter (the database returns a run's wallets in no fixed order), only the set: the same set
+ * of addresses, no repeats, no wallet outside the first N. Returns the wallet indexes in key-list order.
+ */
+export function selectKeyListPrefix(available: ReadonlyArray<{ index: number; address: string }>, addresses: readonly string[]): number[] {
   if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
-  const available = await loadWallets(path);
   const selected = available.slice(0, addresses.length);
-  if (selected.length !== addresses.length || selected.some((wallet, index) => wallet.address.toLowerCase() !== addresses[index]!.toLowerCase())) {
+  const requested = new Set(addresses.map((address) => address.toLowerCase()));
+  if (selected.length !== addresses.length || requested.size !== addresses.length || selected.some((wallet) => !requested.has(wallet.address.toLowerCase()))) {
     throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
   }
   return selected.map((wallet) => wallet.index);
 }
 
+async function assertPrefixSelection(path: string, addresses: readonly string[]): Promise<number[]> {
+  if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
+  return selectKeyListPrefix(await loadWallets(path), addresses);
+}
+
 async function assertWalletSelection(options: MintEngineAdapterOptions, addresses: readonly string[]): Promise<number[]> {
   if (options.walletList) {
     if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
-    const available = await options.walletList();
-    const selected = available.slice(0, addresses.length);
-    if (selected.length !== addresses.length || selected.some((wallet, index) => wallet.address.toLowerCase() !== addresses[index]!.toLowerCase())) {
-      throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
-    }
-    return selected.map((wallet) => wallet.index);
+    return selectKeyListPrefix(await options.walletList(), addresses);
   }
   if (!options.walletFile) throw new Error('WALLET_SOURCE_REQUIRED');
   return assertPrefixSelection(options.walletFile, addresses);

@@ -159,7 +159,7 @@ export class ReadModels {
   }
 
   public chainVerification(chainProfileId: string): ChainVerificationRow | null {
-    const row = this.db.prepare('SELECT chain_profile_id, chain_id, status, sequencer_endpoint_reference, archive_endpoint_reference, checked_at FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, id DESC LIMIT 1').get(chainProfileId) as { chain_profile_id: string; chain_id: number; status: ChainVerificationRow['status']; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; checked_at: string } | undefined;
+    const row = this.db.prepare('SELECT chain_profile_id, chain_id, status, sequencer_endpoint_reference, archive_endpoint_reference, checked_at FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1').get(chainProfileId) as { chain_profile_id: string; chain_id: number; status: ChainVerificationRow['status']; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; checked_at: string } | undefined;
     return row === undefined ? null : { chainProfileId: row.chain_profile_id, chainId: row.chain_id, status: row.status, sequencerEndpointReference: row.sequencer_endpoint_reference, archiveEndpointReference: row.archive_endpoint_reference, checkedAt: row.checked_at };
   }
 
