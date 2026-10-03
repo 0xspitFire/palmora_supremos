@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AlertManager, DurableStore, type ChainScanOutcome, type DropSnapshot, type IntelligenceChainPort, type IntelligenceRepositoryPort, type SimulationOutcome } from '@mint-bot/backend';
+import { AlertManager, DurableStore, plainSystemText, type ChainScanOutcome, type DropSnapshot, type IntelligenceChainPort, type IntelligenceRepositoryPort, type SimulationOutcome } from '@mint-bot/backend';
 import { startIntelligence } from './intelligence-service.js';
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 
@@ -36,11 +36,14 @@ describe('trial status messages (T-005)', () => {
   it('sends one plain-language start message with counts and the dashboard, and no owner addresses', async () => {
     const now = () => new Date('2026-09-30T08:00:00.000Z');
     const h = harness(now);
-    const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, dashboardUrl: 'http://127.0.0.1:8780/', now });
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, startNumber: 1, version: 'a1b2c3d4', now });
     await vi.waitFor(() => expect(h.sent).toHaveLength(1));
     service.stop();
-    expect(h.sent[0]).toBe(startMessage({ watched: 90, ownWallets: 2, dashboardUrl: 'http://127.0.0.1:8780/' }));
-    expect(h.sent[0]).toContain('90 watched wallet(s) and 2 of your wallet(s)');
+    expect(h.sent[0]).toBe(plainSystemText(startMessage({ watched: 90, ownWallets: 2, startedAt: now(), startNumber: 1, version: 'a1b2c3d4' })));
+    expect(h.sent[0]).toContain('MINTBOT STARTED · INFO');
+    expect(h.sent[0]).toContain('Watching: 90 watched wallets on ETHEREUM SeaDrop mints');
+    expect(h.sent[0]).toContain('Your wallets checked: 2 wallets for mint readiness');
+    expect(h.sent[0]).toContain('Version: a1b2c3d4');
     expect(h.sent[0]).not.toMatch(/0x[0-9a-f]{40}/i);
     expect(h.store.snapshot().events.filter((event) => event.type === 'alert_status')).toHaveLength(1);
   });
@@ -50,21 +53,24 @@ describe('trial status messages (T-005)', () => {
     const now = () => new Date(clock);
     const h = harness(now);
     const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    const checkIns = () => h.sent.filter((text) => text.includes('DAILY CHECK-IN'));
     await vi.waitFor(() => expect(h.sent).toHaveLength(1));
     await service.runOnce();
     expect(h.sent).toHaveLength(1);
     clock += 60 * 60_000;
     await service.runOnce();
     await service.runOnce();
-    expect(h.sent).toHaveLength(2);
-    expect(h.sent[1]).toContain('Daily check-in: MintBot is still running (read-only).');
-    expect(h.sent[1]).toContain('Last Ethereum block checked: 21000000.');
+    expect(checkIns()).toHaveLength(1);
+    // No scan has worked in this test (the port never answers), so the check-in says so and asks for attention.
+    expect(checkIns()[0]).toContain('DAILY CHECK-IN · ATTENTION');
+    expect(checkIns()[0]).toContain('Chain scan: no successful scan yet');
     clock += 24 * 60 * 60_000;
     await service.runOnce();
-    expect(h.sent).toHaveLength(3);
+    expect(checkIns()).toHaveLength(2);
     service.stop();
   });
 
+  // The three health events below are one trouble that opened, escalated and recovered: one health warning, not three.
   it('counts the last 24 hours of scored mints, upcoming calendar entries and alerts', async () => {
     const at = new Date('2026-09-30T12:00:00.000Z');
     const store = new DurableStore();
@@ -78,11 +84,14 @@ describe('trial status messages (T-005)', () => {
         { id: 'a1', type: 'alert_opportunity', at: '2026-09-30T11:00:00.000Z', data: {} },
         { id: 'a2', type: 'alert_digest', at: '2026-09-30T11:00:00.000Z', data: {} },
         { id: 'a3', type: 'alert_status', at: '2026-09-30T11:00:00.000Z', data: {} },
+        { id: 'h1', type: 'alert_health', at: '2026-09-30T11:00:00.000Z', data: { dedupe: 'health:scan_stalled:2026-09-30T11:00:00.000Z:open' } },
+        { id: 'h2', type: 'alert_health', at: '2026-09-30T11:30:00.000Z', data: { dedupe: 'health:scan_stalled:2026-09-30T11:00:00.000Z:critical' } },
+        { id: 'h3', type: 'alert_health', at: '2026-09-30T11:40:00.000Z', data: { dedupe: 'health:scan_stalled:2026-09-30T11:00:00.000Z:recovered' } },
       );
     });
     const counts = checkInCounts(store, new Repo(1), at);
-    expect(counts).toEqual({ opportunities: 1, upcomingMints: 1, alerts: 1, lastBlock: null });
-    expect(checkInMessage(counts)).toContain('No blocks scanned yet, so the chain connection may need attention.');
+    expect(counts).toEqual({ opportunities: 1, upcomingMints: 1, alerts: 1, healthWarnings: 1, lastBlock: null, failedDeliveries: 0, pendingFailures: 0 });
+    expect(plainSystemText(checkInMessage(counts, { runningSince: new Date('2026-09-29T00:00:00.000Z'), now: at, lastScanAt: null, scanStale: true }))).toContain('Chain scan: no successful scan yet');
   });
 
   it('keeps running when a status message cannot be delivered', async () => {

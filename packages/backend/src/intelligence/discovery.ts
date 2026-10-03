@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
-import { calendarId, DISCOVERY_FRESHNESS_MS, opportunityId, shortAddress, validChainTime, type DropSnapshot, type IntelligenceAlertSink, type IntelligenceChainPort, type IntelligenceRepositoryPort } from './port.js';
-import { formatEth, scoreOpportunity, type ScoreResult } from './scoring.js';
+import { calendarId, DISCOVERY_FRESHNESS_MS, opportunityId, validChainTime, type DropSnapshot, type IntelligenceAlertSink, type IntelligenceChainPort, type IntelligenceRepositoryPort } from './port.js';
+import { scoreOpportunity, type ScoreResult } from './scoring.js';
+import { plainAlertText } from '../alert-card.js';
+import { CollectionNames } from './names.js';
+import { openingSoonCard, opportunityCard, priceAboveLimitCard } from './cards.js';
 
 /**
  * SeaDrop discovery (T-004, P2-02/P2-03/P2-06). Polls settled blocks, aggregates
@@ -21,6 +24,8 @@ export interface DiscoveryOptions {
   /** Owner price limit per NFT (D-033). */
   budgetPerNftWei: bigint;
   alerts?: IntelligenceAlertSink;
+  /** Collection names read from the chain; one reader can be shared with the readiness sweep. */
+  names?: CollectionNames;
 }
 
 export interface DiscoveryTickResult {
@@ -73,10 +78,12 @@ export class DiscoveryService {
   private readonly seenLogs = new Set<string>();
   private readonly openingAlertTimes: number[] = [];
   private readonly now: () => Date;
+  private readonly names: CollectionNames;
   private restored = false;
 
   public constructor(private readonly store: BackendStore, private readonly repo: IntelligenceRepositoryPort, private readonly port: IntelligenceChainPort, private readonly options: DiscoveryOptions) {
     this.now = options.now ?? (() => new Date());
+    this.names = options.names ?? new CollectionNames(port);
     if (options.budgetPerNftWei <= 0n) throw new Error('DISCOVERY_BUDGET_INVALID');
   }
 
@@ -223,8 +230,12 @@ export class DiscoveryService {
       if (!due) continue;
       const watchedMinters = [...item.watched.entries()].filter(([, at]) => now - at <= CONVERGENCE_WINDOW_MS).map(([address]) => address).sort();
       const disposition = scored.band === 'log' ? 'scored' : 'notified';
+      const alertable = !scored.blocked && scored.band !== 'log';
+      // The name is read from the chain first; the label (ETH MINT) is only for a contract that really has none.
+      const collectionName = alertable ? await this.names.get(item.contract) : null;
+      const mintsLastHour = item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0);
       events.push({ id: `evt_${randomUUID()}`, type: `opportunity_${disposition}`, at: nowDate.toISOString(), data: {
-        opportunityId: opportunityId(this.port.chainId, item.contract), chainId: this.port.chainId, contract: item.contract, disposition,
+        opportunityId: opportunityId(this.port.chainId, item.contract), chainId: this.port.chainId, contract: item.contract, disposition, ...(collectionName ? { collectionName } : {}),
         score: scored.score, scoreVersion: scored.modelVersion, sampleSize: Math.round(scored.confidence * 100).toString(), denominator: '100', confidence: scored.confidenceLabel, band: scored.band, blocked: scored.blocked,
         factors: scored.factors, risks: scored.risks, watchedMinters, mintsLastHour: item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0), totalMinted: item.totalMinted,
         ...(item.priceWei === null ? {} : { priceWei: item.priceWei.toString() }), ...(item.hasCode === null ? {} : { hasCode: item.hasCode }),
@@ -233,10 +244,10 @@ export class DiscoveryService {
         firstSeenAt: new Date(item.firstSeenAt).toISOString(), lastActivityAt: new Date(item.lastActivityAt).toISOString(), expiresAt: new Date(now + DISCOVERY_FRESHNESS_MS).toISOString(),
       } });
       item.lastEmit = { at: now, score: scored.score, band: scored.band };
-      if (!scored.blocked && scored.band !== 'log') {
-        const who = watchedMinters.length > 0 ? `${watchedMinters.length} of your watched wallets joined. ` : '';
-        const price = item.priceWei === null ? 'price unknown' : item.priceWei === 0n ? 'free' : `${formatEth(item.priceWei)} ETH each`;
-        alerts.push({ kind: 'opportunity', dedupe: `opportunity:${item.contract}:${scored.band}`, priority: scored.band === 'proposal' ? 'immediate' : 'grouped', text: `Worth a look (score ${scored.score}/100): Ethereum mint ${shortAddress(item.contract)}, ${price}. ${who}Open the dashboard to inspect. Nothing is bought automatically.` });
+      if (alertable) {
+        const labels = new Map(this.repo.observedAddresses(this.port.chainId).map((row) => [row.address.toLowerCase(), row.label] as const));
+        const card = opportunityCard({ chainId: this.port.chainId, contract: item.contract, collectionName, score: scored.score, priceWei: item.priceWei, watchingConfigured: labels.size > 0, minters: watchedMinters, receivers: item.received.size, labels, drop: item.drop, seenMinted: item.totalMinted, mintsLastHour, scored, spottedAt: item.lastActivityAt, now });
+        alerts.push({ kind: 'opportunity', dedupe: `opportunity:${item.contract}:${scored.band}`, priority: scored.band === 'proposal' ? 'immediate' : 'grouped', text: plainAlertText(card), card });
       }
       } catch { /* one malformed item never blocks the others or the cursor */ }
     }
@@ -268,15 +279,18 @@ export class DiscoveryService {
         } });
         entry.lastEmit = { at: now, signature };
       }
-      const name = `Ethereum mint ${shortAddress(contract)}`;
+      const chainId = this.port.chainId;
       if (drop.priceWei > this.options.budgetPerNftWei) {
-        alerts.push({ kind: 'price_above_limit', dedupe: `price:${contract}:${drop.priceWei}`, priority: 'grouped', text: `${name} costs ${formatEth(drop.priceWei)} ETH per NFT, above your ${formatEth(this.options.budgetPerNftWei)} ETH limit. The bot will not plan to mint it.` });
+        const card = priceAboveLimitCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now, limitWei: this.options.budgetPerNftWei });
+        alerts.push({ kind: 'price_above_limit', dedupe: `price:${contract}:${drop.priceWei}`, priority: 'grouped', text: plainAlertText(card), card });
       } else if (upcoming && drop.maxPerWallet > 0) {
         const minutes = Math.round((startMs - now) / 60_000);
-        const price = drop.priceWei === 0n ? 'free' : `${formatEth(drop.priceWei)} ETH each`;
         // Anyone can publish a drop, so opening reminders are grouped and capped per day rather than pushed immediately.
         const window = minutes <= 30 ? '30m' : minutes <= 360 ? '6h' : null;
-        if (window && this.openingAlertAllowed(now)) alerts.push({ kind: 'opening_soon', dedupe: `opening:${contract}:${drop.startTime}:${window}`, priority: 'grouped', text: window === '30m' ? `${name} opens in ${minutes} minutes (${price}, up to ${drop.maxPerWallet} per wallet). Check wallet readiness on the dashboard.` : `${name} opens in about ${Math.round(minutes / 60)} hours (${price}, up to ${drop.maxPerWallet} per wallet).` });
+        if (window && this.openingAlertAllowed(now)) {
+          const card = openingSoonCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now });
+          alerts.push({ kind: 'opening_soon', dedupe: `opening:${contract}:${drop.startTime}:${window}`, priority: 'grouped', text: plainAlertText(card), card });
+        }
       }
       } catch { /* one malformed entry never blocks the others or the cursor */ }
     }

@@ -28,6 +28,8 @@ export interface OrchestratorServiceConfig {
   maxConcurrentJobs: number;
   alertRetentionDays: number;
   canonicalUrlBase?: string;
+  /** Address the owner opens the dashboard at, when it is not the local one; used only for the links in alerts. */
+  dashboardPublicUrl?: string;
   /** Phase 2 intelligence jobs (T-004, P2-09). Read-only; off unless enabled. */
   intelligenceEnabled: boolean;
   /** Name (not value) of the Ethereum RPC entry in the host secret store. */
@@ -59,6 +61,21 @@ function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, minimum:
   const parsed = Number(candidate);
   if (!Number.isSafeInteger(parsed) || parsed < minimum) throw new Error(`${key}_INVALID`);
   return parsed;
+}
+/**
+ * The public dashboard address used in alert links (never for binding: the server stays on loopback). It must be https
+ * (http only on this computer), carry no credentials, and is stored without query or fragment.
+ */
+function publicUrl(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const candidate = value(env, key);
+  if (candidate === undefined) return undefined;
+  let url: URL;
+  try { url = new URL(candidate); } catch { throw new Error(`${key}_INVALID`); }
+  const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  if (url.username || url.password || !(url.protocol === 'https:' || (url.protocol === 'http:' && loopback))) throw new Error(`${key}_INVALID`);
+  url.search = '';
+  url.hash = '';
+  return url.toString();
 }
 function path(env: NodeJS.ProcessEnv, key: string, fallback: string, root: string): string {
   const candidate = value(env, key) ?? fallback;
@@ -99,6 +116,7 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
   if (bindHost !== '127.0.0.1' && bindHost !== '::1' && bindHost !== 'localhost') throw new Error('BIND_HOST_MUST_BE_LOOPBACK');
   const port = integer(env, 'MINT_BOT_HEALTH_PORT', integer(env, 'MINT_BOT_HTTP_PORT', 8780, 0), 0);
   if (port > 65_535) throw new Error('MINT_BOT_HEALTH_PORT_INVALID');
+  const dashboardPublicUrl = publicUrl(env, 'MINT_BOT_DASHBOARD_PUBLIC_URL');
   return {
     mode,
     projectRoot: root,
@@ -125,6 +143,7 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
     reconciliationIntervalMs: integer(env, 'MINT_BOT_RECONCILIATION_INTERVAL_MS', 30_000, 1_000),
     maxConcurrentJobs: integer(env, 'MINT_BOT_MAX_CONCURRENT_JOBS', 1, 1),
     alertRetentionDays: integer(env, 'MINT_BOT_ALERT_RETENTION_DAYS', 30, 1),
+    ...(dashboardPublicUrl ? { dashboardPublicUrl } : {}),
     ...(value(env, 'MINT_BOT_CANONICAL_URL') ? { canonicalUrlBase: value(env, 'MINT_BOT_CANONICAL_URL') } : {}),
     intelligenceEnabled,
     intelligenceRpcName,

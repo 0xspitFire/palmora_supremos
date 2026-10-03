@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { PERSONAL_LIVE_FLEET_POLICY } from '../fleet-policy.js';
 import type { BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
-import { READINESS_FRESHNESS_MS, shortAddress, type IntelligenceAlertSink, type IntelligenceChainPort } from './port.js';
+import { READINESS_FRESHNESS_MS, type IntelligenceAlertSink, type IntelligenceChainPort } from './port.js';
+import { plainAlertText } from '../alert-card.js';
+import { CollectionNames } from './names.js';
+import { eligibleReadyCard, quantityReducedCard, underfundedCard } from './cards.js';
 import { formatEth, paidQuantityForScore } from './scoring.js';
 import { planFreeQuantity, planningMaxFeeWei, type QuantityPlan } from './quantity-plan.js';
 
@@ -33,7 +36,7 @@ export const D033_READINESS_LIMITS: Readonly<ReadinessLimits> = Object.freeze({
   freeMinWallets: 4,
 });
 
-export interface ReadinessOptions { now?: () => Date; limits: ReadinessLimits; alerts?: IntelligenceAlertSink; }
+export interface ReadinessOptions { now?: () => Date; limits: ReadinessLimits; alerts?: IntelligenceAlertSink; /** Collection names read from the chain; one reader can be shared with discovery. */ names?: CollectionNames; }
 
 export type WalletReadinessState = 'ready' | 'funded' | 'unfunded' | 'blocked' | 'skipped' | 'unknown';
 export interface WalletReadiness { wallet: string; state: WalletReadinessState; reason: string; balanceWei: string | null; requiredWei: string; topUpWei: string | null; }
@@ -55,8 +58,11 @@ export class ReadinessSweep {
   private readonly lastEmit = new Map<string, { at: number; signature: string }>();
   private readonly alertTimes: number[] = [];
 
+  private readonly names: CollectionNames;
+
   public constructor(private readonly store: BackendStore, private readonly port: IntelligenceChainPort, private readonly wallets: () => Promise<readonly string[]>, private readonly options: ReadinessOptions) {
     this.now = options.now ?? (() => new Date());
+    this.names = options.names ?? new CollectionNames(port);
   }
 
   public async tick(): Promise<{ drops: number; written: number; alertsRaised: number }> {
@@ -158,27 +164,31 @@ export class ReadinessSweep {
   private async alert(drop: CalendarView, plan: Awaited<ReturnType<ReadinessSweep['plan']>>, rows: readonly WalletReadiness[], now: number): Promise<number> {
     const sink = this.options.alerts;
     if (!sink) return 0;
-    const name = `Ethereum mint ${shortAddress(drop.contract)}`;
+    // The collection name is read from the chain first; the label (ETH MINT) is only for a contract that has none.
+    const collectionName = await this.names.get(drop.contract);
+    const base = { chainId: this.port.chainId, contract: drop.contract, collectionName, startMs: drop.startMs, priceWei: drop.priceWei, maxPerWallet: drop.maxPerWallet, now };
     let reducedAlerts = 0;
     // D-037: whenever fees cut the planned quantity (or rule a mint out), tell the owner why. One per drop and quantity, bundled.
-    if (plan.quantityPlan?.reduced && this.alertAllowed(now) && await safe(sink, { kind: 'quantity_reduced', dedupe: `quantity:${drop.id}:${plan.quantityPlan.planned}`, priority: 'grouped', text: `${name}: ${plan.quantityPlan.message}` })) reducedAlerts += 1;
+    if (plan.quantityPlan?.reduced && this.alertAllowed(now)) {
+      const card = quantityReducedCard({ ...base, message: plan.quantityPlan.message });
+      if (await safe(sink, { kind: 'quantity_reduced', dedupe: `quantity:${drop.id}:${plan.quantityPlan.planned}`, priority: 'grouped', text: plainAlertText(card), card })) reducedAlerts += 1;
+    }
     if (plan.blockReason) return reducedAlerts;
     // Only a drop the scorer rated worth a look may interrupt immediately; everything else waits for the digest.
     const score = this.latestScore(drop.contract);
     const soon = drop.startMs - now <= HOUR && score !== null && score >= IMMEDIATE_MIN_SCORE;
-    const opens = drop.startMs > now ? `opens in ${formatDuration(drop.startMs - now)}` : 'is open now';
     let raised = reducedAlerts;
     const unfunded = rows.filter((row) => row.state === 'unfunded');
-    if (unfunded.length > 0) {
-      const lines = unfunded.map((row) => `send ${formatEth(BigInt(row.topUpWei ?? '0'))} ETH to ${row.wallet}`);
-      const text = `${unfunded.length} wallet(s) need more ETH for ${name}, which ${opens}. On Ethereum: ${lines.join('; ')}. Each needs ${formatEth(plan.requiredWei)} ETH in total${plan.kind === 'free' ? ' (free mint, network fee allowance)' : ` (${plan.quantity} NFT(s) plus network fee allowance)`}.`;
-      if (this.alertAllowed(now) && await safe(sink, { kind: 'underfunded', dedupe: `underfunded:${drop.id}:${unfunded.map((row) => `${row.wallet}=${row.topUpWei ?? '?'}`).join(',')}`, priority: 'grouped', text })) raised += 1; // top-up reminders always go in the bundle (T-011)
+    if (unfunded.length > 0 && this.alertAllowed(now)) {
+      const card = underfundedCard({ ...base, wallets: unfunded.map((row) => ({ wallet: row.wallet, topUpWei: BigInt(row.topUpWei ?? '0') })), requiredWei: plan.requiredWei, plan: plan.kind === 'free' ? 'free mint, network fee allowance' : `${plan.quantity} NFT(s) plus network fee allowance` });
+      if (await safe(sink, { kind: 'underfunded', dedupe: `underfunded:${drop.id}:${unfunded.map((row) => `${row.wallet}=${row.topUpWei ?? '?'}`).join(',')}`, priority: 'grouped', text: plainAlertText(card), card })) raised += 1; // top-up reminders always go in the bundle (T-011)
     }
     const ready = rows.filter((row) => row.state === 'ready').length;
-    if (ready > 0) {
+    if (ready > 0 && this.alertAllowed(now)) {
       const preference = plan.kind === 'free' && ready < this.options.limits.freeMinWallets ? ` You asked for at least ${this.options.limits.freeMinWallets} wallets on free mints.` : '';
-      const text = `${ready} of ${rows.length} wallets are ready for ${name}, which ${opens} (${plan.kind === 'free' ? `free, ${plan.quantity} each${plan.quantityPlan?.reduced ? ` instead of ${plan.quantityPlan.desired} because of network fees` : ''}` : `${plan.quantity} each at ${formatEth(drop.priceWei)} ETH`}). Minting still needs your approval.${preference}`;
-      if (this.alertAllowed(now) && await safe(sink, { kind: 'eligible_ready', dedupe: `ready:${drop.id}:${ready}`, priority: soon ? 'immediate' : 'grouped', text })) raised += 1;
+      const planText = plan.kind === 'free' ? `free, ${plan.quantity} each${plan.quantityPlan?.reduced ? ` instead of ${plan.quantityPlan.desired} because of network fees` : ''}` : `${plan.quantity} each at ${formatEth(drop.priceWei)} ETH`;
+      const card = eligibleReadyCard({ ...base, ready, total: rows.length, plan: planText, note: `Minting still needs your approval.${preference}` });
+      if (await safe(sink, { kind: 'eligible_ready', dedupe: `ready:${drop.id}:${ready}`, priority: soon ? 'immediate' : 'grouped', text: plainAlertText(card), card })) raised += 1;
     }
     return raised;
   }
@@ -222,9 +232,4 @@ export class ReadinessSweep {
 
 async function safe(sink: IntelligenceAlertSink, input: Parameters<IntelligenceAlertSink['intelligence']>[0]): Promise<boolean> {
   try { return await sink.intelligence(input); } catch { return false; }
-}
-
-function formatDuration(ms: number): string {
-  const minutes = Math.max(1, Math.round(ms / 60_000));
-  return minutes < 90 ? `${minutes} minutes` : `about ${Math.round(minutes / 60)} hours`;
 }

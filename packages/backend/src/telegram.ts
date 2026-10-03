@@ -1,14 +1,16 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { redactText } from './observability.js';
-import type { NotificationSink } from './notifications.js';
+import type { NotificationMessage, NotificationSink } from './notifications.js';
+import { dashboardLink, renderAlertCard, renderDigest, type RenderedAlert } from './alert-card.js';
+import { renderSystemCard } from './system-card.js';
 
 export interface HostSecretStore { has(name: string): boolean; get(name: string): string | undefined; }
 export interface TelegramCredentials { token: string; chatId: string; }
 export interface TelegramFetcherResponse { ok: boolean; status: number; json(): Promise<unknown>; }
 export type TelegramFetcher = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<TelegramFetcherResponse>;
 export interface TelegramHealth { status: 'ok' | 'failed'; provider: 'telegram'; reason?: string; }
-export interface TelegramNotifierOptions { secretStore: HostSecretStore; tokenName?: string; chatIdName?: string; apiBaseUrl?: string; approvedProxy?: string; fetcher?: TelegramFetcher; timeoutMs?: number; }
+export interface TelegramNotifierOptions { secretStore: HostSecretStore; tokenName?: string; chatIdName?: string; apiBaseUrl?: string; approvedProxy?: string; fetcher?: TelegramFetcher; timeoutMs?: number; /** Where the owner opens the dashboard; the Dashboard record link in alerts is built from it. */ dashboardUrl?: string; /** Clock, for tests. */ now?: () => Date; }
 
 function parseStore(source: string): Map<string, string> {
   const values = new Map<string, string>();
@@ -60,6 +62,8 @@ export class TelegramNotifier implements NotificationSink {
   private readonly fetcher: TelegramFetcher;
   private readonly apiBaseUrl: string;
   private readonly timeoutMs: number;
+  private readonly dashboardUrl?: string;
+  private readonly now: () => Date;
   public constructor(options: TelegramNotifierOptions) {
     this.config = credentials(options);
     this.fetcher = options.fetcher ?? (globalThis.fetch as unknown as TelegramFetcher);
@@ -72,14 +76,44 @@ export class TelegramNotifier implements NotificationSink {
     }
     this.apiBaseUrl = apiBaseUrl;
     this.timeoutMs = options.timeoutMs ?? 5_000;
+    this.now = options.now ?? (() => new Date());
+    // Only a plain http(s) address without credentials is ever used in a link.
+    if (options.dashboardUrl && dashboardLink(options.dashboardUrl)) this.dashboardUrl = options.dashboardUrl;
   }
 
-  public async send(message: { eventId: string; runId?: string; type: string; text: string }): Promise<void> {
-    const response = await this.fetcher(`${this.apiBaseUrl}/bot${this.config.token}/sendMessage`, {
+  public async send(message: Pick<NotificationMessage, 'eventId' | 'runId' | 'type' | 'text' | 'card' | 'items' | 'system'>): Promise<void> {
+    // Rendering is presentation only: if it ever fails, the alert still goes out as its stored plain text.
+    let rich: RenderedAlert | undefined;
+    try { rich = this.render(message); } catch { rich = undefined; }
+    if (rich) {
+      const buttons = rich.buttons.map((button) => ({ text: button.text, url: button.url }));
+      // Link buttons only: no callback data, so Telegram can never send anything back to the bot.
+      const response = await this.post({ text: rich.html, parse_mode: 'HTML', ...(buttons.length > 0 ? { reply_markup: { inline_keyboard: [buttons] } } : {}) });
+      if (response.ok) return this.confirm(response);
+      // Telegram refused the formatting (HTTP 400): resend the same facts as plain text so the alert is never lost.
+      if (response.status !== 400) throw new Error(`TELEGRAM_DELIVERY_FAILED:${response.status}`);
+      return this.confirm(await this.post({ text: redactText(rich.plain).slice(0, 4_000) }));
+    }
+    return this.confirm(await this.post({ text: redactText(message.text).slice(0, 4_000) }));
+  }
+
+  private render(message: Pick<NotificationMessage, 'card' | 'items' | 'system'>): RenderedAlert | undefined {
+    const context = { now: this.now(), ...(this.dashboardUrl ? { dashboardUrl: this.dashboardUrl } : {}) };
+    if (message.system) return renderSystemCard(message.system, context);
+    if (message.card) return renderAlertCard(message.card, context);
+    if (message.items && message.items.length > 0) return renderDigest(message.items, context);
+    return undefined;
+  }
+
+  private post(payload: Record<string, unknown>): Promise<TelegramFetcherResponse> {
+    return this.fetcher(`${this.apiBaseUrl}/bot${this.config.token}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: this.config.chatId, text: redactText(message.text).slice(0, 4_000), disable_web_page_preview: true }),
+      body: JSON.stringify({ chat_id: this.config.chatId, disable_web_page_preview: true, ...payload }),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
+  }
+
+  private async confirm(response: TelegramFetcherResponse): Promise<void> {
     if (!response.ok) throw new Error(`TELEGRAM_DELIVERY_FAILED:${response.status}`);
     let body: unknown;
     try { body = await response.json(); } catch { throw new Error('TELEGRAM_RESPONSE_INVALID'); }

@@ -3,6 +3,8 @@ import type { BackendStore } from './store.js';
 import { PHASE2_DEFAULTS } from './phase2-defaults.js';
 import type { EventRecord, NotificationOutboxRecord } from './types.js';
 import type { MetricsRegistry } from './observability.js';
+import { parseAlertCard, parseDigestItems, type AlertCard, type DigestItem } from './alert-card.js';
+import { parseSystemCard, type SystemCard } from './system-card.js';
 
 export interface NotificationMessage {
   eventId: string;
@@ -10,6 +12,12 @@ export interface NotificationMessage {
   type: string;
   text: string;
   canonicalLink?: string;
+  /** Structured collection alert, read from the stored event on every attempt; sinks that cannot render it use `text`. */
+  card?: AlertCard;
+  /** Items of a digest, with their cards where they have one. */
+  items?: DigestItem[];
+  /** Structured system message (start, check-in, kill switch, spend cap, health). */
+  system?: SystemCard;
 }
 
 /** One-way sink. It cannot acknowledge, approve, kill, or execute a run. */
@@ -64,11 +72,18 @@ export class NotificationDispatcher {
     if (this.active.has(sourceEventId)) return;
     this.active.add(sourceEventId);
     let item: NotificationOutboxRecord | undefined;
+    let card: AlertCard | undefined;
+    let items: DigestItem[] | undefined;
+    let system: SystemCard | undefined;
     try {
       item = await this.store.transaction(state => {
         const source = state.events.find(event => event.id === sourceEventId);
         if (!source) throw new Error('NOTIFICATION_SOURCE_EVENT_NOT_FOUND');
         const safeText = sourceText(source, text);
+        // The structured form is re-read from the stored event on every attempt, so a retry renders at the moment it is sent.
+        card = parseAlertCard(source.data.card) ?? undefined;
+        items = parseDigestItems(source.data.items) ?? undefined;
+        system = parseSystemCard(source.data.system) ?? undefined;
       const existing = state.notificationOutbox.find(entry => entry.sourceEventId === sourceEventId);
       if (existing?.state === 'delivered') {
         return undefined;
@@ -97,7 +112,7 @@ export class NotificationDispatcher {
       });
       if (!item) return;
       this.metrics?.recordNotification('delivering');
-      await this.sink.send({ eventId: item.id, ...(item.runId ? { runId: item.runId } : {}), type: item.type, text: item.text, ...(item.canonicalLink ? { canonicalLink: item.canonicalLink } : {}) });
+      await this.sink.send({ eventId: item.id, ...(item.runId ? { runId: item.runId } : {}), type: item.type, text: item.text, ...(item.canonicalLink ? { canonicalLink: item.canonicalLink } : {}), ...(card ? { card } : {}), ...(items ? { items } : {}), ...(system ? { system } : {}) });
       await this.store.transaction(state => {
         const delivered = state.notificationOutbox.find(entry => entry.id === item!.id);
         if (!delivered) throw new Error('NOTIFICATION_OUTBOX_NOT_FOUND');

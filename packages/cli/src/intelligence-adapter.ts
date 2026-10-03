@@ -1,9 +1,23 @@
 import { createPublicClient, http, type Address, type PublicClient } from 'viem';
 import { mainnet } from 'viem/chains';
 import { ChainFactsReader, SeaDropObserver, SeaDropV1PublicStrategy, simulateMint, type DropConfig } from '@mint-bot/engine';
-import type { ChainScanOutcome, DropSnapshot, IntelligenceChainPort, SimulationOutcome } from '@mint-bot/backend';
+import type { ChainScanOutcome, CollectionNameRead, DropSnapshot, IntelligenceChainPort, SimulationOutcome } from '@mint-bot/backend';
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const NAME_ABI = [{ type: 'function', name: 'name', stateMutability: 'view', inputs: [], outputs: [{ type: 'string' }] }] as const;
+/**
+ * viem wraps every failed read in a ContractFunctionExecutionError, so the inner cause says what happened.
+ * A revert, empty data (no such function) or undecodable data means the contract answered without a usable
+ * name; a transport failure, timeout or rate limit means it could not be asked, and the read is retried later.
+ */
+const ANSWERED_WITHOUT_NAME = /ContractFunctionRevertedError|ContractFunctionZeroDataError|ExecutionRevertedError|AbiDecoding|InvalidAbi/;
+const COULD_NOT_ASK = /HttpRequestError|TimeoutError|WebSocketRequestError|LimitExceededRpcError|InternalRpcError|ResourceUnavailableRpcError/;
+export function answeredWithoutName(error: unknown): boolean {
+  const walk = (error as { walk?: (test: (cause: unknown) => boolean) => unknown } | null)?.walk;
+  if (typeof walk !== 'function') return false;
+  const has = (pattern: RegExp): boolean => walk.call(error, (cause) => pattern.test(String((cause as { name?: unknown } | null)?.name ?? ''))) != null;
+  return has(ANSWERED_WITHOUT_NAME) && !has(COULD_NOT_ASK);
+}
 
 function isRateLimit(detail: string | undefined): boolean {
   return detail !== undefined && /HTTP 429|rate.?limit|too many requests|throttl|exceeded.*(?:capacity|quota|compute units)/i.test(detail);
@@ -78,6 +92,17 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   public async hasCode(address: string): Promise<boolean | null> {
     if (!ADDRESS.test(address)) return null;
     try { const code = await this.client.getCode({ address: address as Address }); return code !== undefined && code !== '0x'; } catch { return null; }
+  }
+
+  /** The collection name from the contract's own `name()`, read-only. A contract without one is a final answer; a network error is not. */
+  public async readName(nftContract: string): Promise<CollectionNameRead> {
+    if (!ADDRESS.test(nftContract)) return { status: 'none' };
+    try {
+      const name = await this.client.readContract({ address: nftContract as Address, abi: NAME_ABI, functionName: 'name' });
+      return typeof name === 'string' && name.trim() !== '' ? { status: 'name', name } : { status: 'none' };
+    } catch (error) {
+      return answeredWithoutName(error) ? { status: 'none' } : { status: 'error' };
+    }
   }
 
   public async balance(address: string): Promise<bigint | null> {
