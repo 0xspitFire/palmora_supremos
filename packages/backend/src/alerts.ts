@@ -2,11 +2,14 @@ import { createHash } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import type { MetricsRegistry } from './observability.js';
 import type { NotificationDispatcher } from './notifications.js';
+import type { AlertCard } from './alert-card.js';
+import { plainSystemText, type SystemCard } from './system-card.js';
+import { killEngagedCard, runProblemCard, spendCapCard } from './system-messages.js';
 
 export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder';
 export type AlertPriority = 'immediate' | 'grouped';
 /** Phase 2 intelligence alerts (T-004, P2-06). Outbound only; never a permission or execution proof. */
-export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status' | 'quantity_reduced';
+export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status' | 'quantity_reduced' | 'health';
 export interface IntelligenceAlertInput {
   kind: IntelligenceAlertKind;
   /** Stable dedupe identity: the same identity is never alerted twice. */
@@ -15,6 +18,10 @@ export interface IntelligenceAlertInput {
   text: string;
   /** Immediate alerts send now; grouped ones wait for the next digest. */
   priority: AlertPriority;
+  /** Structured form for the Telegram sender (T-029); `text` stays as the plain fallback. */
+  card?: AlertCard;
+  /** Structured form of a system message (start, check-in, health); `text` stays as the plain fallback. */
+  system?: SystemCard;
   at?: string;
 }
 export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; }
@@ -52,6 +59,15 @@ export function evaluateOperationalAlerts(snapshot: OperationalSnapshot, thresho
   return alerts;
 }
 
+function systemFor(input: AlertInput, at: string): SystemCard | undefined {
+  try {
+    if (input.kind === 'kill') return killEngagedCard({ ...(input.reason ? { reason: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
+    if (input.kind === 'cap') return spendCapCard({ ...(input.reason ? { notice: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
+    if (input.kind === 'blocked' || input.kind === 'failed') return runProblemCard(input.kind, { ...(input.reason ? { reason: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
+  } catch { /* presentation only: the alert still goes out as plain text */ }
+  return undefined;
+}
+
 function alertType(kind: AlertKind): string { return `alert_${kind}`; }
 function alertText(input: AlertInput): string {
   const suffix = input.reason ? `: ${input.reason}` : '';
@@ -83,7 +99,7 @@ export class AlertManager {
     const at = input.at ?? this.now().toISOString();
     const retentionUntil = new Date(Date.parse(at) + this.policy.retentionDays * 86_400_000).toISOString();
     const eventId = `alert_${input.kind}_${shortDigest(input.dedupe)}`;
-    await this.store.transaction((current) => { current.events.push({ id: eventId, type, at, data: { dedupe: input.dedupe, text: input.text, priority: input.priority, retentionUntil } }); });
+    await this.store.transaction((current) => { current.events.push({ id: eventId, type, at, data: { dedupe: input.dedupe, text: input.text, priority: input.priority, retentionUntil, ...(input.card ? { card: input.card } : {}), ...(input.system ? { system: input.system } : {}) } }); });
     this.metrics?.recordNotification('pending');
     if (input.priority === 'immediate' && this.dispatcher) await this.dispatcher.dispatch(eventId, input.text);
     return true;
@@ -104,7 +120,9 @@ export class AlertManager {
     const ids = pending.map((event) => event.id);
     const text = [`MintBot reminders (${pending.length}):`, ...pending.map((event) => `• ${String(event.data.text ?? '')}`)].join('\n');
     const digestId = `alert_digest_${shortDigest(ids.join(','))}`;
-    await this.store.transaction((current) => { if (!current.events.some((event) => event.id === digestId)) current.events.push({ id: digestId, type: 'alert_digest', at: this.now().toISOString(), data: { includes: ids, text } }); });
+    // Items keep each alert's card for the sender; the list is capped, while `includes` and `text` still cover every alert.
+    const items = pending.slice(0, 30).map((event) => ({ text: String(event.data.text ?? ''), ...(event.data.card ? { card: event.data.card } : {}) }));
+    await this.store.transaction((current) => { if (!current.events.some((event) => event.id === digestId)) current.events.push({ id: digestId, type: 'alert_digest', at: this.now().toISOString(), data: { includes: ids, text, items } }); });
     if (this.dispatcher) await this.dispatcher.dispatch(digestId, text);
     return pending.length;
   }
@@ -139,10 +157,12 @@ export class AlertManager {
     const duplicate = state.events.some((event) => event.type === type && event.runId === input.runId && (input.kind === 'started' || event.data.reason === input.reason));
     if (duplicate) return;
     const at = input.at ?? this.now().toISOString();
-    const text = alertText(input);
+    // Kill, cap, blocked and failed alerts carry a structured message for Telegram; the plain text stays as the fallback.
+    const system = systemFor(input, at);
+    const text = system ? plainSystemText(system) : alertText(input);
     const retentionUntil = new Date(Date.parse(at) + this.policy.retentionDays * 86_400_000).toISOString();
     const eventId = `alert_${type}_${input.runId ?? 'global'}_${Date.parse(at)}`;
-    await this.store.transaction((current) => { current.events.push({ id: eventId, ...(input.runId ? { runId: input.runId } : {}), type, at, data: { ...input, text, retentionUntil } }); });
+    await this.store.transaction((current) => { current.events.push({ id: eventId, ...(input.runId ? { runId: input.runId } : {}), type, at, data: { ...input, text, retentionUntil, ...(system ? { system } : {}) } }); });
     this.metrics?.recordNotification('pending');
     const priority: AlertPriority = this.policy.immediateKinds.includes(input.kind) ? 'immediate' : 'grouped';
     if (priority === 'grouped') this.grouped.add(eventId);

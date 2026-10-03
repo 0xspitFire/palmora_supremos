@@ -26,7 +26,7 @@ import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFr
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase } from './personal-live-cli.js';
 import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
-import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, recordWalletSimulations, TelegramNotifier } from '@mint-bot/backend';
+import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, recordWalletSimulations, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
 import { assertFeePolicyApplyAllowed, assertTipMatchesStoredPolicy, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -610,7 +610,7 @@ const cli = yargs(hideBin(process.argv))
         let noticeSent = false;
         try {
           const secretStorePath = process.env.SECRET_STORE_PATH ?? join(configuredSecretRoot(runtimeRoot), 'MINT_BOT_SECRETS.env');
-          await new TelegramNotifier({ secretStore: await loadHostSecretStore(secretStorePath) }).send({ eventId: `kill-release-${Date.now()}`, type: 'kill_switch_released', text: 'MintBot: the kill switch was released from the command line. Live runs are possible again once readiness is recorded.' });
+          await new TelegramNotifier({ secretStore: await loadHostSecretStore(secretStorePath) }).send({ eventId: `kill-release-${Date.now()}`, type: 'kill_switch_released', text: plainSystemText(killReleasedCard()), system: killReleasedCard() });
           noticeSent = true;
         } catch { noticeSent = false; }
         process.stdout.write(`${json({ state: 'Released', message: `The kill switch is off${result.released ? '' : ' (only the file was left)'}. Run live-readiness record next; create the kill switch again with the kill command at any time to stop.`, telegramNoticeSent: noticeSent })}\n`);
@@ -694,7 +694,7 @@ const cli = yargs(hideBin(process.argv))
             try {
               const notifier = new TelegramNotifier({ secretStore: await loadHostSecretStore(secretStorePath) });
               if ((await notifier.health()).status !== 'ok') return false;
-              await notifier.send({ eventId: `live-readiness-${Date.now()}`, type: 'live_readiness_check', text: 'MintBot: live readiness check. If you can read this, Telegram works. Nothing has been sent or spent.' });
+              await notifier.send({ eventId: `live-readiness-${Date.now()}`, type: 'live_readiness_check', text: plainSystemText(telegramTestCard()), system: telegramTestCard() });
               return true;
             } catch { return false; }
           },

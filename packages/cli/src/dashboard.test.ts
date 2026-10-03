@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DurableStore, loadServiceConfig, MetricsRegistry, ServiceHttpServer, type OrchestratorService } from '@mint-bot/backend';
+import { calendarId, dashboardAnchor, DurableStore, loadServiceConfig, opportunityId, MetricsRegistry, ServiceHttpServer, type OrchestratorService } from '@mint-bot/backend';
 import { request as httpRequest } from 'node:http';
 import { createDashboard } from './dashboard.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -87,5 +87,25 @@ describe('intelligence service configuration (P2-09)', () => {
     const wallets = loadServiceConfig({ MINT_BOT_READINESS_WALLETS: `${NFT.toUpperCase().replace('0X', '0x')}, ${NFT}` }, '/tmp/mintbot').readinessWallets;
     expect(wallets).toEqual([NFT]);
     expect(() => loadServiceConfig({ MINT_BOT_DISCOVERY_INTERVAL_MS: '1000' }, '/tmp/mintbot')).toThrow('MINT_BOT_DISCOVERY_INTERVAL_MS_INVALID');
+  });
+});
+
+describe('alert deep links point at real dashboard cards (T-029)', () => {
+  it('gives the opportunity and calendar cards on the served home page exactly the anchors an alert links to', async () => {
+    const store = new DurableStore();
+    const at = new Date().toISOString();
+    await store.transaction((state) => {
+      state.events.push({ id: 'opp-1', type: 'opportunity_notified', at, data: { opportunityId: opportunityId(1, NFT), chainId: 1, contract: NFT, disposition: 'notified', score: 72, scoreVersion: 'v1-rules-p2', sampleSize: '60', denominator: '100', confidence: 'medium', band: 'proposal', blocked: false, factors: [], risks: [], watchedMinters: [], mintsLastHour: 3, totalMinted: 3, priceWei: '0', sourceBlock: '1', firstSeenAt: at, lastActivityAt: at, expiresAt: new Date(Date.now() + 600_000).toISOString() } });
+      state.events.push({ id: 'cal-1', type: 'calendar_entry', at, data: { id: calendarId(1, NFT), chainId: 1, contract: NFT, openingAt: new Date(Date.now() + 3_600_000).toISOString(), closingAt: null, phase: 'upcoming', priceWei: '0', maxPerWallet: 5, method: 'seadrop-v1-public', publicStatus: 'public', sourceAuthority: 'on_chain', sourceBlock: '1', expiresAt: new Date(Date.now() + 600_000).toISOString() } });
+    });
+    const { server, base } = await serve(store);
+    try {
+      const html = await (await fetch(`${base}/`)).text();
+      const ids = new Set([...html.matchAll(/ id="([^"]+)"/g)].map((match) => match[1]));
+      expect(ids.has(dashboardAnchor({ kind: 'opportunity', id: opportunityId(1, NFT) }))).toBe(true);
+      expect(ids.has(dashboardAnchor({ kind: 'calendar', id: calendarId(1, NFT) }))).toBe(true);
+    } finally {
+      await server.stop();
+    }
   });
 });

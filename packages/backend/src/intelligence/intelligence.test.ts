@@ -4,11 +4,12 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
 import { AlertManager } from '../alerts.js';
+import { parseAlertCard } from '../alert-card.js';
 import { CanonicalStoreBridge } from '../canonical-store.js';
 import { DurableStore } from '../store.js';
 import type { BackendStore } from '../store.js';
 import { DiscoveryService } from './discovery.js';
-import type { ChainScanOutcome, DropSnapshot, IntelligenceChainPort, IntelligenceRepositoryPort, ObservedDropUpdate, ObservedMint, ObservedWatchedMint, SimulationOutcome } from './port.js';
+import type { ChainScanOutcome, CollectionNameRead, DropSnapshot, IntelligenceChainPort, IntelligenceRepositoryPort, ObservedDropUpdate, ObservedMint, ObservedWatchedMint, SimulationOutcome } from './port.js';
 import { ReadinessSweep } from './readiness.js';
 import { Phase2ReadModelService } from '../read-model-v1.js';
 
@@ -34,6 +35,9 @@ class FakePort implements IntelligenceChainPort {
   public estimateMintGas?: (wallet: string, contract: string, quantity: number, valueWei: bigint) => Promise<bigint | null>;
   public baseFeePerGasWei?: () => Promise<bigint | null>;
   public scans: Array<[bigint, bigint, readonly string[]]> = [];
+  public names = new Map<string, CollectionNameRead>();
+  public nameReads = 0;
+  public async readName(contract: string): Promise<CollectionNameRead> { this.nameReads += 1; return this.names.get(contract) ?? { status: 'none' }; }
   public async safeHead(): Promise<bigint | null> { return this.head; }
   public async scan(fromBlock: bigint, toBlock: bigint, watched: readonly string[]): Promise<ChainScanOutcome> {
     this.scans.push([fromBlock, toBlock, watched]);
@@ -50,8 +54,9 @@ class FakePort implements IntelligenceChainPort {
 
 class MemoryRepo implements IntelligenceRepositoryPort {
   public watched: string[] = [];
+  public labels = new Map<string, string>();
   public cursors = new Map<string, bigint>();
-  public observedAddresses(): ReadonlyArray<{ address: string }> { return this.watched.map((address) => ({ address })); }
+  public observedAddresses(): ReadonlyArray<{ address: string; label?: string | null }> { return this.watched.map((address) => ({ address, label: this.labels.get(address) ?? null })); }
   public cursor(chainId: number, source: string): bigint | undefined { return this.cursors.get(`${chainId}:${source}`); }
   public advanceCursor(chainId: number, source: string, lastBlock: bigint): void { this.cursors.set(`${chainId}:${source}`, lastBlock); }
 }
@@ -129,8 +134,8 @@ describe('DiscoveryService', () => {
     const result = await t.discovery.tick();
     expect(result.calendarWritten).toBe(2);
     expect(events(t.store, 'alert_opening_soon')[0]?.data).toMatchObject({ priority: 'grouped' });
-    expect(String(events(t.store, 'alert_opening_soon')[0]?.data.text)).toContain('opens in 20 minutes');
-    expect(String(events(t.store, 'alert_price_above_limit')[0]?.data.text)).toContain('above your 0.0037 ETH limit');
+    expect(String(events(t.store, 'alert_opening_soon')[0]?.data.text)).toContain('Opens: Tue 29 Sep 12:20 UTC, in 20 min');
+    expect(String(events(t.store, 'alert_price_above_limit')[0]?.data.text)).toContain('Your limit: 0.0037 ETH per NFT');
     await t.discovery.tick();
     expect(events(t.store, 'alert_opening_soon')).toHaveLength(1);
   });
@@ -192,7 +197,7 @@ describe('ReadinessSweep', () => {
       expect.objectContaining({ wallet: W2, state: 'unfunded', topUpWei: '300000000000000' }),
     ]);
     const underfunded = String(events(t.store, 'alert_underfunded')[0]?.data.text);
-    expect(underfunded).toContain(`send 0.0003 ETH to ${W2}`);
+    expect(underfunded).toContain(`Top up: 0.0003 ETH to ${W2}`);
     expect(String(events(t.store, 'alert_eligible_ready')[0]?.data.text)).toContain('You asked for at least 4 wallets');
   });
 
@@ -515,5 +520,88 @@ describe('quantity explanation in the run summary and dashboard (T-012, D-037)',
     const { BackendApplication } = await import('../application.js');
     const summary = await new BackendApplication(store, undefined as never).command('summary', { runId });
     expect((summary.data as Array<{ quantityPlan?: { planned: number; message: string } }>)[0]?.quantityPlan).toMatchObject({ planned: 3, message: planData.message });
+  });
+});
+
+describe('collection alerts as cards (T-029)', () => {
+  const busy = (): ObservedMint[] => [mint(900n, WHALE, 2n), ...Array.from({ length: 60 }, (_, index) => mint(950n, `0x${index.toString(16).padStart(40, '0')}`))];
+  async function opportunity(configure: (t: ReturnType<typeof setup>) => void = () => undefined) {
+    const t = setup();
+    t.repo.watched = [WHALE];
+    t.repo.labels.set(WHALE, 'Whale One');
+    t.port.drops.set(NFT, drop());
+    t.port.mints = busy();
+    configure(t);
+    await t.discovery.tick();
+    const event = events(t.store, 'alert_opportunity')[0]!;
+    return { t, event, card: parseAlertCard(event.data.card)! };
+  }
+
+  it('reads the collection name from the chain before alerting, and stores it with the notified record', async () => {
+    const { t, card } = await opportunity((x) => x.port.names.set(NFT, { status: 'name', name: 'Pudgy Example' }));
+    expect(card).toMatchObject({ collectionName: 'Pudgy Example', chainId: 1, contract: NFT, mint: 'free', record: { kind: 'opportunity', id: `seadrop:1:${NFT}` }, title: expect.stringContaining('WORTH A LOOK') });
+    expect(events(t.store, 'opportunity_notified')[0]?.data.collectionName).toBe('Pudgy Example');
+    expect(t.port.nameReads).toBe(1);
+  });
+
+  it('labels the watched wallets that joined by the owner\'s label, under Tracking Status (never "Who")', async () => {
+    const { card } = await opportunity();
+    expect(card.fields.map((field) => field.label)).toEqual(['Tracking Status', 'Price', 'Opens', 'Supply', 'Limit', 'Activity']);
+    expect(card.fields[0]?.value).toBe('1 of your watched wallets minted (Whale One)');
+    expect(card.fields.find((field) => field.label === 'Supply')?.value).toBe('10 minted of 1,000');
+    expect(card.notes.map((note) => note.label)).toContain('Why');
+  });
+
+  it('uses the chain label only when the contract has no name, and the stored plain text says so too', async () => {
+    const { event, card } = await opportunity();
+    expect(card.collectionName).toBeNull();
+    expect(String(event.data.text)).toContain('ETH MINT');
+    expect(String(event.data.text)).toContain('ETHEREUM · FREE MINT');
+    expect(String(event.data.text)).toContain(`https://etherscan.io/address/${NFT}`);
+  });
+
+  it('retries a failed read once, then alerts with the label this time (reading again on a later alert is covered by the name reader tests)', async () => {
+    const { t, card } = await opportunity((x) => x.port.names.set(NFT, { status: 'error' }));
+    expect(card.collectionName).toBeNull();
+    expect(t.port.nameReads).toBe(2);
+  });
+
+  it('never lets a hostile collection name through as anything but display text', async () => {
+    const { card } = await opportunity((x) => x.port.names.set(NFT, { status: 'name', name: '  @everyone\u202e https://evil.example/claim\u200b  <b>FREE</b>' }));
+    expect(card.collectionName).not.toMatch(/[\u202e\u200b]/);
+    expect(card.collectionName).not.toContain('://');
+    expect(card.collectionName?.startsWith('@')).toBe(false);
+    expect(Array.from(card.collectionName ?? '').length).toBeLessThanOrEqual(40);
+  });
+
+  it('builds opening-soon and over-limit cards with the on-chain name', async () => {
+    const t = setup();
+    t.port.names.set(NFT, { status: 'name', name: 'Soon Club' });
+    t.port.dropUpdates = [
+      { nftContract: NFT, mintPriceWei: 0n, startTime: seconds(START) + 20 * 60, endTime: 0, maxPerWallet: 3, blockNumber: 950n },
+      { nftContract: PAID_NFT, mintPriceWei: LIMIT + 1n, startTime: seconds(START) + 3 * 3600, endTime: 0, maxPerWallet: 2, blockNumber: 951n },
+    ];
+    await t.discovery.tick();
+    const soon = parseAlertCard(events(t.store, 'alert_opening_soon')[0]?.data.card)!;
+    expect(soon).toMatchObject({ title: 'OPENING SOON', collectionName: 'Soon Club', mint: 'free', record: { kind: 'calendar', id: `calendar:1:${NFT}` }, spottedLabel: 'this drop' });
+    const over = parseAlertCard(events(t.store, 'alert_price_above_limit')[0]?.data.card)!;
+    expect(over).toMatchObject({ title: 'OVER YOUR PRICE LIMIT', collectionName: null, mint: 'paid' });
+  });
+
+  it('builds the readiness cards: wallets that need ETH carry the full wallet address, ready wallets say approval is still needed', async () => {
+    const t = setup();
+    t.port.names.set(NFT, { status: 'name', name: 'Ready Club' });
+    t.port.drops.set(NFT, drop());
+    t.port.mints = [mint(900n, W1, 1n, 0n, NFT)];
+    await t.discovery.tick();
+    t.port.balances.set(W1, 500_000_000_000_000n);
+    t.port.balances.set(W2, 100_000_000_000_000n);
+    await new ReadinessSweep(t.store, t.port, async () => [W1, W2], { now: t.clock.now, limits: LIMITS, alerts: t.alerts }).tick();
+    const underfunded = parseAlertCard(events(t.store, 'alert_underfunded')[0]?.data.card)!;
+    expect(underfunded).toMatchObject({ title: 'WALLETS NEED ETH', collectionName: 'Ready Club' });
+    expect(underfunded.fields.some((field) => field.label === 'Top up' && field.value.includes(W2))).toBe(true);
+    const ready = parseAlertCard(events(t.store, 'alert_eligible_ready')[0]?.data.card)!;
+    expect(ready.title).toBe('WALLETS READY');
+    expect(ready.notes[0]?.value).toContain('Minting still needs your approval.');
   });
 });

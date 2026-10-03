@@ -20,6 +20,7 @@ import { createCliRuntime, configuredSecretRoot } from './runtime.js';
 import { createDashboard } from './dashboard.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { startIntelligence } from './intelligence-service.js';
+import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -69,13 +70,16 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   const restartCount = await incrementRestartCounter(config.restartCounterPath);
   // OrchestratorService records the current start as the final increment.
   metrics.setCounter('mintbot_process_restarts_total', restartCount - 1);
+  // The one address the owner opens the dashboard at. Alerts link to it; a live deployment changes this value only.
+  // MINT_BOT_DASHBOARD_PUBLIC_URL replaces the local address in alert links; the server itself still listens on loopback only.
+  const dashboardUrl = config.dashboardPublicUrl ?? `http://${config.bindHost === '::1' ? '[::1]' : config.bindHost}:${config.port}/`;
   let dispatcher: NotificationDispatcher | undefined;
   let notifier: TelegramNotifier | undefined;
   if (config.telegramEnabled && config.secretStorePath) {
     const secrets = await loadHostSecretStore(config.secretStorePath);
     logger.registerSecret(secrets.get(config.telegramTokenName) ?? '');
     logger.registerSecret(secrets.get(config.telegramChatIdName) ?? '');
-    notifier = new TelegramNotifier({ secretStore: secrets, tokenName: config.telegramTokenName, chatIdName: config.telegramChatIdName, apiBaseUrl: config.telegramApiBaseUrl, ...(config.telegramApprovedProxy ? { approvedProxy: config.telegramApprovedProxy } : {}) });
+    notifier = new TelegramNotifier({ secretStore: secrets, tokenName: config.telegramTokenName, chatIdName: config.telegramChatIdName, apiBaseUrl: config.telegramApiBaseUrl, dashboardUrl, ...(config.telegramApprovedProxy ? { approvedProxy: config.telegramApprovedProxy } : {}) });
     dispatcher = new NotificationDispatcher(runtime.store, notifier, { metrics, retentionDays: config.alertRetentionDays });
     const telegramHealth = await notifier.health();
     metrics.set('mintbot_notification_up', telegramHealth.status === 'ok' ? 1 : 0);
@@ -105,7 +109,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const rpcUrl = secrets.get(config.intelligenceRpcName);
     if (!rpcUrl) throw new Error('INTELLIGENCE_RPC_SECRET_MISSING');
     logger.registerSecret(rpcUrl);
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, dashboardUrl: `http://${config.bindHost === '::1' ? '[::1]' : config.bindHost}:${config.port}/` });
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
   const dashboard = createDashboard(runtime.store);
