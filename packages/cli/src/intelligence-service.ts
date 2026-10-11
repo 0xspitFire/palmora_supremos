@@ -1,6 +1,7 @@
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 import { ScanTracker } from './scan-tracker.js';
 import { readHeartbeat, writeHeartbeat } from './heartbeat.js';
+import type { MonitorPing } from './monitor-ping.js';
 import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, pauseCard, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
@@ -25,6 +26,9 @@ export interface IntelligenceServiceOptions {
   /** How often the heartbeat is taken (default 30 s). A gap above `pauseMinMs` (default 5 min) is reported as a pause. */
   heartbeatIntervalMs?: number;
   pauseMinMs?: number;
+  /** Signal sent to an outside monitor every minute: ok while chain scans work, fail when they have stalled. Silence is what the monitor alerts on. */
+  monitorPing?: MonitorPing;
+  monitorIntervalMs?: number;
   now?: () => Date;
 }
 
@@ -112,8 +116,23 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
     catch (error) { options.logger?.warn({ event: 'pause_message_failed', error }, 'pause message failed'); }
   };
   void runHeartbeat();
+  // Outside monitor: 'ok' only while a chain scan worked within the last 15 minutes (start-up gets the same grace).
+  let monitorWasOk: boolean | undefined;
+  const runMonitor = async (): Promise<void> => {
+    if (!options.monitorPing) return;
+    const current = now();
+    const healthy = current.getTime() - (tracker.lastOkAt ?? startedAt).getTime() < 15 * 60_000;
+    try {
+      await options.monitorPing(healthy ? 'ok' : 'fail');
+      if (monitorWasOk !== healthy) options.logger?.info({ event: 'monitor_ping_state', status: healthy ? 'ok' : 'fail' }, 'monitor ping state changed');
+      monitorWasOk = healthy;
+    } catch (error) {
+      options.logger?.warn({ event: 'monitor_ping_failed', reason: error instanceof Error ? error.message : 'unknown' }, 'monitor ping failed');
+    }
+  };
+  void runMonitor();
   void sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, startedAt, ...(options.startNumber !== undefined ? { startNumber: options.startNumber } : {}), ...(options.version ? { version: options.version } : {}) }));
-  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void runHeartbeat(), options.heartbeatIntervalMs ?? 30_000)];
+  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void runHeartbeat(), options.heartbeatIntervalMs ?? 30_000), setInterval(() => void runMonitor(), options.monitorIntervalMs ?? 60_000)];
   for (const timer of timers) timer.unref();
   void runDiscovery().then(runReadiness);
   return {
