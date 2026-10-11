@@ -1141,13 +1141,13 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)').run(canonicalId('fee', `${chainProfileId}:${encode(snapshot)}:${this.now().toISOString()}`), chainProfileId, `backend-${digest(encode({ ...snapshot, at: this.now().toISOString() }))}`, chainId === ETHEREUM_CHAIN_ID ? 'ordering' : 'fee_only', values.maxTotalFeeWei.toString(), values.freeCapWei.toString(), values.priorityComponentWei.toString(), 2, values.paidMintsEnabled ? 1 : 0, this.now().toISOString(), values.priorityComponentWei === 0n ? 'requires_po_resolution' : 'allowed');
   }
 
-  /** Whether the stored kill switch is on, and who last changed it and when. */
   /**
    * Key 2 (D-040). There is no way to write the record yet (the owner command is a later, separately reviewed change), so
    * this always answers "none" and every Robinhood live path stays refused. It is not read from configuration or the environment.
    */
   public robinhoodEnablement(): unknown { return undefined; }
 
+  /** Whether the stored kill switch is on, and who last changed it and when. */
   public killSwitchStatus(): { engaged: boolean; changedBy: string; changedAt: string } {
     return this.databaseStore.killSwitchStatus();
   }

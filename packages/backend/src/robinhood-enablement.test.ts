@@ -57,6 +57,15 @@ describe('Robinhood enablement record (Key 2)', () => {
     expect(() => validRobinhoodEnablement({ get recordId(): string { throw new Error('x'); } }, now)).not.toThrow();
   });
 
+  it('does not count inherited properties as evidence (prototype pollution)', () => {
+    const inherited = Object.create({ E7: true }) as Record<string, unknown>;
+    for (const step of ROBINHOOD_EVIDENCE_STEPS.filter((name) => name !== 'E7')) inherited[step] = true;
+    inherited.junk = true;
+    expect(validRobinhoodEnablement({ ...good(), evidence: inherited }, now)).toBeUndefined();
+    const onlyInherited = Object.create(good().evidence) as Record<string, unknown>;
+    expect(validRobinhoodEnablement({ ...good(), evidence: onlyInherited }, now)).toBeUndefined();
+  });
+
   it('is not turned on by an environment variable or setting', () => {
     process.env.MINT_BOT_ROBINHOOD_ENABLED = 'true';
     process.env.ROBINHOOD_EXECUTION_ENABLED = '1';
@@ -82,5 +91,11 @@ describe('every Robinhood refusal site goes through the one policy', () => {
     const source = await read('canonical-store.ts');
     expect(source).toMatch(/public robinhoodEnablement\(\): unknown \{ return undefined; \}/);
     expect(await read('coordinator.ts')).toContain('this.canonicalStore()?.robinhoodEnablement?.()');
+  });
+
+  it('routes campaign creation of a paid Robinhood mint through the policy too', async () => {
+    const source = await read('application.ts');
+    expect(source).not.toMatch(/throw new Error\('ROBINHOOD_PAID_MINTS_DISABLED'\)/);
+    expect(source).toContain("assertRobinhoodLiveAllowed('paid'");
   });
 });

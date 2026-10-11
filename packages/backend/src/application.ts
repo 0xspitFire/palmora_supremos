@@ -1,3 +1,4 @@
+import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { randomUUID } from 'node:crypto';
 import type { Campaign, ChainVerification, CommandName, FeePolicy, ValidatedCampaign } from './types.js';
 import type { BackendStore } from './store.js';
@@ -133,7 +134,7 @@ export class BackendApplication {
     if (totalFeeBudget > input.gasCeilingWei) throw new Error('GAS_CEILING_EXCEEDED');
     const mintPriceWei = input.mintPriceWei ?? 0n;
     if (input.feePolicy.kind === 'paid') {
-      if (input.chainId === 4663) throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
+      if (input.chainId === 4663) assertRobinhoodLiveAllowed('paid', (this.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), new Date());
       if (input.chainId !== 1 || input.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
       if (mintPriceWei <= 0n) throw new Error('PAID_MINT_VALUE_REQUIRED');
       const allInExposure = mintPriceWei * BigInt(input.quantity) + totalFeeBudget;

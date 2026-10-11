@@ -527,7 +527,6 @@ export interface MintJobResult {
 // Config
 // ─────────────────────────────────────────────────────────────
 
-/** Full mint job configuration. */
 /**
  * What the engine is told when the owner has enabled Robinhood (D-040, Key 2). The backend judges the stored record
  * (owner-written, evidence complete) and passes on only these two facts. The engine re-checks the expiry itself.
@@ -537,6 +536,7 @@ export interface RobinhoodEnablementGrant {
   readonly paidAllowed: boolean;
 }
 
+/** Full mint job configuration. */
 export interface MintJobConfig {
   readonly target: {
     readonly chain: 'ethereum' | 'base' | 'robinhood';

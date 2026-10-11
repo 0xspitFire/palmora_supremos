@@ -160,3 +160,15 @@ describe('Robinhood enablement grant (D-040, Key 2): refused unless a current ow
     expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, current, now)).not.toThrow();
   });
 });
+
+describe('the engine hands its Robinhood grant to the policy at every check', () => {
+  it('passes safety.robinhoodGrant at all four call sites and reads no environment variable for it', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('./mint-engine.ts', import.meta.url), 'utf8');
+    const calls = source.match(/assertDirectChainExecutionPolicy\(/g)?.length ?? 0;
+    const granted = source.match(/this\.config\.safety\.robinhoodGrant/g)?.length ?? 0;
+    expect(calls).toBe(4);
+    expect(granted).toBe(4);
+    expect(source).not.toMatch(/process\.env[^\n]*(ROBINHOOD|GRANT)/i);
+  });
+});

@@ -47,8 +47,10 @@ function judge(value: unknown, now: Date): RobinhoodEnablement | undefined {
   if (Date.parse(approvedAt) > nowMs || Date.parse(expiresAt) <= nowMs || Date.parse(expiresAt) <= Date.parse(approvedAt)) return undefined;
   if (typeof paidAllowed !== 'boolean') return undefined;
   if (!PLAIN_OBJECT(evidence)) return undefined;
-  if (Object.keys(evidence).length !== ROBINHOOD_EVIDENCE_STEPS.length) return undefined;
-  for (const step of ROBINHOOD_EVIDENCE_STEPS) if (evidence[step] !== true) return undefined;
+  // Own properties only: an inherited property (prototype pollution) never counts as evidence.
+  const steps = Object.keys(evidence);
+  if (steps.length !== ROBINHOOD_EVIDENCE_STEPS.length || steps.some((step) => !(ROBINHOOD_EVIDENCE_STEPS as readonly string[]).includes(step))) return undefined;
+  for (const step of ROBINHOOD_EVIDENCE_STEPS) if (!Object.hasOwn(evidence, step) || evidence[step] !== true) return undefined;
   return { recordId, approvedBy, approvedAt, expiresAt, paidAllowed, evidence: evidence as Record<RobinhoodEvidenceStep, true> };
 }
 
