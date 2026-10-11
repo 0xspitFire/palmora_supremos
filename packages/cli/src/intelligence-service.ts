@@ -1,6 +1,7 @@
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 import { ScanTracker } from './scan-tracker.js';
-import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, ReadinessSweep, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
+import { readHeartbeat, writeHeartbeat } from './heartbeat.js';
+import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, pauseCard, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
   store: BackendStore;
@@ -19,6 +20,11 @@ export interface IntelligenceServiceOptions {
   /** Disk and backup facts for the health warnings; supplied by the host. Failing or absent means those two are not checked. */
   sampleHost?: () => Promise<Pick<HealthSample, 'disk' | 'backup'>>;
   healthIntervalMs?: number;
+  /** Where to save the last time the service was alive; with it, a pause or stop is reported when the bot is back. */
+  heartbeatPath?: string;
+  /** How often the heartbeat is taken (default 30 s). A gap above `pauseMinMs` (default 5 min) is reported as a pause. */
+  heartbeatIntervalMs?: number;
+  pauseMinMs?: number;
   now?: () => Date;
 }
 
@@ -84,8 +90,30 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
     const scanStale = current.getTime() - (lastScanAt ?? startedAt).getTime() >= 15 * 60_000;
     await sendStatus(`checkin:${current.toISOString().slice(0, 10)}`, checkInMessage(checkInCounts(options.store, options.repo, current), { runningSince: startedAt, now: current, lastScanAt, scanStale }));
   };
+  // Pause notice: a frozen bot cannot announce that it froze, so the message goes out as soon as the beats resume.
+  const pauses = new PauseWatch(options.pauseMinMs ?? 5 * 60_000);
+  let heartbeatReady = options.heartbeatPath === undefined;
+  const runHeartbeat = async (): Promise<void> => {
+    const path = options.heartbeatPath;
+    if (!path) return;
+    const current = now();
+    if (!heartbeatReady) {
+      heartbeatReady = true;
+      const saved = await readHeartbeat(path);
+      if (saved) pauses.beat(saved);
+    }
+    const span = pauses.beat(current);
+    try { await writeHeartbeat(path, current); } catch (error) { options.logger?.warn({ event: 'heartbeat_write_failed', error }, 'heartbeat write failed'); }
+    if (!span) return;
+    options.logger?.warn({ event: 'bot_resumed_after_pause', from: span.from.toISOString(), to: span.to.toISOString(), minutes: Math.round(span.ms / 60_000) }, 'bot resumed after a pause');
+    const block = options.repo.cursor(1, 'seadrop-v1')?.toString();
+    const system = pauseCard({ from: span.from, to: span.to, ...(block ? { resumedBlock: block } : {}) });
+    try { await options.alerts.intelligence({ kind: 'health', dedupe: `pause:${span.from.toISOString()}`, text: plainSystemText(system), priority: 'immediate', system, at: span.to.toISOString() }); }
+    catch (error) { options.logger?.warn({ event: 'pause_message_failed', error }, 'pause message failed'); }
+  };
+  void runHeartbeat();
   void sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, startedAt, ...(options.startNumber !== undefined ? { startNumber: options.startNumber } : {}), ...(options.version ? { version: options.version } : {}) }));
-  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000)];
+  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void runHeartbeat(), options.heartbeatIntervalMs ?? 30_000)];
   for (const timer of timers) timer.unref();
   void runDiscovery().then(runReadiness);
   return {

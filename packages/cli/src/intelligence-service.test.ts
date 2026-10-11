@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AlertManager, DurableStore, plainSystemText, type ChainScanOutcome, type DropSnapshot, type IntelligenceChainPort, type IntelligenceRepositoryPort, type SimulationOutcome } from '@mint-bot/backend';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { writeHeartbeat } from './heartbeat.js';
 import { startIntelligence } from './intelligence-service.js';
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 
@@ -101,5 +105,48 @@ describe('trial status messages (T-005)', () => {
     const service = startIntelligence({ store, repo: new Repo(1), port: new IdlePort(), alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
     await expect(service.runOnce()).resolves.toBeUndefined();
     service.stop();
+  });
+});
+
+describe('pause notice', () => {
+  const options = (h: ReturnType<typeof harness>, now: () => Date, heartbeatPath?: string) => ({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now, ...(heartbeatPath ? { heartbeatPath } : {}) });
+
+  it('tells the owner, once, that the bot was paused when the saved heartbeat is old, with the time window', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mint-pause-'));
+    try {
+      const path = join(directory, 'heartbeat');
+      await writeHeartbeat(path, new Date('2026-10-11T08:00:00.000Z'));
+      const now = () => new Date('2026-10-11T15:00:00.000Z');
+      const h = harness(now);
+      const service = startIntelligence(options(h, now, path));
+      await vi.waitFor(() => expect(h.sent.some((text) => text.includes('BOT WAS PAUSED'))).toBe(true));
+      service.stop();
+      const message = h.sent.find((text) => text.includes('BOT WAS PAUSED')) ?? '';
+      expect(message).toContain('2026-10-11 08:00 UTC to 2026-10-11 15:00 UTC (7 h 0 min)');
+      expect(message).toContain('block 21,000,000');
+      // A second start with the same saved heartbeat is the same pause: the durable dedupe sends nothing new.
+      await writeHeartbeat(path, new Date('2026-10-11T08:00:00.000Z'));
+      const again = startIntelligence(options(h, now, path));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      again.stop();
+      expect(h.sent.filter((text) => text.includes('BOT WAS PAUSED'))).toHaveLength(1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('says nothing after a short restart, with no heartbeat file, or when no path is given', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mint-pause-'));
+    try {
+      const path = join(directory, 'heartbeat');
+      await writeHeartbeat(path, new Date('2026-10-11T14:58:00.000Z'));
+      const now = () => new Date('2026-10-11T15:00:00.000Z');
+      for (const heartbeatPath of [path, join(directory, 'missing'), undefined]) {
+        const h = harness(now);
+        const service = startIntelligence(options(h, now, heartbeatPath));
+        await vi.waitFor(() => expect(h.sent.length).toBeGreaterThan(0));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        service.stop();
+        expect(h.sent.some((text) => text.includes('PAUSED'))).toBe(false);
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });
