@@ -20,6 +20,7 @@ import { createCliRuntime, configuredSecretRoot } from './runtime.js';
 import { createDashboard } from './dashboard.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { startIntelligence } from './intelligence-service.js';
+import { runBackupJob, startBackupScheduler } from './backup-scheduler.js';
 import { createMonitorPing, validMonitorUrl } from './monitor-ping.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 
@@ -116,6 +117,17 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
+  // Scheduled encrypted backups, only when the owner has put BACKUP_ENCRYPTION_KEY in the secret store.
+  let backups: { stop(): void } | undefined;
+  if (config.secretStorePath) {
+    const backupKey = (await loadHostSecretStore(config.secretStorePath)).get('BACKUP_ENCRYPTION_KEY');
+    if (backupKey) {
+      logger.registerSecret(backupKey);
+      const paths = { script: join(config.projectRoot, 'scripts', 'backup-job.mjs'), storePath: config.statePath, backupDir: config.backupDir, statusPath: config.backupStatusPath, killSwitchPath: config.killSwitchPath };
+      backups = startBackupScheduler({ run: () => runBackupJob(paths, backupKey), statusPath: config.backupStatusPath, logger });
+      logger.info({ event: 'backup_scheduler_started' }, 'scheduled backups on');
+    } else logger.info({ event: 'backup_scheduler_off' }, 'scheduled backups off: no backup key in the secret store');
+  }
   const dashboard = createDashboard(runtime.store);
   const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics, readModel: dashboard.readModel, dashboard: (url) => dashboard.render(url) });
   await http.start();
@@ -128,6 +140,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     stopped = true;
     metrics.set('mintbot_process_up', 0);
     intelligence?.stop();
+    backups?.stop();
     await orchestrator.stop();
     await http.stop();
     (runtime.store as CanonicalStoreBridge).close();
