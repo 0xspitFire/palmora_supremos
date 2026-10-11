@@ -20,6 +20,7 @@ import { createCliRuntime, configuredSecretRoot } from './runtime.js';
 import { createDashboard } from './dashboard.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { startIntelligence } from './intelligence-service.js';
+import { createMonitorPing, validMonitorUrl } from './monitor-ping.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 
 export interface RunningOrchestratorService {
@@ -109,7 +110,10 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const rpcUrl = secrets.get(config.intelligenceRpcName);
     if (!rpcUrl) throw new Error('INTELLIGENCE_RPC_SECRET_MISSING');
     logger.registerSecret(rpcUrl);
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    const monitorUrl = validMonitorUrl(secrets.get('HEALTHCHECK_PING_URL'));
+    if (secrets.get('HEALTHCHECK_PING_URL') && !monitorUrl) logger.warn({ event: 'monitor_url_invalid' }, 'outside monitor address is not a valid https address; no signal will be sent');
+    if (monitorUrl) logger.registerSecret(monitorUrl);
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
   const dashboard = createDashboard(runtime.store);
