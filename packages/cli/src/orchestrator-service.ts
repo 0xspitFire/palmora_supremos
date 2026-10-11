@@ -109,7 +109,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const rpcUrl = secrets.get(config.intelligenceRpcName);
     if (!rpcUrl) throw new Error('INTELLIGENCE_RPC_SECRET_MISSING');
     logger.registerSecret(rpcUrl);
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
   const dashboard = createDashboard(runtime.store);

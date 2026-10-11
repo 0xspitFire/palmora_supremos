@@ -273,3 +273,23 @@ export function recoveredCard(key: HealthKey, input: { since: Date; now: Date })
     summary: `Recovered: ${HEALTH_TITLE[key]}.`,
   });
 }
+
+/** The bot was not running for a while (asleep, stopped or frozen). Sent after the fact, when it is back. */
+export function pauseCard(input: { from: Date; to: Date; resumedBlock?: string }): SystemCard {
+  const seconds = (input.to.getTime() - input.from.getTime()) / 1_000;
+  const clock = (date: Date): string => `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  return buildSystemCard({
+    title: 'BOT WAS PAUSED',
+    severity: 'attention',
+    lines: [
+      { label: 'What happened', value: `the bot was not running from ${clock(input.from)} to ${clock(input.to)} (${duration(seconds)}). It is running again now.`, strong: true },
+      { label: 'Likely cause', value: 'the computer was asleep or off, or the service was stopped.' },
+      { label: 'What it means', value: `nothing was watched during that time. Scanning continues from the last block it checked${input.resumedBlock ? ` (block ${Number(input.resumedBlock).toLocaleString('en-US')})` : ''}, so no mints are skipped, but alerts for that period arrive late.` },
+    ],
+    steps: ['If this was not planned, keep the computer awake and plugged in, or run the bot on an always-on machine.'],
+    dashboard: true,
+    eventAt: input.from,
+    eventLabel: 'the pause began',
+    summary: `Bot was paused for ${duration(seconds)}; running again.`,
+  });
+}
