@@ -527,6 +527,15 @@ export interface MintJobResult {
 // Config
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * What the engine is told when the owner has enabled Robinhood (D-040, Key 2). The backend judges the stored record
+ * (owner-written, evidence complete) and passes on only these two facts. The engine re-checks the expiry itself.
+ */
+export interface RobinhoodEnablementGrant {
+  readonly expiresAt: string;
+  readonly paidAllowed: boolean;
+}
+
 /** Full mint job configuration. */
 export interface MintJobConfig {
   readonly target: {
@@ -569,6 +578,11 @@ export interface MintJobConfig {
      * The caller sets them from the approved policy; the engine never raises them itself.
      */
     readonly freeMintReserveCaps?: { readonly perWalletCapWei: bigint; readonly activePeriodCapWei: bigint };
+    /**
+     * Robinhood only (D-040): the owner's current enablement. Without it, every Robinhood live path is refused. Never set from
+     * configuration, flags or the environment; the command line passes it only from the stored, validated owner record.
+     */
+    readonly robinhoodGrant?: RobinhoodEnablementGrant;
   };
 readonly broadcast: {
     readonly mode: BroadcastMode;
