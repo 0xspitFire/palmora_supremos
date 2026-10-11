@@ -230,7 +230,7 @@ export class MintEngine {
     try {
       const configuredChainId = this.config.target.chain === 'ethereum' ? 1 : this.config.target.chain === 'base' ? 8453 : 4663;
       // This runs before any mutable chain registry flag is consulted.
-      assertDirectChainExecutionPolicy(configuredChainId, undefined, this.config.safety.dryRun);
+      assertDirectChainExecutionPolicy(configuredChainId, undefined, this.config.safety.dryRun, this.config.safety.robinhoodGrant);
       assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
       if (!this.config.safety.dryRun && (!this.lifecycleStore || this.lifecycleStore.durable !== true || this.lifecycleStore.storeKind !== 'normalized-sqlite')) {
         throw new LifecycleGateError('DURABLE_LIFECYCLE_STORE_REQUIRED', 'admission', 'Live execution requires a normalized durable lifecycle store');
@@ -266,7 +266,7 @@ export class MintEngine {
       // Robinhood requires staged finality and integrated operational gates that
       // are not available in this standalone engine path. Fail closed rather
       // than reporting a receipt as product success before Ethereum finality.
-      assertDirectChainExecutionPolicy(chainId, undefined, this.config.safety.dryRun);
+      assertDirectChainExecutionPolicy(chainId, undefined, this.config.safety.dryRun, this.config.safety.robinhoodGrant);
 
       // ── 2. Create RPC client ────────────────────────────────
       const rpcUrl = this.config.broadcast.rpcEndpoints[0] ?? chainConfig.rpcEndpoints[0];
@@ -317,7 +317,7 @@ export class MintEngine {
         );
       }
       const mintCostPerWallet = drop.mintPrice * BigInt(this.config.target.quantity);
-      assertDirectChainExecutionPolicy(chainId, mintCostPerWallet, this.config.safety.dryRun);
+      assertDirectChainExecutionPolicy(chainId, mintCostPerWallet, this.config.safety.dryRun, this.config.safety.robinhoodGrant);
       if (!this.config.safety.dryRun) {
         assertTimingWindow(
           drop.startTime,
@@ -612,6 +612,7 @@ export class MintEngine {
       chainId,
       drop.mintPrice * BigInt(this.config.target.quantity),
       this.config.safety.dryRun,
+      this.config.safety.robinhoodGrant,
     );
     assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
     const admissionGate = new AdmissionGate();

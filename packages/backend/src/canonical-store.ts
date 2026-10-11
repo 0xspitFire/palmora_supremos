@@ -1,3 +1,4 @@
+import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { unresolvedRunIds } from './kill-switch-release.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type {
@@ -56,6 +57,8 @@ export interface CanonicalAdmissionResult {
 export interface CanonicalExecutionStore extends BackendStore {
   admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult>;
   abortRemaining(reason: string): Promise<void>;
+  /** Key 2 for Robinhood (D-040): the owner's enablement record, or undefined when there is none. */
+  robinhoodEnablement?(): unknown;
 }
 
 interface DatabaseRunRow {
@@ -600,7 +603,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (input.intent.campaignId !== input.campaign.id || input.run.campaignId !== input.campaign.id) throw new Error('INTENT_CAMPAIGN_MISMATCH');
     const armedWallets = new Set(input.intent.wallets.map((wallet) => wallet.toLowerCase()));
     if (wallets.some((wallet) => !armedWallets.has(wallet.toLowerCase()))) throw new Error('INTENT_WALLET_MISMATCH');
-    if (input.campaign.chainId === ROBINHOOD_CHAIN_ID && input.campaign.feePolicy.kind === 'paid') throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
+    if (input.campaign.chainId === ROBINHOOD_CHAIN_ID && input.campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), this.now());
     const requestFingerprint = this.runFingerprint(input.run.id);
     if (input.run.requestDigest !== requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
     const mintClassForFleet: 'free' | 'paid' = input.campaign.mintPriceWei === 0n ? 'free' : 'paid';
@@ -1109,7 +1112,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private ensureFeePolicy(chainProfileId: string, policy: FeePolicy, chainId: 1 | 4663): void {
-    if (policy.kind === 'paid' && chainId === ROBINHOOD_CHAIN_ID) throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
+    if (policy.kind === 'paid' && chainId === ROBINHOOD_CHAIN_ID) assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), this.now());
     const existing = this.db.prepare('SELECT paid_mints_enabled FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(chainProfileId) as { paid_mints_enabled: number } | undefined;
     if (existing) {
       if (policy.kind === 'paid' && existing.paid_mints_enabled !== 1) throw new Error('PAID_MINT_POLICY_REQUIRED');
@@ -1139,6 +1142,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   /** Whether the stored kill switch is on, and who last changed it and when. */
+  /**
+   * Key 2 (D-040). There is no way to write the record yet (the owner command is a later, separately reviewed change), so
+   * this always answers "none" and every Robinhood live path stays refused. It is not read from configuration or the environment.
+   */
+  public robinhoodEnablement(): unknown { return undefined; }
+
   public killSwitchStatus(): { engaged: boolean; changedBy: string; changedAt: string } {
     return this.databaseStore.killSwitchStatus();
   }
@@ -1327,7 +1336,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private assertCanonicalFeePolicy(campaign: Campaign, fee: FeePolicy): void {
     const profile = this.chainProfileForCampaign(campaign.id);
     if (!profile) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
-    if (profile.chainId === ROBINHOOD_CHAIN_ID && fee.kind === 'paid') throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
+    if (profile.chainId === ROBINHOOD_CHAIN_ID && fee.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), this.now());
     const totalFee = fee.totalFeeBudgetWei ?? 0n;
     if (profile.chainId === ETHEREUM_CHAIN_ID && fee.kind === 'paid' && campaign.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
     if (totalFee < 0n || totalFee > campaign.spendPolicy.gasCeilingWei) throw new Error('GAS_CEILING_EXCEEDED');
@@ -1343,7 +1352,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const profile = this.db.prepare('SELECT id, chain_id, execution_enabled FROM chain_profile WHERE chain_id = ?').get(campaign.chainId) as { id: string; chain_id: number; execution_enabled: number } | undefined;
     if (!profile) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
     if (profile.chain_id !== campaign.chainId) throw new Error('CHAIN_PROFILE_IDENTITY_MISMATCH');
-    if (campaign.chainId === ROBINHOOD_CHAIN_ID) throw new Error('ROBINHOOD_EXECUTION_DISABLED');
+    if (campaign.chainId === ROBINHOOD_CHAIN_ID) assertRobinhoodLiveAllowed('free', this.robinhoodEnablement(), this.now());
     if (profile.execution_enabled !== 1) throw new Error('CHAIN_EXECUTION_DISABLED');
     const verification = this.db.prepare('SELECT status, evidence_json FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1').get(profile.id) as { status: string; evidence_json: string } | undefined;
     const evidence = decodeRecord<{ expiresAt?: string }>(verification?.evidence_json);

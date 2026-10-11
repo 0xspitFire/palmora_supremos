@@ -6,6 +6,7 @@
 
 // Core types
 export type {
+  RobinhoodEnablementGrant,
   SupportedChainId,
   BroadcastMode,
   ChainConfig,

@@ -128,3 +128,35 @@ describe('Gate 3 lifecycle boundaries', () => {
     await expect(new MintEngine(liveConfig('robinhood')).execute('not-used')).rejects.toMatchObject({ code: 'CHAIN_4663_EXECUTION_DISABLED' });
   });
 });
+
+describe('Robinhood enablement grant (D-040, Key 2): refused unless a current owner grant is passed in', () => {
+  const now = new Date('2026-10-12T12:00:00.000Z');
+  const current = { expiresAt: '2026-10-13T12:00:00.000Z', paidAllowed: false };
+
+  it('keeps today\'s answers when there is no grant', () => {
+    expect(() => assertDirectChainExecutionPolicy(4663, 1n, false, undefined, now)).toThrowError(/Paid Robinhood/);
+    expect(() => assertDirectChainExecutionPolicy(4663, 0n, false, undefined, now)).toThrowError(/4663 live execution/);
+    expect(() => assertDirectChainExecutionPolicy(4663, undefined, false, undefined, now)).toThrowError(/4663 live execution/);
+    expect(() => assertDirectChainExecutionPolicy(4663, undefined, true, undefined, now)).not.toThrow();
+  });
+
+  it('allows free live Robinhood only with a current grant, and paid only when the grant allows paid', () => {
+    expect(() => assertDirectChainExecutionPolicy(4663, 0n, false, current, now)).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(4663, 1n, false, current, now)).toThrowError(/Paid Robinhood/);
+    expect(() => assertDirectChainExecutionPolicy(4663, 1n, false, { ...current, paidAllowed: true }, now)).not.toThrow();
+  });
+
+  it('refuses an expired grant, one expiring right now, and malformed grants', () => {
+    expect(() => assertDirectChainExecutionPolicy(4663, 0n, false, { ...current, expiresAt: '2026-10-12T11:59:59.000Z' }, now)).toThrowError(/4663 live execution/);
+    expect(() => assertDirectChainExecutionPolicy(4663, 0n, false, { ...current, expiresAt: now.toISOString() }, now)).toThrowError(/4663 live execution/);
+    for (const bad of [{ expiresAt: 'soon', paidAllowed: true }, { expiresAt: '2026-10-13T12:00:00.000Z' }, { expiresAt: 5, paidAllowed: true }, {}, null, 'yes', true]) {
+      expect(() => assertDirectChainExecutionPolicy(4663, 0n, false, bad as never, now)).toThrowError(/4663 live execution/);
+      expect(() => assertDirectChainExecutionPolicy(4663, 1n, false, bad as never, now)).toThrowError(/Paid Robinhood/);
+    }
+  });
+
+  it('does not touch other chains', () => {
+    expect(() => assertDirectChainExecutionPolicy(1, 1n, false, undefined, now)).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, current, now)).not.toThrow();
+  });
+});

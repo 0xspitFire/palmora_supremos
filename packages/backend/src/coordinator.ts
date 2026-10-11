@@ -4,6 +4,7 @@ import type { AttemptRecord, BackendState, Campaign, CampaignState, EngineAdapte
 import { SpendLedger } from './spend-ledger.js';
 import { EvidenceService, liveRequestDigest } from './evidence.js';
 import { rebindExecutionResult, type CanonicalExecutionStore } from './canonical-store.js';
+import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
 
 export class ExecutionCoordinator {
@@ -58,7 +59,7 @@ export class ExecutionCoordinator {
       if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
       if (!campaign.chainVerification.evidenceId || !campaign.chainVerification.checkedAt || campaign.chainVerification.sourceBlock === undefined) throw new Error('CHAIN_VERIFICATION_EVIDENCE_REQUIRED');
       if (campaign.chainId === 4663 && campaign.broadcastMode !== 'sequencer') throw new Error('ROBINHOOD_SEQUENCER_REQUIRED');
-      if (campaign.chainId === 4663 && campaign.feePolicy.kind === 'paid') throw new Error('ROBINHOOD_PAID_MINTS_DISABLED');
+      if (campaign.chainId === 4663 && campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), new Date());
       if (campaign.chainId === 1 && campaign.feePolicy.kind === 'paid') {
         if (campaign.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
         const fee = campaign.feePolicy.totalFeeBudgetWei;
@@ -102,7 +103,10 @@ export class ExecutionCoordinator {
     assertLiveOperationalReadiness(current.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined);
     this.evidence.assertLiveEvidence({ campaign, wallets: intent.wallets, simulationIds: intent.simulationIds, evidenceAt: intent.evidenceAt });
     if (wallets.length !== intent.wallets.length || wallets.some(wallet => !intent.wallets.some(armed => armed.toLowerCase() === wallet.toLowerCase()))) throw new Error('EXECUTION_FLEET_MISMATCH');
-    if (campaign.chainId === 4663) throw new Error('ROBINHOOD_EXECUTION_DISABLED');
+    if (campaign.chainId === 4663) {
+      assertRobinhoodLiveAllowed('free', this.robinhoodEnablement(), new Date());
+      if (campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), new Date());
+    }
     const totalFee = campaign.feePolicy.totalFeeBudgetWei;
     if (totalFee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
     const reservationAmount = campaign.mintPriceWei * BigInt(campaign.quantity) + totalFee;
@@ -286,6 +290,9 @@ export class ExecutionCoordinator {
   private event(type: string, runId: string | undefined, data: Record<string, unknown>): EventRecord {
     return { id: `evt_${randomUUID()}`, ...(runId ? { runId } : {}), type, at: new Date().toISOString(), data };
   }
+
+  /** Key 2 (D-040). Only the canonical store can supply it; any other store means no record, so Robinhood stays refused. */
+  private robinhoodEnablement(): unknown { return this.canonicalStore()?.robinhoodEnablement?.(); }
 
   private canonicalStore(): CanonicalExecutionStore | undefined {
     const candidate = this.store as Partial<CanonicalExecutionStore>;

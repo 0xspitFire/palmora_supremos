@@ -5,6 +5,7 @@ import type {
   BroadcastResult,
   ExecutionIdentity,
   FinalityStage,
+  RobinhoodEnablementGrant,
   SimulationEvidence,
   ReservationSettlementComponents,
   SpendReservationProvider,
@@ -24,24 +25,34 @@ export class LifecycleGateError extends Error {
   }
 }
 
+function grantIsCurrent(grant: RobinhoodEnablementGrant | undefined, now: Date): grant is RobinhoodEnablementGrant {
+  if (typeof grant !== 'object' || grant === null || typeof grant.paidAllowed !== 'boolean' || typeof grant.expiresAt !== 'string') return false;
+  const expires = Date.parse(grant.expiresAt);
+  return Number.isFinite(expires) && Number.isFinite(now.getTime()) && expires > now.getTime();
+}
+
 /**
- * Hard chain policy. A mutable runtime flag may never turn 4663 into a live
- * execution path. Dry-run inspection is intentionally allowed so the chain
- * can be characterized without signing or broadcasting.
+ * Hard chain policy. A mutable runtime flag may never turn 4663 into a live execution path: only a current, owner-written
+ * grant passed in by the caller can, and without one the answer is exactly what it has always been. Dry-run inspection is
+ * intentionally allowed so the chain can be characterized without signing or broadcasting.
  */
 export function assertDirectChainExecutionPolicy(
   chainId: SupportedChainId,
   mintValueWei: bigint | undefined,
   dryRun: boolean,
+  grant?: RobinhoodEnablementGrant,
+  now: Date = new Date(),
 ): void {
-  if (chainId === 4663 && mintValueWei !== undefined && mintValueWei > 0n) {
+  if (chainId !== 4663) return;
+  const granted = grantIsCurrent(grant, now);
+  if (mintValueWei !== undefined && mintValueWei > 0n && !(granted && grant.paidAllowed)) {
     throw new LifecycleGateError(
       'PAID_ROBINHOOD_BLOCKED',
       'admission',
       'Paid Robinhood execution is hard-blocked by the engine',
     );
   }
-  if (chainId === 4663 && !dryRun) {
+  if (!dryRun && !granted) {
     throw new LifecycleGateError(
       'CHAIN_4663_EXECUTION_DISABLED',
       'admission',
