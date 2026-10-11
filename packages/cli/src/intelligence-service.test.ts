@@ -133,6 +133,22 @@ describe('pause notice', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it('logs what it loaded at start, so a missing pause notice can be explained', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mint-pause-'));
+    try {
+      const path = join(directory, 'heartbeat');
+      await writeHeartbeat(path, new Date('2026-10-11T14:40:00.000Z'));
+      const now = () => new Date('2026-10-11T15:00:00.000Z');
+      const h = harness(now);
+      const events: Array<Record<string, unknown>> = [];
+      const logger = { info: (entry: Record<string, unknown>) => events.push(entry), warn: (entry: Record<string, unknown>) => events.push(entry), error: () => undefined } as never;
+      const service = startIntelligence({ ...options(h, now, path), logger });
+      await vi.waitFor(() => expect(events.some((entry) => entry.event === 'heartbeat_loaded')).toBe(true));
+      service.stop();
+      expect(events.find((entry) => entry.event === 'heartbeat_loaded')).toMatchObject({ savedAt: '2026-10-11T14:40:00.000Z', gapMinutes: 20 });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('says nothing after a short restart, with no heartbeat file, or when no path is given', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mint-pause-'));
     try {
