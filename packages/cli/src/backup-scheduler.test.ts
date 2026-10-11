@@ -73,6 +73,24 @@ describe('scheduled backup job', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it('leaves no restore-check side files behind after a good backup, and removes only this snapshot\'s', async () => {
+    const { removeRestoreLeftovers } = (await import(script)) as { removeRestoreLeftovers: (directory: string, file: string) => Promise<string[]> };
+    const { directory, paths } = await workspace();
+    try {
+      expect(await runBackupJob(paths, KEY)).toEqual({ ok: true });
+      expect((await readdir(paths.backupDir)).filter((name) => name.includes('.restore.tmp'))).toEqual([]);
+      // Leftovers of this snapshot go; another snapshot's files and unrelated files stay.
+      await writeFile(join(paths.backupDir, '.a.snapshot.enc.1.restore.tmp-wal'), 'x');
+      await writeFile(join(paths.backupDir, '.a.snapshot.enc.1.restore.tmp-shm'), 'x');
+      await writeFile(join(paths.backupDir, '.b.snapshot.enc.2.restore.tmp-wal'), 'x');
+      await writeFile(join(paths.backupDir, 'notes.txt'), 'x');
+      expect((await removeRestoreLeftovers(paths.backupDir, 'a.snapshot.enc')).sort()).toEqual(['.a.snapshot.enc.1.restore.tmp-shm', '.a.snapshot.enc.1.restore.tmp-wal']);
+      const left = await readdir(paths.backupDir);
+      expect(left).toContain('.b.snapshot.enc.2.restore.tmp-wal');
+      expect(left).toContain('notes.txt');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('refuses a retention other than 30 days', async () => {
     const { directory, paths } = await workspace();
     try {

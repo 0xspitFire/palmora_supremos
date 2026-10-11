@@ -36,6 +36,20 @@ async function script(name, extra = {}, base = process.env) {
   } catch { throw new Error(name === 'backup.mjs' ? 'BACKUP_SNAPSHOT_FAILED' : 'BACKUP_RESTORE_CHECK_FAILED'); }
 }
 
+/** restore-check.mjs removes its temporary restored database but leaves the SQLite side files (-shm, -wal) beside it. Those can hold plaintext pages, so remove every leftover of this snapshot's restore check. */
+export async function removeRestoreLeftovers(directory, snapshotFile) {
+  const prefix = `.${snapshotFile}.`;
+  const removed = [];
+  for (const name of await readdir(directory)) {
+    if (!name.startsWith(prefix) || !/\.restore\.tmp(-shm|-wal|-journal)?$/.test(name)) continue;
+    const info = await lstat(resolve(directory, name)).catch(() => undefined);
+    if (!info?.isFile()) continue;
+    await rm(resolve(directory, name), { force: true });
+    removed.push(name);
+  }
+  return removed;
+}
+
 /** Removes snapshot files (and their checksum files) older than the retention window. The newest snapshot is never removed. */
 export async function prune(directory, now = Date.now(), keepNewest = 1) {
   const names = (await readdir(directory)).filter((name) => name.endsWith('.snapshot.enc'));
@@ -64,7 +78,8 @@ async function main() {
   const snapshot = resolve(backupDir, made.file);
   const discard = async () => { await rm(snapshot, { force: true }); await rm(`${snapshot}.sha256`, { force: true }); };
   let restored;
-  try { restored = await script('restore-check.mjs', { RESTORE_SNAPSHOT: snapshot }); } catch (error) { await discard(); throw error; }
+  try { restored = await script('restore-check.mjs', { RESTORE_SNAPSHOT: snapshot }); } catch (error) { await removeRestoreLeftovers(backupDir, made.file); await discard(); throw error; }
+  await removeRestoreLeftovers(backupDir, made.file);
   if (restored.status !== 'ok') { await discard(); throw new Error('BACKUP_RESTORE_CHECK_FAILED'); }
   const removed = await prune(backupDir);
   await writeStatus({ status: 'ok', operation: 'backup', file: made.file, sha256: made.sha256, encrypted: true, restoreVerified: true, retentionDays: RETENTION_DAYS, removedOld: removed.length });
