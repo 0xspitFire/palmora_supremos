@@ -5,7 +5,7 @@
 // BACKUP_ENCRYPTION_KEY, BACKUP_RETENTION_DAYS (must be 30). The key is passed on to the two existing scripts and is
 // never written anywhere. On any failure the status file says "failed" with a short code only (no path, no key).
 import { execFile } from 'node:child_process';
-import { mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -23,9 +23,15 @@ async function writeStatus(body) {
   await rename(temporary, statusPath);
 }
 
-async function script(name, extra = {}) {
+/** backup.mjs writes its own "ok" status as soon as the snapshot exists, before the restore check. It must not get the status path, so an unverified "ok" can never be left behind if this job stops half way. */
+export function backupChildEnv(env) {
+  const { BACKUP_STATUS_PATH: _a, MINT_BOT_BACKUP_STATUS_PATH: _b, ...rest } = env;
+  return rest;
+}
+
+async function script(name, extra = {}, base = process.env) {
   try {
-    const { stdout } = await run(process.execPath, [resolve(scripts, name)], { env: { ...process.env, ...extra }, timeout: 4 * 60_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await run(process.execPath, [resolve(scripts, name)], { env: { ...base, ...extra }, timeout: 4 * 60_000, maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout.trim().split('\n').at(-1));
   } catch { throw new Error(name === 'backup.mjs' ? 'BACKUP_SNAPSHOT_FAILED' : 'BACKUP_RESTORE_CHECK_FAILED'); }
 }
@@ -34,7 +40,10 @@ async function script(name, extra = {}) {
 export async function prune(directory, now = Date.now(), keepNewest = 1) {
   const names = (await readdir(directory)).filter((name) => name.endsWith('.snapshot.enc'));
   const dated = [];
-  for (const name of names) dated.push({ name, at: (await stat(resolve(directory, name))).mtimeMs });
+  // Only regular files count; a dangling link or a folder with that name is skipped, never followed or removed.
+  for (const name of names) {
+    try { const info = await lstat(resolve(directory, name)); if (info.isFile()) dated.push({ name, at: info.mtimeMs }); } catch { /* vanished: ignore */ }
+  }
   dated.sort((left, right) => right.at - left.at);
   const removed = [];
   for (const { name, at } of dated.slice(keepNewest)) {
@@ -49,11 +58,14 @@ export async function prune(directory, now = Date.now(), keepNewest = 1) {
 async function main() {
   if (Number(process.env.BACKUP_RETENTION_DAYS ?? RETENTION_DAYS) !== RETENTION_DAYS) throw new Error('BACKUP_RETENTION_MUST_BE_30_DAYS');
   if (!process.env.BACKUP_ENCRYPTION_KEY) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
+  if (process.env.BACKUP_ENCRYPTION_KEY.length < 32) throw new Error('BACKUP_ENCRYPTION_KEY_TOO_SHORT');
   if (!backupDir) throw new Error('BACKUP_DIR_REQUIRED');
-  const made = await script('backup.mjs');
+  const made = await script('backup.mjs', {}, backupChildEnv(process.env));
   const snapshot = resolve(backupDir, made.file);
-  const restored = await script('restore-check.mjs', { RESTORE_SNAPSHOT: snapshot });
-  if (restored.status !== 'ok') throw new Error('BACKUP_RESTORE_CHECK_FAILED');
+  const discard = async () => { await rm(snapshot, { force: true }); await rm(`${snapshot}.sha256`, { force: true }); };
+  let restored;
+  try { restored = await script('restore-check.mjs', { RESTORE_SNAPSHOT: snapshot }); } catch (error) { await discard(); throw error; }
+  if (restored.status !== 'ok') { await discard(); throw new Error('BACKUP_RESTORE_CHECK_FAILED'); }
   const removed = await prune(backupDir);
   await writeStatus({ status: 'ok', operation: 'backup', file: made.file, sha256: made.sha256, encrypted: true, restoreVerified: true, retentionDays: RETENTION_DAYS, removedOld: removed.length });
   console.log(JSON.stringify({ status: 'ok', file: made.file, restoreVerified: true, removedOld: removed.length }));

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -46,6 +46,7 @@ describe('scheduled backup job', () => {
     try {
       expect(await runBackupJob(paths, '')).toEqual({ ok: false, code: 'BACKUP_ENCRYPTION_KEY_REQUIRED' });
       expect(JSON.parse(await readFile(paths.statusPath, 'utf8'))).toMatchObject({ status: 'failed', code: 'BACKUP_ENCRYPTION_KEY_REQUIRED' });
+      expect(await runBackupJob(paths, 'short')).toEqual({ ok: false, code: 'BACKUP_ENCRYPTION_KEY_TOO_SHORT' });
       const plain = join(directory, 'plain.sqlite');
       const database = new Database(plain);
       database.exec('create table t (a text)');
@@ -56,6 +57,19 @@ describe('scheduled backup job', () => {
       const text = await readFile(paths.statusPath, 'utf8');
       expect(text).not.toContain(KEY);
       expect(text).not.toContain(directory);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('leaves no snapshot and writes failed when the restore check fails, and never passes the status path to the snapshot step', async () => {
+    const { backupChildEnv } = (await import(script)) as { backupChildEnv: (env: Record<string, string>) => Record<string, string> };
+    expect(backupChildEnv({ A: '1', BACKUP_STATUS_PATH: '/x', MINT_BOT_BACKUP_STATUS_PATH: '/y' })).toEqual({ A: '1' });
+    const { directory, paths } = await workspace();
+    try {
+      // The restore check needs the kill-switch file to exist; without it the check fails after the snapshot was made.
+      const result = await runBackupJob({ ...paths, killSwitchPath: join(directory, 'no-such-kill-file') }, KEY);
+      expect(result).toEqual({ ok: false, code: 'BACKUP_RESTORE_CHECK_FAILED' });
+      expect((await readdir(paths.backupDir)).filter((name) => name.includes('.snapshot.enc'))).toEqual([]);
+      expect(JSON.parse(await readFile(paths.statusPath, 'utf8'))).toMatchObject({ status: 'failed', code: 'BACKUP_RESTORE_CHECK_FAILED' });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -83,8 +97,13 @@ describe('scheduled backup job', () => {
       expect((await prune(directory, now)).sort()).toEqual(['a.snapshot.enc', 'b.snapshot.enc']);
       expect((await readdir(directory)).sort()).toEqual(['c.snapshot.enc', 'c.snapshot.enc.sha256']);
       // Everything old: the newest one still stays.
+      // A dangling link and a folder with a snapshot name are skipped, not followed, not removed, and do not stop the prune.
+      await symlink(join(directory, 'nowhere'), join(directory, 'link.snapshot.enc'));
+      await mkdir(join(directory, 'dir.snapshot.enc'));
       await make('d.snapshot.enc', 60);
       expect(await prune(directory, now + 90 * 86_400_000)).toEqual(['d.snapshot.enc']);
+      expect((await readdir(directory)).includes('link.snapshot.enc')).toBe(true);
+      expect((await readdir(directory)).includes('dir.snapshot.enc')).toBe(true);
       expect((await readdir(directory)).includes('c.snapshot.enc')).toBe(true);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
@@ -116,6 +135,16 @@ describe('startBackupScheduler', () => {
     } finally { await rm(fresh.directory, { recursive: true, force: true }); await rm(old.directory, { recursive: true, force: true }); }
   });
 
+  it('treats a status dated in the future as untrustworthy and runs', async () => {
+    const run = vi.fn(async () => ({ ok: true }));
+    const future = await statusFile('ok', '2026-10-12T12:00:00.000Z');
+    try {
+      const scheduler = startBackupScheduler({ run, statusPath: future.path, now: () => new Date('2026-10-11T12:00:00.000Z'), firstDelayMs: 3_600_000, checkMs: 3_600_000 });
+      expect(await scheduler.checkNow()).toBe(true);
+      scheduler.stop();
+    } finally { await rm(future.directory, { recursive: true, force: true }); }
+  });
+
   it('retries a failed backup after 30 minutes, not sooner, and survives a crash in the job', async () => {
     const now = () => new Date('2026-10-11T12:00:00.000Z');
     const logs: unknown[] = [];
@@ -133,6 +162,19 @@ describe('startBackupScheduler', () => {
       expect(JSON.stringify(logs)).toContain('backup_job_failed');
       expect(JSON.stringify(logs)).not.toContain('boom');
     } finally { await rm(soon.directory, { recursive: true, force: true }); await rm(later.directory, { recursive: true, force: true }); }
+  });
+
+  it('does not start a second backup within the minimum gap even if the status file never changes', async () => {
+    let clock = new Date('2026-10-11T12:00:00.000Z');
+    const run = vi.fn(async () => ({ ok: true }));
+    const scheduler = startBackupScheduler({ run, statusPath: join(tmpdir(), 'never-written-status.json'), now: () => clock, firstDelayMs: 3_600_000, checkMs: 3_600_000 });
+    expect(await scheduler.checkNow()).toBe(true);
+    clock = new Date('2026-10-11T12:05:00.000Z');
+    expect(await scheduler.checkNow()).toBe(false);
+    clock = new Date('2026-10-11T12:11:00.000Z');
+    expect(await scheduler.checkNow()).toBe(true);
+    scheduler.stop();
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it('never runs two backups at once', async () => {

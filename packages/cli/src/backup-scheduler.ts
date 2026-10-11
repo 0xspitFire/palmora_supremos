@@ -18,7 +18,7 @@ export async function runBackupJob(paths: BackupJobPaths, key: string): Promise<
   try {
     const { stdout } = await exec(process.execPath, [paths.script], {
       env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), STORE_PATH: paths.storePath, BACKUP_DIR: paths.backupDir, BACKUP_STATUS_PATH: paths.statusPath, KILL_SWITCH_PATH: paths.killSwitchPath, BACKUP_RETENTION_DAYS: '30', BACKUP_ENCRYPTION_KEY: key },
-      timeout: 6 * 60_000,
+      timeout: 10 * 60_000,
       maxBuffer: 1024 * 1024,
     });
     return JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}').status === 'ok' ? { ok: true } : { ok: false, code: 'BACKUP_FAILED' };
@@ -38,6 +38,8 @@ export interface BackupSchedulerOptions {
   everyMs?: number;
   /** After a failed backup, try again after this long (default 30 minutes). */
   retryMs?: number;
+  /** Never start two backups closer than this, even if the status file cannot be read or written (default 10 minutes). */
+  minGapMs?: number;
   /** How often to look at the age (default 5 minutes). */
   checkMs?: number;
   /** Delay before the first look, so the service settles first (default 2 minutes). */
@@ -51,15 +53,20 @@ export function startBackupScheduler(options: BackupSchedulerOptions): { stop():
   const now = options.now ?? (() => new Date());
   const everyMs = options.everyMs ?? 6 * 60 * 60_000;
   const retryMs = options.retryMs ?? 30 * 60_000;
+  const minGapMs = options.minGapMs ?? 10 * 60_000;
   let busy = false;
+  let lastAttemptAt: number | undefined;
   const checkNow = async (): Promise<boolean> => {
     if (busy) return false;
     busy = true;
     try {
       const last = await backupFacts(options.statusPath);
       const age = last ? now().getTime() - last.recordedAt.getTime() : Number.POSITIVE_INFINITY;
-      const due = !last || age >= (last.status === 'ok' ? everyMs : retryMs);
+      // A status dated in the future (clock change) cannot be trusted: treat the backup as due.
+      const due = !last || age < -5 * 60_000 || age >= (last.status === 'ok' ? everyMs : retryMs);
       if (!due) return false;
+      if (lastAttemptAt !== undefined && now().getTime() - lastAttemptAt < minGapMs) return false;
+      lastAttemptAt = now().getTime();
       const result = await options.run();
       if (result.ok) options.logger?.info({ event: 'backup_job_ok' }, 'backup made and restore-checked');
       else options.logger?.warn({ event: 'backup_job_failed', code: result.code ?? 'BACKUP_FAILED' }, 'backup failed');
