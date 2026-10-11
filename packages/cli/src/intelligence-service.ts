@@ -97,13 +97,19 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   // Pause notice: a frozen bot cannot announce that it froze, so the message goes out as soon as the beats resume.
   const pauses = new PauseWatch(options.pauseMinMs ?? 5 * 60_000);
   let heartbeatReady = options.heartbeatPath === undefined;
+  let heartbeatBusy = false;
   const runHeartbeat = async (): Promise<void> => {
     const path = options.heartbeatPath;
-    if (!path) return;
+    if (!path || heartbeatBusy) return;
+    heartbeatBusy = true;
+    try { await beatOnce(path); } finally { heartbeatBusy = false; }
+  };
+  const beatOnce = async (path: string): Promise<void> => {
     const current = now();
     if (!heartbeatReady) {
       heartbeatReady = true;
       const saved = await readHeartbeat(path);
+      options.logger?.info({ event: 'heartbeat_loaded', savedAt: saved ? saved.toISOString() : null, gapMinutes: saved ? Math.round((current.getTime() - saved.getTime()) / 60_000) : null }, 'heartbeat loaded at start');
       if (saved) pauses.beat(saved);
     }
     const span = pauses.beat(current);
