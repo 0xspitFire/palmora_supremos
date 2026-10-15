@@ -605,3 +605,61 @@ describe('collection alerts as cards (T-029)', () => {
     expect(ready.notes[0]?.value).toContain('Minting still needs your approval.');
   });
 });
+
+describe('discovery jumps ahead when it is too far behind (T-034)', () => {
+  const tickWith = async (cursor: bigint | undefined, head: bigint, options: { maxLagBlocks?: bigint; maxRange?: bigint; mints?: ObservedMint[] } = {}) => {
+    const store = new DurableStore();
+    const clock = new Clock(START);
+    const port = new FakePort();
+    port.head = head;
+    if (options.maxRange !== undefined) port.maxRange = options.maxRange;
+    port.mints = options.mints ?? [];
+    const repo = new MemoryRepo();
+    if (cursor !== undefined) repo.cursors.set('1:seadrop-v1', cursor);
+    const alerts = new AlertManager(store, undefined, undefined, { now: clock.now });
+    const discovery = new DiscoveryService(store, repo, port, { now: clock.now, budgetPerNftWei: LIMIT, alerts, ...(options.maxLagBlocks === undefined ? {} : { maxLagBlocks: options.maxLagBlocks }) });
+    const result = await discovery.tick();
+    return { store, port, repo, result };
+  };
+
+  it('skips to the look-back window, records the skipped range once, and only counts mints after it', async () => {
+    const { store, port, repo, result } = await tickWith(100n, 5_000n, { mints: [mint(2_000n, W1), mint(4_800n, W2)] });
+    expect(result.skipped).toEqual({ fromBlock: '101', toBlock: '4699', blocks: '4599' });
+    expect(port.scans[0]?.[0]).toBe(4_700n);
+    expect(repo.cursor(1, 'seadrop-v1')).toBeGreaterThanOrEqual(4_700n);
+    expect(result.mintsObserved).toBe(1);
+    const skips = events(store, 'discovery_skipped');
+    expect(skips).toHaveLength(1);
+    expect(skips[0]?.data).toMatchObject({ fromBlock: '101', toBlock: '4699', blocks: '4599', headBlock: '5000' });
+  });
+
+  it('does not skip at or below the limit, on the first run, or when the head is not ahead of the cursor', async () => {
+    const atLimit = await tickWith(3_800n, 5_000n);
+    expect(atLimit.result.skipped).toBeUndefined();
+    expect(atLimit.port.scans[0]?.[0]).toBe(3_801n);
+    const justOver = await tickWith(3_799n, 5_000n);
+    expect(justOver.result.skipped).toBeDefined();
+    const first = await tickWith(undefined, 5_000n);
+    expect(first.result.skipped).toBeUndefined();
+    expect(first.port.scans[0]?.[0]).toBe(4_700n);
+    const behindCursor = await tickWith(6_000n, 5_000n);
+    expect(behindCursor.result.skipped).toBeUndefined();
+    expect(events(behindCursor.store, 'discovery_skipped')).toHaveLength(0);
+  });
+
+  it('uses the limit it is given and never moves the cursor backwards', async () => {
+    const tight = await tickWith(4_900n, 5_000n, { maxLagBlocks: 50n });
+    expect(tight.result.skipped).toBeUndefined(); // look-back (300) reaches behind the cursor: nothing to skip
+    const wide = await tickWith(100n, 5_000n, { maxLagBlocks: 10_000n });
+    expect(wide.result.skipped).toBeUndefined();
+    expect(wide.port.scans[0]?.[0]).toBe(101n);
+    const repoCursor = (await tickWith(4_000n, 5_000n, { maxLagBlocks: 100n })).repo.cursor(1, 'seadrop-v1');
+    expect(repoCursor).toBeGreaterThanOrEqual(4_700n);
+  });
+
+  it('makes up to 8 scans in one tick while catching up (was 4)', async () => {
+    const { port, result } = await tickWith(4_000n, 5_000n, { maxRange: 10n });
+    expect(result.skipped).toBeUndefined();
+    expect(port.scans).toHaveLength(8);
+  });
+});

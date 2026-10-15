@@ -19,8 +19,14 @@ export interface DiscoveryOptions {
   now?: () => Date;
   /** Blocks to look back on the very first run (about one hour on Ethereum). */
   initialLookbackBlocks?: bigint;
-  /** Scans per tick while catching up. */
+  /** Scans per tick while catching up (default 8). */
   maxScansPerTick?: number;
+  /**
+   * If the scan is further behind the chain head than this many blocks (default 1200, about 4 hours), it jumps forward to the
+   * look-back window instead of reading old blocks one slice at a time. An alert about a mint hours old is no use, and a slow host
+   * would otherwise fall further behind every hour. The skipped range is recorded (event `discovery_skipped`) and reported.
+   */
+  maxLagBlocks?: bigint;
   /** Owner price limit per NFT (D-033). */
   budgetPerNftWei: bigint;
   alerts?: IntelligenceAlertSink;
@@ -39,6 +45,8 @@ export interface DiscoveryTickResult {
   alertsRaised: number;
   /** Watched-wallet evidence was partly unavailable; SeaDrop results are still complete. */
   watchedPartial?: boolean;
+  /** The scan was too far behind and jumped ahead: the first and last block it did not read, and how many. */
+  skipped?: { fromBlock: string; toBlock: string; blocks: string };
 }
 
 interface Tracked {
@@ -96,9 +104,22 @@ export class DiscoveryService {
     const watched = this.repo.observedAddresses(chainId).map((row) => row.address.toLowerCase());
     const watchedSet = new Set(watched);
     const cursor = this.repo.cursor(chainId, SOURCE);
-    let from = cursor === undefined ? (head > (this.options.initialLookbackBlocks ?? 300n) ? head - (this.options.initialLookbackBlocks ?? 300n) : 0n) : cursor + 1n;
+    const lookback = this.options.initialLookbackBlocks ?? 300n;
+    let from = cursor === undefined ? (head > lookback ? head - lookback : 0n) : cursor + 1n;
+    // Too far behind: skip to the look-back window, durably (the cursor only moves forward), and say so.
+    const maxLag = this.options.maxLagBlocks ?? 1200n;
+    if (cursor !== undefined && head > cursor && head - cursor > maxLag && head > lookback) {
+      const resume = head - lookback;
+      if (resume > from) {
+        const skipped = { fromBlock: from.toString(), toBlock: (resume - 1n).toString(), blocks: (resume - from).toString() };
+        await this.store.transaction((state) => { state.events.push({ id: `evt_${randomUUID()}`, type: 'discovery_skipped', at: this.now().toISOString(), data: { ...skipped, headBlock: head.toString() } }); });
+        this.repo.advanceCursor(chainId, SOURCE, resume - 1n);
+        result.skipped = skipped;
+        from = resume;
+      }
+    }
     const touched = new Set<string>();
-    for (let scans = 0; scans < (this.options.maxScansPerTick ?? 4) && from <= head; scans += 1) {
+    for (let scans = 0; scans < (this.options.maxScansPerTick ?? 8) && from <= head; scans += 1) {
       const outcome = await this.port.scan(from, head, watched);
       if (!outcome.ok) return { ...result, status: 'unavailable', reason: outcome.reason };
       const at = this.now().getTime();

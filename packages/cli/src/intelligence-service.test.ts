@@ -166,3 +166,27 @@ describe('pause notice', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });
+
+describe('scan jump and tick timing (T-034)', () => {
+  class LaggingPort extends IdlePort {
+    public override async safeHead(): Promise<bigint | null> { return 50_000n; }
+    public override async scan(fromBlock: bigint, toBlock: bigint): Promise<ChainScanOutcome> { return { ok: true, scan: { fromBlock, toBlock: fromBlock + 7n > toBlock ? toBlock : fromBlock + 7n, mints: [], dropUpdates: [], watchedMints: [] } }; }
+  }
+
+  it('tells the owner once that the scan jumped ahead, without paths or addresses, and logs how long each tick took', async () => {
+    const now = () => new Date('2026-10-15T12:00:00.000Z');
+    const h = harness(now, new Repo(1, 100n));
+    const logs: Array<Record<string, unknown>> = [];
+    const logger = { info: (entry: Record<string, unknown>) => logs.push(entry), warn: (entry: Record<string, unknown>) => logs.push(entry), error: () => undefined } as never;
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new LaggingPort(), alerts: h.alerts, wallets: OWN, logger, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    await vi.waitFor(() => expect(h.sent.some((text) => text.includes('SCAN JUMPED AHEAD'))).toBe(true));
+    service.stop();
+    const message = h.sent.find((text) => text.includes('SCAN JUMPED AHEAD')) ?? '';
+    expect(message).toContain('blocks 101 to 49,699 were not read');
+    expect(message).not.toMatch(/0x[0-9a-f]{40}|\/home|https?:/i);
+    expect(h.sent.filter((text) => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(1);
+    expect(logs.some((entry) => entry.event === 'discovery_skipped')).toBe(true);
+    const tick = logs.find((entry) => entry.event === 'intelligence_discovery');
+    expect(typeof tick?.durationMs).toBe('number');
+  });
+});
