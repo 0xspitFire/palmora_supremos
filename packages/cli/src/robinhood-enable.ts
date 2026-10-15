@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validRobinhoodEnablement } from '@mint-bot/backend';
 
 /**
  * Owner command rules for switching Robinhood on (T-032 part B, D-040, D-050, D-051). Pure: it reads nothing and writes nothing.
@@ -90,4 +91,38 @@ export function assertEnableAllowed(facts: EnableFacts): { phrase: string; diges
   const phrase = enablePhrase(fileDigest, facts.days);
   if (typeof facts.confirm !== 'string' || facts.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run robinhood-enable status and copy the phrase it prints exactly');
   return { phrase, digest: confirmationDigest(phrase, fileDigest), evidence };
+}
+
+/** What the command needs from the store. The real one is the canonical store; the tests use a stand-in. */
+export interface EnableStore {
+  ethereumLiveMintProven(): boolean;
+  robinhoodEnablement(): unknown;
+  enableRobinhood(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<EvidenceStep, true>; confirmationDigest: string }): void;
+}
+
+/**
+ * The whole `robinhood-enable` command after the evidence file has been read. `status` only reads. `record` writes exactly once,
+ * and only after `assertEnableAllowed` has returned. Returns what the command prints.
+ */
+export function runRobinhoodEnable(input: { action: 'status' | 'record'; evidenceText: string; evidenceFile: string; days: number; confirm: string | undefined; now: Date; store: EnableStore; newId: () => string }): Record<string, unknown> {
+  const { store, now } = input;
+  const evidence = checkEvidenceFile(input.evidenceText, now);
+  const proven = store.ethereumLiveMintProven();
+  const current = validRobinhoodEnablement(store.robinhoodEnablement(), now);
+  if (input.action === 'status') {
+    const ready = proven && evidence.problems.length === 0 && evidence.fileDigest !== undefined;
+    return {
+      state: ready ? 'ReadyToRecord' : 'NotReady',
+      message: ready ? `Everything checks out. Recording switches Robinhood FREE execution on for ${input.days} day(s); paid mints stay blocked.` : 'Not ready yet. Fix the items below.',
+      ethereumLiveMintConfirmed: proven,
+      steps: EVIDENCE_STEPS.map((step) => ({ step, meaning: STEP_MEANING[step], ok: evidence.ok.includes(step) })),
+      problems: [...(proven ? [] : ['No confirmed live Ethereum mint yet (D-040 item 6).']), ...evidence.problems],
+      currentlyEnabledUntil: current?.expiresAt ?? null,
+      ...(ready && evidence.fileDigest ? { copyThisToRecord: `robinhood-enable record --evidence-file ${input.evidenceFile} --days ${input.days} --confirm "${enablePhrase(evidence.fileDigest, input.days)}"` } : {}),
+    };
+  }
+  const allowed = assertEnableAllowed({ evidence, ethereumLiveMintProven: proven, confirm: input.confirm, days: input.days });
+  const expiresAt = new Date(now.getTime() + input.days * 86_400_000).toISOString();
+  store.enableRobinhood({ id: input.newId(), approvedAt: now.toISOString(), expiresAt, evidence: allowed.evidence, confirmationDigest: allowed.digest });
+  return { state: 'Enabled', message: `Robinhood FREE execution is on until ${expiresAt}. Paid mints stay blocked. The service switches it off by itself when this expires; the kill switch still stops everything.`, expiresAt };
 }

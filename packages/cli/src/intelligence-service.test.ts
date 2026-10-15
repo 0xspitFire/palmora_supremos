@@ -185,7 +185,7 @@ describe('scan jump and tick timing (T-034)', () => {
     expect(message).toContain('blocks 101 to 49,699 were not read');
     expect(message).not.toMatch(/0x[0-9a-f]{40}|\/home|https?:/i);
     expect(h.sent.filter((text) => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(1);
-    expect(logs.some((entry) => entry.event === 'discovery_skipped')).toBe(true);
+    expect(logs.filter((entry) => entry.event === 'discovery_skipped')).toHaveLength(1);
     const tick = logs.find((entry) => entry.event === 'intelligence_discovery');
     expect(typeof tick?.durationMs).toBe('number');
   });
@@ -232,3 +232,23 @@ describe('jump notice is never lost (T-034 review)', () => {
     expect(typeof logs.find((entry) => entry.event === 'intelligence_discovery_failed')?.durationMs).toBe('number');
   });
 });
+
+describe('jump log line is not repeated by the start-up re-check (tidy after T-034)', () => {
+  it('logs a jump once when it happens and not again when the same jump is re-checked at the next start', async () => {
+    const now = () => new Date('2026-10-15T12:00:00.000Z');
+    const h = harness(now);
+    await h.store.transaction((state) => { state.events.push({ id: 'evt_skip', type: 'discovery_skipped', at: '2026-10-15T11:00:00.000Z', data: { fromBlock: '1000', toBlock: '9999', blocks: '9000', headBlock: '10299' } }); });
+    const logs: Array<Record<string, unknown>> = [];
+    const logger = { info: (entry: Record<string, unknown>) => logs.push(entry), warn: (entry: Record<string, unknown>) => logs.push(entry), error: () => undefined } as never;
+    const options = { store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, logger, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now };
+    const first = startIntelligence(options);
+    await vi.waitFor(() => expect(logs.filter((entry) => entry.event === 'discovery_skipped')).toHaveLength(1));
+    first.stop();
+    const second = startIntelligence(options);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    second.stop();
+    expect(logs.filter((entry) => entry.event === 'discovery_skipped')).toHaveLength(1);
+    expect(h.sent.filter((text) => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(1);
+  });
+});
+

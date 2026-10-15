@@ -80,13 +80,15 @@ describe('dashboard server hardening (security review T-004)', () => {
 describe('intelligence service configuration (P2-09)', () => {
   it('is off by default, needs the host secret store when on, and only takes public wallet addresses', () => {
     const config = loadServiceConfig({}, '/tmp/mintbot');
-    expect(config).toMatchObject({ intelligenceEnabled: false, intelligenceRpcName: 'ETHEREUM_RPC_URL', readinessWallets: [], discoveryIntervalMs: 120_000 });
+    expect(config).toMatchObject({ intelligenceEnabled: false, intelligenceRpcName: 'ETHEREUM_RPC_URL', readinessWallets: [], discoveryIntervalMs: 120_000, discoveryMaxLagBlocks: 1_200 });
     expect(() => loadServiceConfig({ MINT_BOT_INTELLIGENCE_ENABLED: 'true' }, '/tmp/mintbot')).toThrow('INTELLIGENCE_SECRET_STORE_REQUIRED');
     expect(() => loadServiceConfig({ MINT_BOT_READINESS_WALLETS: '0x12' }, '/tmp/mintbot')).toThrow('MINT_BOT_READINESS_WALLETS_INVALID');
     expect(() => loadServiceConfig({ MINT_BOT_INTELLIGENCE_RPC_NAME: 'https://rpc.example' }, '/tmp/mintbot')).toThrow('MINT_BOT_INTELLIGENCE_RPC_NAME_INVALID');
     const wallets = loadServiceConfig({ MINT_BOT_READINESS_WALLETS: `${NFT.toUpperCase().replace('0X', '0x')}, ${NFT}` }, '/tmp/mintbot').readinessWallets;
     expect(wallets).toEqual([NFT]);
     expect(() => loadServiceConfig({ MINT_BOT_DISCOVERY_INTERVAL_MS: '1000' }, '/tmp/mintbot')).toThrow('MINT_BOT_DISCOVERY_INTERVAL_MS_INVALID');
+    expect(loadServiceConfig({ MINT_BOT_DISCOVERY_MAX_LAG_BLOCKS: '600' }, '/tmp/mintbot').discoveryMaxLagBlocks).toBe(600);
+    for (const bad of ['99', '0', '-5', 'many', '1.5']) expect(() => loadServiceConfig({ MINT_BOT_DISCOVERY_MAX_LAG_BLOCKS: bad }, '/tmp/mintbot'), bad).toThrow('MINT_BOT_DISCOVERY_MAX_LAG_BLOCKS_INVALID');
   });
 });
 

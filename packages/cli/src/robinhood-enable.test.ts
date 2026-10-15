@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { ENABLEMENT_DAYS, EVIDENCE_STEPS, assertEnableAllowed, checkEvidenceFile, confirmationDigest, enablePhrase } from './robinhood-enable.js';
+import { ENABLEMENT_DAYS, EVIDENCE_STEPS, assertEnableAllowed, checkEvidenceFile, confirmationDigest, enablePhrase, runRobinhoodEnable } from './robinhood-enable.js';
 import { robinhoodGrantFrom } from './engine-adapter.js';
 
 const NOW = new Date('2026-10-20T12:00:00.000Z');
@@ -98,24 +98,73 @@ describe('the engine grant is made in one place, from the stored owner record on
   });
 });
 
+describe('runRobinhoodEnable: the whole command with a stand-in store', () => {
+  const NOW2 = new Date('2026-10-20T12:00:00.000Z');
+  const file = goodFile();
+  const digest = checkEvidenceFile(file, NOW2).fileDigest ?? '';
+  const phrase = enablePhrase(digest, 7);
+  const makeStore = (over: Partial<{ proven: boolean; record: unknown }> = {}) => {
+    const writes: unknown[] = [];
+    const store = { ethereumLiveMintProven: () => over.proven ?? true, robinhoodEnablement: () => over.record, enableRobinhood: (input: unknown) => { writes.push(input); } };
+    return { store, writes };
+  };
+  const run = (store: unknown, over: Record<string, unknown> = {}) => runRobinhoodEnable({ action: 'record', evidenceText: file, evidenceFile: 'e.json', days: 7, confirm: phrase, now: NOW2, store: store as never, newId: () => 'rh_enable_test', ...over });
+
+  it('status never writes, says what is missing, and prints the exact command only when everything is ready', () => {
+    const ready = makeStore();
+    const out = run(ready.store, { action: 'status', confirm: undefined });
+    expect(out).toMatchObject({ state: 'ReadyToRecord', ethereumLiveMintConfirmed: true, problems: [], currentlyEnabledUntil: null });
+    expect(String(out.copyThisToRecord)).toContain(`--confirm "${phrase}"`);
+    expect(ready.writes).toEqual([]);
+    const notProven = makeStore({ proven: false });
+    const missing = run(notProven.store, { action: 'status', confirm: undefined, evidenceText: goodFile({ E3: undefined }) });
+    expect(missing).toMatchObject({ state: 'NotReady', ethereumLiveMintConfirmed: false });
+    expect(String((missing.problems as string[]).join(' '))).toMatch(/No confirmed live Ethereum mint.*E3 .*missing/);
+    expect(missing.copyThisToRecord).toBeUndefined();
+    expect(notProven.writes).toEqual([]);
+  });
+
+  it('record writes exactly once, with the evidence, the digest and a 7-day expiry, only after every check passed', () => {
+    const { store, writes } = makeStore();
+    const out = run(store);
+    expect(out).toMatchObject({ state: 'Enabled', expiresAt: '2026-10-27T12:00:00.000Z' });
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toEqual({ id: 'rh_enable_test', approvedAt: NOW2.toISOString(), expiresAt: '2026-10-27T12:00:00.000Z', evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true }, confirmationDigest: confirmationDigest(phrase, digest) });
+  });
+
+  it('record writes nothing when any condition fails', () => {
+    const cases: Array<[string, Record<string, unknown>, Parameters<typeof makeStore>[0]?]> = [
+      ['no proof', {}, { proven: false }],
+      ['no phrase', { confirm: undefined }],
+      ['wrong phrase', { confirm: 'ENABLE-ROBINHOOD-FREE 7-DAYS 00000000' }],
+      ['bad evidence', { evidenceText: goodFile({ E5: { ...entry(), passed: false } }) }],
+      ['old evidence', { evidenceText: goodFile({ E2: entry('2026-01-01') }) }],
+      ['bad days', { days: 30 }],
+      ['not json', { evidenceText: 'nope' }],
+    ];
+    for (const [label, over, storeOver] of cases) {
+      const { store, writes } = makeStore(storeOver);
+      expect(() => run(store, over), label).toThrow();
+      expect(writes, label).toEqual([]);
+    }
+  });
+
+  it('shows when it is already enabled', () => {
+    const record = { recordId: 'x', approvedBy: 'owner-cli', approvedAt: '2026-10-20T10:00:00.000Z', expiresAt: '2026-10-27T10:00:00.000Z', paidAllowed: false, evidence: Object.fromEntries(EVIDENCE_STEPS.map((step) => [step, true])) };
+    const out = run(makeStore({ record }).store, { action: 'status', confirm: undefined });
+    expect(out.currentlyEnabledUntil).toBe('2026-10-27T10:00:00.000Z');
+  });
+});
+
 describe('robinhood-enable command wiring', () => {
-  const body = async () => {
+  it('reads a plain file only, never from a link, and starts no coordinator', async () => {
     const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
     const start = source.indexOf(".command('robinhood-enable <action>'");
-    const end = source.indexOf(".command('chain-evidence <action>'");
+    const text = source.slice(start, source.indexOf(".command('chain-evidence <action>'", start));
     expect(start).toBeGreaterThan(0);
-    expect(end).toBeGreaterThan(start);
-    return source.slice(start, end);
-  };
-
-  it('checks every condition before it writes, and never writes on status', async () => {
-    const text = await body();
-    const gate = text.indexOf('assertEnableAllowed({');
-    const write = text.indexOf('store.enableRobinhood({');
-    expect(gate).toBeGreaterThan(0);
-    expect(write).toBeGreaterThan(gate);
-    expect(text.indexOf("args.action === 'status'")).toBeLessThan(gate);
-    expect(text).toContain('{ startCoordinator: false }');
     expect(text).toContain('info.isSymbolicLink()');
+    expect(text).toContain('{ startCoordinator: false }');
+    expect(text).toContain('runRobinhoodEnable({');
+    expect(text).not.toContain('enableRobinhood(');
   });
 });

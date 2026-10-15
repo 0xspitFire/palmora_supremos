@@ -12,6 +12,8 @@ export interface IntelligenceServiceOptions {
   wallets: readonly string[];
   logger?: RedactedLogger;
   discoveryIntervalMs: number;
+  /** Jump the scan ahead when it is more than this many blocks behind (default 1200). */
+  discoveryMaxLagBlocks?: number;
   readinessIntervalMs: number;
   digestIntervalMs: number;
   /** Number of this start, from the restart counter; shown in the start message. */
@@ -40,7 +42,7 @@ export interface IntelligenceServiceOptions {
 export function startIntelligence(options: IntelligenceServiceOptions): { stop(): void; runOnce(): Promise<void> } {
   // One reader for collection names, so a contract's name is read from the chain once for both services.
   const names = new CollectionNames(options.port);
-  const discovery = new DiscoveryService(options.store, options.repo, options.port, { budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts, names });
+  const discovery = new DiscoveryService(options.store, options.repo, options.port, { budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts, names, ...(options.discoveryMaxLagBlocks === undefined ? {} : { maxLagBlocks: BigInt(options.discoveryMaxLagBlocks) }) });
   const readiness = new ReadinessSweep(options.store, options.port, async () => options.wallets, { limits: D033_READINESS_LIMITS, alerts: options.alerts, names });
   const busy = { discovery: false, readiness: false, digest: false, retry: false, health: false };
   const guarded = (name: keyof typeof busy, work: () => Promise<unknown>) => async (): Promise<void> => {
@@ -59,10 +61,12 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   const startedAt = now();
   const tracker = new ScanTracker(startedAt);
   const announceSkip = async (skipped: { fromBlock: string; toBlock: string; blocks: string }): Promise<void> => {
-    options.logger?.warn({ event: 'discovery_skipped', ...skipped }, 'scan jumped ahead');
     const system = scanSkippedCard({ blocks: BigInt(skipped.blocks), fromBlock: skipped.fromBlock, toBlock: skipped.toBlock, at: now() });
-    try { await options.alerts.intelligence({ kind: 'health', dedupe: `skip:${skipped.fromBlock}`, text: plainSystemText(system), priority: 'immediate', system, at: now().toISOString() }); }
-    catch (error) { options.logger?.warn({ event: 'skip_message_failed', error }, 'skip message failed'); }
+    try {
+      // The alert's dedupe answers false for a jump already announced (for example the re-check at start-up); only a new one is logged.
+      const sent = await options.alerts.intelligence({ kind: 'health', dedupe: `skip:${skipped.fromBlock}`, text: plainSystemText(system), priority: 'immediate', system, at: now().toISOString() });
+      if (sent) options.logger?.warn({ event: 'discovery_skipped', ...skipped }, 'scan jumped ahead');
+    } catch (error) { options.logger?.warn({ event: 'skip_message_failed', error }, 'skip message failed'); }
   };
   // A jump is announced right after the tick, and again at start-up and after a failed tick for any recent jump that has no card yet
   // (the alert's own dedupe makes repeats harmless), so a crash between the jump and the card cannot lose the notice.

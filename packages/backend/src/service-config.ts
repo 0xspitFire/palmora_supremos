@@ -37,6 +37,8 @@ export interface OrchestratorServiceConfig {
   /** Public addresses of the owner's wallets for readiness checks; the keystore is never read. */
   readinessWallets: string[];
   discoveryIntervalMs: number;
+  /** The scan jumps ahead when it is more than this many blocks behind the head (default 1200, about 4 hours on Ethereum). */
+  discoveryMaxLagBlocks: number;
   readinessIntervalMs: number;
   digestIntervalMs: number;
 }
@@ -149,6 +151,7 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
     intelligenceRpcName,
     readinessWallets: [...new Set(readinessWallets.map((address) => address.toLowerCase()))],
     discoveryIntervalMs: integer(env, 'MINT_BOT_DISCOVERY_INTERVAL_MS', 120_000, 15_000),
+    discoveryMaxLagBlocks: integer(env, 'MINT_BOT_DISCOVERY_MAX_LAG_BLOCKS', 1_200, 100),
     readinessIntervalMs: integer(env, 'MINT_BOT_READINESS_INTERVAL_MS', 120_000, 15_000),
     digestIntervalMs: integer(env, 'MINT_BOT_DIGEST_INTERVAL_MS', 900_000, 60_000),
   };
