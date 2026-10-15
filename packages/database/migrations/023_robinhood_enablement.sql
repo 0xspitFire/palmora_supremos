@@ -7,7 +7,8 @@
 --
 -- A row can only be added complete (owner command, a typed-confirmation digest, E1 to E7 each exactly true, an expiry at
 -- most 7 days after approval, paid mints not allowed yet), can never be changed or deleted, and a newer row supersedes it.
--- Time checks use the times written by the application, never the database clock.
+-- The record's own times are the ones the application writes. In addition, the three chain-profile triggers below also compare the
+-- record's expiry with the database clock, so a profile cannot be switched back on after the record has expired without a new record.
 
 CREATE TABLE robinhood_enablement (
   id TEXT PRIMARY KEY,
@@ -28,7 +29,7 @@ WHEN NEW.approved_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][
   OR julianday(NEW.approved_at) IS NULL
   OR julianday(NEW.expires_at) IS NULL
   OR julianday(NEW.expires_at) <= julianday(NEW.approved_at)
-  OR julianday(NEW.expires_at) - julianday(NEW.approved_at) > 7.0001
+  OR julianday(NEW.expires_at) - julianday(NEW.approved_at) > 7.000001
   OR json_valid(NEW.evidence_json) = 0
   OR json_type(NEW.evidence_json) IS NOT 'object'
   OR (SELECT count(*) FROM json_each(NEW.evidence_json)) <> 7
@@ -69,7 +70,8 @@ WHEN NEW.execution_enabled = 1 AND (
     WHERE e.rowid = (SELECT max(rowid) FROM robinhood_enablement)
       AND NEW.verification_approved_at IS NOT NULL
       AND julianday(NEW.verification_approved_at) >= julianday(e.approved_at)
-      AND julianday(NEW.verification_approved_at) < julianday(e.expires_at))))
+      AND julianday(NEW.verification_approved_at) < julianday(e.expires_at)
+      AND julianday('now') < julianday(e.expires_at))))
 BEGIN SELECT RAISE(ABORT, 'execution requires verified non-Robinhood chain'); END;
 
 CREATE TRIGGER chain_execution_enable_update_guard
@@ -81,7 +83,8 @@ WHEN NEW.execution_enabled = 1 AND (
     WHERE e.rowid = (SELECT max(rowid) FROM robinhood_enablement)
       AND NEW.verification_approved_at IS NOT NULL
       AND julianday(NEW.verification_approved_at) >= julianday(e.approved_at)
-      AND julianday(NEW.verification_approved_at) < julianday(e.expires_at))))
+      AND julianday(NEW.verification_approved_at) < julianday(e.expires_at)
+      AND julianday('now') < julianday(e.expires_at))))
 BEGIN SELECT RAISE(ABORT, 'execution requires verified non-Robinhood chain'); END;
 
 CREATE TRIGGER chain_verification_status_guard
@@ -91,5 +94,6 @@ WHEN NEW.verification_status = 'verified' AND NEW.chain_id = 4663 AND NOT EXISTS
   WHERE e.rowid = (SELECT max(rowid) FROM robinhood_enablement)
     AND NEW.verification_approved_at IS NOT NULL
     AND julianday(NEW.verification_approved_at) >= julianday(e.approved_at)
-    AND julianday(NEW.verification_approved_at) < julianday(e.expires_at))
+    AND julianday(NEW.verification_approved_at) < julianday(e.expires_at)
+    AND julianday('now') < julianday(e.expires_at))
 BEGIN SELECT RAISE(ABORT, 'Robinhood chain cannot be execution verified'); END;

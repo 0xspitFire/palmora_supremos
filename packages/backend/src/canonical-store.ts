@@ -247,11 +247,15 @@ function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 32);
 }
 
-/** A live Ethereum run with a confirmed receipt. Pure, so it can be tested on a hand-made state. */
+/**
+ * A live Ethereum run with a confirmed receipt and no reorged or failed receipt for the same execution. A mint that was confirmed and
+ * later reorged does not count. Pure, so it can be tested on a hand-made state.
+ */
 export function hasConfirmedLiveEthereumMint(state: Pick<BackendState, 'runs' | 'campaigns' | 'receipts'>): boolean {
   const ethereumCampaigns = new Set(state.campaigns.filter((campaign) => campaign.chainId === ETHEREUM_CHAIN_ID).map((campaign) => campaign.id));
   const liveRuns = new Set(state.runs.filter((run) => run.mode === 'live' && ethereumCampaigns.has(run.campaignId)).map((run) => run.id));
-  return state.receipts.some((receipt) => liveRuns.has(receipt.runId) && receipt.state === 'Confirmed');
+  const spoiled = new Set(state.receipts.filter((receipt) => liveRuns.has(receipt.runId) && (receipt.state === 'Reorged' || receipt.state === 'Failed')).map((receipt) => receipt.executionId));
+  return state.receipts.some((receipt) => liveRuns.has(receipt.runId) && receipt.state === 'Confirmed' && !spoiled.has(receipt.executionId));
 }
 
 function canonicalId(prefix: string, value: string): string {

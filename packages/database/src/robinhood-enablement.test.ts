@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { openDatabase } from './database.js';
 import { DurableRepository } from './repositories.js';
 
-const T0 = '2026-10-20T10:00:00.000Z';
+// The database also compares a record's expiry with its own clock, so the times here are relative to now.
+const T0 = new Date().toISOString();
 const day = (offset: number, base = T0): string => new Date(Date.parse(base) + offset * 86_400_000).toISOString();
 const DIGEST = 'a'.repeat(64);
 const EVIDENCE = { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true } as const;
@@ -81,7 +82,7 @@ describe('the enablement table accepts only complete rows (direct SQL cannot che
     const t = setup();
     for (const bad of [
       { approved_by: 'session' }, { approved_by: 'owner' }, { paid_allowed: 1 }, { confirmation_digest: 'A'.repeat(64) }, { confirmation_digest: 'a'.repeat(63) },
-      { approved_at: 'yesterday' }, { expires_at: '2026-10-27' }, { expires_at: T0 }, { expires_at: day(-1) }, { expires_at: day(7.5) }, { expires_at: day(30) },
+      { approved_at: 'yesterday' }, { expires_at: '2026-10-27' }, { expires_at: T0 }, { expires_at: day(-1) }, { expires_at: day(7.5) }, { expires_at: new Date(Date.parse(T0) + 7 * 86_400_000 + 10_000).toISOString() }, { expires_at: day(30) },
     ]) expect(() => t.insertRow(bad), JSON.stringify(bad)).toThrow();
   });
 
@@ -133,6 +134,33 @@ describe('the profile can be enabled only inside the newest record\'s window', (
     t.enable('rh-1');
     expect(() => t.db.prepare("UPDATE chain_profile SET verification_approved_at = ? WHERE id = 'rh'").run(day(30))).toThrow();
     expect(t.profile().enabled).toBe(1);
+  });
+});
+
+describe('the database clock also stops a re-enable after the record has expired', () => {
+  it('refuses to verify or enable the profile when the newest record is already past its expiry by the database clock', () => {
+    const t = setup();
+    // A valid-looking record whose whole window lies in the past (approved 9 days ago, expired 2 days ago).
+    t.insertRow({ id: 'old', approved_at: day(-9), expires_at: day(-2) });
+    expect(() => t.forceEnable(day(-5))).toThrow();
+    expect(() => t.db.prepare("UPDATE chain_profile SET verification_status = 'verified' WHERE id = 'rh'").run()).toThrow(/cannot be execution verified/);
+    expect(t.profile().enabled).toBe(0);
+  });
+
+  it('refuses a plain re-enable after the switch-off once the record has expired', () => {
+    const t = setup();
+    const base = Date.now();
+    const at = (ms: number): string => new Date(base + ms).toISOString();
+    // A record that expires in 1.5 seconds.
+    t.insertRow({ id: 'soon', approved_at: at(-6 * 86_400_000), expires_at: at(1_500) });
+    t.forceEnable(at(-86_400_000));
+    expect(t.profile().enabled).toBe(1);
+    t.db.prepare("UPDATE chain_profile SET execution_enabled = 0 WHERE id = 'rh'").run();
+    t.db.prepare("UPDATE chain_profile SET execution_enabled = 1 WHERE id = 'rh'").run(); // still inside the record's window by the database clock
+    t.db.prepare("UPDATE chain_profile SET execution_enabled = 0 WHERE id = 'rh'").run();
+    const until = base + 2_000;
+    while (Date.now() < until) { /* wait for the record to expire */ }
+    expect(() => t.db.prepare("UPDATE chain_profile SET execution_enabled = 1 WHERE id = 'rh'").run()).toThrow(/execution requires verified non-Robinhood chain/);
   });
 });
 
