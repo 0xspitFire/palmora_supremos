@@ -274,6 +274,26 @@ export function recoveredCard(key: HealthKey, input: { since: Date; now: Date })
   });
 }
 
+/** The scan was too far behind the chain and jumped ahead; the skipped blocks were not read. */
+export function scanSkippedCard(input: { blocks: bigint; fromBlock: string; toBlock: string; at: Date }): SystemCard {
+  const hours = Number(input.blocks) * 12 / 3600;
+  const span = hours >= 1 ? `about ${hours.toFixed(1)} hours` : `about ${Math.max(1, Math.round(hours * 60))} minutes`;
+  return buildSystemCard({
+    title: 'SCAN JUMPED AHEAD',
+    severity: 'attention',
+    lines: [
+      { label: 'What happened', value: `the chain scan was too far behind (${span} of blocks), so it skipped ahead to recent blocks.`, strong: true },
+      { label: 'Skipped', value: `blocks ${Number(input.fromBlock).toLocaleString('en-US')} to ${Number(input.toBlock).toLocaleString('en-US')} were not read.` },
+      { label: 'What it means', value: 'mints and wallet activity in that stretch are not in the results. Alerts from now on describe recent blocks again.' },
+    ],
+    steps: ['Nothing is needed. If this keeps happening, the host is too slow or off for long stretches; see the pause and scan-stalled warnings.'],
+    dashboard: true,
+    eventAt: input.at,
+    eventLabel: 'the jump',
+    summary: `Scan jumped ahead by ${span}.`,
+  });
+}
+
 /** The bot was not running for a while (asleep, stopped or frozen). Sent after the fact, when it is back. */
 export function pauseCard(input: { from: Date; to: Date; resumedBlock?: string }): SystemCard {
   const seconds = (input.to.getTime() - input.from.getTime()) / 1_000;

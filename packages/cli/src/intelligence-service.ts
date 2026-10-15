@@ -2,7 +2,7 @@ import { checkInCounts, checkInMessage, startMessage } from './status-messages.j
 import { ScanTracker } from './scan-tracker.js';
 import { readHeartbeat, writeHeartbeat } from './heartbeat.js';
 import type { MonitorPing } from './monitor-ping.js';
-import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, pauseCard, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
+import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, pauseCard, scanSkippedCard, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
   store: BackendStore;
@@ -46,22 +46,43 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   const guarded = (name: keyof typeof busy, work: () => Promise<unknown>) => async (): Promise<void> => {
     if (busy[name]) return;
     busy[name] = true;
+    const startedMs = Date.now();
     try {
       const result = await work();
-      options.logger?.info({ event: `intelligence_${name}`, result: summarize(result) }, `intelligence ${name} tick`);
+      // durationMs shows which tick is slow (a scan that takes minutes points at the node provider or a starved process).
+      options.logger?.info({ event: `intelligence_${name}`, durationMs: Date.now() - startedMs, result: summarize(result) }, `intelligence ${name} tick`);
     } catch (error) {
-      options.logger?.warn({ event: `intelligence_${name}_failed`, error }, `intelligence ${name} failed`);
+      options.logger?.warn({ event: `intelligence_${name}_failed`, durationMs: Date.now() - startedMs, error }, `intelligence ${name} failed`);
     } finally { busy[name] = false; }
   };
   const now = options.now ?? (() => new Date());
   const startedAt = now();
   const tracker = new ScanTracker(startedAt);
+  const announceSkip = async (skipped: { fromBlock: string; toBlock: string; blocks: string }): Promise<void> => {
+    options.logger?.warn({ event: 'discovery_skipped', ...skipped }, 'scan jumped ahead');
+    const system = scanSkippedCard({ blocks: BigInt(skipped.blocks), fromBlock: skipped.fromBlock, toBlock: skipped.toBlock, at: now() });
+    try { await options.alerts.intelligence({ kind: 'health', dedupe: `skip:${skipped.fromBlock}`, text: plainSystemText(system), priority: 'immediate', system, at: now().toISOString() }); }
+    catch (error) { options.logger?.warn({ event: 'skip_message_failed', error }, 'skip message failed'); }
+  };
+  // A jump is announced right after the tick, and again at start-up and after a failed tick for any recent jump that has no card yet
+  // (the alert's own dedupe makes repeats harmless), so a crash between the jump and the card cannot lose the notice.
+  const announcePendingSkips = async (): Promise<void> => {
+    try {
+      const since = now().getTime() - 24 * 60 * 60_000;
+      for (const event of options.store.snapshot().events) {
+        if (event.type !== 'discovery_skipped' || Date.parse(event.at) < since) continue;
+        const { fromBlock, toBlock, blocks } = event.data as { fromBlock?: unknown; toBlock?: unknown; blocks?: unknown };
+        if (typeof fromBlock === 'string' && typeof toBlock === 'string' && typeof blocks === 'string' && /^\d+$/.test(blocks)) await announceSkip({ fromBlock, toBlock, blocks });
+      }
+    } catch (error) { options.logger?.warn({ event: 'skip_recheck_failed', error }, 'could not re-check for jump notices'); }
+  };
   const runDiscovery = guarded('discovery', async () => {
     try {
       const result = await discovery.tick();
       tracker.record(result, now(), options.repo.cursor(1, 'seadrop-v1')?.toString());
+      if (result.skipped) await announceSkip(result.skipped);
       return result;
-    } catch (error) { tracker.recordFailure(now()); throw error; }
+    } catch (error) { tracker.recordFailure(now()); await announcePendingSkips(); throw error; }
   });
   const monitor = new HealthMonitor(options.alerts, { now, onError: (error) => options.logger?.warn({ event: 'health_message_failed', error }, 'health message failed') });
   const RETRY_WINDOW_MS = 6 * 60 * 60_000;
@@ -122,6 +143,7 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
     catch (error) { options.logger?.warn({ event: 'pause_message_failed', error }, 'pause message failed'); }
   };
   void runHeartbeat();
+  void announcePendingSkips();
   // Outside monitor: 'ok' only while a chain scan worked within the last 15 minutes (start-up gets the same grace).
   let monitorWasOk: boolean | undefined;
   const runMonitor = async (): Promise<void> => {

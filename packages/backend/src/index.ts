@@ -16,7 +16,7 @@ export { buildAlertCard, chainDisplay, cleanCollectionName, cleanText, dashboard
 export type { AlertButton, AlertCard, AlertCardField, AlertCardInput, DashboardRecord, DigestItem, RenderContext, RenderedAlert } from './alert-card.js';
 export { buildSystemCard, parseSystemCard, plainSystemText, renderSystemCard } from './system-card.js';
 export type { Severity, SystemCard, SystemCardInput, SystemLine, SystemTxLink } from './system-card.js';
-export { REASON_WORDS, checkInCard, durationText, healthCard, killEngagedCard, killReleasedCard, pauseCard, reasonCode, reasonText, recoveredCard, runProblemCard, spendCapCard, startCard, telegramTestCard } from './system-messages.js';
+export { REASON_WORDS, checkInCard, durationText, healthCard, killEngagedCard, killReleasedCard, pauseCard, reasonCode, scanSkippedCard, reasonText, recoveredCard, runProblemCard, spendCapCard, startCard, telegramTestCard } from './system-messages.js';
 export type { CheckInInput, HealthFacts, HealthKey, StartInput } from './system-messages.js';
 export { HealthMonitor, scanCauseWords } from './health-monitor.js';
 export type { HealthMonitorOptions, HealthSample } from './health-monitor.js';
