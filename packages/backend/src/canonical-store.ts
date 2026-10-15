@@ -216,6 +216,12 @@ function encode(value: unknown): string {
   return result;
 }
 
+function deepFreeze(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return;
+  Object.freeze(value);
+  for (const inner of Object.values(value)) deepFreeze(inner);
+}
+
 const BIGINT_TEXT = /"-?\d+n"/;
 
 function decode<T>(value: string | null | undefined): T | undefined {
@@ -401,6 +407,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   /** Audit events are append-only (migration 007), so decoded events are kept and only newer rows are read. */
   private eventCache: EventRecord[] = [];
   private eventCacheRowid = 0;
+  /** The last audit row the cache has seen (filtered or not), to prove on every read that it is still there and unchanged. */
+  private eventCacheTail: { rid: number; id: string; at: string } | undefined;
   private supportsReservationBoundaryFields = false;
   private supportsCampaignPeriods = false;
   private readonly durable: boolean;
@@ -812,23 +820,32 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private readEvents(): EventRecord[] {
+    // A transaction that read events and then rolled back leaves rows in the cache that no longer exist, and SQLite hands the same
+    // row numbers to the next writes. So before using the cache, check that the last row it saw is still the same row; if not, start over.
+    const tail = this.eventCacheTail;
+    if (tail) {
+      const row = this.db.prepare('SELECT id, occurred_at FROM audit_event WHERE rowid = ?').get(tail.rid) as { id: string; occurred_at: string } | undefined;
+      if (!row || row.id !== tail.id || row.occurred_at !== tail.at) { this.eventCache = []; this.eventCacheRowid = 0; this.eventCacheTail = undefined; }
+    }
     const rows = this.db.prepare("SELECT rowid AS rid, id, entity_type, entity_id, prior_state, new_state, actor, reason, policy_snapshot_json, occurred_at FROM audit_event WHERE rowid > ? ORDER BY rowid").all(this.eventCacheRowid) as Array<DatabaseEventRow & { rid: number }>;
     if (rows.length > 0) {
-      const lastBefore = this.eventCache.at(-1);
       let outOfOrder = false;
       for (const row of rows) {
         this.eventCacheRowid = Math.max(this.eventCacheRowid, row.rid);
+        this.eventCacheTail = { rid: row.rid, id: row.id, at: row.occurred_at };
         const snapshot = decode<{ kind?: string; eventType?: string; eventData?: Record<string, unknown>; runId?: string }>(row.policy_snapshot_json);
         if (snapshot?.kind !== 'event' && row.entity_type !== 'execution_run') continue;
         const event = { id: row.id, ...(snapshot?.runId || row.entity_type === 'execution_run' ? { runId: snapshot?.runId ?? row.entity_id } : {}), type: snapshot?.eventType ?? row.new_state ?? row.reason, at: row.occurred_at, data: snapshot?.eventData ?? {} } satisfies EventRecord;
-        const tail = this.eventCache.at(-1) ?? lastBefore;
-        if (tail && (event.at < tail.at || (event.at === tail.at && event.id < tail.id))) outOfOrder = true;
+        for (const value of Object.values(event.data)) deepFreeze(value);
+        const last = this.eventCache.at(-1);
+        if (last && (event.at < last.at || (event.at === last.at && event.id < last.id))) outOfOrder = true;
         this.eventCache.push(event);
       }
       // The original query ordered by time then id; new rows normally arrive in that order, and a sort restores it when they do not.
       if (outOfOrder) this.eventCache.sort((left, right) => left.at < right.at ? -1 : left.at > right.at ? 1 : left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
     }
-    // Fresh top-level objects each time, as before; callers that change a snapshot (the transaction does, on a deep copy) never touch the cache.
+    // Each caller gets fresh top-level objects. Anything nested inside an event's data is frozen, so a caller that tried to change it
+    // would fail loudly instead of silently altering every later snapshot.
     return this.eventCache.map((event) => ({ ...event, data: { ...event.data } }));
   }
 
