@@ -1224,6 +1224,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return { id, created: true };
   }
 
+  /** For the owner command's status page: has one Ethereum live mint been confirmed (D-040 item 6)? */
+  public ethereumLiveMintProven(): boolean { return this.hasConfirmedLiveEthereumMint(); }
+
   /** True when a live run on Ethereum has a confirmed receipt: the proof D-040 item 6 asks for before Robinhood may be enabled. */
   protected hasConfirmedLiveEthereumMint(): boolean {
     return hasConfirmedLiveEthereumMint(this.snapshot());

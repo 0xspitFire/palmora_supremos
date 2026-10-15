@@ -8,6 +8,7 @@ import {
   type MintJobConfig,
   type MintJobResult,
   type ReservationSettlementComponents,
+  type RobinhoodEnablementGrant,
   type SignerFactory,
   type SpendReservationProvider,
   type WalletInfo,
@@ -23,7 +24,7 @@ import type {
   ReconciliationUpdate,
   RunRecord,
 } from '@mint-bot/backend';
-import { PERSONAL_LIVE_FLEET_POLICY } from '@mint-bot/backend';
+import { PERSONAL_LIVE_FLEET_POLICY, validRobinhoodEnablement } from '@mint-bot/backend';
 import { promptHiddenPassphrase } from './secure-prompt.js';
 
 interface WalletFile {
@@ -46,6 +47,8 @@ export interface MintEngineAdapterOptions {
   readonly transact: <T>(mutate: (state: BackendState) => T) => Promise<T>;
   readonly lifecycleStore?: EngineLifecycleStore;
   readonly settleComponents?: (reservationId: string, components: ReservationSettlementComponents) => Promise<void>;
+  /** Robinhood only (D-050): returns the owner's stored enablement record, or undefined. The only source of the engine's Robinhood grant. */
+  readonly robinhoodEnablement?: () => unknown;
 }
 
 type CanonicalLifecycleDelegate = BackendStore & {
@@ -137,8 +140,18 @@ export function freeMintReserveCapsFor(chainId: number): { perWalletCapWei: bigi
   return chainId === 1 ? { perWalletCapWei: PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei, activePeriodCapWei: PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei } : undefined;
 }
 
+/**
+ * The ONE place an engine Robinhood grant is made (D-050): from the stored owner record, judged by the backend policy at this
+ * moment, and reduced to the expiry and the paid flag. Frozen. No record, or an invalid or expired one, gives no grant.
+ */
+export function robinhoodGrantFrom(record: unknown, now: Date): RobinhoodEnablementGrant | undefined {
+  const valid = validRobinhoodEnablement(record, now);
+  return valid ? Object.freeze({ expiresAt: valid.expiresAt, paidAllowed: valid.paidAllowed }) : undefined;
+}
+
 function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
   const chain = chainName(campaign.chainId);
+  const robinhoodGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : undefined;
   const reserveCaps = freeMintReserveCapsFor(campaign.chainId);
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
@@ -156,6 +169,7 @@ function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRu
       paidMaxQuantityPerWallet: 15,
       paidRunMintValueCapEth: paidRunMintValueCapEth(campaign),
       ...(reserveCaps ? { freeMintReserveCaps: reserveCaps } : {}),
+      ...(robinhoodGrant ? { robinhoodGrant } : {}),
     },
     broadcast: {
       // Dry runs must not require relay credentials. Live Ethereum still
