@@ -216,8 +216,12 @@ function encode(value: unknown): string {
   return result;
 }
 
+const BIGINT_TEXT = /"-?\d+n"/;
+
 function decode<T>(value: string | null | undefined): T | undefined {
   if (!value) return undefined;
+  // Most records hold no bigint text; skip the per-value reviver for them (same result, much less work).
+  if (!BIGINT_TEXT.test(value)) return JSON.parse(value) as T;
   return JSON.parse(value, (_key, item) => typeof item === 'string' && /^-?\d+n$/.test(item) ? BigInt(item.slice(0, -1)) : item) as T;
 }
 
@@ -394,6 +398,9 @@ export const APPROVED_ETHEREUM_TIP_WEI = 100_000_000n;
 export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private readonly databaseStore: SqliteBackendStore;
   private opened = false;
+  /** Audit events are append-only (migration 007), so decoded events are kept and only newer rows are read. */
+  private eventCache: EventRecord[] = [];
+  private eventCacheRowid = 0;
   private supportsReservationBoundaryFields = false;
   private supportsCampaignPeriods = false;
   private readonly durable: boolean;
@@ -466,7 +473,10 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const previous = this.snapshot();
-      const next = structuredClone(previous);
+      // Events are append-only and already persisted ones are never rewritten (persistEvent ignores them), so they are not deep-copied:
+      // `next` gets its own array, which a mutation may append to, over the same event objects.
+      const { events: previousEvents, ...rest } = previous;
+      const next: BackendState = { ...structuredClone(rest), events: previousEvents.slice() };
       const result = mutate(next);
       this.persistDelta(previous, next);
       this.db.exec('COMMIT');
@@ -802,12 +812,24 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private readEvents(): EventRecord[] {
-    const rows = this.db.prepare("SELECT id, entity_type, entity_id, prior_state, new_state, actor, reason, policy_snapshot_json, occurred_at FROM audit_event ORDER BY occurred_at, id").all() as DatabaseEventRow[];
-    return rows.flatMap((row) => {
-      const snapshot = decode<{ kind?: string; eventType?: string; eventData?: Record<string, unknown>; runId?: string }>(row.policy_snapshot_json);
-      if (snapshot?.kind !== 'event' && row.entity_type !== 'execution_run') return [];
-      return [{ id: row.id, ...(snapshot?.runId || row.entity_type === 'execution_run' ? { runId: snapshot?.runId ?? row.entity_id } : {}), type: snapshot?.eventType ?? row.new_state ?? row.reason, at: row.occurred_at, data: snapshot?.eventData ?? {} } satisfies EventRecord];
-    });
+    const rows = this.db.prepare("SELECT rowid AS rid, id, entity_type, entity_id, prior_state, new_state, actor, reason, policy_snapshot_json, occurred_at FROM audit_event WHERE rowid > ? ORDER BY rowid").all(this.eventCacheRowid) as Array<DatabaseEventRow & { rid: number }>;
+    if (rows.length > 0) {
+      const lastBefore = this.eventCache.at(-1);
+      let outOfOrder = false;
+      for (const row of rows) {
+        this.eventCacheRowid = Math.max(this.eventCacheRowid, row.rid);
+        const snapshot = decode<{ kind?: string; eventType?: string; eventData?: Record<string, unknown>; runId?: string }>(row.policy_snapshot_json);
+        if (snapshot?.kind !== 'event' && row.entity_type !== 'execution_run') continue;
+        const event = { id: row.id, ...(snapshot?.runId || row.entity_type === 'execution_run' ? { runId: snapshot?.runId ?? row.entity_id } : {}), type: snapshot?.eventType ?? row.new_state ?? row.reason, at: row.occurred_at, data: snapshot?.eventData ?? {} } satisfies EventRecord;
+        const tail = this.eventCache.at(-1) ?? lastBefore;
+        if (tail && (event.at < tail.at || (event.at === tail.at && event.id < tail.id))) outOfOrder = true;
+        this.eventCache.push(event);
+      }
+      // The original query ordered by time then id; new rows normally arrive in that order, and a sort restores it when they do not.
+      if (outOfOrder) this.eventCache.sort((left, right) => left.at < right.at ? -1 : left.at > right.at ? 1 : left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    }
+    // Fresh top-level objects each time, as before; callers that change a snapshot (the transaction does, on a deep copy) never touch the cache.
+    return this.eventCache.map((event) => ({ ...event, data: { ...event.data } }));
   }
 
   private readNotifications(): BackendState['notificationOutbox'] {
@@ -854,19 +876,36 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private persistDelta(previous: BackendState, next: BackendState): void {
-    for (const campaign of next.campaigns) this.persistCampaign(campaign, previous.campaigns.find((item) => item.id === campaign.id));
-    for (const run of next.runs) this.persistRun(run, previous.runs.find((item) => item.id === run.id));
-    for (const intent of next.intents) this.persistIntent(intent, previous.intents.find((item) => item.id === intent.id));
-    for (const attempt of next.attempts) this.persistAttempt(attempt, previous.attempts.find((item) => item.id === attempt.id));
-    for (const receipt of next.receipts) this.persistReceipt(receipt, previous.receipts.find((item) => item.id === receipt.id));
-    for (const reconciliation of next.reconciliations) this.persistReconciliation(reconciliation, previous.reconciliations.find((item) => item.id === reconciliation.id));
-    for (const reservation of next.reservations) this.persistReservation(reservation, previous.reservations.find((item) => item.id === reservation.id));
-    for (const event of next.events) this.persistEvent(event, previous.events.find((item) => item.id === event.id));
-    for (const notification of next.notificationOutbox) this.persistNotification(notification, previous.notificationOutbox.find((item) => item.id === notification.id));
-    for (const evidence of next.chainEvidence) this.persistChainEvidence(evidence, previous.chainEvidence.find((item) => item.id === evidence.id));
-    for (const simulation of next.simulations) this.persistSimulation(simulation, previous.simulations.find((item) => item.id === simulation.id));
-    for (const readiness of next.readiness) this.persistReadiness(readiness, previous.readiness.find((item) => item.campaignId === readiness.campaignId && item.wallet.toLowerCase() === readiness.wallet.toLowerCase()));
-    for (const job of next.jobs) this.persistJob(job, previous.jobs.find((item) => item.id === job.id));
+    // Look up the previous record by id in a Map (same answer as a scan, without a scan per record).
+    const index = <T extends { id: string }>(items: readonly T[]): Map<string, T> => { const map = new Map<string, T>(); for (const item of items) if (!map.has(item.id)) map.set(item.id, item); return map; };
+    const campaigns = index(previous.campaigns);
+    const runs = index(previous.runs);
+    const intents = index(previous.intents);
+    const attempts = index(previous.attempts);
+    const receipts = index(previous.receipts);
+    const reconciliations = index(previous.reconciliations);
+    const reservations = index(previous.reservations);
+    const events = index(previous.events);
+    const notifications = index(previous.notificationOutbox);
+    const chainEvidence = index(previous.chainEvidence);
+    const simulations = index(previous.simulations);
+    const jobs = index(previous.jobs);
+    const readinessKey = (item: { campaignId?: string | undefined; wallet: string }): string => `${item.campaignId ?? ''}\u0000${item.wallet.toLowerCase()}`;
+    const readiness = new Map<string, BackendState['readiness'][number]>();
+    for (const item of previous.readiness) if (!readiness.has(readinessKey(item))) readiness.set(readinessKey(item), item);
+    for (const campaign of next.campaigns) this.persistCampaign(campaign, campaigns.get(campaign.id));
+    for (const run of next.runs) this.persistRun(run, runs.get(run.id));
+    for (const intent of next.intents) this.persistIntent(intent, intents.get(intent.id));
+    for (const attempt of next.attempts) this.persistAttempt(attempt, attempts.get(attempt.id));
+    for (const receipt of next.receipts) this.persistReceipt(receipt, receipts.get(receipt.id));
+    for (const reconciliation of next.reconciliations) this.persistReconciliation(reconciliation, reconciliations.get(reconciliation.id));
+    for (const reservation of next.reservations) this.persistReservation(reservation, reservations.get(reservation.id));
+    for (const event of next.events) this.persistEvent(event, events.get(event.id));
+    for (const notification of next.notificationOutbox) this.persistNotification(notification, notifications.get(notification.id));
+    for (const evidence of next.chainEvidence) this.persistChainEvidence(evidence, chainEvidence.get(evidence.id));
+    for (const simulation of next.simulations) this.persistSimulation(simulation, simulations.get(simulation.id));
+    for (const item of next.readiness) this.persistReadiness(item, readiness.get(readinessKey(item)));
+    for (const job of next.jobs) this.persistJob(job, jobs.get(job.id));
     const nextJobIds = new Set(next.jobs.map((item) => item.id));
     for (const job of previous.jobs) if (!nextJobIds.has(job.id)) this.db.prepare('DELETE FROM orchestrator_job WHERE id = ?').run(job.id);
     const nextNotificationIds = new Set(next.notificationOutbox.map((item) => item.id));
