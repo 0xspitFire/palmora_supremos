@@ -12,7 +12,7 @@ const OWN = ['0x365952eb1e8209bf2bcc2db5ed213111a87d061e', '0x81c104dcb898416fd4
 class IdlePort implements IntelligenceChainPort {
   public readonly chainId = 1 as const;
   public async safeHead(): Promise<bigint | null> { return null; }
-  public async scan(): Promise<ChainScanOutcome> { return { ok: false, reason: 'unused' }; }
+  public async scan(_fromBlock?: bigint, _toBlock?: bigint): Promise<ChainScanOutcome> { return { ok: false, reason: 'unused' }; }
   public async readDrop(): Promise<DropSnapshot | null> { return null; }
   public async hasCode(): Promise<boolean | null> { return null; }
   public async balance(): Promise<bigint | null> { return null; }
