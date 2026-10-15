@@ -190,3 +190,45 @@ describe('scan jump and tick timing (T-034)', () => {
     expect(typeof tick?.durationMs).toBe('number');
   });
 });
+
+describe('jump notice is never lost (T-034 review)', () => {
+  class FailingAfterJumpPort extends IdlePort {
+    public override async safeHead(): Promise<bigint | null> { return 50_000n; }
+    public override async scan(): Promise<ChainScanOutcome> { return { ok: false, reason: 'LOGS_UNAVAILABLE' }; }
+  }
+
+  it('sends the card even when the scan fails right after the jump, and not twice on the next tick', async () => {
+    const now = () => new Date('2026-10-15T12:00:00.000Z');
+    const h = harness(now, new Repo(1, 100n));
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new FailingAfterJumpPort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    await vi.waitFor(() => expect(h.sent.some((text) => text.includes('SCAN JUMPED AHEAD'))).toBe(true));
+    await service.runOnce();
+    service.stop();
+    expect(h.sent.filter((text) => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(1);
+  });
+
+  it('announces a recorded jump that never got its card, once, when the service starts', async () => {
+    const now = () => new Date('2026-10-15T12:00:00.000Z');
+    const h = harness(now);
+    await h.store.transaction((state) => { state.events.push({ id: 'evt_old_skip', type: 'discovery_skipped', at: '2026-10-15T11:00:00.000Z', data: { fromBlock: '1000', toBlock: '9999', blocks: '9000', headBlock: '10299' } }, { id: 'evt_ancient_skip', type: 'discovery_skipped', at: '2026-10-10T11:00:00.000Z', data: { fromBlock: '1', toBlock: '2', blocks: '2', headBlock: '3' } }); });
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    await vi.waitFor(() => expect(h.sent.some((text) => text.includes('SCAN JUMPED AHEAD'))).toBe(true));
+    await service.runOnce();
+    service.stop();
+    const cards = h.sent.filter((text) => text.includes('SCAN JUMPED AHEAD'));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toContain('blocks 1,000 to 9,999 were not read');
+  });
+
+  it('logs how long a failed tick took', async () => {
+    const now = () => new Date('2026-10-15T12:00:00.000Z');
+    const h = harness(now);
+    const logs: Array<Record<string, unknown>> = [];
+    const logger = { info: (entry: Record<string, unknown>) => logs.push(entry), warn: (entry: Record<string, unknown>) => logs.push(entry), error: () => undefined } as never;
+    class ThrowingPort extends IdlePort { public override async safeHead(): Promise<bigint | null> { throw new Error('boom'); } }
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new ThrowingPort(), alerts: h.alerts, wallets: OWN, logger, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    await vi.waitFor(() => expect(logs.some((entry) => entry.event === 'intelligence_discovery_failed')).toBe(true));
+    service.stop();
+    expect(typeof logs.find((entry) => entry.event === 'intelligence_discovery_failed')?.durationMs).toBe('number');
+  });
+});
