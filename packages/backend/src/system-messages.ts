@@ -276,6 +276,7 @@ export function recoveredCard(key: HealthKey, input: { since: Date; now: Date })
 
 /** The scan was too far behind the chain and jumped ahead; the skipped blocks were not read. */
 export function scanSkippedCard(input: { blocks: bigint; fromBlock: string; toBlock: string; at: Date }): SystemCard {
+  // Ethereum blocks come every 12 seconds; the scan is Ethereum-only (D-014), so this is the conversion to hours.
   const hours = Number(input.blocks) * 12 / 3600;
   const span = hours >= 1 ? `about ${hours.toFixed(1)} hours` : `about ${Math.max(1, Math.round(hours * 60))} minutes`;
   return buildSystemCard({
