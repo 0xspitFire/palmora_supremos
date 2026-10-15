@@ -87,9 +87,14 @@ describe('every Robinhood refusal site goes through the one policy', () => {
     expect((await read('canonical-store.ts')).match(/assertRobinhoodLiveAllowed\(/g)?.length).toBeGreaterThanOrEqual(4);
   });
 
-  it('has a store that can only answer "no record" until the owner command exists', async () => {
+  it('has a store whose only source for the record is the database table (no environment variable, no configuration)', async () => {
     const source = await read('canonical-store.ts');
-    expect(source).toMatch(/public robinhoodEnablement\(\): unknown \{ return undefined; \}/);
+    const start = source.indexOf('public robinhoodEnablement(): unknown {');
+    expect(start).toBeGreaterThan(0);
+    const body = source.slice(start, source.indexOf('\n  }\n', start));
+    expect(body).toContain('this.databaseStore.latestRobinhoodEnablement()');
+    expect(body).not.toMatch(/process\./);
+    expect(body).not.toMatch(/options|config/i);
     expect(await read('coordinator.ts')).toContain('this.canonicalStore()?.robinhoodEnablement?.()');
   });
 

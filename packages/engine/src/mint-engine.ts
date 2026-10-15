@@ -640,6 +640,8 @@ export class MintEngine {
             error: this.killSwitch.getReason(), durationMs: Date.now() - startTime,
           };
         }
+        // Robinhood only: the owner's enablement must still be current at the moment this wallet is about to be prepared and signed (D-050).
+        assertDirectChainExecutionPolicy(chainId, drop.mintPrice * BigInt(this.config.target.quantity), this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now());
 
         const simulation = simulations.get(walletIndex);
         if (!this.config.safety.dryRun && !simulation?.success) {

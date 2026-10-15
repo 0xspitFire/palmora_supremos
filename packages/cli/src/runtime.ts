@@ -81,6 +81,8 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     transact: (mutate) => store.transaction(mutate),
     lifecycleStore: adapterOptions?.lifecycleStore ?? lifecycleStore,
     settleComponents: adapterOptions?.settleComponents ?? ((reservationId, components) => store.settleExecutionComponents(reservationId, components)),
+    // Robinhood grant source (D-050): the stored owner record only. Placed after the spread above so no caller option can replace it.
+    robinhoodEnablement: () => (store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(),
   });
   let alertSink: SpendAlertSink = new AlertManager(store);
   // The owner's CLI may accept a recorded local key file for Personal Live (D-043); the service never passes this, so unattended runs still need Turnkey or a cloud key service.

@@ -116,11 +116,20 @@ export class OrchestratorService {
     return { running: this.running, state: this.running ? state.runtime.startupState : 'stopped', startupState: state.runtime.startupState, active: jobs.filter((job) => job.state === 'running').length, queued: jobs.filter((job) => job.state === 'scheduled').length, blocked: jobs.filter((job) => job.state === 'blocked' || job.state === 'cancelled').length, failed: jobs.filter((job) => job.state === 'failed').length, completed: jobs.filter((job) => job.state === 'succeeded').length, blockingReasons: [...state.runtime.blockingReasons] };
   }
 
+  /** Robinhood execution is switched off again once the owner's enablement record has expired (D-051). Only a canonical store has the record. */
+  private switchOffExpiredRobinhood(): void {
+    try {
+      const store = this.store as Partial<{ disableExpiredRobinhood(): boolean }>;
+      if (typeof store.disableExpiredRobinhood === 'function' && store.disableExpiredRobinhood()) this.options.logger?.warn({ event: 'robinhood_enablement_expired' }, 'Robinhood execution switched off: the enablement record expired');
+    } catch (error) { this.options.logger?.warn({ event: 'robinhood_expiry_check_failed', error }, 'could not check Robinhood enablement expiry'); }
+  }
+
   public async tick(): Promise<void> {
     if (!this.running || this.ticking) return;
     this.ticking = true;
     try {
       await this.observeBackupStatus();
+      this.switchOffExpiredRobinhood();
       this.recordReconciliationMetrics();
       if (this.options.backupStatusPath && (this.lastBackupStatus !== 'ok' || this.lastBackupRecordedAt === undefined || this.now().getTime() - this.lastBackupRecordedAt > (this.options.backupMaxAgeMs ?? 30 * 86_400_000))) {
         await this.store.transaction((state) => {

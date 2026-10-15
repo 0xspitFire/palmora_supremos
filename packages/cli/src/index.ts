@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { constants } from 'node:fs';
-import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { type Address, type Hex, parseEther, parseGwei } from 'viem';
@@ -10,7 +10,7 @@ import { canonicalPolicyDigest, createTurnkeyClient, generateAndEncryptWallets, 
 import type { WalletImportRecord } from '@mint-bot/engine';
 import type { TurnkeyWalletMap } from '@mint-bot/engine';
 import { configuredSecretRoot, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
-import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
+import { resolveWalletPath, validRobinhoodEnablement, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
@@ -23,6 +23,7 @@ import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
+import { ENABLEMENT_DAYS, EVIDENCE_STEPS, STEP_MEANING, assertEnableAllowed, checkEvidenceFile, enablePhrase, type EvidenceStep } from './robinhood-enable.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase } from './personal-live-cli.js';
 import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
@@ -614,6 +615,32 @@ const cli = yargs(hideBin(process.argv))
           noticeSent = true;
         } catch { noticeSent = false; }
         process.stdout.write(`${json({ state: 'Released', message: `The kill switch is off${result.released ? '' : ' (only the file was left)'}. Run live-readiness record next; create the kill switch again with the kill command at any time to stop.`, telegramNoticeSent: noticeSent })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
+  .command('robinhood-enable <action>', 'Owner-run: switch Robinhood FREE execution on for up to 7 days (status | record). Needs one confirmed live Ethereum mint and your evidence file for E1 to E7', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'record'] as const, demandOption: true })
+    .option('evidence-file', { type: 'string', demandOption: true, describe: 'Your JSON file with E1 to E7 (see Docs/robinhood-enable-evidence.template.json)' })
+    .option('days', { type: 'number', default: ENABLEMENT_DAYS, describe: 'How long it stays on (1 to 7)' })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (record only)' }), async (args) => {
+      try {
+        const info = await lstat(args.evidenceFile);
+        if (!info.isFile() || info.isSymbolicLink() || info.size > 20_000) throw new Error('EVIDENCE_FILE_INVALID: it must be a plain file under 20 KB');
+        const now = new Date();
+        const evidence = checkEvidenceFile(await readFile(args.evidenceFile, 'utf8'), now);
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
+        const store = runtime.store as unknown as { ethereumLiveMintProven?: () => boolean; enableRobinhood?: (input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<EvidenceStep, true>; confirmationDigest: string }) => void; robinhoodEnablement?: () => unknown };
+        if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
+        const proven = store.ethereumLiveMintProven();
+        const current = validRobinhoodEnablement(store.robinhoodEnablement?.(), now);
+        if (args.action === 'status') {
+          const ready = proven && evidence.problems.length === 0 && evidence.fileDigest !== undefined;
+          process.stdout.write(`${json({ state: ready ? 'ReadyToRecord' : 'NotReady', message: ready ? `Everything checks out. Recording switches Robinhood FREE execution on for ${args.days} day(s); paid mints stay blocked.` : 'Not ready yet. Fix the items below.', ethereumLiveMintConfirmed: proven, steps: EVIDENCE_STEPS.map((step) => ({ step, meaning: STEP_MEANING[step], ok: evidence.ok.includes(step) })), problems: [...(proven ? [] : ['No confirmed live Ethereum mint yet (D-040 item 6).']), ...evidence.problems], currentlyEnabledUntil: current?.expiresAt ?? null, ...(ready && evidence.fileDigest ? { copyThisToRecord: `robinhood-enable record --evidence-file ${args.evidenceFile} --days ${args.days} --confirm "${enablePhrase(evidence.fileDigest, args.days)}"` } : {}) })}\n`);
+          return;
+        }
+        const allowed = assertEnableAllowed({ evidence, ethereumLiveMintProven: proven, confirm: args.confirm, days: args.days });
+        const expiresAt = new Date(now.getTime() + args.days * 86_400_000).toISOString();
+        store.enableRobinhood({ id: `rh_enable_${randomBytes(8).toString('hex')}`, approvedAt: now.toISOString(), expiresAt, evidence: allowed.evidence, confirmationDigest: allowed.digest });
+        process.stdout.write(`${json({ state: 'Enabled', message: `Robinhood FREE execution is on until ${expiresAt}. Paid mints stay blocked. The service switches it off by itself when this expires; the kill switch still stops everything.`, expiresAt })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('chain-evidence <action>', 'Owner-run: record Ethereum SeaDrop chain evidence for 7 days after a typed confirmation (needed before a live arm)', (args) => args

@@ -149,6 +149,27 @@ export interface ChainVerificationRecord {
   executionEnabled?: boolean;
 }
 
+export interface RobinhoodEnablementInput {
+  id: string;
+  approvedAt: string;
+  expiresAt: string;
+  /** E1 to E7, each exactly true. */
+  evidence: Record<'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7', true>;
+  /** SHA-256 (hex) of the typed confirmation phrase the owner entered. */
+  confirmationDigest: string;
+}
+
+export interface RobinhoodEnablementRow {
+  id: string;
+  approvedBy: string;
+  approvedAt: string;
+  expiresAt: string;
+  paidAllowed: boolean;
+  evidence: unknown;
+  confirmationDigest: string;
+  createdAt: string;
+}
+
 export interface ReorgEventRecord {
   id: string;
   chainProfileId: string;
@@ -463,6 +484,59 @@ export class DurableRepository {
       this.db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, sea_drop_test_tx_hash, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.status, record.chainId, safeText(record.sequencerEndpointReference, 'sequencer endpoint') ?? null, safeText(record.archiveEndpointReference, 'archive endpoint') ?? null, safeText(record.feedEndpointReference, 'feed endpoint') ?? null, record.seaDropTestTxHash ?? null, evidence, record.checkedAt, approver ?? null, approvedAt);
       this.db.prepare('UPDATE chain_profile SET verification_status = ?, verification_evidence_json = ?, verification_approved_by = ?, verification_approved_at = ?, execution_enabled = ? WHERE id = ?').run(record.status, evidence, approver ?? null, approvedAt, executionEnabled ? 1 : 0, record.chainProfileId);
       this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, evidence_snapshot_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`${record.id}:audit`, 'chain_profile', record.chainProfileId, profile.verification_status, record.status, safeText(record.approvedBy, 'verification approver') ?? 'database', 'chain verification evidence recorded', evidence, record.checkedAt);
+    });
+  }
+
+  /**
+   * Robinhood live enablement (D-040 Key 2, D-050, D-051). Writes the owner's enablement row, the verified chain evidence and the
+   * enabled chain profile in ONE transaction; the database triggers (migration 023) refuse the profile change unless the row exists
+   * and is valid at the approval time. Nothing here is reachable except from the owner-run command.
+   */
+  public enableRobinhood(record: RobinhoodEnablementInput, chain: { chainProfileId: string; verificationId: string; sequencerEndpointReference: string; archiveEndpointReference: string }): void {
+    if (!record.confirmationDigest || !/^[0-9a-f]{64}$/.test(record.confirmationDigest)) throw new Error('Robinhood enablement requires a confirmation digest');
+    const steps = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7'] as const;
+    if (Object.keys(record.evidence).length !== steps.length || steps.some((step) => record.evidence[step] !== true)) throw new Error('Robinhood enablement requires E1 to E7 all passed');
+    this.immediate(() => {
+      this.db.prepare("INSERT INTO robinhood_enablement (id, approved_by, approved_at, expires_at, paid_allowed, evidence_json, confirmation_digest, created_at) VALUES (?, 'owner-cli', ?, ?, 0, ?, ?, ?)").run(record.id, record.approvedAt, record.expiresAt, JSON.stringify(record.evidence), record.confirmationDigest, record.approvedAt);
+      this.recordChainVerification({
+        id: chain.verificationId,
+        chainProfileId: chain.chainProfileId,
+        chainId: 4663,
+        status: 'verified',
+        sequencerEndpointReference: chain.sequencerEndpointReference,
+        archiveEndpointReference: chain.archiveEndpointReference,
+        evidence: { finalityPassed: true, robinhoodEnablementId: record.id, expiresAt: record.expiresAt, evidence: record.evidence },
+        checkedAt: record.approvedAt,
+        approvedBy: 'owner-cli',
+        approvedAt: record.approvedAt,
+        executionEnabled: true,
+      });
+    });
+  }
+
+  /** The newest enablement row (it alone decides), or undefined. Validity at a time is the caller's judgement (see `robinhoodEnabledAt`). */
+  public latestRobinhoodEnablement(): RobinhoodEnablementRow | undefined {
+    const row = this.db.prepare('SELECT id, approved_by, approved_at, expires_at, paid_allowed, evidence_json, confirmation_digest, created_at FROM robinhood_enablement ORDER BY rowid DESC LIMIT 1').get() as { id: string; approved_by: string; approved_at: string; expires_at: string; paid_allowed: number; evidence_json: string; confirmation_digest: string; created_at: string } | undefined;
+    if (!row) return undefined;
+    let evidence: unknown;
+    try { evidence = JSON.parse(row.evidence_json); } catch { return undefined; }
+    return { id: row.id, approvedBy: row.approved_by, approvedAt: row.approved_at, expiresAt: row.expires_at, paidAllowed: row.paid_allowed === 1, evidence, confirmationDigest: row.confirmation_digest, createdAt: row.created_at };
+  }
+
+  /**
+   * Turns Robinhood execution off again when the newest enablement is no longer valid at `now` (expired, or none). Turning it off is
+   * always allowed by the database. Returns true when the profile was switched off.
+   */
+  public disableRobinhoodIfNotEnabled(now: Date): boolean {
+    const at = now.toISOString();
+    return this.immediate(() => {
+      const profile = this.db.prepare('SELECT id, execution_enabled FROM chain_profile WHERE chain_id = 4663').get() as { id: string; execution_enabled: number } | undefined;
+      if (!profile || profile.execution_enabled !== 1) return false;
+      const latest = this.latestRobinhoodEnablement();
+      if (latest && Date.parse(latest.approvedAt) <= now.getTime() && now.getTime() < Date.parse(latest.expiresAt)) return false;
+      this.db.prepare('UPDATE chain_profile SET execution_enabled = 0 WHERE id = ?').run(profile.id);
+      this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(`robinhood-disabled:${profile.id}:${at}`, 'chain_profile', profile.id, 'execution_enabled', 'execution_disabled', 'system', 'Robinhood enablement expired or missing', at);
+      return true;
     });
   }
 

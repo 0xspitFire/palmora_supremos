@@ -1,0 +1,121 @@
+import { readFile } from 'node:fs/promises';
+import { describe, expect, it } from 'vitest';
+import { ENABLEMENT_DAYS, EVIDENCE_STEPS, assertEnableAllowed, checkEvidenceFile, confirmationDigest, enablePhrase } from './robinhood-enable.js';
+import { robinhoodGrantFrom } from './engine-adapter.js';
+
+const NOW = new Date('2026-10-20T12:00:00.000Z');
+const entry = (checkedOn = '2026-10-18') => ({ passed: true, checkedOn, reference: 'Docs/robinhood-evidence.md section 3' });
+const goodFile = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...Object.fromEntries(EVIDENCE_STEPS.map((step) => [step, entry()])), ...overrides });
+
+describe('evidence file for switching Robinhood on', () => {
+  it('accepts a complete, recent file and reports its digest', () => {
+    const result = checkEvidenceFile(goodFile(), NOW);
+    expect(result.problems).toEqual([]);
+    expect(result.ok).toEqual([...EVIDENCE_STEPS]);
+    expect(result.fileDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.evidence).toEqual({ E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true });
+  });
+
+  it('names each missing, failed, old, future, undated or unreferenced step in plain words', () => {
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [{ E3: undefined }, /E3 .*missing/],
+      [{ E2: { ...entry(), passed: false } }, /E2 .*not marked passed/],
+      [{ E4: { ...entry(), passed: 'yes' } }, /E4 .*not marked passed/],
+      [{ E5: entry('2026-08-01') }, /E5 was checked more than 30 days ago/],
+      [{ E6: entry('2026-11-30') }, /E6 is dated in the future/],
+      [{ E1: { ...entry(), checkedOn: 'last week' } }, /E1 needs a date/],
+      [{ E7: { ...entry(), reference: 'ok' } }, /E7 needs a short reference/],
+      [{ E7: { ...entry(), reference: 'x'.repeat(301) } }, /E7 needs a short reference/],
+      [{ E8: entry() }, /Unknown entries/],
+    ];
+    for (const [overrides, expected] of cases) {
+      const result = checkEvidenceFile(goodFile(overrides), NOW);
+      expect(result.evidence, JSON.stringify(overrides)).toBeUndefined();
+      expect(result.problems.join(' '), JSON.stringify(overrides)).toMatch(expected);
+    }
+  });
+
+  it('refuses files that are not a JSON object', () => {
+    for (const text of ['', 'nope', '[]', '"E1"', 'null', '5']) {
+      const result = checkEvidenceFile(text, NOW);
+      expect(result.evidence).toBeUndefined();
+      expect(result.problems.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('does not count inherited properties as steps', () => {
+    const result = checkEvidenceFile(JSON.stringify(Object.fromEntries(EVIDENCE_STEPS.slice(0, 6).map((step) => [step, entry()]))), NOW);
+    expect(result.ok).toHaveLength(6);
+    expect(result.problems.join(' ')).toMatch(/E7 .*missing/);
+  });
+});
+
+describe('assertEnableAllowed: every condition must hold before anything is written', () => {
+  const evidence = checkEvidenceFile(goodFile(), NOW);
+  const phrase = enablePhrase(evidence.fileDigest ?? '', ENABLEMENT_DAYS);
+  const facts = (overrides: Record<string, unknown> = {}) => ({ evidence, ethereumLiveMintProven: true, confirm: phrase, days: ENABLEMENT_DAYS, ...overrides }) as never;
+
+  it('passes with a proven Ethereum mint, complete evidence and the exact phrase, and returns a digest that depends on the phrase and the file', () => {
+    const allowed = assertEnableAllowed(facts());
+    expect(allowed.phrase).toBe(phrase);
+    expect(allowed.digest).toBe(confirmationDigest(phrase, evidence.fileDigest ?? ''));
+    expect(allowed.digest).not.toBe(confirmationDigest(phrase, 'f'.repeat(64)));
+    expect(allowed.evidence).toEqual({ E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true });
+  });
+
+  it('fails closed: no Ethereum live mint, bad evidence, missing or wrong phrase, bad days', () => {
+    expect(() => assertEnableAllowed(facts({ ethereumLiveMintProven: false }))).toThrow('ETHEREUM_LIVE_MINT_REQUIRED');
+    expect(() => assertEnableAllowed(facts({ evidence: checkEvidenceFile(goodFile({ E3: undefined }), NOW) }))).toThrow('EVIDENCE_INCOMPLETE');
+    expect(() => assertEnableAllowed(facts({ evidence: { ok: [], problems: [] } }))).toThrow('EVIDENCE_INCOMPLETE');
+    expect(() => assertEnableAllowed(facts({ confirm: undefined }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(() => assertEnableAllowed(facts({ confirm: `${phrase} ` }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(() => assertEnableAllowed(facts({ confirm: enablePhrase('0'.repeat(64), ENABLEMENT_DAYS) }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    for (const days of [0, 8, 1.5, Number.NaN, -1]) expect(() => assertEnableAllowed(facts({ days })), String(days)).toThrow('DAYS_INVALID');
+    // The phrase for one length of enablement does not work for another.
+    expect(() => assertEnableAllowed(facts({ days: 3 }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+  });
+});
+
+describe('the engine grant is made in one place, from the stored owner record only', () => {
+  const now = new Date('2026-10-20T12:00:00.000Z');
+  const record = (over: Record<string, unknown> = {}) => ({ recordId: 'rh-1', approvedBy: 'owner-cli', approvedAt: '2026-10-20T10:00:00.000Z', expiresAt: '2026-10-27T10:00:00.000Z', paidAllowed: false, evidence: Object.fromEntries(EVIDENCE_STEPS.map((step) => [step, true])), ...over });
+
+  it('gives a frozen grant with only the expiry and the paid flag for a valid record, and none otherwise', () => {
+    const grant = robinhoodGrantFrom(record(), now);
+    expect(grant).toEqual({ expiresAt: '2026-10-27T10:00:00.000Z', paidAllowed: false });
+    expect(Object.isFrozen(grant)).toBe(true);
+    for (const bad of [undefined, null, {}, record({ approvedBy: 'session' }), record({ expiresAt: '2026-10-20T12:00:00.000Z' }), record({ evidence: { E1: true } }), 'on', true]) expect(robinhoodGrantFrom(bad, now)).toBeUndefined();
+  });
+
+  it('is wired so that only the stored record feeds it, only for chain 4663, and no caller option can replace it', async () => {
+    const adapter = await readFile(new URL('./engine-adapter.ts', import.meta.url), 'utf8');
+    expect(adapter).toContain('campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : undefined');
+    const runtime = await readFile(new URL('./runtime.ts', import.meta.url), 'utf8');
+    const spread = runtime.indexOf('...configuredAdapterOptions,');
+    const source = runtime.indexOf('robinhoodEnablement: () => (store as');
+    expect(spread).toBeGreaterThan(0);
+    expect(source).toBeGreaterThan(spread);
+  });
+});
+
+describe('robinhood-enable command wiring', () => {
+  const body = async () => {
+    const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
+    const start = source.indexOf(".command('robinhood-enable <action>'");
+    const end = source.indexOf(".command('chain-evidence <action>'");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    return source.slice(start, end);
+  };
+
+  it('checks every condition before it writes, and never writes on status', async () => {
+    const text = await body();
+    const gate = text.indexOf('assertEnableAllowed({');
+    const write = text.indexOf('store.enableRobinhood({');
+    expect(gate).toBeGreaterThan(0);
+    expect(write).toBeGreaterThan(gate);
+    expect(text.indexOf("args.action === 'status'")).toBeLessThan(gate);
+    expect(text).toContain('{ startCoordinator: false }');
+    expect(text).toContain('info.isSymbolicLink()');
+  });
+});
