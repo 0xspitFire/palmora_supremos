@@ -32,6 +32,7 @@ import type {
   StoreCapabilities,
 } from './types.js';
 import type { BackendStore } from './store.js';
+import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
 
 export interface CanonicalAdmissionInput {
@@ -244,6 +245,13 @@ function asBigInt(value: unknown, fallback = 0n): bigint {
 
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 32);
+}
+
+/** A live Ethereum run with a confirmed receipt. Pure, so it can be tested on a hand-made state. */
+export function hasConfirmedLiveEthereumMint(state: Pick<BackendState, 'runs' | 'campaigns' | 'receipts'>): boolean {
+  const ethereumCampaigns = new Set(state.campaigns.filter((campaign) => campaign.chainId === ETHEREUM_CHAIN_ID).map((campaign) => campaign.id));
+  const liveRuns = new Set(state.runs.filter((run) => run.mode === 'live' && ethereumCampaigns.has(run.campaignId)).map((run) => run.id));
+  return state.receipts.some((receipt) => liveRuns.has(receipt.runId) && receipt.state === 'Confirmed');
 }
 
 function canonicalId(prefix: string, value: string): string {
@@ -1198,10 +1206,51 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   /**
-   * Key 2 (D-040). There is no way to write the record yet (the owner command is a later, separately reviewed change), so
-   * this always answers "none" and every Robinhood live path stays refused. It is not read from configuration or the environment.
+   * Key 2 (D-040, D-050): the newest enablement row, or undefined. Only the database table can supply it (never configuration
+   * or the environment); the policy then judges owner, evidence, approval time and expiry on every use.
    */
-  public robinhoodEnablement(): unknown { return undefined; }
+  public robinhoodEnablement(): unknown {
+    const row = this.databaseStore.latestRobinhoodEnablement();
+    if (!row) return undefined;
+    return { recordId: row.id, approvedBy: row.approvedBy, approvedAt: row.approvedAt, expiresAt: row.expiresAt, paidAllowed: row.paidAllowed, evidence: row.evidence };
+  }
+
+  /** Creates the Robinhood chain profile row when there is none (disabled and unverified, like Ethereum's). */
+  public ensureRobinhoodChainProfile(): { id: string; created: boolean } {
+    const existing = this.db.prepare('SELECT id FROM chain_profile WHERE chain_id = ?').get(ROBINHOOD_CHAIN_ID) as { id: string } | undefined;
+    if (existing) return { id: existing.id, created: false };
+    const id = canonicalId('chain', 'robinhood-4663');
+    this.db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, ROBINHOOD_CHAIN_ID, 'Robinhood Chain', '[]', 1, this.now().toISOString());
+    return { id, created: true };
+  }
+
+  /** True when a live run on Ethereum has a confirmed receipt: the proof D-040 item 6 asks for before Robinhood may be enabled. */
+  protected hasConfirmedLiveEthereumMint(): boolean {
+    return hasConfirmedLiveEthereumMint(this.snapshot());
+  }
+
+  /**
+   * Owner command only (D-040, D-050, D-051). Writes the enablement record, the verified chain evidence and the enabled chain
+   * profile in one transaction. Refuses unless one Ethereum Personal Live mint has already worked. The database triggers refuse the
+   * profile change unless the record exists and covers the approval time.
+   */
+  public enableRobinhood(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7', true>; confirmationDigest: string }): void {
+    this.ensureOpen();
+    if (!this.hasConfirmedLiveEthereumMint()) throw new Error('ETHEREUM_LIVE_MINT_REQUIRED');
+    const profile = this.ensureRobinhoodChainProfile();
+    this.databaseStore.enableRobinhood(input, {
+      chainProfileId: profile.id,
+      verificationId: canonicalId('verification', `robinhood-enable:${input.id}`),
+      sequencerEndpointReference: 'https://sequencer.mainnet.chain.robinhood.com',
+      archiveEndpointReference: `${MAINNET_SECRET_FILE_REFERENCE}:ROBINHOOD_ARCHIVE_RPC`,
+    });
+  }
+
+  /** Switches Robinhood execution off when the newest record has expired (or there is none). Called on every service tick. */
+  public disableExpiredRobinhood(): boolean {
+    this.ensureOpen();
+    return this.databaseStore.disableRobinhoodIfNotEnabled(this.now());
+  }
 
   /** Whether the stored kill switch is on, and who last changed it and when. */
   public killSwitchStatus(): { engaged: boolean; changedBy: string; changedAt: string } {
