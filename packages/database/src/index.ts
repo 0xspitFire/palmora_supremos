@@ -1,4 +1,4 @@
-export { backupDatabase, migrate, openDatabase, pruneRawObservations, restoreDatabase, verifyBackup } from './database.js';
+export { backupDatabase, migrate, openDatabase, openDatabaseReadOnly, pruneRawObservations, restoreDatabase, verifyBackup } from './database.js';
 export type { BackupVerification } from './database.js';
 export { ReservationConflictError, SpendCapExceededError, SpendReservations } from './spend-reservations.js';
 export type { ExecutionReservationRequest, ReservationRequest, ReservationStatus, SettlementComponents } from './spend-reservations.js';
