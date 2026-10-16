@@ -13,7 +13,8 @@ import { configuredSecretRoot, configuredWallets, createCliRuntime, turnkeyCusto
 import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
-import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
+import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
+import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
 import { resolveChainByNameFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
@@ -615,6 +616,19 @@ const cli = yargs(hideBin(process.argv))
           noticeSent = true;
         } catch { noticeSent = false; }
         process.stdout.write(`${json({ state: 'Released', message: `The kill switch is off${result.released ? '' : ' (only the file was left)'}. Run live-readiness record next; create the kill switch again with the kill command at any time to stop.`, telegramNoticeSent: noticeSent })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
+  .command('watch-ranking', 'Read-only: rank your watched wallets by what the bot saw them do (activity and signal; profit and win rate are not measured yet)', (args) => args
+    .option('db', { type: 'string', describe: 'The trial database to read (default: MINT_BOT_STATE_PATH, or the standard path)' })
+    .option('top', { type: 'number', default: 15, describe: 'How many wallets to list (1 to 500)' })
+    .option('format', { type: 'string', choices: ['text', 'json'] as const, default: 'text' }), async (args) => {
+      try {
+        if (!Number.isInteger(args.top) || args.top < 1 || args.top > 500) throw new Error('TOP_INVALID: use a whole number from 1 to 500');
+        const database = openDatabaseReadOnly(resolve(runtimeRoot, args.db ?? process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite'));
+        try {
+          const result = rankWatchedWallets(readRankingInputs(database));
+          process.stdout.write(`${args.format === 'json' ? json({ ...result, ranked: result.ranked.slice(0, args.top) }) : renderWatchRanking(result, args.top)}\n`);
+        } finally { database.close(); }
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('robinhood-enable <action>', 'Owner-run: switch Robinhood FREE execution on for up to 7 days (status | record). Needs one confirmed live Ethereum mint and your evidence file for E1 to E7', (args) => args

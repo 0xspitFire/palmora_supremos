@@ -69,6 +69,16 @@ export function openDatabase(filename = ':memory:'): SqliteDatabase {
   return db;
 }
 
+/**
+ * Opens an existing database file for reading only: no migration, no journal change, no write of any kind. For reports that look at the
+ * running service's data without touching it. A file that does not exist is an error (nothing is created).
+ */
+export function openDatabaseReadOnly(filename: string): SqliteDatabase {
+  const db = new Database(filename, { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 5000');
+  return db;
+}
+
 export function migrate(db: SqliteDatabase): void {
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)');
   const migrations = migrationDefinitions();
