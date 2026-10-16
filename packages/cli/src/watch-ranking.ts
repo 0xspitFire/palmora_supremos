@@ -25,13 +25,13 @@ export interface RankedWallet {
   label: string | null;
   /** Distinct collections this wallet minted. */
   collectionsMinted: number;
-  /** Distinct collections it received an NFT from (a transfer to it, not a mint it paid for). */
+  /** Distinct collections it received an NFT from (a transfer to it, not a mint it paid for). Shown, but never used for the ranking: anyone can send an NFT to any wallet. */
   collectionsReceived: number;
-  /** Distinct collections it took part in that triggered an alert for the owner. */
+  /** Of the collections it MINTED, how many reached the alert level (and were not blocked). */
   alertCollections: number;
-  /** Mean of the best score each of its collections reached (0 to 100), or null when it had none. */
+  /** Mean of the best score each of its MINTED collections reached (0 to 100). The score belongs to the collection and partly counts how many watched wallets minted it. Null when it minted nothing. */
   averageBestScore: number | null;
-  /** Share of its collections that were free mints, 0 to 1, or null. */
+  /** Share of its minted collections that were free mints, 0 to 1, or null. */
   freeShare: number | null;
   lastActiveAt: string | null;
 }
@@ -72,13 +72,16 @@ export function rankWatchedWallets(input: { events: readonly RankingEvent[]; wat
   const watchedSet = new Set(input.watched.map((wallet) => wallet.address.toLowerCase()));
   for (const event of input.events) {
     if (event.type !== 'opportunity_scored' && event.type !== 'opportunity_notified') continue;
+    // The scan is Ethereum-only today; an event that names another chain is not part of this ranking.
+    if (event.data.chainId !== undefined && Number(event.data.chainId) !== 1) continue;
     const contract = typeof event.data.contract === 'string' && ADDRESS.test(event.data.contract) ? event.data.contract.toLowerCase() : undefined;
     if (!contract || !Number.isFinite(Date.parse(event.at))) continue;
     eventsRead += 1;
     if (dataFrom === null || event.at < dataFrom) dataFrom = event.at;
     if (dataTo === null || event.at > dataTo) dataTo = event.at;
     const score = typeof event.data.score === 'number' && Number.isFinite(event.data.score) ? event.data.score : null;
-    const notified = event.type === 'opportunity_notified' || event.data.disposition === 'notified' || event.data.band === 'notify';
+    // An alert is raised only for a collection that reached the alert level and is not blocked.
+    const notified = (event.type === 'opportunity_notified' || event.data.disposition === 'notified' || event.data.band === 'notify') && event.data.blocked !== true;
     const known = facts.get(contract);
     const next: ContractFacts = known ?? { maxScore: null, notified: false, free: null, firstAt: event.at };
     if (score !== null && (next.maxScore === null || score > next.maxScore)) next.maxScore = score;
@@ -105,8 +108,9 @@ export function rankWatchedWallets(input: { events: readonly RankingEvent[]; wat
     seen.add(address);
     const mintedSet = minted.get(address) ?? new Set<string>();
     const receivedSet = received.get(address) ?? new Set<string>();
-    const all = new Set([...mintedSet, ...receivedSet]);
-    if (all.size === 0) { silent.push(wallet); continue; }
+    if (mintedSet.size === 0 && receivedSet.size === 0) { silent.push(wallet); continue; }
+    // Only what the wallet minted counts toward the figures that rank it (a received NFT can be an airdrop or spam).
+    const all = mintedSet;
     const scores = [...all].map((contract) => facts.get(contract)?.maxScore).filter((score): score is number => typeof score === 'number');
     const freeKnown = [...all].map((contract) => facts.get(contract)?.free).filter((value): value is boolean => typeof value === 'boolean');
     rows.push({
@@ -144,7 +148,8 @@ export function renderWatchRanking(result: WatchRanking, top = 15): string {
     `Based on ${meta.opportunitiesSeen} collections the bot scored over about ${meta.days} day(s)` + (meta.dataFrom && meta.dataTo ? ` (${meta.dataFrom.slice(0, 16).replace('T', ' ')} to ${meta.dataTo.slice(0, 16).replace('T', ' ')} UTC).` : '.'),
     `${result.ranked.length} of your ${meta.watchedWallets} watched wallets were active; ${result.silent.length} were not seen minting or receiving anything.`,
     '',
-    'Ranked by: collections that triggered an alert, then collections minted, then average best score, then most recent activity.',
+    'Ranked by: collections it minted that reached the alert level, then collections minted, then average best score, then most recent activity. NFTs a wallet only received are shown but not counted (anyone can send an NFT to any wallet).',
+    'A collection\'s score is the collection\'s, and it partly rises with how many watched wallets minted it, so wallets that mint together lift each other.',
     'Not measured yet: profit, win rate and floor performance (they arrive with analytics). This is an activity and signal ranking, not a verdict on quality.',
     '',
   ];
@@ -152,7 +157,7 @@ export function renderWatchRanking(result: WatchRanking, top = 15): string {
     const name = row.label ? `${row.label} (${shortAddress(row.address)})` : shortAddress(row.address);
     const free = row.freeShare === null ? 'price unknown' : `${Math.round(row.freeShare * 100)}% free`;
     const score = row.averageBestScore === null ? 'no score' : `average best score ${row.averageBestScore}`;
-    lines.push(`${row.rank}. ${name}: minted ${row.collectionsMinted}, received ${row.collectionsReceived}, ${row.alertCollections} triggered an alert, ${score}, ${free}, last active ${row.lastActiveAt ? row.lastActiveAt.slice(0, 16).replace('T', ' ') + ' UTC' : 'unknown'}.`);
+    lines.push(`${row.rank}. ${name}: minted ${row.collectionsMinted}, received ${row.collectionsReceived}, ${row.alertCollections} of the minted reached the alert level, ${score}, ${free}, last active ${row.lastActiveAt ? row.lastActiveAt.slice(0, 16).replace('T', ' ') + ' UTC' : 'unknown'}.`);
   }
   if (result.ranked.length > top) lines.push(`... and ${result.ranked.length - top} more active wallet(s); use --top ${result.ranked.length} to see all.`);
   if (result.ranked.length === 0) lines.push('No watched wallet has been seen minting or receiving anything yet.');
@@ -160,8 +165,9 @@ export function renderWatchRanking(result: WatchRanking, top = 15): string {
 }
 
 /** Pulls the inputs out of the trial database. `db` is a read-only connection. */
-export function readRankingInputs(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): { events: RankingEvent[]; watched: WatchedWallet[] } {
-  const rows = db.prepare("SELECT new_state, occurred_at, policy_snapshot_json FROM audit_event WHERE new_state IN ('opportunity_scored', 'opportunity_notified') ORDER BY occurred_at").all() as Array<{ new_state: string; occurred_at: string; policy_snapshot_json: string | null }>;
+export function readRankingInputs(db: { prepare(sql: string): { all(...params: unknown[]): unknown[]; iterate(...params: unknown[]): Iterable<unknown> } }): { events: RankingEvent[]; watched: WatchedWallet[] } {
+  // One row at a time, so a large database never has to be held in memory as raw text.
+  const rows = db.prepare("SELECT new_state, occurred_at, policy_snapshot_json FROM audit_event WHERE new_state IN ('opportunity_scored', 'opportunity_notified') ORDER BY occurred_at").iterate() as Iterable<{ new_state: string; occurred_at: string; policy_snapshot_json: string | null }>;
   const events: RankingEvent[] = [];
   for (const row of rows) {
     if (!row.policy_snapshot_json) continue;

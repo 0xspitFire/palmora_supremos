@@ -75,6 +75,37 @@ describe('rankWatchedWallets', () => {
     expect(second.ranked.map((row) => row.address)).toEqual([A, B, C]);
   });
 
+  it('does not let received-only NFTs lift a wallet: only minted collections count toward alerts, score and free share', () => {
+    const events = [
+      event('opportunity_notified', '2026-10-10T10:00:00Z', NFT1, { score: 90, watchedMinters: [A], watchedReceivers: [B] }),
+      event('opportunity_notified', '2026-10-10T10:00:00Z', NFT2, { score: 95, watchedReceivers: [B] }),
+      event('opportunity_scored', '2026-10-11T10:00:00Z', NFT3, { score: 10, watchedMinters: [B] }),
+    ];
+    const result = rankWatchedWallets({ events, watched: WATCHED });
+    // B received two high-scoring alert collections and minted one weak one; A minted one alert collection. A ranks first.
+    expect(result.ranked.map((row) => row.address)).toEqual([A, B]);
+    expect(result.ranked[1]).toMatchObject({ collectionsMinted: 1, collectionsReceived: 2, alertCollections: 0, averageBestScore: 10 });
+  });
+
+  it('does not count a blocked collection as having triggered an alert', () => {
+    const events = [
+      event('opportunity_notified', '2026-10-10T10:00:00Z', NFT1, { watchedMinters: [A], blocked: true }),
+      event('opportunity_notified', '2026-10-10T10:00:00Z', NFT2, { watchedMinters: [A], blocked: false }),
+    ];
+    expect(rankWatchedWallets({ events, watched: WATCHED }).ranked[0]).toMatchObject({ collectionsMinted: 2, alertCollections: 1 });
+  });
+
+  it('keeps events from other chains out of the ranking', () => {
+    const events = [
+      event('opportunity_scored', '2026-10-10T10:00:00Z', NFT1, { watchedMinters: [A], chainId: 4663 }),
+      event('opportunity_scored', '2026-10-10T10:00:00Z', NFT2, { watchedMinters: [A], chainId: 1 }),
+      event('opportunity_scored', '2026-10-10T10:00:00Z', NFT3, { watchedMinters: [A] }),
+    ];
+    const result = rankWatchedWallets({ events, watched: WATCHED });
+    expect(result.ranked[0]).toMatchObject({ collectionsMinted: 2 });
+    expect(result.meta.eventsRead).toBe(2);
+  });
+
   it('reads prices written as plain digits, with an n suffix, or as numbers', () => {
     const events = [
       event('opportunity_scored', '2026-10-10T10:00:00Z', NFT1, { watchedMinters: [A], priceWei: '0n' }),
@@ -125,6 +156,28 @@ describe('reading the trial database (read-only)', () => {
         expect(() => readOnly.prepare("DELETE FROM audit_event WHERE id = 'e1'").run()).toThrow();
         expect(() => readOnly.prepare("INSERT INTO observed_address (id, chain_id, address, created_at, updated_at) VALUES ('o3', 1, ?, 'x', 'x')").run(C)).toThrow();
       } finally { readOnly.close(); }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('reads beside a live writer on a WAL database, sees new rows, and leaves no extra files behind', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mint-ranking-'));
+    const { readdir } = await import('node:fs/promises');
+    try {
+      const file = join(directory, 'state.sqlite');
+      const writer = openDatabase(file); // stays open, like the running service
+      const add = (id: string, at: string, contract: string) => writer.prepare("INSERT INTO audit_event (id, entity_type, entity_id, new_state, actor, reason, policy_snapshot_json, occurred_at) VALUES (?, 'state_transition', 'global', 'opportunity_scored', 'test', 'backend event', ?, ?)").run(id, JSON.stringify({ kind: 'event', eventType: 'opportunity_scored', eventData: { contract, score: 50, priceWei: '0', watchedMinters: [A], watchedReceivers: [] } }), at);
+      writer.prepare("INSERT INTO observed_address (id, chain_id, address, label, enabled, created_at, updated_at) VALUES ('o1', 1, ?, NULL, 1, '2026-10-10T00:00:00.000Z', '2026-10-10T00:00:00.000Z')").run(A);
+      add('w1', '2026-10-10T10:00:00.000Z', NFT1);
+      const before = new Set(await readdir(directory));
+      const first = openDatabaseReadOnly(file);
+      expect(rankWatchedWallets(readRankingInputs(first)).ranked[0]).toMatchObject({ collectionsMinted: 1 });
+      add('w2', '2026-10-10T11:00:00.000Z', NFT2); // the writer keeps writing while the report is open
+      first.close();
+      const second = openDatabaseReadOnly(file);
+      expect(rankWatchedWallets(readRankingInputs(second)).ranked[0]).toMatchObject({ collectionsMinted: 2 });
+      second.close();
+      expect(new Set(await readdir(directory))).toEqual(before);
+      writer.close();
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
