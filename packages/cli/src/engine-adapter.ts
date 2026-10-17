@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createPublicClient, http, formatEther, formatGwei, type Address, type Hash } from 'viem';
 import {
   MintEngine,
+  RobinhoodFinalityObserver,
   canonicalExecutionIdentity,
   resolveChainByNameFromSecrets,
   type EngineLifecycleStore,
@@ -26,6 +27,8 @@ import type {
 } from '@mint-bot/backend';
 import { PERSONAL_LIVE_FLEET_POLICY, validRobinhoodEnablement } from '@mint-bot/backend';
 import { promptHiddenPassphrase } from './secure-prompt.js';
+import { createNitroFinalitySources } from './robinhood-readonly.js';
+import { parseGasUsedForL1, reconcileRobinhood } from './robinhood-reconcile.js';
 
 interface WalletFile {
   wallets?: Array<{ index?: number; address?: string }>;
@@ -369,6 +372,24 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       const endpoint = config.rpcEndpoints[0];
       if (!endpoint) return { result: 'unknown', attempts: [], receipts: [], reason: 'chain endpoint unavailable' };
       const client = createPublicClient({ transport: http(endpoint) });
+      if (intent.campaignSnapshot.chainId === 4663) {
+        // Robinhood: final only when canonical and Ethereum-final; the settled amount is the observed cost (T-035 piece 2).
+        const observer = new RobinhoodFinalityObserver(createNitroFinalitySources(client), 1);
+        return reconcileRobinhood({
+          run,
+          attempts,
+          mintPriceWei: intent.campaignSnapshot.mintPriceWei,
+          quantity: intent.campaignSnapshot.quantity,
+          readReceipt: async (hash) => {
+            const receipt = await client.getTransactionReceipt({ hash: hash as Hash });
+            return { status: receipt.status === 'success' ? 'success' : 'reverted', blockNumber: receipt.blockNumber, blockHash: receipt.blockHash, gasUsed: receipt.gasUsed, effectiveGasPrice: receipt.effectiveGasPrice, gasUsedForL1: parseGasUsedForL1((receipt as unknown as { gasUsedForL1?: unknown }).gasUsedForL1) };
+          },
+          observe: async (observed) => {
+            const observation = await observer.observe({ txHash: observed.txHash as Hash, txBlockNumber: observed.txBlockNumber });
+            return { stage: observation.stage === 'ethereum_final' || observation.stage === 'posted' ? observation.stage : 'soft', canonical: observation.canonical, ready: observation.ready };
+          },
+        });
+      }
       const updatedAttempts: AttemptRecord[] = [];
       const receipts: ReceiptRecord[] = [];
       for (const attempt of attempts) {
@@ -383,7 +404,6 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
         }
       }
       if (receipts.length === 0) return { result: 'unknown', attempts: updatedAttempts, receipts, reason: 'receipt unavailable; outcome unresolved' };
-      if (intent.campaignSnapshot.chainId === 4663) return { result: 'unknown', attempts: updatedAttempts, receipts, reason: 'Robinhood L2 receipt requires an authoritative Ethereum-final observer' };
       return { result: receipts.every((receipt) => receipt.state === 'Confirmed') ? 'confirmed' : 'failed', attempts: updatedAttempts, receipts };
     },
   };
