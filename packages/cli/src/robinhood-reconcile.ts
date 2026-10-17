@@ -64,7 +64,7 @@ export async function reconcileRobinhood(input: RobinhoodReconcileInput): Promis
   for (const attempt of submitted) {
     let receipt: ObservedReceipt | null = null;
     try { receipt = await input.readReceipt(attempt.hash!); } catch { receipt = null; }
-    if (!receipt) { missing += 1; continue; }
+    if (!receipt || typeof receipt.gasUsed !== 'bigint' || typeof receipt.effectiveGasPrice !== 'bigint' || typeof receipt.blockNumber !== 'bigint' || !receipt.blockHash) { missing += 1; continue; }
     let observation: ObservedFinality;
     try { observation = await input.observe({ txHash: attempt.hash!, txBlockNumber: receipt.blockNumber }); } catch { missing += 1; continue; }
     // Unproven canonicality is never treated as final or as a reorg.
@@ -82,8 +82,8 @@ export async function reconcileRobinhood(input: RobinhoodReconcileInput): Promis
       pending += 1;
       const stage = observation.stage === 'posted' ? 'posted' : 'soft';
       if (stage === 'soft') lowestPending = 'soft';
+      // The coordinator accepts only terminal receipts with an amount, so a not-yet-final mint is reported as an attempt carrying its stage and no receipt.
       updatedAttempts.push({ ...attempt, robinhoodFinality: stage, updatedAt: now });
-      receipts.push({ ...base, id: `${attempt.executionId}:reconciled:${receipt.blockHash}:${stage}`, state: 'Pending', finalityStage: stage, robinhoodFinality: stage });
       continue;
     }
     // Final on Ethereum. The L1 part must be observed on the receipt before the amount can be trusted.
@@ -102,10 +102,10 @@ export async function reconcileRobinhood(input: RobinhoodReconcileInput): Promis
   }
   if (missing > 0) return unknown(updatedAttempts, receipts, 'a receipt, its finality or its L1 data fee could not be proven; outcome unresolved');
   if (reorged > 0) {
-    // The coordinator only accepts "reorged" when every receipt is reorged; anything mixed waits for the owner.
-    return reorged === receipts.length ? { result: 'reorged', attempts: updatedAttempts, receipts } : unknown(updatedAttempts, receipts, 'mixed reorg; the reservation stays held for owner reconciliation');
+    // The coordinator only accepts "reorged" when every attempt has a reorged receipt; anything mixed waits for the owner.
+    return reorged === submitted.length ? { result: 'reorged', attempts: updatedAttempts, receipts } : unknown(updatedAttempts, receipts, 'mixed reorg; the reservation stays held for owner reconciliation');
   }
   if (pending > 0) return { result: lowestPending, attempts: updatedAttempts, receipts };
   if (failed > 0) return { result: 'failed', attempts: updatedAttempts, receipts };
-  return { result: final === receipts.length ? 'final' : 'unknown', attempts: updatedAttempts, receipts };
+  return { result: final === submitted.length ? 'final' : 'unknown', attempts: updatedAttempts, receipts };
 }

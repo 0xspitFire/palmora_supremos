@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AttemptRecord, RunRecord } from '@mint-bot/backend';
+import { DurableStore, ExecutionCoordinator, type AttemptRecord, type BackendState, type EngineAdapter, type RunRecord } from '@mint-bot/backend';
 import { parseGasUsedForL1, reconcileRobinhood, type ObservedFinality, type ObservedReceipt } from './robinhood-reconcile.js';
 
 const run: RunRecord = { id: 'run1', intentId: 'int1', campaignId: 'c1', mode: 'live', requestDigest: 'd', state: 'Active', createdAt: '2026-10-17T00:00:00.000Z', updatedAt: '2026-10-17T00:00:00.000Z' };
@@ -33,18 +33,12 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
   it('keeps a posted or soft receipt pending with no amount to settle', async () => {
     const posted = await run1({ finality: { stage: 'posted', canonical: true, ready: false } });
     expect(posted.result).toBe('posted');
-    expect(posted.receipts[0]).toMatchObject({ state: 'Pending', robinhoodFinality: 'posted' });
-    expect(posted.receipts[0]?.actualSpendWei).toBeUndefined();
+    expect(posted.receipts).toHaveLength(0);
     expect(posted.attempts[0]?.robinhoodFinality).toBe('posted');
     const soft = await run1({ finality: { stage: 'soft', canonical: true, ready: false } });
     expect(soft.result).toBe('soft');
-    expect(soft.receipts[0]).toMatchObject({ state: 'Pending', robinhoodFinality: 'soft' });
-  });
-
-  it('gives each stage its own receipt id so a later final receipt is not blocked by the earlier pending one', async () => {
-    const posted = await run1({ finality: { stage: 'posted', canonical: true, ready: false } });
-    const done = await run1();
-    expect(posted.receipts[0]?.id).not.toBe(done.receipts[0]?.id);
+    expect(soft.receipts).toHaveLength(0);
+    expect(soft.attempts[0]?.robinhoodFinality).toBe('soft');
   });
 
   it('settles a reverted mint at the gas cost only once final', async () => {
@@ -80,6 +74,13 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
     expect((await run1({ finality: () => { throw new Error('observer down'); } })).result).toBe('unknown');
   });
 
+  it('fails closed when the receipt lacks the gas fields, without throwing', async () => {
+    const broken = { ...receipt(), effectiveGasPrice: undefined } as unknown as ObservedReceipt;
+    const update = await run1({ receipt: broken });
+    expect(update.result).toBe('unknown');
+    expect(update.receipts).toHaveLength(0);
+  });
+
   it('does not report final while any attempt is unresolved, and refuses a mixed reorg', async () => {
     let calls = 0;
     const mixedMissing = await reconcileRobinhood({ run, attempts: [attempt('1'), attempt('2')], mintPriceWei: 0n, quantity: 1, readReceipt: async () => (++calls === 1 ? receipt() : null), observe: async () => final });
@@ -102,5 +103,72 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
     expect(parseGasUsedForL1('abc')).toBeUndefined();
     expect(parseGasUsedForL1(-1)).toBeUndefined();
     expect(parseGasUsedForL1(1.5)).toBeUndefined();
+  });
+
+  describe('through the real coordinator (settlement, run state, and errors that would stop the loop)', () => {
+    const NOW = '2026-10-17T00:00:00.000Z';
+    async function harness(finality: ObservedFinality | (() => never), receiptOver: Partial<ObservedReceipt> = {}, reservationWei = 1_000_000_000_000_000n) {
+      class Store extends DurableStore { override capabilities() { return { durable: true, atomicAcrossProcesses: true }; } }
+      const store = new Store();
+      const a = attempt('1');
+      await store.transaction((state: BackendState) => {
+        state.runs.push({ ...run });
+        state.intents.push({ id: 'int1', runId: 'run1', campaignId: 'c1', campaignSnapshot: { chainId: 4663, mintPriceWei: 0n, quantity: 1 }, wallets: [a.wallet] } as never);
+        state.attempts.push(a);
+        state.reservations.push({ id: 'res1', runId: 'run1', campaignId: 'c1', chainId: 4663, wallet: a.wallet, amountWei: reservationWei, accountingDate: '2026-10-17', status: 'reserved', createdAt: NOW, updatedAt: NOW });
+      });
+      const adapter: EngineAdapter = {
+        prepare: async () => { throw new Error('unused'); },
+        execute: async () => { throw new Error('unused'); },
+        reconcile: (r) => reconcileRobinhood({ run: r, attempts: store.snapshot().attempts.filter((x) => x.runId === r.id), mintPriceWei: 0n, quantity: 1, readReceipt: async () => receipt(receiptOver), observe: async () => (typeof finality === 'function' ? finality() : finality) }),
+      };
+      return { store, coordinator: new ExecutionCoordinator(store, adapter) };
+    }
+
+    it('final: settles the reservation at the observed cost and completes the run', async () => {
+      const { store, coordinator } = await harness(final);
+      await coordinator.reconcile();
+      const state = store.snapshot();
+      expect(state.reservations[0]).toMatchObject({ status: 'settled', actualAmountWei: 200_000n * 20_000_000n });
+      expect(state.runs[0]?.state).toBe('Completed');
+      expect(state.receipts).toHaveLength(1);
+    });
+
+    it('posted and soft: the loop does not throw, the reservation stays held and the run is not completed', async () => {
+      for (const stage of ['posted', 'soft'] as const) {
+        const { store, coordinator } = await harness({ stage, canonical: true, ready: false });
+        await expect(coordinator.reconcile()).resolves.toBeUndefined();
+        expect(store.snapshot().reservations[0]?.status).toBe('reserved');
+        expect(store.snapshot().runs[0]?.state).not.toBe('Completed');
+        expect(store.snapshot().receipts).toHaveLength(0);
+      }
+    });
+
+    it('reverted: settles the gas only and fails the run', async () => {
+      const { store, coordinator } = await harness(final, { status: 'reverted' });
+      await coordinator.reconcile();
+      expect(store.snapshot().reservations[0]).toMatchObject({ status: 'settled', actualAmountWei: 200_000n * 20_000_000n });
+      expect(store.snapshot().runs[0]?.state).toBe('Failed');
+    });
+
+    it('reorged: marks the reservation reorged (held for the owner) and fails the run', async () => {
+      const { store, coordinator } = await harness({ stage: 'soft', canonical: false, ready: false });
+      await coordinator.reconcile();
+      expect(store.snapshot().reservations[0]?.status).toBe('reorged');
+      expect(store.snapshot().runs[0]?.state).toBe('Failed');
+    });
+
+    it('unknown (proof missing): changes nothing', async () => {
+      const { store, coordinator } = await harness(final, { gasUsedForL1: undefined });
+      await coordinator.reconcile();
+      expect(store.snapshot().reservations[0]?.status).toBe('reserved');
+      expect(store.snapshot().receipts).toHaveLength(0);
+    });
+
+    it('refuses to settle above the reservation: the coordinator throws and the reservation stays held', async () => {
+      const { store, coordinator } = await harness(final, {}, 1n);
+      await expect(coordinator.reconcile()).rejects.toThrow('INVALID_SETTLEMENT_AMOUNT');
+      expect(store.snapshot().reservations[0]?.status).toBe('reserved');
+    });
   });
 });
