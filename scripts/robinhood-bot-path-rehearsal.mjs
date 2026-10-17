@@ -38,7 +38,7 @@ try {
   if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
   const reportDir = mkdtempSync(join(tmpdir(), 'mintbot-rehearsal-report-'));
   const reportFile = join(reportDir, 'report.json');
-  const code = await run(process.execPath, [vitest, 'run', '--config', 'vitest.fork.config.ts', 'packages/engine/src/bot-path.fork.test.ts', '--reporter=verbose', '--reporter=json', '--outputFile', reportFile], root, {
+  const code = await run(process.execPath, [vitest, 'run', '--config', 'vitest.fork.config.ts', 'packages/engine/src/bot-path.fork.test.ts', 'packages/cli/src/robinhood-reconcile.fork.test.ts', '--reporter=verbose', '--reporter=json', '--outputFile', reportFile], root, {
     ANVIL_REHEARSAL_RPC_URL: rpcUrl,
     REHEARSAL_CHAIN: 'robinhood',
     REHEARSAL_NFT: nft,
