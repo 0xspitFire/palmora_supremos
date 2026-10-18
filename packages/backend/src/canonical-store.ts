@@ -34,6 +34,7 @@ import type {
 import type { BackendStore } from './store.js';
 import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
+import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 export interface CanonicalAdmissionInput {
   run: RunRecord;
@@ -1241,7 +1242,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
    * profile in one transaction. Refuses unless one Ethereum Personal Live mint has already worked. The database triggers refuse the
    * profile change unless the record exists and covers the approval time.
    */
-  public enableRobinhood(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7', true>; confirmationDigest: string }): void {
+  public enableRobinhood(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7', true> & Partial<Record<'paidRehearsal' | 'paidPolicyApproved', true>>; paidAllowed: boolean; confirmationDigest: string }): void {
     this.ensureOpen();
     if (!this.hasConfirmedLiveEthereumMint()) throw new Error('ETHEREUM_LIVE_MINT_REQUIRED');
     const profile = this.ensureRobinhoodChainProfile();
@@ -1250,6 +1251,14 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       verificationId: canonicalId('verification', `robinhood-enable:${input.id}`),
       sequencerEndpointReference: 'https://sequencer.mainnet.chain.robinhood.com',
       archiveEndpointReference: `${MAINNET_SECRET_FILE_REFERENCE}:ROBINHOOD_ARCHIVE_RPC`,
+      ...(input.paidAllowed ? {
+        paidFeePolicy: {
+          id: canonicalId('fee', `robinhood-paid:${input.id}`),
+          version: `robinhood-paid-d054-${input.id}`,
+          maxTotalFeeWei: PERSONAL_LIVE_FLEET_POLICY.paidFeeAllowanceWei,
+          freeCapWei: 200_000_000_000_000n,
+        },
+      } : {}),
     });
   }
 

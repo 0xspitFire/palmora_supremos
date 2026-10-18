@@ -7,6 +7,7 @@ const T0 = new Date().toISOString();
 const day = (offset: number, base = T0): string => new Date(Date.parse(base) + offset * 86_400_000).toISOString();
 const DIGEST = 'a'.repeat(64);
 const EVIDENCE = { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true } as const;
+const PAID_EVIDENCE = { ...EVIDENCE, paidRehearsal: true, paidPolicyApproved: true } as const;
 const SEQ = 'https://sequencer.mainnet.chain.robinhood.com';
 const ARCH = 'Rets/MINT_BOT_SECRETS.env:ROBINHOOD_ARCHIVE_RPC';
 
@@ -15,7 +16,7 @@ function setup() {
   db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES ('rh', 4663, 'Robinhood', '[]', 1, ?)").run(T0);
   db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES ('eth', 1, 'Ethereum', '[]', 2, ?)").run(T0);
   const repository = new DurableRepository(db);
-  const enable = (id: string, approvedAt = T0, expiresAt = day(7, approvedAt)) => repository.enableRobinhood({ id, approvedAt, expiresAt, evidence: { ...EVIDENCE }, confirmationDigest: DIGEST }, { chainProfileId: 'rh', verificationId: `ver-${id}`, sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH });
+  const enable = (id: string, approvedAt = T0, expiresAt = day(7, approvedAt)) => repository.enableRobinhood({ id, approvedAt, expiresAt, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST }, { chainProfileId: 'rh', verificationId: `ver-${id}`, sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH });
   const insertRow = (overrides: Record<string, unknown> = {}) => {
     const row = { id: `row-${Math.random()}`, approved_by: 'owner-cli', approved_at: T0, expires_at: day(7), paid_allowed: 0, evidence_json: JSON.stringify(EVIDENCE), confirmation_digest: DIGEST, created_at: T0, ...overrides };
     return db.prepare('INSERT INTO robinhood_enablement (id, approved_by, approved_at, expires_at, paid_allowed, evidence_json, confirmation_digest, created_at) VALUES (@id, @approved_by, @approved_at, @expires_at, @paid_allowed, @evidence_json, @confirmation_digest, @created_at)').run(row);
@@ -55,7 +56,7 @@ describe('enableRobinhood: one transaction writes the record, the evidence and t
 
   it('rolls everything back when any part is refused (no row without the profile change)', () => {
     const t = setup();
-    expect(() => t.repository.enableRobinhood({ id: 'bad', approvedAt: T0, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: DIGEST }, { chainProfileId: 'rh', verificationId: 'v', sequencerEndpointReference: 'https://evil.example', archiveEndpointReference: ARCH })).toThrow();
+    expect(() => t.repository.enableRobinhood({ id: 'bad', approvedAt: T0, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST }, { chainProfileId: 'rh', verificationId: 'v', sequencerEndpointReference: 'https://evil.example', archiveEndpointReference: ARCH })).toThrow();
     expect(t.repository.latestRobinhoodEnablement()).toBeUndefined();
     expect(t.profile().enabled).toBe(0);
   });
@@ -65,9 +66,9 @@ describe('enableRobinhood: one transaction writes the record, the evidence and t
     const chain = { chainProfileId: 'rh', verificationId: 'v', sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH };
     const missing = { ...EVIDENCE } as Record<string, unknown>;
     delete missing.E3;
-    expect(() => t.repository.enableRobinhood({ id: 'a', approvedAt: T0, expiresAt: day(7), evidence: missing as never, confirmationDigest: DIGEST }, chain)).toThrow(/E1 to E7/);
-    expect(() => t.repository.enableRobinhood({ id: 'b', approvedAt: T0, expiresAt: day(7), evidence: { ...EVIDENCE, E4: false } as never, confirmationDigest: DIGEST }, chain)).toThrow(/E1 to E7/);
-    expect(() => t.repository.enableRobinhood({ id: 'c', approvedAt: T0, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: 'ABC' }, chain)).toThrow(/digest/);
+    expect(() => t.repository.enableRobinhood({ id: 'a', approvedAt: T0, expiresAt: day(7), evidence: missing as never, paidAllowed: false, confirmationDigest: DIGEST }, chain)).toThrow(/E1 to E7/);
+    expect(() => t.repository.enableRobinhood({ id: 'b', approvedAt: T0, expiresAt: day(7), evidence: { ...EVIDENCE, E4: false } as never, paidAllowed: false, confirmationDigest: DIGEST }, chain)).toThrow(/E1 to E7/);
+    expect(() => t.repository.enableRobinhood({ id: 'c', approvedAt: T0, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: 'ABC' }, chain)).toThrow(/digest/);
     expect(t.repository.latestRobinhoodEnablement()).toBeUndefined();
   });
 });
@@ -78,12 +79,20 @@ describe('the enablement table accepts only complete rows (direct SQL cannot che
     expect(() => t.insertRow({ id: 'ok' })).not.toThrow();
   });
 
-  it('refuses a row with the wrong author, paid allowed, a bad digest or bad times', () => {
+  it('refuses a row with the wrong author, incomplete paid evidence, a bad digest or bad times', () => {
     const t = setup();
     for (const bad of [
       { approved_by: 'session' }, { approved_by: 'owner' }, { paid_allowed: 1 }, { confirmation_digest: 'A'.repeat(64) }, { confirmation_digest: 'a'.repeat(63) },
       { approved_at: 'yesterday' }, { expires_at: '2026-10-27' }, { expires_at: T0 }, { expires_at: day(-1) }, { expires_at: day(7.5) }, { expires_at: new Date(Date.parse(T0) + 7 * 86_400_000 + 10_000).toISOString() }, { expires_at: day(30) },
     ]) expect(() => t.insertRow(bad), JSON.stringify(bad)).toThrow();
+  });
+
+  it('allows paid only with exactly both paid evidence keys', () => {
+    const t = setup();
+    expect(() => t.insertRow({ id: 'paid-ok', paid_allowed: 1, evidence_json: JSON.stringify(PAID_EVIDENCE) })).not.toThrow();
+    const t2 = setup();
+    expect(() => t2.insertRow({ paid_allowed: 1, evidence_json: JSON.stringify({ ...EVIDENCE, paidRehearsal: true }) })).toThrow(/incomplete/);
+    expect(() => t2.insertRow({ paid_allowed: 0, evidence_json: JSON.stringify(PAID_EVIDENCE) })).toThrow(/incomplete/);
   });
 
   it('refuses a row without all of E1 to E7 exactly true', () => {
@@ -134,6 +143,25 @@ describe('the profile can be enabled only inside the newest record\'s window', (
     t.enable('rh-1');
     expect(() => t.db.prepare("UPDATE chain_profile SET verification_approved_at = ? WHERE id = 'rh'").run(day(30))).toThrow();
     expect(t.profile().enabled).toBe(1);
+  });
+});
+
+describe('paid Robinhood enablement (migration 024)', () => {
+  it('writes the immutable paid record and replaces the active fee policy with D-041-compatible paid admission', () => {
+    const t = setup();
+    t.db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES ('old-free', 'rh', 'free', 'fee_only', '200000000000000', '200000000000000', '0', 2, 0, 1, ?, 'allowed')").run(T0);
+    t.repository.enableRobinhood({ id: 'paid-record', approvedAt: T0, expiresAt: day(7), evidence: { ...PAID_EVIDENCE }, paidAllowed: true, confirmationDigest: DIGEST }, { chainProfileId: 'rh', verificationId: 'paid-verification', sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH, paidFeePolicy: { id: 'paid-fee', version: 'd054', maxTotalFeeWei: 370000000000000n, freeCapWei: 200000000000000n } });
+    expect(t.repository.latestRobinhoodEnablement()).toMatchObject({ paidAllowed: true, evidence: PAID_EVIDENCE });
+    expect(t.db.prepare("SELECT active FROM fee_policy WHERE id = 'old-free'").get()).toEqual({ active: 0 });
+    expect(t.db.prepare("SELECT paid_mints_enabled AS paid, max_total_fee_wei AS fee, active FROM fee_policy WHERE id = 'paid-fee'").get()).toEqual({ paid: 1, fee: '370000000000000', active: 1 });
+  });
+
+  it('rolls back when paid evidence or the paid fee policy is missing', () => {
+    const t = setup();
+    const chain = { chainProfileId: 'rh', verificationId: 'v', sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH };
+    expect(() => t.repository.enableRobinhood({ id: 'missing-evidence', approvedAt: T0, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: true, confirmationDigest: DIGEST }, chain)).toThrow();
+    expect(() => t.repository.enableRobinhood({ id: 'missing-policy', approvedAt: T0, expiresAt: day(7), evidence: { ...PAID_EVIDENCE }, paidAllowed: true, confirmationDigest: DIGEST }, chain)).toThrow(/paid fee policy/);
+    expect(t.repository.latestRobinhoodEnablement()).toBeUndefined();
   });
 });
 

@@ -19,7 +19,7 @@ async function enabledAdmission() {
   const value = await fixture(ROBINHOOD);
   const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
   await proven.open();
-  proven.enableRobinhood({ id: 'rh-rows', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: 'c'.repeat(64) });
+  proven.enableRobinhood({ id: 'rh-rows', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: 'c'.repeat(64) });
   const campaignValue = await campaign(value, ROBINHOOD);
   const prepared = await armed(value, campaignValue);
   const store = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });

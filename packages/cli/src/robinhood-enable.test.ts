@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { ENABLEMENT_DAYS, EVIDENCE_STEPS, assertEnableAllowed, checkEvidenceFile, confirmationDigest, enablePhrase, runRobinhoodEnable } from './robinhood-enable.js';
+import { ENABLEMENT_DAYS, EVIDENCE_STEPS, PAID_EVIDENCE_STEPS, assertEnableAllowed, checkEvidenceFile, confirmationDigest, enablePhrase, runRobinhoodEnable } from './robinhood-enable.js';
 import { robinhoodGrantFrom } from './engine-adapter.js';
 
 const NOW = new Date('2026-10-20T12:00:00.000Z');
 const entry = (checkedOn = '2026-10-18') => ({ passed: true, checkedOn, reference: 'Docs/robinhood-evidence.md section 3' });
 const goodFile = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...Object.fromEntries(EVIDENCE_STEPS.map((step) => [step, entry()])), ...overrides });
+const paidFile = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...Object.fromEntries([...EVIDENCE_STEPS, ...PAID_EVIDENCE_STEPS].map((step) => [step, entry()])), ...overrides });
 
 describe('evidence file for switching Robinhood on', () => {
   it('accepts a complete, recent file and reports its digest', () => {
@@ -48,12 +49,19 @@ describe('evidence file for switching Robinhood on', () => {
     expect(result.ok).toHaveLength(6);
     expect(result.problems.join(' ')).toMatch(/E7 .*missing/);
   });
+
+  it('requires both recent paid attestations only when --paid is selected', () => {
+    expect(checkEvidenceFile(paidFile(), NOW, true).evidence).toMatchObject({ paidRehearsal: true, paidPolicyApproved: true });
+    expect(checkEvidenceFile(goodFile(), NOW, true).problems.join(' ')).toMatch(/paidRehearsal.*missing.*paidPolicyApproved.*missing/);
+    expect(checkEvidenceFile(paidFile({ paidPolicyApproved: undefined }), NOW, true).evidence).toBeUndefined();
+    expect(checkEvidenceFile(paidFile(), NOW, false).problems.join(' ')).toMatch(/Unknown entries/);
+  });
 });
 
 describe('assertEnableAllowed: every condition must hold before anything is written', () => {
   const evidence = checkEvidenceFile(goodFile(), NOW);
   const phrase = enablePhrase(evidence.fileDigest ?? '', ENABLEMENT_DAYS);
-  const facts = (overrides: Record<string, unknown> = {}) => ({ evidence, ethereumLiveMintProven: true, confirm: phrase, days: ENABLEMENT_DAYS, ...overrides }) as never;
+  const facts = (overrides: Record<string, unknown> = {}) => ({ evidence, ethereumLiveMintProven: true, confirm: phrase, days: ENABLEMENT_DAYS, paid: false, ...overrides }) as never;
 
   it('passes with a proven Ethereum mint, complete evidence and the exact phrase, and returns a digest that depends on the phrase and the file', () => {
     const allowed = assertEnableAllowed(facts());
@@ -129,7 +137,18 @@ describe('runRobinhoodEnable: the whole command with a stand-in store', () => {
     const out = run(store);
     expect(out).toMatchObject({ state: 'Enabled', expiresAt: '2026-10-27T12:00:00.000Z' });
     expect(writes).toHaveLength(1);
-    expect(writes[0]).toEqual({ id: 'rh_enable_test', approvedAt: NOW2.toISOString(), expiresAt: '2026-10-27T12:00:00.000Z', evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true }, confirmationDigest: confirmationDigest(phrase, digest) });
+    expect(writes[0]).toEqual({ id: 'rh_enable_test', approvedAt: NOW2.toISOString(), expiresAt: '2026-10-27T12:00:00.000Z', evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true }, paidAllowed: false, confirmationDigest: confirmationDigest(phrase, digest) });
+  });
+
+  it('records paid enablement only with the paid file, flag and paid-specific phrase', () => {
+    const text = paidFile();
+    const fileDigest = checkEvidenceFile(text, NOW2, true).fileDigest ?? '';
+    const paidPhrase = enablePhrase(fileDigest, 7, true);
+    const { store, writes } = makeStore();
+    const out = run(store, { evidenceText: text, paid: true, confirm: paidPhrase });
+    expect(out).toMatchObject({ state: 'Enabled', paidAllowed: true });
+    expect(writes[0]).toMatchObject({ paidAllowed: true, evidence: { paidRehearsal: true, paidPolicyApproved: true } });
+    expect(() => run(makeStore().store, { evidenceText: text, paid: true, confirm: enablePhrase(fileDigest, 7, false) })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
   });
 
   it('record writes nothing when any condition fails', () => {

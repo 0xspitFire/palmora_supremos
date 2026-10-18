@@ -3,7 +3,8 @@ import { CanonicalStoreBridge, hasConfirmedLiveEthereumMint } from './canonical-
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { BackendApplication } from './application.js';
 import { OrchestratorService } from './service-orchestrator.js';
-import { ETHEREUM, OPEN_FLEET_POLICY, ROBINHOOD, armed, campaign, close, fixture } from './canonical-fixtures.js';
+import { ETHEREUM, OPEN_FLEET_POLICY, ROBINHOOD, WALLET_ONE, WALLET_TWO, armed, campaign, campaignInput, close, fixture } from './canonical-fixtures.js';
+import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 // The database compares expiry with its own clock, so the enablement times are relative to now (the fixture's NOW is in the past).
 const REAL = new Date().toISOString();
@@ -47,7 +48,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     const value = await fixture(ROBINHOOD);
     try {
       expect(value.store.robinhoodEnablement()).toBeUndefined();
-      expect(() => value.store.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: DIGEST })).toThrow('ETHEREUM_LIVE_MINT_REQUIRED');
+      expect(() => value.store.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST })).toThrow('ETHEREUM_LIVE_MINT_REQUIRED');
       expect(value.store.robinhoodEnablement()).toBeUndefined();
       expect(value.db.prepare('SELECT count(*) AS n FROM robinhood_enablement').get()).toEqual({ n: 0 });
       expect(() => assertRobinhoodLiveAllowed('free', value.store.robinhoodEnablement(), new Date(REAL))).toThrow('ROBINHOOD_EXECUTION_DISABLED');
@@ -59,7 +60,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
     try {
       await proven.open();
-      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: DIGEST });
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
       expect(value.db.prepare("SELECT execution_enabled AS e, verification_status AS s FROM chain_profile WHERE chain_id = 4663").get()).toEqual({ e: 1, s: 'verified' });
       const record = value.store.robinhoodEnablement();
       expect(record).toMatchObject({ recordId: 'rh-1', approvedBy: 'owner-cli', paidAllowed: false });
@@ -67,6 +68,32 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       expect(() => assertRobinhoodLiveAllowed('paid', record, new Date(REAL))).toThrow('ROBINHOOD_PAID_MINTS_DISABLED');
       expect(() => assertRobinhoodLiveAllowed('free', record, new Date(day(7)))).toThrow('ROBINHOOD_EXECUTION_DISABLED');
       expect(() => assertRobinhoodLiveAllowed('free', record, new Date(day(-1)))).toThrow('ROBINHOOD_EXECUTION_DISABLED');
+    } finally { proven.close(); await close(value); }
+  });
+
+  it('admits paid Robinhood only from a complete paid record and applies the D-041 price and two-wallet limits', async () => {
+    const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, PERSONAL_LIVE_FLEET_POLICY);
+    const proven = new ProvenStore(value.db, { now: () => new Date(REAL), fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+    try {
+      await proven.open();
+      const paidEvidence = { ...EVIDENCE, paidRehearsal: true, paidPolicyApproved: true } as const;
+      proven.enableRobinhood({ id: 'rh-paid', approvedAt: REAL, expiresAt: day(7), evidence: paidEvidence, paidAllowed: true, confirmationDigest: DIGEST });
+      expect(() => assertRobinhoodLiveAllowed('paid', proven.robinhoodEnablement(), new Date(REAL))).not.toThrow();
+      const paidFixture = { ...value, store: proven, application: new BackendApplication(proven, {} as never) };
+      const paidCampaign = await campaign(paidFixture, ROBINHOOD, true);
+      const prepared = await armed(paidFixture, paidCampaign, [WALLET_ONE, WALLET_TWO]);
+      const admission = await proven.admitExecution(prepared.input);
+      expect(admission.reservations).toHaveLength(2);
+      expect(value.db.prepare("SELECT COUNT(*) AS n FROM spend_reservation WHERE campaign_id = ? AND mint_class = 'paid' AND CAST(mint_value_wei AS INTEGER) = 100").get(paidCampaign.id)).toEqual({ n: 2 });
+
+      const tooExpensive = { ...campaignInput(ROBINHOOD, true), mintPriceWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei + 1n, maxRunWei: 10n ** 18n, dailyCapWei: 10n ** 18n };
+      const expensiveCampaign = await paidFixture.application.createCampaign(tooExpensive);
+      const expensive = await armed(paidFixture, expensiveCampaign, [WALLET_ONE], [], '-expensive');
+      await expect(proven.admitExecution(expensive.input)).rejects.toThrow('PAID_PRICE_PER_NFT_EXCEEDED');
+      const another = await campaign(paidFixture, ROBINHOOD, true);
+      const third = '0x3333333333333333333333333333333333333333';
+      const threeWallets = await armed(paidFixture, another, [WALLET_ONE, WALLET_TWO, third], [], '-three');
+      await expect(proven.admitExecution(threeWallets.input)).rejects.toThrow('PAID_WALLET_LIMIT_EXCEEDED');
     } finally { proven.close(); await close(value); }
   });
 
@@ -78,7 +105,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       const campaignValue = await campaign(value, ROBINHOOD);
       const prepared = await armed(value, campaignValue);
       await expect(value.store.admitExecution(prepared.input)).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
-      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: DIGEST });
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
       const now = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
       await now.open();
       await expect(now.admitExecution(prepared.input)).resolves.toBeDefined();
@@ -95,7 +122,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
     try {
       await proven.open();
-      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: DIGEST });
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
       expect(proven.disableExpiredRobinhood()).toBe(false);
       const later = new CanonicalStoreBridge(value.db, { now: () => new Date(day(7)) });
       await later.open();
@@ -121,7 +148,7 @@ describe('the service switches Robinhood off when the record expires (D-051)', (
     const value = await fixture(ROBINHOOD);
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
     await proven.open();
-    proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, confirmationDigest: DIGEST });
+    proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
     const store = new CanonicalStoreBridge(value.db, { now: () => new Date(clock), fleetPolicy: OPEN_FLEET_POLICY });
     await store.open();
     const coordinator = { start: async () => undefined, reconcile: async () => ({}) } as never;
@@ -140,4 +167,3 @@ describe('the service switches Robinhood off when the record expires (D-051)', (
     expect(await run(day(8))).toBe(0);
   });
 });
-

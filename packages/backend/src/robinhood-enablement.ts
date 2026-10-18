@@ -10,6 +10,8 @@
  */
 export const ROBINHOOD_EVIDENCE_STEPS = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7'] as const;
 export type RobinhoodEvidenceStep = typeof ROBINHOOD_EVIDENCE_STEPS[number];
+export const ROBINHOOD_PAID_EVIDENCE_STEPS = ['paidRehearsal', 'paidPolicyApproved'] as const;
+export type RobinhoodPaidEvidenceStep = typeof ROBINHOOD_PAID_EVIDENCE_STEPS[number];
 
 /** Key 2, as the engine and the backend receive it. */
 export interface RobinhoodEnablement {
@@ -20,7 +22,7 @@ export interface RobinhoodEnablement {
   /** True only when the paid rehearsal passed and the owner approved the paid policy (D-040 item 4, D-041). */
   readonly paidAllowed: boolean;
   /** Every step must be exactly true. */
-  readonly evidence: Readonly<Record<RobinhoodEvidenceStep, true>>;
+  readonly evidence: Readonly<Record<RobinhoodEvidenceStep, true> & Partial<Record<RobinhoodPaidEvidenceStep, true>>>;
 }
 
 const PLAIN_OBJECT = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -48,10 +50,12 @@ function judge(value: unknown, now: Date): RobinhoodEnablement | undefined {
   if (typeof paidAllowed !== 'boolean') return undefined;
   if (!PLAIN_OBJECT(evidence)) return undefined;
   // Own properties only: an inherited property (prototype pollution) never counts as evidence.
+  const required: readonly string[] = paidAllowed ? [...ROBINHOOD_EVIDENCE_STEPS, ...ROBINHOOD_PAID_EVIDENCE_STEPS] : ROBINHOOD_EVIDENCE_STEPS;
   const steps = Object.keys(evidence);
-  if (steps.length !== ROBINHOOD_EVIDENCE_STEPS.length || steps.some((step) => !(ROBINHOOD_EVIDENCE_STEPS as readonly string[]).includes(step))) return undefined;
+  if (steps.length !== required.length || steps.some((step) => !required.includes(step))) return undefined;
   for (const step of ROBINHOOD_EVIDENCE_STEPS) if (!Object.hasOwn(evidence, step) || evidence[step] !== true) return undefined;
-  return { recordId, approvedBy, approvedAt, expiresAt, paidAllowed, evidence: evidence as Record<RobinhoodEvidenceStep, true> };
+  if (paidAllowed) for (const step of ROBINHOOD_PAID_EVIDENCE_STEPS) if (!Object.hasOwn(evidence, step) || evidence[step] !== true) return undefined;
+  return { recordId, approvedBy, approvedAt, expiresAt, paidAllowed, evidence: evidence as Record<RobinhoodEvidenceStep, true> & Partial<Record<RobinhoodPaidEvidenceStep, true>> };
 }
 
 /** The error code each kind of refusal has always used, so callers and tests see no change while Key 2 is absent. */
