@@ -135,7 +135,7 @@ export class BackendApplication {
     const mintPriceWei = input.mintPriceWei ?? 0n;
     if (input.feePolicy.kind === 'paid') {
       if (input.chainId === 4663) assertRobinhoodLiveAllowed('paid', (this.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), new Date());
-      if (input.chainId !== 1 || input.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
+      if (input.chainId === 1 && input.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
       if (mintPriceWei <= 0n) throw new Error('PAID_MINT_VALUE_REQUIRED');
       const allInExposure = mintPriceWei * BigInt(input.quantity) + totalFeeBudget;
       if (allInExposure > input.maxRunWei || allInExposure > input.dailyCapWei) throw new Error('PAID_ETHEREUM_CAP_REQUIRED');

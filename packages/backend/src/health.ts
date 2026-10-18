@@ -1,9 +1,10 @@
 import type { BackendStore } from './store.js';
 import type { OperationalReadiness } from './types.js';
-import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI, ROBINHOOD_PAID_MINTS_ENABLED } from './policy.js';
+import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from './policy.js';
+import { validRobinhoodEnablement } from './robinhood-enablement.js';
 import { assertLiveOperationalReadiness } from './custody.js';
 
-export interface HealthReport { live: true; ready: boolean; state: 'Ready' | 'NotReady' | 'Killed'; blockingReasons: string[]; policy: { robinhoodFreePerWalletCapWei: string; robinhoodFreeActivePeriodCapWei: string; robinhoodPaidMintsEnabled: false; }; operational?: OperationalReadiness; checkedAt: string; }
+export interface HealthReport { live: true; ready: boolean; state: 'Ready' | 'NotReady' | 'Killed'; blockingReasons: string[]; policy: { robinhoodFreePerWalletCapWei: string; robinhoodFreeActivePeriodCapWei: string; robinhoodPaidMintsEnabled: boolean; }; operational?: OperationalReadiness; checkedAt: string; }
 export class HealthService {
   constructor(private readonly store: BackendStore, private readonly now: () => Date = () => new Date()) {}
   check(): HealthReport {
@@ -33,6 +34,7 @@ export class HealthService {
     if (state.notificationOutbox.some(item => item.state !== 'delivered' && item.attempts > 0)) reasons.push('NOTIFICATION_DELIVERY_DEGRADED');
     if (state.killed) reasons.push('KILLED');
     const blockingReasons = [...new Set(reasons)];
-    return { live: true, ready: blockingReasons.length === 0, state: state.killed ? 'Killed' : blockingReasons.length === 0 ? 'Ready' : 'NotReady', blockingReasons, policy: { robinhoodFreePerWalletCapWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI.toString(), robinhoodFreeActivePeriodCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI.toString(), robinhoodPaidMintsEnabled: ROBINHOOD_PAID_MINTS_ENABLED }, ...(operational ? { operational: { ...operational } } : {}), checkedAt: this.now().toISOString() };
+    const robinhood = validRobinhoodEnablement((this.store as BackendStore & { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), this.now());
+    return { live: true, ready: blockingReasons.length === 0, state: state.killed ? 'Killed' : blockingReasons.length === 0 ? 'Ready' : 'NotReady', blockingReasons, policy: { robinhoodFreePerWalletCapWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI.toString(), robinhoodFreeActivePeriodCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI.toString(), robinhoodPaidMintsEnabled: robinhood?.paidAllowed === true }, ...(operational ? { operational: { ...operational } } : {}), checkedAt: this.now().toISOString() };
   }
 }

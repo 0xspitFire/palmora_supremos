@@ -154,7 +154,8 @@ export interface RobinhoodEnablementInput {
   approvedAt: string;
   expiresAt: string;
   /** E1 to E7, each exactly true. */
-  evidence: Record<'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7', true>;
+  evidence: Record<'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7', true> & Partial<Record<'paidRehearsal' | 'paidPolicyApproved', true>>;
+  paidAllowed: boolean;
   /** SHA-256 (hex) of the typed confirmation phrase the owner entered. */
   confirmationDigest: string;
 }
@@ -492,12 +493,13 @@ export class DurableRepository {
    * enabled chain profile in ONE transaction; the database triggers (migration 023) refuse the profile change unless the row exists
    * and is valid at the approval time. Nothing here is reachable except from the owner-run command.
    */
-  public enableRobinhood(record: RobinhoodEnablementInput, chain: { chainProfileId: string; verificationId: string; sequencerEndpointReference: string; archiveEndpointReference: string }): void {
+  public enableRobinhood(record: RobinhoodEnablementInput, chain: { chainProfileId: string; verificationId: string; sequencerEndpointReference: string; archiveEndpointReference: string; paidFeePolicy?: { id: string; version: string; maxTotalFeeWei: bigint; freeCapWei: bigint } }): void {
     if (!record.confirmationDigest || !/^[0-9a-f]{64}$/.test(record.confirmationDigest)) throw new Error('Robinhood enablement requires a confirmation digest');
-    const steps = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7'] as const;
+    const steps = record.paidAllowed ? ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'paidRehearsal', 'paidPolicyApproved'] as const : ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7'] as const;
     if (Object.keys(record.evidence).length !== steps.length || steps.some((step) => record.evidence[step] !== true)) throw new Error('Robinhood enablement requires E1 to E7 all passed');
+    if (record.paidAllowed && !chain.paidFeePolicy) throw new Error('Robinhood paid enablement requires the approved paid fee policy');
     this.immediate(() => {
-      this.db.prepare("INSERT INTO robinhood_enablement (id, approved_by, approved_at, expires_at, paid_allowed, evidence_json, confirmation_digest, created_at) VALUES (?, 'owner-cli', ?, ?, 0, ?, ?, ?)").run(record.id, record.approvedAt, record.expiresAt, JSON.stringify(record.evidence), record.confirmationDigest, record.approvedAt);
+      this.db.prepare("INSERT INTO robinhood_enablement (id, approved_by, approved_at, expires_at, paid_allowed, evidence_json, confirmation_digest, created_at) VALUES (?, 'owner-cli', ?, ?, ?, ?, ?, ?)").run(record.id, record.approvedAt, record.expiresAt, record.paidAllowed ? 1 : 0, JSON.stringify(record.evidence), record.confirmationDigest, record.approvedAt);
       this.recordChainVerification({
         id: chain.verificationId,
         chainProfileId: chain.chainProfileId,
@@ -511,6 +513,11 @@ export class DurableRepository {
         approvedAt: record.approvedAt,
         executionEnabled: true,
       });
+      if (record.paidAllowed && chain.paidFeePolicy) {
+        const current = this.db.prepare('SELECT id FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(chain.chainProfileId) as { id: string } | undefined;
+        if (current) this.db.prepare('UPDATE fee_policy SET active = 0 WHERE id = ?').run(current.id);
+        this.db.prepare("INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, 'fee_only', ?, ?, '0', 2, 1, 1, ?, 'allowed')").run(chain.paidFeePolicy.id, chain.chainProfileId, chain.paidFeePolicy.version, chain.paidFeePolicy.maxTotalFeeWei.toString(), chain.paidFeePolicy.freeCapWei.toString(), record.approvedAt);
+      }
     });
   }
 

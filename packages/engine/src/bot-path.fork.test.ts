@@ -26,6 +26,7 @@ import type { MintJobConfig, Signer, SpendReservation, SpendReservationProvider,
 const rpcUrl = process.env.ANVIL_REHEARSAL_RPC_URL;
 const chainName = (process.env.REHEARSAL_CHAIN ?? 'ethereum') as 'ethereum' | 'robinhood';
 const nft = process.env.REHEARSAL_NFT as Address | undefined;
+const paidMode = process.env.REHEARSAL_PAID === 'true';
 const chainId = chainName === 'robinhood' ? 4663 : 1;
 
 const isLoopback = (url: string | undefined): boolean => {
@@ -51,10 +52,10 @@ vi.mock('./lifecycle.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lifecycle.js')>();
   return {
     ...actual,
-    // Test process only, loopback fork only, Robinhood only, FREE mints only. Paid Robinhood stays blocked.
+    // Test process only and loopback fork only. Paid is admitted only for the explicit D-054 rehearsal process.
     assertDirectChainExecutionPolicy: (id: number, value: bigint | undefined, dryRun: boolean): void => {
       // `value` is undefined only for the early check made before the drop is read; the later check carries the real price.
-      if (id === 4663 && process.env.REHEARSAL_CHAIN === 'robinhood' && isLoopback(process.env.ANVIL_REHEARSAL_RPC_URL) && (value === undefined || value === 0n)) return;
+      if (id === 4663 && process.env.REHEARSAL_CHAIN === 'robinhood' && isLoopback(process.env.ANVIL_REHEARSAL_RPC_URL) && (value === undefined || value === 0n || process.env.REHEARSAL_PAID === 'true')) return;
       return actual.assertDirectChainExecutionPolicy(id as never, value, dryRun);
     },
   };
@@ -85,7 +86,7 @@ class RehearsalSigner implements Signer {
   zeroize(): void { /* nothing held beyond this test */ }
 }
 
-type Reserved = { id: string; walletIndex: number; status: 'reserved' | 'settled' | 'released'; actualGasWei?: bigint };
+type Reserved = { id: string; walletIndex: number; status: 'reserved' | 'settled' | 'released'; maxValueWei: bigint; actualMintValueWei?: bigint; actualGasWei?: bigint; actualL1DataGasWei?: bigint };
 function reservationProvider(onReserve?: (walletIndex: number) => void, seenKeys = new Set<string>()): { provider: SpendReservationProvider; records: Reserved[] } {
   const records: Reserved[] = [];
   const provider: SpendReservationProvider = {
@@ -95,13 +96,13 @@ function reservationProvider(onReserve?: (walletIndex: number) => void, seenKeys
       // Like the durable store, a repeated idempotency key is refused rather than reserved twice.
       if (seenKeys.has(input.idempotencyKey)) throw new Error('IDEMPOTENCY_KEY_ALREADY_USED');
       seenKeys.add(input.idempotencyKey);
-      const record: Reserved = { id: `res-${records.length}`, walletIndex: input.walletIndex, status: 'reserved' };
+      const record: Reserved = { id: `res-${records.length}`, walletIndex: input.walletIndex, status: 'reserved', maxValueWei: input.valueWei };
       records.push(record);
       onReserve?.(input.walletIndex);
       const reservation: SpendReservation = {
         reservationId: record.id, walletIndex: input.walletIndex, maxValueWei: input.valueWei, maxGasCostWei: input.maxGasCostWei, durable: true, storeKind: 'normalized-sqlite',
-        settle: async (_value, gas) => { record.status = 'settled'; record.actualGasWei = gas; },
-        settleComponents: async (components) => { record.status = 'settled'; record.actualGasWei = components.actualL2ExecutionGasWei; },
+        settle: async (value, gas) => { record.status = 'settled'; record.actualMintValueWei = value; record.actualGasWei = gas; },
+        settleComponents: async (components) => { record.status = 'settled'; record.actualMintValueWei = components.actualMintValueWei; record.actualGasWei = components.actualL2ExecutionGasWei; record.actualL1DataGasWei = components.actualL1DataGasWei; },
         release: async () => { if (record.status === 'reserved') record.status = 'released'; },
       };
       return reservation;
@@ -129,7 +130,7 @@ const finality = (stage: 'soft' | 'posted' | 'ethereum_final'): FinalityObserver
   observe: async () => ({ chainId: chainId as never, stage, canonical: true, ready: stage === 'ethereum_final', observedAt: new Date() }),
 });
 
-describe.skipIf(!isLoopback(rpcUrl) || !nft)(`bot-path rehearsal on a local ${chainName} fork (T-022)`, () => {
+describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path rehearsal on a local ${chainName} fork (${paidMode ? 'D-054' : 'T-022'})`, () => {
   const directory = mkdtempSync(join(tmpdir(), 'mintbot-rehearsal-'));
   const accounts = [privateKeyToAccount(generatePrivateKey()), privateKeyToAccount(generatePrivateKey())];
   let client: ReturnType<typeof createPublicClient>;
@@ -183,6 +184,11 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`bot-path rehearsal on a local ${ch
     const after = await Promise.all(accounts.map((account) => balanceOf(account.address)));
     expect(after.map((value, index) => value - before[index]!)).toEqual([1n, 1n]);
     expect(records.map((record) => record.status)).toEqual(['settled', 'settled']);
+    if (paidMode) {
+      expect(records.every((record) => record.maxValueWei > 0n)).toBe(true);
+      expect(records.every((record) => record.actualMintValueWei === record.maxValueWei)).toBe(true);
+      expect(records.every((record) => record.actualL1DataGasWei !== undefined)).toBe(true);
+    }
     expect(attempts.length).toBeGreaterThanOrEqual(2);
     expect(receipts.length).toBe(2);
   }, 60_000);

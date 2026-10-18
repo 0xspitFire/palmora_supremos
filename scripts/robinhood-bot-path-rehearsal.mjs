@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
  */
 const root = resolve(process.cwd());
 const nft = readNft();
+const paidNft = readPaidNft();
 const port = Number(process.env.ANVIL_REHEARSAL_PORT ?? '8547');
 const rpcUrl = `http://127.0.0.1:${port}`;
 const archiveUrl = readReference(resolveArchiveFile(root), 'ROBINHOOD_ARCHIVE_RPC');
@@ -36,25 +37,44 @@ try {
   await Promise.race([waitForRpc(rpcUrl), anvilFailure]);
   const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
   if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
+  const freeCode = await runSuite(vitest, nft, false, ['packages/engine/src/bot-path.fork.test.ts', 'packages/cli/src/robinhood-reconcile.fork.test.ts']);
+  if (freeCode !== 0) process.exitCode = freeCode;
+  if (freeCode === 0 && paidNft) {
+    const paidCode = await runSuite(vitest, paidNft, true, ['packages/engine/src/bot-path.fork.test.ts']);
+    if (paidCode !== 0) process.exitCode = paidCode;
+  }
+} finally {
+  anvil.kill('SIGTERM');
+}
+
+async function runSuite(vitest, contract, paid, tests) {
   const reportDir = mkdtempSync(join(tmpdir(), 'mintbot-rehearsal-report-'));
   const reportFile = join(reportDir, 'report.json');
-  const code = await run(process.execPath, [vitest, 'run', '--config', 'vitest.fork.config.ts', 'packages/engine/src/bot-path.fork.test.ts', 'packages/cli/src/robinhood-reconcile.fork.test.ts', '--reporter=verbose', '--reporter=json', '--outputFile', reportFile], root, {
+  const code = await run(process.execPath, [vitest, 'run', '--config', 'vitest.fork.config.ts', ...tests, '--reporter=verbose', '--reporter=json', '--outputFile', reportFile], root, {
     ANVIL_REHEARSAL_RPC_URL: rpcUrl,
     REHEARSAL_CHAIN: 'robinhood',
-    REHEARSAL_NFT: nft,
+    REHEARSAL_NFT: contract,
+    ...(paid ? { REHEARSAL_PAID: 'true' } : {}),
     ...(process.env.REHEARSAL_MAX_FEE_GWEI ? { REHEARSAL_MAX_FEE_GWEI: process.env.REHEARSAL_MAX_FEE_GWEI } : {}),
   });
   if (code !== 0) process.exitCode = code;
   if (code === 0) assertAllRan(reportFile);
   rmSync(reportDir, { recursive: true, force: true });
-} finally {
-  anvil.kill('SIGTERM');
+  return code;
 }
 
 function readNft() {
   const flag = process.argv.indexOf('--nft');
   const value = flag >= 0 ? process.argv[flag + 1] : process.env.REHEARSAL_NFT;
   if (!value || !/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error('Pass --nft 0x<address of an open, free public SeaDrop drop on Robinhood>');
+  return value;
+}
+
+function readPaidNft() {
+  const flag = process.argv.indexOf('--paid-nft');
+  const value = flag >= 0 ? process.argv[flag + 1] : process.env.REHEARSAL_PAID_NFT;
+  if (value === undefined) return undefined;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error('Pass --paid-nft 0x<address of an open, paid public SeaDrop drop on Robinhood>');
   return value;
 }
 

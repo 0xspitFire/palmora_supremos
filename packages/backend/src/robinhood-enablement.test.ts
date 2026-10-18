@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { ROBINHOOD_EVIDENCE_STEPS, assertRobinhoodLiveAllowed, validRobinhoodEnablement } from './robinhood-enablement.js';
+import { ROBINHOOD_EVIDENCE_STEPS, ROBINHOOD_PAID_EVIDENCE_STEPS, assertRobinhoodLiveAllowed, validRobinhoodEnablement } from './robinhood-enablement.js';
 
 const now = new Date('2026-10-12T12:00:00.000Z');
 const good = () => ({
@@ -53,7 +53,14 @@ describe('Robinhood enablement record (Key 2)', () => {
 
   it('allows paid only when the record says so, and never throws from the validator', () => {
     expect(() => assertRobinhoodLiveAllowed('paid', good(), now)).toThrow('ROBINHOOD_PAID_MINTS_DISABLED');
-    expect(() => assertRobinhoodLiveAllowed('paid', { ...good(), paidAllowed: true }, now)).not.toThrow();
+    const paid = { ...good(), paidAllowed: true, evidence: { ...good().evidence, paidRehearsal: true, paidPolicyApproved: true } };
+    expect(() => assertRobinhoodLiveAllowed('paid', paid, now)).not.toThrow();
+    for (const step of ROBINHOOD_PAID_EVIDENCE_STEPS) {
+      const evidence = { ...paid.evidence } as Record<string, unknown>;
+      delete evidence[step];
+      expect(() => assertRobinhoodLiveAllowed('paid', { ...paid, evidence }, now)).toThrow('ROBINHOOD_PAID_MINTS_DISABLED');
+    }
+    expect(validRobinhoodEnablement({ ...good(), paidAllowed: true }, now)).toBeUndefined();
     expect(() => validRobinhoodEnablement({ get recordId(): string { throw new Error('x'); } }, now)).not.toThrow();
   });
 

@@ -223,10 +223,13 @@ export class SpendReservations {
       if (this.isKillSwitchEngaged()) throw new Error('kill switch engaged');
       const chain = this.db.prepare('SELECT chain_id, execution_enabled, verification_status FROM chain_profile WHERE id = ?').get(request.chainProfileId) as { chain_id: number; execution_enabled: number; verification_status: string } | undefined;
       if (!chain) throw new Error('chain profile not found');
-      if (chain.chain_id === 4663 && !request.freeMint) throw new Error('paid Robinhood mints are blocked');
+      if (chain.chain_id === 4663 && !request.freeMint) {
+        const paid = this.db.prepare("SELECT 1 AS allowed FROM robinhood_enablement WHERE rowid = (SELECT max(rowid) FROM robinhood_enablement) AND paid_allowed = 1 AND julianday('now') < julianday(expires_at) AND json_type(evidence_json, '$.paidRehearsal') IS 'true' AND json_type(evidence_json, '$.paidPolicyApproved') IS 'true'").get() as { allowed: number } | undefined;
+        if (!paid) throw new Error('paid Robinhood mints are blocked');
+      }
       if (chain.chain_id === 4663 && chain.execution_enabled !== 1) throw new Error('Robinhood execution is disabled');
       if (chain.verification_status !== 'verified' || chain.execution_enabled !== 1) throw new Error('chain execution is not enabled or verified');
-      if (chain.chain_id === 4663 && request.mintValueWei !== 0n) throw new Error('Robinhood reservations must have zero mint value');
+      if (chain.chain_id === 4663 && request.freeMint && request.mintValueWei !== 0n) throw new Error('Robinhood free reservations must have zero mint value');
       if (!request.executionId || !request.transactionIntentId) throw new Error('execution reservation requires execution and transaction intent linkage');
       const wallet = this.db.prepare('SELECT chain_profile_id FROM wallet WHERE id = ?').get(request.walletId) as { chain_profile_id: string } | undefined;
       if (!wallet || wallet.chain_profile_id !== request.chainProfileId) throw new Error('reservation chain does not match wallet');

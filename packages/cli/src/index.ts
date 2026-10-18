@@ -631,10 +631,11 @@ const cli = yargs(hideBin(process.argv))
         } finally { database.close(); }
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
-  .command('robinhood-enable <action>', 'Owner-run: switch Robinhood FREE execution on for up to 7 days (status | record). Needs one confirmed live Ethereum mint and your evidence file for E1 to E7', (args) => args
+  .command('robinhood-enable <action>', 'Owner-run: switch Robinhood execution on for up to 7 days (status | record). Paid also needs D-054 evidence', (args) => args
     .positional('action', { type: 'string', choices: ['status', 'record'] as const, demandOption: true })
     .option('evidence-file', { type: 'string', demandOption: true, describe: 'Your JSON file with E1 to E7 (see Docs/robinhood-enable-evidence.template.json)' })
     .option('days', { type: 'number', default: ENABLEMENT_DAYS, describe: 'How long it stays on (1 to 7)' })
+    .option('paid', { type: 'boolean', default: false, describe: 'Enable paid mints too; requires paidRehearsal and paidPolicyApproved evidence' })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (record only)' }), async (args) => {
       try {
         const info = await lstat(args.evidenceFile);
@@ -643,7 +644,7 @@ const cli = yargs(hideBin(process.argv))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<EnableStore>;
         if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function' || typeof store.robinhoodEnablement !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, evidenceText, evidenceFile: args.evidenceFile, days: args.days, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, evidenceText, evidenceFile: args.evidenceFile, days: args.days, paid: args.paid, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('chain-evidence <action>', 'Owner-run: record Ethereum SeaDrop chain evidence for 7 days after a typed confirmation (needed before a live arm)', (args) => args
