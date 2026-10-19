@@ -6,9 +6,12 @@ export const APPROVED_ARCHIVE_PATH = '/home/Junayd/W3/Rets/archive-rpc.env';
 export const APPROVED_ARCHIVE_REFERENCE = '~/W3/Rets/archive-rpc.env';
 export const APPROVED_ETHEREUM_ARCHIVE_PATH = '/home/Junayd/W3/Rets/eth-archive-rpc.env';
 export const APPROVED_ETHEREUM_ARCHIVE_REFERENCE = '~/W3/Rets/eth-archive-rpc.env';
+export const APPROVED_BASE_ARCHIVE_PATH = '/home/Junayd/W3/Rets/MINT_BOT_SECRETS.env';
+export const APPROVED_BASE_ARCHIVE_REFERENCE = '~/W3/Rets/MINT_BOT_SECRETS.env';
 
 const ALLOWED_KEYS = new Set([
   'ROBINHOOD_ARCHIVE_RPC',
+  'BASE_ARCHIVE_RPC',
   'ETHEREUM_FORK_RPC',
   'ETHEREUM_ARCHIVE_RPC',
   'ETHEREUM_FORK_BLOCK',
@@ -18,21 +21,28 @@ const ALLOWED_KEYS = new Set([
 ]);
 
 export function parseArchiveReference(sourceReference, defaultKey) {
-  assertNativeWslWorkspace();
-  const reference = sourceReference ?? `${APPROVED_ARCHIVE_REFERENCE}:${defaultKey}`;
+  const defaultReference = defaultKey.startsWith('ETHEREUM_')
+    ? APPROVED_ETHEREUM_ARCHIVE_REFERENCE
+    : defaultKey.startsWith('BASE_')
+      ? APPROVED_BASE_ARCHIVE_REFERENCE
+      : APPROVED_ARCHIVE_REFERENCE;
+  const reference = sourceReference ?? `${defaultReference}:${defaultKey}`;
   const separator = reference.lastIndexOf(':');
   const sourcePath = separator > 0 ? reference.slice(0, separator) : reference;
   const key = separator > 0 ? reference.slice(separator + 1) : defaultKey;
   const ethereumKey = key.startsWith('ETHEREUM_');
+  const baseKey = key.startsWith('BASE_');
   const approvedReferences = ethereumKey
     ? [APPROVED_ETHEREUM_ARCHIVE_REFERENCE, APPROVED_ETHEREUM_ARCHIVE_PATH]
-    : [APPROVED_ARCHIVE_REFERENCE, APPROVED_ARCHIVE_PATH];
+    : baseKey
+      ? [APPROVED_BASE_ARCHIVE_REFERENCE, APPROVED_BASE_ARCHIVE_PATH]
+      : [APPROVED_ARCHIVE_REFERENCE, APPROVED_ARCHIVE_PATH];
   if (!approvedReferences.includes(sourcePath)) {
-    throw new Error(ethereumKey ? 'Ethereum archive source must be ~/W3/Rets/eth-archive-rpc.env' : 'Archive source must be ~/W3/Rets/archive-rpc.env');
+    throw new Error(ethereumKey ? 'Ethereum archive source must be ~/W3/Rets/eth-archive-rpc.env' : baseKey ? 'Base archive source must be ~/W3/Rets/MINT_BOT_SECRETS.env' : 'Archive source must be ~/W3/Rets/archive-rpc.env');
   }
   if (!ALLOWED_KEYS.has(key)) throw new Error('Archive reference key is not approved');
-  const filePath = ethereumKey ? APPROVED_ETHEREUM_ARCHIVE_PATH : APPROVED_ARCHIVE_PATH;
-  const displayPath = ethereumKey ? APPROVED_ETHEREUM_ARCHIVE_REFERENCE : APPROVED_ARCHIVE_REFERENCE;
+  const filePath = ethereumKey ? APPROVED_ETHEREUM_ARCHIVE_PATH : baseKey ? APPROVED_BASE_ARCHIVE_PATH : APPROVED_ARCHIVE_PATH;
+  const displayPath = ethereumKey ? APPROVED_ETHEREUM_ARCHIVE_REFERENCE : baseKey ? APPROVED_BASE_ARCHIVE_REFERENCE : APPROVED_ARCHIVE_REFERENCE;
   return { filePath, key, display: `${displayPath}:${key}` };
 }
 
@@ -51,6 +61,7 @@ function assertNativeWslWorkspace() {
 }
 
 export async function readArchiveValue(sourceReference, defaultKey) {
+  assertNativeWslWorkspace();
   const { filePath, key } = parseArchiveReference(sourceReference, defaultKey);
   const values = await readApprovedFile(filePath, [key]);
   const value = values.get(key);
@@ -59,6 +70,7 @@ export async function readArchiveValue(sourceReference, defaultKey) {
 }
 
 export async function readArchiveValues(sourceReference, defaultKey, keys) {
+  assertNativeWslWorkspace();
   const parsed = parseArchiveReference(sourceReference, defaultKey);
   for (const key of keys) {
     if (!ALLOWED_KEYS.has(key)) throw new Error('Archive reference key is not approved');
