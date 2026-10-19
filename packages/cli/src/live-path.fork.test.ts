@@ -81,7 +81,7 @@ describe.skipIf(!enabled)('Personal Live path on a local Ethereum fork (T-027)',
     // 1. The plan: drop open and free, both wallets funded, test mint passes.
     const port = EngineIntelligencePort.fromRpcUrl(rpcUrl!);
     const report = await checkDrop(port, nft!, wallets, { simulate: true });
-    const plan = buildLivePlan(report, { killSwitchPresent: false, custody: 'local' });
+    const plan = buildLivePlan(report, { killSwitchPresent: true, custody: 'local' });
     expect(plan.blockers).toEqual([]);
     expect(plan.verdict).toBe('ready');
     const confirm = liveConfirmationPhrase(nft!, plan.quantity, plan.totalMaxExposureEth);
@@ -93,7 +93,7 @@ describe.skipIf(!enabled)('Personal Live path on a local Ethereum fork (T-027)',
     const evidence = runtime.store.snapshot().chainEvidence.find((item) => item.status === 'accepted')!;
 
     // 3. The campaign (what live-prepare records), gated by the exact phrase and the wallet file.
-    const ready = assertLivePrepareAllowed({ plan, contract: nft!, confirm, priorityFeeGwei: 0.1, walletFileAddresses: wallets });
+    const ready = assertLivePrepareAllowed({ plan, contract: nft!, confirm, priorityFeeGwei: 0.1, walletFileAddresses: wallets, killSwitchPresent: true });
     const fields = liveFreeCampaignFields({ quantity: plan.quantity, wallets: ready.length, tipWei: parseGwei('0.1') });
     const campaign = await runtime.application.createCampaign({
       chainId: 1, contract: nft!, strategy: 'seadrop-v1-public', quantity: fields.quantity, dryRun: false, maxRunWei: fields.maxRunWei, dailyCapWei: fields.dailyCapWei, gasCeilingWei: fields.gasCeilingWei, broadcastMode: 'public',

@@ -761,7 +761,7 @@ const cli = yargs(hideBin(process.argv))
         const report = await checkDrop(port, args.contract, wallets, { simulate: true, ...(args.quantityLimit === undefined ? {} : { maxQuantity: args.quantityLimit }) });
         const plan = buildLivePlan(report, { killSwitchPresent: existsSync(DEFAULT_KILL_FILE), custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local' });
         const file = walletFile(args.walletFile);
-        const readyWallets = assertLivePrepareAllowed({ plan, contract: args.contract, confirm: args.confirm, priorityFeeGwei: args.priorityFeeGwei, walletFileAddresses: await publicWallets(file) });
+        const readyWallets = assertLivePrepareAllowed({ plan, contract: args.contract, confirm: args.confirm, priorityFeeGwei: args.priorityFeeGwei, walletFileAddresses: await publicWallets(file), killSwitchPresent: existsSync(DEFAULT_KILL_FILE) });
         const fields = liveFreeCampaignFields({ quantity: plan.quantity, wallets: readyWallets.length, tipWei: parseGwei(args.priorityFeeGwei.toString()) });
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file }, { startCoordinator: false });
         const store = runtime.store as unknown as { ethereumFeePolicyStatus?: () => Parameters<typeof describeFeePolicy>[0] };

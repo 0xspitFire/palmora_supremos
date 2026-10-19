@@ -44,7 +44,8 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
     if (report.drop.status !== 'open') blockers.push(`The mint is ${report.drop.status}; a live run only makes sense while it is open.`);
   }
   if (report.verdict === 'blocked' && blockers.length === 0) blockers.push(report.summary);
-  if (context.killSwitchPresent === true) blockers.push('The kill switch is on, which refuses every live run. Remove it deliberately only when you are ready to mint.');
+  if (context.killSwitchPresent === true) warnings.push('The kill switch is engaged, as required during preparation. Release it only after the campaign and simulations are recorded.');
+  if (context.killSwitchPresent === false) warnings.push('The kill switch is off. Engage it before recording a live campaign.');
   if (context.killSwitchPresent === null) warnings.push('The kill-switch file could not be checked.');
   if (context.custody === 'local') warnings.push('Wallets are signed from the local encrypted keystore (accepted for Personal Live, D-028).');
 
@@ -105,10 +106,11 @@ export function liveConfirmationPhrase(contract: string, quantity: number, total
  * Every gate for recording a live campaign, in one place so each refusal can be tested. Throws a plain error
  * when anything is off; returns the ready wallets (lower case) that the campaign will use.
  */
-export function assertLivePrepareAllowed(args: { plan: LivePlan; contract: string; confirm: string; priorityFeeGwei: number; walletFileAddresses: readonly string[] }): string[] {
-  const { plan, contract, confirm, priorityFeeGwei, walletFileAddresses } = args;
+export function assertLivePrepareAllowed(args: { plan: LivePlan; contract: string; confirm: string; priorityFeeGwei: number; walletFileAddresses: readonly string[]; killSwitchPresent: boolean }): string[] {
+  const { plan, contract, confirm, priorityFeeGwei, walletFileAddresses, killSwitchPresent } = args;
   if (!Number.isFinite(priorityFeeGwei) || !(priorityFeeGwei > 0 && priorityFeeGwei <= 2)) throw new Error('PRIORITY_FEE_GWEI_OUT_OF_RANGE: use more than 0 and at most 2');
   if (plan.verdict !== 'ready') throw new Error(`LIVE_PLAN_NOT_READY: ${plan.blockers[0] ?? 'see live-plan'}`);
+  if (!killSwitchPresent) throw new Error('KILL_SWITCH_REQUIRED_FOR_PREPARATION: engage the kill switch before recording a live campaign');
   if (typeof confirm !== 'string' || confirm !== liveConfirmationPhrase(contract, plan.quantity, plan.totalMaxExposureEth)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run live-plan again and copy the phrase it prints exactly');
   // Approve, arm and run take their wallets from the wallet file, not from this campaign record, so the file must
   // hold exactly the wallets that passed the test mint. Anything else could let an untested wallet mint.

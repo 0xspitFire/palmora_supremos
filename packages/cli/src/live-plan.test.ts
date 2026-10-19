@@ -6,7 +6,7 @@ import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFr
 const CONTRACT = '0x21d90c1ea94b7f8b0bea50df540bac9f04ada760';
 const row = (index: number, verdict: DropCheckWallet['verdict'], extra: Partial<DropCheckWallet> = {}): DropCheckWallet => ({ wallet: `0x${String(index).repeat(40)}`, balanceEth: '0.0006', requiredEth: '0.0004', topUpEth: null, simulation: verdict === 'ready' ? 'passed' : 'not run', verdict, note: '', ...extra }) as DropCheckWallet;
 const report = (wallets: DropCheckWallet[], overrides: Partial<DropCheckReport> = {}): DropCheckReport => ({ contract: CONTRACT, verdict: 'ok', summary: 'ok', drop: { priceEth: '0', opensAt: null, closesAt: null, maxPerWallet: 5, status: 'open' }, quantity: 3, wallets, ...overrides });
-const context = { killSwitchPresent: false, custody: 'local' as const };
+const context = { killSwitchPresent: true, custody: 'local' as const };
 
 describe('Personal Live plan (read-only)', () => {
   it('is ready only when the drop is free and open, every wallet passed the test mint, and the exposure fits the daily budget', () => {
@@ -18,10 +18,13 @@ describe('Personal Live plan (read-only)', () => {
     expect(plan.warnings.join(' ')).toContain('local encrypted keystore');
   });
 
-  it('refuses while the kill switch is on, and says how it is released', () => {
-    const plan = buildLivePlan(report([row(1, 'ready')]), { ...context, killSwitchPresent: true });
-    expect(plan.verdict).toBe('not_ready');
-    expect(plan.blockers.join(' ')).toContain('kill switch is on');
+  it('plans while the kill switch is on and warns when it is off', () => {
+    const engaged = buildLivePlan(report([row(1, 'ready')]), context);
+    expect(engaged.verdict).toBe('ready');
+    expect(engaged.warnings.join(' ')).toContain('required during preparation');
+    const released = buildLivePlan(report([row(1, 'ready')]), { ...context, killSwitchPresent: false });
+    expect(released.verdict).toBe('ready');
+    expect(released.warnings.join(' ')).toContain('Engage it before recording');
   });
 
   it('refuses a paid drop, a drop that is not open, and a plan with no usable drop', () => {
@@ -65,7 +68,7 @@ describe('every gate on recording a live campaign (live-prepare)', () => {
   const wallets = [row(1, 'ready'), row(2, 'ready'), row(3, 'ready')];
   const plan = buildLivePlan(report(wallets), context);
   const phrase = liveConfirmationPhrase(CONTRACT, plan.quantity, plan.totalMaxExposureEth);
-  const good = { plan, contract: CONTRACT, confirm: phrase, priorityFeeGwei: 0.1, walletFileAddresses: wallets.map((item) => item.wallet) };
+  const good = { plan, contract: CONTRACT, confirm: phrase, priorityFeeGwei: 0.1, walletFileAddresses: wallets.map((item) => item.wallet), killSwitchPresent: true };
 
   it('passes only with the exact phrase, a ready plan, a sane tip and a wallet file holding exactly the ready wallets', () => {
     expect(assertLivePrepareAllowed(good)).toEqual(wallets.map((item) => item.wallet).sort());
@@ -81,6 +84,10 @@ describe('every gate on recording a live campaign (live-prepare)', () => {
   it('refuses a plan that is not ready, before looking at the phrase', () => {
     const notReady = buildLivePlan(report([row(1, 'ready'), row(2, 'needs ETH', { topUpEth: '0.0001' })], { verdict: 'unknown' }), context);
     expect(() => assertLivePrepareAllowed({ ...good, plan: notReady })).toThrow('LIVE_PLAN_NOT_READY');
+  });
+
+  it('refuses to record the campaign after the kill switch has already been released', () => {
+    expect(() => assertLivePrepareAllowed({ ...good, killSwitchPresent: false })).toThrow('KILL_SWITCH_REQUIRED_FOR_PREPARATION');
   });
 
   it('refuses tips of zero, negative, above 2 gwei, NaN or infinite', () => {
