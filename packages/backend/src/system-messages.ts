@@ -222,7 +222,7 @@ export function checkInCard(input: CheckInInput): SystemCard {
   });
 }
 
-export type HealthKey = 'scan_stalled' | 'endpoint_errors' | 'disk_pressure' | 'backup_stale' | 'delivery_trouble';
+export type HealthKey = 'scan_stalled' | 'endpoint_errors' | 'disk_pressure' | 'backup_stale' | 'delivery_trouble' | 'pending_exposure';
 
 export interface HealthFacts {
   key: HealthKey;
@@ -241,6 +241,7 @@ const HEALTH_TITLE: Readonly<Record<HealthKey, string>> = {
   disk_pressure: 'DISK SPACE LOW',
   backup_stale: 'BACKUP PROBLEM',
   delivery_trouble: 'TELEGRAM DELIVERY TROUBLE',
+  pending_exposure: 'PENDING EXPOSURE NEEDS RECONCILIATION',
 };
 
 export function healthCard(input: HealthFacts, extra: { reminder?: number } = {}): SystemCard {
@@ -267,7 +268,7 @@ export function recoveredCard(key: HealthKey, input: { since: Date; now: Date })
     lines: [
       { label: 'What happened', value: 'the problem is over.', strong: true },
       { label: 'It lasted', value: duration((input.now.getTime() - input.since.getTime()) / 1_000), strong: true },
-      { label: 'What it means', value: 'nothing is needed. Anything missed while it lasted is picked up on the next scan.' },
+      { label: 'What it means', value: key === 'pending_exposure' ? 'the stale reservation is resolved and no longer blocks live admission.' : 'nothing is needed. Anything missed while it lasted is picked up on the next scan.' },
     ],
     steps: [],
     summary: `Recovered: ${HEALTH_TITLE[key]}.`,

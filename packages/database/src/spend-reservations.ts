@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { SqliteDatabase } from './database.js';
+import { assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from './spend-window.js';
 
 export type ReservationStatus = 'reserved' | 'settled' | 'released' | 'expired';
 
@@ -175,7 +176,10 @@ export class SpendReservations {
         if (existing.request_fingerprint !== computedFingerprint) throw new ReservationConflictError();
         return existing.status;
       }
-      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(request.walletId, day) as Array<{ status: ReservationStatus; amount_wei: string; reserved_amount_wei: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string | null; mint_value_buffer_wei: string | null; l2_execution_gas_buffer_wei: string | null; l1_data_gas_buffer_wei: string | null; priority_fee_buffer_wei: string | null }>;
+      assertAndAdvanceAdmissionClock(this.db, at);
+      assertNoStalePendingReservations(this.db, at);
+      const cutoff = rollingSpendCutoff(at);
+      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND (status = 'reserved' OR (status = 'settled' AND (julianday(settled_at) IS NULL OR julianday(settled_at) >= julianday(?))))").all(request.walletId, cutoff) as Array<{ status: ReservationStatus; amount_wei: string; reserved_amount_wei: string | null; mint_value_wei: string; l2_execution_gas_wei: string; l1_data_gas_wei: string; priority_fee_component_wei: string; replacement_budget_wei: string | null; mint_value_buffer_wei: string | null; l2_execution_gas_buffer_wei: string | null; l1_data_gas_buffer_wei: string | null; priority_fee_buffer_wei: string | null }>;
       const used = rows.reduce((total, row) => total + componentExposure(row), 0n);
       if (used + request.amountWei > BigInt(policy.cap)) throw new SpendCapExceededError();
       this.db.prepare('INSERT INTO spend_reservation (id, wallet_id, execution_id, idempotency_key, request_id, request_fingerprint, policy_id, amount_wei, reserved_amount_wei, usage_date, status, created_at, mint_class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'reserved\', ?, \'legacy\')').run(request.id, request.walletId, request.executionId ?? null, request.idempotencyKey, request.requestId ?? request.idempotencyKey, computedFingerprint, request.policyId, request.amountWei.toString(), request.amountWei.toString(), day, at.toISOString());
@@ -264,7 +268,10 @@ export class SpendReservations {
         if (existing.request_fingerprint !== computedFingerprint) throw new ReservationConflictError();
         return existing.status;
       }
-      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND usage_date = ? AND status IN ('reserved', 'settled')").all(request.walletId, usageDate) as StoredReservationRow[];
+      assertAndAdvanceAdmissionClock(this.db, at);
+      assertNoStalePendingReservations(this.db, at);
+      const cutoff = rollingSpendCutoff(at);
+      const rows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND (status = 'reserved' OR (status = 'settled' AND (julianday(settled_at) IS NULL OR julianday(settled_at) >= julianday(?))))").all(request.walletId, cutoff) as StoredReservationRow[];
       const used = rows.reduce((total, row) => total + componentExposure(row), 0n);
       if (used + exposure > BigInt(policy.cap)) throw new SpendCapExceededError();
       const scopedRows = this.db.prepare("SELECT status, amount_wei, reserved_amount_wei, mint_value_wei, l2_execution_gas_wei, l1_data_gas_wei, priority_fee_component_wei, replacement_budget_wei, mint_value_buffer_wei, l2_execution_gas_buffer_wei, l1_data_gas_buffer_wei, priority_fee_buffer_wei FROM spend_reservation WHERE wallet_id = ? AND mint_class = 'free' AND status IN ('reserved', 'settled')").all(request.walletId) as StoredReservationRow[];

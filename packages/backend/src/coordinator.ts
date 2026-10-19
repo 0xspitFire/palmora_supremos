@@ -117,10 +117,18 @@ export class ExecutionCoordinator {
     let prepared: Awaited<ReturnType<CanonicalExecutionStore['admitExecution']>>['executions'] = [];
     let notices: readonly string[] = [];
     if (canonical) {
-      const admission = await canonical.admitExecution({ run, intent, campaign, wallets });
-      reservations = admission.reservations;
-      prepared = admission.executions;
-      notices = admission.notices ?? [];
+      try {
+        const admission = await canonical.admitExecution({ run, intent, campaign, wallets });
+        reservations = admission.reservations;
+        prepared = admission.executions;
+        notices = admission.notices ?? [];
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (reason === 'STALE_PENDING_RESERVATION_REQUIRES_RECONCILIATION' || reason === 'ADMISSION_CLOCK_ROLLBACK') {
+          await this.raiseAdmissionBlock(runId, reason);
+        }
+        throw error;
+      }
     } else {
       reservations = await this.ledger.reserveBatch(runId, campaign.id, wallets, reservationAmount, campaign.spendPolicy.maxRunWei, campaign.chainId, campaign.spendPolicy.dailyCapWei, current => {
         if (current.killed) throw new Error('KILLED');
@@ -178,6 +186,13 @@ export class ExecutionCoordinator {
         await this.options.alerts?.cap(notice, runId);
       } catch { /* notice persistence and delivery never block, prove, or alter execution */ }
     }
+  }
+
+  private async raiseAdmissionBlock(runId: string, reason: string): Promise<void> {
+    try { await this.store.transaction(state => { state.events.push(this.event('admission_blocked', runId, { reason })); }); }
+    catch { /* event persistence cannot replace the fail-closed admission error */ }
+    try { await this.options.alerts?.cap(reason, runId); }
+    catch { /* alert delivery cannot replace the fail-closed admission error */ }
   }
 
   async kill(reason: string): Promise<void> {

@@ -372,4 +372,25 @@ describe.skipIf(!ready)('Runtime guardrail harness on an Ethereum Anvil fork', (
       store.close();
     }
   });
+
+  it('S9: stale pending exposure blocks every new live admission and raises an operator alert', async () => {
+    const [a, b] = [wallets[0]!, wallets[1]!];
+    const alerts: Array<{ reason: string; runId?: string }> = [];
+    const coordinator = new ExecutionCoordinator(h.store, h.engine, { alerts: { cap: async (reason, runId) => { alerts.push({ reason, ...(runId ? { runId } : {}) }); } } });
+    await rpc('evm_setAutomine', [false]);
+    h.engine.mode = 'pending';
+    const first = await armLive({ maxRunWei: exposure, dailyCapWei: exposure }, [a], h.store, coordinator);
+    await coordinator.execute(first.id, [a]);
+    expect(reservations(first.id).map((item) => item.status)).toEqual(['reserved']);
+    h.db.prepare("UPDATE spend_reservation SET created_at = '2026-09-27T23:59:59.999Z' WHERE status = 'reserved'").run();
+
+    const second = await armLive({ maxRunWei: exposure, dailyCapWei: exposure }, [b], h.store, coordinator);
+    const nonceBefore = await nonceOf(b);
+    await expect(coordinator.execute(second.id, [b])).rejects.toThrow('STALE_PENDING_RESERVATION_REQUIRES_RECONCILIATION');
+    expect(h.engine.executeCalls).toBe(1);
+    expect(reservations(second.id)).toEqual([]);
+    expect(await nonceOf(b)).toBe(nonceBefore);
+    expect(alerts).toEqual([{ reason: 'STALE_PENDING_RESERVATION_REQUIRES_RECONCILIATION', runId: second.id }]);
+    expect(h.store.snapshot().events).toContainEqual(expect.objectContaining({ type: 'admission_blocked', runId: second.id, data: { reason: 'STALE_PENDING_RESERVATION_REQUIRES_RECONCILIATION' } }));
+  });
 });

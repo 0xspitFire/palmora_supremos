@@ -68,7 +68,7 @@ describe('database migrations and spend reservations', () => {
   it('applies migrations idempotently and enables integrity pragmas', () => {
     const db = fixture();
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 24 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 25 });
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(db.pragma('journal_mode', { simple: true })).toBe('memory');
     expect(() => db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('other', 'chain', '0xABC', 'kms://other', '2026-01-01T00:00:00.000Z')").run()).toThrow();
@@ -102,11 +102,11 @@ describe('database migrations and spend reservations', () => {
       worker.once('error', (error: Error) => resolve(`error:${error.message}`));
     });
     const results = await Promise.all([run(), run()]);
-    expect(results.sort()).toEqual(['24', '24']);
+    expect(results.sort()).toEqual(['25', '25']);
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it('enforces a UTC daily cap, idempotency, and legal transitions', () => {
+  it('enforces a rolling 24-hour cap across midnight, idempotency, and legal transitions', () => {
     const db = fixture();
     const reservations = new SpendReservations(db);
     const date = new Date('2026-01-10T23:59:59.000Z');
@@ -115,7 +115,21 @@ describe('database migrations and spend reservations', () => {
     expect(() => reservations.reserve({ id: 'r2', walletId: 'wallet', idempotencyKey: 'new', policyId: 'policy', amountWei: 41n, at: date })).toThrow(SpendCapExceededError);
     reservations.transition('r1', 'settled', date);
     expect(() => reservations.transition('r1', 'released', date)).toThrow();
-    expect(reservations.reserve({ id: 'r3', walletId: 'wallet', idempotencyKey: 'next-day', policyId: 'policy', amountWei: 100n, at: new Date('2026-01-11T00:00:00.000Z') })).toBe('reserved');
+    expect(() => reservations.reserve({ id: 'r3', walletId: 'wallet', idempotencyKey: 'next-day', policyId: 'policy', amountWei: 100n, at: new Date('2026-01-11T00:00:00.000Z') })).toThrow(SpendCapExceededError);
+    expect(() => reservations.reserve({ id: 'r4', walletId: 'wallet', idempotencyKey: 'exactly-24h', policyId: 'policy', amountWei: 100n, at: new Date('2026-01-11T23:59:59.000Z') })).toThrow(SpendCapExceededError);
+    expect(reservations.reserve({ id: 'r5', walletId: 'wallet', idempotencyKey: 'after-24h', policyId: 'policy', amountWei: 100n, at: new Date('2026-01-11T23:59:59.001Z') })).toBe('reserved');
+    db.close();
+  });
+
+  it('carries pending exposure indefinitely and fails closed on backward clock movement', () => {
+    const db = fixture();
+    const reservations = new SpendReservations(db);
+    reservations.reserve({ id: 'pending', walletId: 'wallet', idempotencyKey: 'pending', policyId: 'policy', amountWei: 10n, at: new Date('2026-01-10T12:00:00.000Z') });
+    expect(() => db.prepare("UPDATE admission_clock_watermark SET last_admission_at = '2026-01-10T11:00:00.000Z' WHERE id = 'global'").run()).toThrow('admission clock watermark cannot move backwards');
+    expect(() => reservations.reserve({ id: 'backward', walletId: 'wallet', idempotencyKey: 'backward', policyId: 'policy', amountWei: 1n, at: new Date('2026-01-10T11:59:54.999Z') })).toThrow('ADMISSION_CLOCK_ROLLBACK');
+    expect(() => reservations.reserve({ id: 'stale', walletId: 'wallet', idempotencyKey: 'stale', policyId: 'policy', amountWei: 1n, at: new Date('2026-01-11T12:00:00.000Z') })).toThrow('STALE_PENDING_RESERVATION_REQUIRES_RECONCILIATION');
+    reservations.transition('pending', 'released', new Date('2026-01-11T12:00:00.001Z'));
+    expect(reservations.reserve({ id: 'after-release', walletId: 'wallet', idempotencyKey: 'after-release', policyId: 'policy', amountWei: 100n, at: new Date('2026-01-11T12:00:00.001Z') })).toBe('reserved');
     db.close();
   });
 
@@ -286,12 +300,12 @@ describe('database migrations and spend reservations', () => {
     const destination = join(directory, 'state.sqlite');
     await backupDatabase(source, destination);
     const verification = verifyBackup(destination);
-    expect(verification.schemaVersion).toBe(24);
+    expect(verification.schemaVersion).toBe(25);
     expect(verification.integrityCheck).toBe('ok');
     expect(verification.foreignKeyViolations).toBe(0);
     const restoredDestination = join(directory, 'restored.sqlite');
     const restoredVerification = await restoreDatabase(destination, restoredDestination);
-    expect(restoredVerification).toMatchObject({ schemaVersion: 24, integrityCheck: 'ok', foreignKeyViolations: 0 });
+    expect(restoredVerification).toMatchObject({ schemaVersion: 25, integrityCheck: 'ok', foreignKeyViolations: 0 });
     const staleDestination = join(directory, 'stale.sqlite');
     copyFileSync(destination, staleDestination);
     const staleDb = new BetterSqlite3(staleDestination);
@@ -309,7 +323,7 @@ describe('database migrations and spend reservations', () => {
     const repository = new DurableRepository(restored);
     repository.saveBackupPolicy({ id: 'backup-policy', approvalOwner: 'product-owner', approvedAt: '2026-01-01T00:00:00.000Z' });
     expect(restored.prepare('SELECT retention_days, encryption_required FROM backup_policy WHERE id = ?').get('backup-policy')).toEqual({ retention_days: 30, encryption_required: 1 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: destination, backupReference: 's3://test/backup', sha256: verification.sha256, schemaVersion: 24, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: verification.sha256, evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: destination, backupReference: 's3://test/backup', sha256: verification.sha256, schemaVersion: 25, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: verification.sha256, evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:00.000Z' });
     restored.close();
     source.close();
     rmSync(directory, { recursive: true, force: true });
@@ -407,7 +421,7 @@ describe('database migrations and spend reservations', () => {
     const db = legacyFixture();
     migrate(db);
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 24 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 25 });
     expect(db.prepare('SELECT reserved_amount_wei, request_fingerprint FROM spend_reservation WHERE id = ?').get('legacy-reservation')).toMatchObject({ reserved_amount_wei: '10' });
     expect(db.prepare('SELECT execution_enabled, success_finality_stage FROM chain_profile WHERE id = ?').get('legacy-chain')).toEqual({ execution_enabled: 0, success_finality_stage: 'ethereum_final' });
     db.close();
@@ -536,7 +550,7 @@ describe('database migrations and spend reservations', () => {
     repository.recordRetentionEvidence({ id: 'retention-evidence', policyId: 'raw-observation-30d', entityType: 'raw_observation', cutoffAt: '2026-01-01T00:00:00.000Z', rowsDeleted: 3, rowsRetained: 1, outcome: 'passed', recordedAt: '2026-01-01T00:00:01.000Z' });
     expect(db.prepare('SELECT entity_type, rows_deleted, rows_retained, outcome FROM retention_evidence WHERE id = ?').get('retention-evidence')).toEqual({ entity_type: 'raw_observation', rows_deleted: 3, rows_retained: 1, outcome: 'passed' });
     expect(db.prepare('SELECT retention_days, retain_indefinitely FROM retention_policy WHERE entity_type = ?').get('raw_observation')).toEqual({ retention_days: 30, retain_indefinitely: 0 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 24, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 25, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
     expect(db.prepare('SELECT encryption_verified, integrity_check FROM backup_restore_evidence WHERE id = ?').get('backup-evidence-integrity')).toEqual({ encryption_verified: 1, integrity_check: 'ok' });
     expect(() => repository.recordAuditEvent({ id: 'secret-audit', entityType: 'run', entityId: 'run', actor: 'test', reason: 'secret boundary', policySnapshot: { privateKey: 'not-written' }, occurredAt: '2026-01-01T00:00:03.000Z' })).toThrow('approved secret store');
     expect(() => db.prepare("UPDATE retention_evidence SET rows_deleted = 4 WHERE id = 'retention-evidence'").run()).toThrow('retention evidence is append-only');
