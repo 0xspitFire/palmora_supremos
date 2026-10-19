@@ -96,9 +96,9 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
   };
 }
 
-/** The phrase the owner must type to record a live campaign. It names the contract and the most that can be spent. */
-export function liveConfirmationPhrase(contract: string, totalMaxExposureEth: string): string {
-  return `PREPARE-LIVE ${contract.slice(-8).toLowerCase()} ${totalMaxExposureEth}`;
+/** The phrase the owner must type to record a live campaign. It binds the contract, per-wallet quantity and maximum spend. */
+export function liveConfirmationPhrase(contract: string, quantity: number, totalMaxExposureEth: string): string {
+  return `PREPARE-LIVE ${contract.slice(-8).toLowerCase()} QTY-${quantity} ${totalMaxExposureEth}`;
 }
 
 /**
@@ -109,7 +109,7 @@ export function assertLivePrepareAllowed(args: { plan: LivePlan; contract: strin
   const { plan, contract, confirm, priorityFeeGwei, walletFileAddresses } = args;
   if (!Number.isFinite(priorityFeeGwei) || !(priorityFeeGwei > 0 && priorityFeeGwei <= 2)) throw new Error('PRIORITY_FEE_GWEI_OUT_OF_RANGE: use more than 0 and at most 2');
   if (plan.verdict !== 'ready') throw new Error(`LIVE_PLAN_NOT_READY: ${plan.blockers[0] ?? 'see live-plan'}`);
-  if (typeof confirm !== 'string' || confirm !== liveConfirmationPhrase(contract, plan.totalMaxExposureEth)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run live-plan again and copy the phrase it prints exactly');
+  if (typeof confirm !== 'string' || confirm !== liveConfirmationPhrase(contract, plan.quantity, plan.totalMaxExposureEth)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run live-plan again and copy the phrase it prints exactly');
   // Approve, arm and run take their wallets from the wallet file, not from this campaign record, so the file must
   // hold exactly the wallets that passed the test mint. Anything else could let an untested wallet mint.
   const ready = plan.walletsReady.map((wallet) => wallet.toLowerCase()).sort();

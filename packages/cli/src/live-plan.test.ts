@@ -54,16 +54,17 @@ describe('Personal Live plan (read-only)', () => {
 
 describe('typed confirmation', () => {
   it('names the contract and the most that can be spent, so a stale or copied phrase does not match', () => {
-    expect(liveConfirmationPhrase(CONTRACT, '0.0012')).toBe('PREPARE-LIVE 04ada760 0.0012');
-    expect(liveConfirmationPhrase(CONTRACT, '0.0012')).not.toBe(liveConfirmationPhrase(CONTRACT, '0.0016'));
-    expect(liveConfirmationPhrase(CONTRACT, '0.0012')).not.toBe(liveConfirmationPhrase('0x1111111111111111111111111111111111111111', '0.0012'));
+    expect(liveConfirmationPhrase(CONTRACT, 3, '0.0012')).toBe('PREPARE-LIVE 04ada760 QTY-3 0.0012');
+    expect(liveConfirmationPhrase(CONTRACT, 3, '0.0012')).not.toBe(liveConfirmationPhrase(CONTRACT, 4, '0.0012'));
+    expect(liveConfirmationPhrase(CONTRACT, 3, '0.0012')).not.toBe(liveConfirmationPhrase(CONTRACT, 3, '0.0016'));
+    expect(liveConfirmationPhrase(CONTRACT, 3, '0.0012')).not.toBe(liveConfirmationPhrase('0x1111111111111111111111111111111111111111', 3, '0.0012'));
   });
 });
 
 describe('every gate on recording a live campaign (live-prepare)', () => {
   const wallets = [row(1, 'ready'), row(2, 'ready'), row(3, 'ready')];
   const plan = buildLivePlan(report(wallets), context);
-  const phrase = liveConfirmationPhrase(CONTRACT, plan.totalMaxExposureEth);
+  const phrase = liveConfirmationPhrase(CONTRACT, plan.quantity, plan.totalMaxExposureEth);
   const good = { plan, contract: CONTRACT, confirm: phrase, priorityFeeGwei: 0.1, walletFileAddresses: wallets.map((item) => item.wallet) };
 
   it('passes only with the exact phrase, a ready plan, a sane tip and a wallet file holding exactly the ready wallets', () => {
@@ -72,7 +73,7 @@ describe('every gate on recording a live campaign (live-prepare)', () => {
   });
 
   it('refuses a wrong, empty, stale or other-contract phrase', () => {
-    for (const confirm of ['', 'yes', phrase.toUpperCase(), `${phrase} `, liveConfirmationPhrase(CONTRACT, '0.0016'), liveConfirmationPhrase('0x1111111111111111111111111111111111111111', plan.totalMaxExposureEth)]) {
+    for (const confirm of ['', 'yes', phrase.toUpperCase(), `${phrase} `, liveConfirmationPhrase(CONTRACT, plan.quantity + 1, plan.totalMaxExposureEth), liveConfirmationPhrase(CONTRACT, plan.quantity, '0.0016'), liveConfirmationPhrase('0x1111111111111111111111111111111111111111', plan.quantity, plan.totalMaxExposureEth)]) {
       expect(() => assertLivePrepareAllowed({ ...good, confirm })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
     }
   });
@@ -118,5 +119,21 @@ describe('live free campaign numbers (D-042)', () => {
     expect(() => liveFreeCampaignFields({ quantity: 1, wallets: 7, tipWei: 1n })).toThrow('LIVE_WALLET_COUNT_EXCEEDS_DAILY_BUDGET');
     expect(() => liveFreeCampaignFields({ quantity: 1, wallets: 0, tipWei: 1n })).toThrow('LIVE_WALLET_COUNT_EXCEEDS_DAILY_BUDGET');
     expect(() => liveFreeCampaignFields({ quantity: 0, wallets: 1, tipWei: 1n })).toThrow('LIVE_QUANTITY_INVALID');
+  });
+});
+
+describe('live quantity-limit command wiring (D-055)', () => {
+  it('passes the same owner ceiling through both live-plan and live-prepare', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
+    const planStart = source.indexOf(".command('live-plan'");
+    const prepareStart = source.indexOf(".command('live-prepare'", planStart);
+    const nextStart = source.indexOf(".command('survey-seadrop'", prepareStart);
+    const planBody = source.slice(planStart, prepareStart);
+    const prepareBody = source.slice(prepareStart, nextStart);
+    for (const body of [planBody, prepareBody]) {
+      expect(body).toContain(".option('quantity-limit'");
+      expect(body).toContain('{ maxQuantity: args.quantityLimit }');
+    }
   });
 });
