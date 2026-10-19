@@ -2,6 +2,7 @@ export { backupDatabase, migrate, openDatabase, openDatabaseReadOnly, pruneRawOb
 export type { BackupVerification } from './database.js';
 export { ReservationConflictError, SpendCapExceededError, SpendReservations } from './spend-reservations.js';
 export type { ExecutionReservationRequest, ReservationRequest, ReservationStatus, SettlementComponents } from './spend-reservations.js';
+export { ADMISSION_CLOCK_SKEW_TOLERANCE_MS, ROLLING_SPEND_WINDOW_MS, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from './spend-window.js';
 export { DurableRepository } from './repositories.js';
 export { IdempotencyConflictError } from './repositories.js';
 export type { AuditEventRecord, BackupPolicyRecord, ChainVerificationRecord, RobinhoodEnablementInput, RobinhoodEnablementRow, ExecutionRecord, ExecutionRunRecord, FeePolicyRecord, LifecycleEventRecord, ReceiptRecord, ReconciliationRecord, ReorgEventRecord, ReorgResolutionRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';

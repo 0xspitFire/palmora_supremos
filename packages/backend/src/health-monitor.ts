@@ -30,6 +30,8 @@ export interface HealthSample {
   backup?: { status: 'ok' | 'failed'; recordedAt: Date };
   /** Messages that failed to deliver and are still within their retry window. */
   delivery: { failed: number; oldestFailedAt?: Date };
+  /** Pending spend reservations that have crossed the 24-hour reconciliation deadline. */
+  exposure?: { stalePending: number; oldestPendingAt?: Date };
 }
 
 export interface HealthMonitorOptions {
@@ -168,6 +170,20 @@ export class HealthMonitor {
         since: oldest,
       });
     }
+    if ((sample.exposure?.stalePending ?? 0) > 0) {
+      const count = sample.exposure!.stalePending;
+      active.push({
+        key: 'pending_exposure',
+        severity: 'critical',
+        facts: [
+          { label: 'What happened', value: `${count} pending spend ${count === 1 ? 'reservation is' : 'reservations are'} at least 24 hours old.`, strong: true },
+          { label: 'Oldest pending', value: sample.exposure?.oldestPendingAt ? `${durationText((now.getTime() - sample.exposure.oldestPendingAt.getTime()) / 1_000)} old` : 'timestamp invalid or unavailable', strong: true },
+        ],
+        meaning: 'all new live admissions are blocked until reconciliation proves what happened to the pending transaction.',
+        steps: ['Run reconciliation and inspect the transaction on chain.', 'Release a reservation only when the transaction was never broadcast; ambiguous or submitted transactions must stay reserved.'],
+        since: sample.exposure?.oldestPendingAt ?? now,
+      });
+    }
     return active;
   }
 
@@ -189,7 +205,7 @@ export class HealthMonitor {
       }
       sent.push(`${key}:${stage}`);
     };
-    for (const key of ['scan_stalled', 'endpoint_errors', 'disk_pressure', 'backup_stale', 'delivery_trouble'] as const) {
+    for (const key of ['scan_stalled', 'endpoint_errors', 'disk_pressure', 'backup_stale', 'delivery_trouble', 'pending_exposure'] as const) {
       const current = active.get(key);
       const episode = this.episodes.get(key);
       if (current && !episode) {

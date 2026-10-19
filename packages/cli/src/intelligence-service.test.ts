@@ -106,6 +106,22 @@ describe('trial status messages (T-005)', () => {
     await expect(service.runOnce()).resolves.toBeUndefined();
     service.stop();
   });
+
+  it('samples stale pending reservations and sends the reconciliation warning without waiting for another mint', async () => {
+    const now = () => new Date('2026-10-19T12:00:00.000Z');
+    const h = harness(now);
+    await h.store.transaction((state) => {
+      state.reservations.push({ id: 'stale-reservation', runId: 'run-stale', campaignId: 'campaign-stale', chainId: 1, wallet: OWN[0]!, amountWei: 1n, accountingDate: '2026-10-18', status: 'reserved', createdAt: '2026-10-18T11:59:59.999Z', updatedAt: '2026-10-18T11:59:59.999Z' });
+    });
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    await service.runOnce();
+    service.stop();
+    expect(h.store.snapshot().reservations).toHaveLength(1);
+    expect(h.store.snapshot().events.filter((event) => event.type === 'alert_health')).toHaveLength(1);
+    const warnings = h.sent.filter((text) => text.includes('PENDING EXPOSURE NEEDS RECONCILIATION'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('all new live admissions are blocked');
+  });
 });
 
 describe('pause notice', () => {
@@ -251,4 +267,3 @@ describe('jump log line is not repeated by the start-up re-check (tidy after T-0
     expect(h.sent.filter((text) => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(1);
   });
 });
-

@@ -110,6 +110,19 @@ describe('health monitor (T-030)', () => {
     expect(await monitor.check(sample(minutes(40)))).toEqual(['delivery_trouble:recovered']);
   });
 
+  it('warns when pending exposure crosses 24 hours and clears only after reconciliation resolves it', async () => {
+    const { monitor, sample, html } = setup();
+    const staleAt = minutes(-24 * 60);
+    expect(await monitor.check(sample(minutes(0), { exposure: { stalePending: 1, oldestPendingAt: staleAt } }))).toEqual(['pending_exposure:critical']);
+    expect(html(0)).toContain('<b>PENDING EXPOSURE NEEDS RECONCILIATION</b> · CRITICAL');
+    expect(html(0)).toContain('1 pending spend reservation is at least 24 hours old.');
+    expect(html(0)).toContain('all new live admissions are blocked');
+    expect(html(0)).toContain('Release a reservation only when the transaction was never broadcast');
+    expect(await monitor.check(sample(minutes(10), { exposure: { stalePending: 1, oldestPendingAt: staleAt } }))).toEqual([]);
+    expect(await monitor.check(sample(minutes(20), { exposure: { stalePending: 0 } }))).toEqual(['pending_exposure:recovered']);
+    expect(html(1)).toContain('the stale reservation is resolved and no longer blocks live admission.');
+  });
+
   it('keeps going, and still counts the warning as raised, when Telegram cannot deliver it (the outbox retries)', async () => {
     const { monitor, sample, errors, sent } = setup({ failDelivery: true });
     await expect(monitor.check(sample(minutes(20), { scan: { startedAt: START, lastOkAt: minutes(0) } }))).resolves.toEqual(['scan_stalled:open']);

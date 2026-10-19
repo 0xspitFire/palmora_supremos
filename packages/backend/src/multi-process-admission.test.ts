@@ -12,9 +12,9 @@ const serializablePolicy = JSON.stringify(Object.fromEntries(Object.entries(ONE_
 type Outcome = { ok: true; reservations: string[] } | { ok: false; error: string };
 
 /** Starts one OS process that admits `runId` against the shared database file at `startAt`. */
-function admitInChildProcess(dbPath: string, runId: string, startAt: number): Promise<Outcome> {
+function admitInChildProcess(dbPath: string, runId: string, startAt: number, nowIso = NOW): Promise<Outcome> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CHILD, dbPath, runId, String(startAt), serializablePolicy, NOW], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [CHILD, dbPath, runId, String(startAt), serializablePolicy, nowIso], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     child.stdout.on('data', (chunk) => { out += String(chunk); });
@@ -60,6 +60,19 @@ describe('multi-process concurrent admission (checklist: two OS processes, one S
       expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
       const [left, right] = outcomes as Array<{ ok: true; reservations: string[] }>;
       expect(left!.reservations).toEqual(right!.reservations);
+      expect(reservationCount(value)).toBe(2);
+    } finally { await close(value); }
+  }, 60_000);
+
+  it('does not grant a fresh fleet allowance to a second process after midnight', async () => {
+    const value = await fixture(ETHEREUM, false, true, undefined, true, ONE_RUN_POLICY);
+    try {
+      const first = await armed(value, await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 1_000n, dailyCapWei: 1_000n }), [WALLET_ONE, WALLET_TWO], [], '-rollover-first');
+      const second = await armed(value, await campaign(value, ETHEREUM), [WALLET_ONE, WALLET_TWO], [], '-rollover-second');
+      const before = await admitInChildProcess(dbPathOf(value), first.run.id, Date.now(), '2026-10-19T23:59:59.900Z');
+      expect(before.ok).toBe(true);
+      const after = await admitInChildProcess(dbPathOf(value), second.run.id, Date.now(), '2026-10-20T00:00:00.100Z');
+      expect(after).toEqual({ ok: false, error: 'FLEET_DAILY_CAP_EXCEEDED' });
       expect(reservationCount(value)).toBe(2);
     } finally { await close(value); }
   }, 60_000);

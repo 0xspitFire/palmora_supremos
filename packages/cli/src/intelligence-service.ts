@@ -93,13 +93,21 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   const runHealth = guarded('health', async () => {
     const current = now();
     const host = options.sampleHost ? await options.sampleHost().catch(() => ({})) : {};
-    const failed = options.store.snapshot().notificationOutbox.filter((item) => item.state === 'failed' && current.getTime() - Date.parse(item.createdAt) <= RETRY_WINDOW_MS);
+    const snapshot = options.store.snapshot();
+    const failed = snapshot.notificationOutbox.filter((item) => item.state === 'failed' && current.getTime() - Date.parse(item.createdAt) <= RETRY_WINDOW_MS);
     const oldest = failed.map((item) => Date.parse(item.createdAt)).sort((left, right) => left - right)[0];
+    const stalePending = snapshot.reservations.filter((item) => {
+      if (item.status !== 'reserved') return false;
+      const created = Date.parse(item.createdAt);
+      return !Number.isFinite(created) || current.getTime() - created >= 24 * 60 * 60_000;
+    });
+    const oldestPending = stalePending.map((item) => Date.parse(item.createdAt)).filter(Number.isFinite).sort((left, right) => left - right)[0];
     return monitor.check({
       now: current,
       scan: { startedAt, ...(tracker.lastOkAt ? { lastOkAt: tracker.lastOkAt } : {}), ...(tracker.lastOkBlock ? { lastOkBlock: tracker.lastOkBlock } : {}), ...(tracker.lastProblem ? { lastProblem: tracker.lastProblem } : {}) },
       endpoint: tracker.lastHour(current),
       delivery: { failed: failed.length, ...(oldest === undefined ? {} : { oldestFailedAt: new Date(oldest) }) },
+      exposure: { stalePending: stalePending.length, ...(oldestPending === undefined ? {} : { oldestPendingAt: new Date(oldestPending) }) },
       ...host,
     });
   });

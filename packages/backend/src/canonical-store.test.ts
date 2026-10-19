@@ -478,6 +478,84 @@ describe('CanonicalStoreBridge', () => {
   describe('fleet-wide spend limits (D-032, D-033)', () => {
     const reservationCount = (value: Fixture): number => (value.db.prepare('SELECT COUNT(*) AS n FROM spend_reservation').get() as { n: number }).n;
     const policy = (overrides: Partial<FleetSpendPolicy>): FleetSpendPolicy => ({ ...OPEN_FLEET_POLICY, ...overrides });
+    const settleReservation = async (value: Fixture, reservationId: string, executionId: string, runId: string, suffix: string, observedAt: string): Promise<void> => {
+      await value.store.transaction((state) => {
+        state.attempts.push({ id: `rolling-attempt-${suffix}`, executionId, runId, wallet: WALLET_ONE, hash: `0x${'c'.repeat(63)}${suffix === 'settled' ? '1' : '2'}`, nonce: 2, state: 'Submitted', createdAt: observedAt, updatedAt: observedAt });
+        state.receipts.push({ id: `rolling-receipt-${suffix}`, executionId, runId, state: 'Confirmed', blockNumber: 12n, blockHash: `0x${'d'.repeat(64)}`, actualSpendWei: 17n, observedAt });
+      });
+      await value.store.transaction((state) => {
+        const reservation = state.reservations.find((item) => item.id === reservationId);
+        if (!reservation) throw new Error('reservation missing');
+        reservation.status = 'settled';
+        reservation.actualAmountWei = 17n;
+      });
+    };
+
+    it('keeps wallet and fleet exposure charged across a UTC midnight', async () => {
+      let clock = '2026-10-19T23:59:59.900Z';
+      const value = await fixture(ETHEREUM, false, true, undefined, true, policy({ freeDailyCapWei: 34n }), () => new Date(clock));
+      try {
+        const firstCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        await value.store.admitExecution((await armed(value, firstCampaign, [WALLET_ONE], [], '-before-midnight')).input);
+        clock = '2026-10-20T00:00:00.100Z';
+        const secondCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        const second = await armed(value, secondCampaign, [WALLET_ONE], [], '-after-midnight');
+        await expect(value.store.admitExecution(second.input)).rejects.toThrow('DAILY_SPEND_CAP_EXCEEDED');
+      } finally { await close(value); }
+    });
+
+    it('charges settled exposure for 24 hours and restores capacity only after the window', async () => {
+      let clock = '2026-10-19T23:59:59.000Z';
+      const value = await fixture(ETHEREUM, false, true, undefined, true, OPEN_FLEET_POLICY, () => new Date(clock));
+      try {
+        const firstCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        const first = await value.store.admitExecution((await armed(value, firstCampaign, [WALLET_ONE], [], '-settled-first')).input);
+        await settleReservation(value, first.reservations[0]!.id, first.executions[0]!.executionId, first.reservations[0]!.runId, 'settled', clock);
+        clock = '2026-10-20T23:59:58.999Z';
+        const withinCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        await expect(value.store.admitExecution((await armed(value, withinCampaign, [WALLET_ONE], [], '-within-window')).input)).rejects.toThrow('DAILY_SPEND_CAP_EXCEEDED');
+        clock = '2026-10-20T23:59:59.001Z';
+        const afterCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        await expect(value.store.admitExecution((await armed(value, afterCampaign, [WALLET_ONE], [], '-after-window')).input)).resolves.toBeDefined();
+      } finally { await close(value); }
+    });
+
+    it('blocks all live admission when a pending reservation is older than 24 hours', async () => {
+      let clock = '2026-10-19T10:00:00.000Z';
+      const value = await fixture(ETHEREUM, false, true, undefined, true, OPEN_FLEET_POLICY, () => new Date(clock));
+      try {
+        const firstCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 1_000n });
+        await value.store.admitExecution((await armed(value, firstCampaign, [WALLET_ONE], [], '-stale-first')).input);
+        clock = '2026-10-20T10:00:00.000Z';
+        const secondCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 1_000n });
+        const second = await armed(value, secondCampaign, [WALLET_TWO], [], '-stale-second');
+        await expect(value.store.admitExecution(second.input)).rejects.toThrow('STALE_PENDING_RESERVATION_REQUIRES_RECONCILIATION');
+      } finally { await close(value); }
+    });
+
+    it('counts a settled row with a missing timestamp indefinitely and releases unbroadcast capacity immediately', async () => {
+      let clock = '2026-10-19T10:00:00.000Z';
+      const value = await fixture(ETHEREUM, false, true, undefined, true, OPEN_FLEET_POLICY, () => new Date(clock));
+      try {
+        const brokenCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        const broken = await value.store.admitExecution((await armed(value, brokenCampaign, [WALLET_ONE], [], '-missing-settlement-time')).input);
+        await settleReservation(value, broken.reservations[0]!.id, broken.executions[0]!.executionId, broken.reservations[0]!.runId, 'missing', clock);
+        value.db.prepare("UPDATE spend_reservation SET settled_at = NULL WHERE id = ?").run(broken.reservations[0]!.id);
+        clock = '2026-10-21T10:00:00.000Z';
+        const blockedCampaign = await value.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        await expect(value.store.admitExecution((await armed(value, blockedCampaign, [WALLET_ONE], [], '-missing-time-blocked')).input)).rejects.toThrow('DAILY_SPEND_CAP_EXCEEDED');
+      } finally { await close(value); }
+
+      clock = '2026-10-19T10:00:00.000Z';
+      const released = await fixture(ETHEREUM, false, true, undefined, true, OPEN_FLEET_POLICY, () => new Date(clock));
+      try {
+        const firstCampaign = await released.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        const first = await released.store.admitExecution((await armed(released, firstCampaign, [WALLET_ONE], [], '-release-first')).input);
+        released.db.prepare("UPDATE spend_reservation SET status = 'released' WHERE id = ?").run(first.reservations[0]!.id);
+        const secondCampaign = await released.application.createCampaign({ ...campaignInput(ETHEREUM), maxRunWei: 34n, dailyCapWei: 34n });
+        await expect(released.store.admitExecution((await armed(released, secondCampaign, [WALLET_ONE], [], '-release-second')).input)).resolves.toBeDefined();
+      } finally { await close(released); }
+    });
 
     it('encodes the owner-approved Personal Live limits exactly', () => {
       expect(PERSONAL_LIVE_FLEET_POLICY).toEqual({ freeDailyCapWei: 2_400_000_000_000_000n, paidDailyCapWei: 8_200_000_000_000_000n, paidHeadroomAlertWei: 7_500_000_000_000_000n, paidMaxPricePerNftWei: 3_700_000_000_000_000n, paidMaxWalletsPerMint: 2, freeFeeAllowanceWei: 400_000_000_000_000n, paidFeeAllowanceWei: 370_000_000_000_000n });

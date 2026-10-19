@@ -32,7 +32,7 @@ export interface Fixture {
 /** Generous limits so pre-existing tests exercise only the per-run and per-wallet caps. */
 export const OPEN_FLEET_POLICY: FleetSpendPolicy = { freeDailyCapWei: 10n ** 18n, paidDailyCapWei: 10n ** 18n, paidHeadroomAlertWei: 10n ** 18n, paidMaxPricePerNftWei: 10n ** 18n, paidMaxWalletsPerMint: 50, freeFeeAllowanceWei: 10n ** 18n, paidFeeAllowanceWei: 10n ** 18n };
 
-export async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false, executionEnabled = true, evidenceExpiresAt = '2099-01-01T00:00:00.000Z', includeVerification = true, fleetPolicy: FleetSpendPolicy | null = OPEN_FLEET_POLICY): Promise<Fixture> {
+export async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid = false, executionEnabled = true, evidenceExpiresAt = '2099-01-01T00:00:00.000Z', includeVerification = true, fleetPolicy: FleetSpendPolicy | null = OPEN_FLEET_POLICY, now: () => Date = () => new Date(NOW)): Promise<Fixture> {
   const directory = await mkdtemp(join(tmpdir(), 'mint-backend-'));
   const db = openDatabase(join(directory, 'state.sqlite'));
   const profileId = `profile-${chainId}`;
@@ -42,7 +42,7 @@ export async function fixture(chainId: typeof ETHEREUM | typeof ROBINHOOD, paid 
   if (includeVerification) db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`verification-${chainId}`, profileId, chainId === ROBINHOOD ? 'execution_blocked' : 'verified', chainId, chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : null, chainId === ROBINHOOD ? 'RH_ARCHIVE_REFERENCE' : 'ETH_ARCHIVE_REFERENCE', chainId === ETHEREUM ? 'ETH_FEED_REFERENCE' : null, JSON.stringify({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: chainId === ROBINHOOD ? 'RH_SEQUENCER_REFERENCE' : 'ETH_FEED_REFERENCE', sourceBlock: 1, sourceBlockHash: '0xblock', expiresAt: evidenceExpiresAt, acceptedAt: NOW, acceptedBy: 'test-operator', approvalProof: 'test-proof', strategyVersion: 'seadrop-v1-public@1' }), NOW, 'test-operator', NOW);
   db.prepare('UPDATE chain_profile SET execution_enabled = ?, verification_status = ?, verification_evidence_json = ?, verification_approved_by = ?, verification_approved_at = ? WHERE id = ?').run(includeVerification && chainId === ETHEREUM && executionEnabled ? 1 : 0, includeVerification ? verificationStatus : 'unverified', includeVerification ? verificationEvidence : null, includeVerification ? 'test-operator' : null, includeVerification ? NOW : null, profileId);
   db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`fee-${chainId}`, profileId, `test-${chainId}-${paid ? 'paid' : 'free'}`, chainId === ETHEREUM ? 'ordering' : 'fee_only', '34', '40', '20', 2, paid ? 1 : 0, 1, NOW, 'allowed');
-  const store = new CanonicalStoreBridge(db, { now: () => new Date(NOW), ...(fleetPolicy ? { fleetPolicy } : {}) });
+  const store = new CanonicalStoreBridge(db, { now, ...(fleetPolicy ? { fleetPolicy } : {}) });
   await store.open();
   return { directory, db, store, application: new BackendApplication(store, new ExecutionCoordinator(store, noopEngine)) };
 }
@@ -80,4 +80,3 @@ export async function armed(fixtureValue: Fixture, campaignValue: Campaign, wall
   if (!persistedRun) throw new Error('run missing');
   return { run: persistedRun, intent, input: { run: persistedRun, intent, campaign: campaignValue, wallets } };
 }
-
