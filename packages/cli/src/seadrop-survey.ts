@@ -166,6 +166,12 @@ export function surveyErrorMessage(error: unknown): string {
   return `SURVEY_FAILED: ${providerErrorDetail(error)}${connectionHint(error)}`;
 }
 
+/** Secret-safe error text for commands that are not surveys. */
+export function commandErrorMessage(error: unknown, fallbackCode = 'COMMAND_FAILED'): string {
+  if (error instanceof Error && /^[A-Z][A-Z0-9_]+(:|$)/.test(error.message) && !/:\/\/|0x[0-9a-f]{20,}|[A-Za-z0-9_-]{32,}/i.test(error.message)) return error.message;
+  return `${fallbackCode}: ${providerErrorDetail(error)}${connectionHint(error)}`;
+}
+
 /** Short, secret-free clues about why a request failed: the error type, HTTP status and network code (for example ENOTFOUND), never the URL. */
 function connectionHint(error: unknown): string {
   const parts: string[] = [];

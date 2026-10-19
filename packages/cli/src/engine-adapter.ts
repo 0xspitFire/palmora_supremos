@@ -392,11 +392,14 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       }
       const updatedAttempts: AttemptRecord[] = [];
       const receipts: ReceiptRecord[] = [];
+      const receiptExecutions = new Set<string>();
       for (const attempt of attempts) {
         if (!attempt.hash || attempt.nonce === undefined) continue;
         try {
           const receipt = await client.getTransactionReceipt({ hash: attempt.hash as Hash });
           updatedAttempts.push({ ...attempt, state: receipt.status === 'success' ? 'Confirmed' : 'Failed', updatedAt: new Date().toISOString() });
+          if (receiptExecutions.has(attempt.executionId)) continue;
+          receiptExecutions.add(attempt.executionId);
           const existingReceipt = state.receipts.find((candidate) => candidate.executionId === attempt.executionId && candidate.blockHash === receipt.blockHash);
           receipts.push(existingReceipt ?? { id: `${attempt.executionId}:reconciled:${receipt.blockHash}`, executionId: attempt.executionId, runId: run.id, transactionAttemptId: attempt.id, state: receipt.status === 'success' ? 'Confirmed' : 'Failed', blockNumber: receipt.blockNumber, blockHash: receipt.blockHash, actualSpendWei: (receipt.status === 'success' ? intent.campaignSnapshot.mintPriceWei * BigInt(intent.campaignSnapshot.quantity) : 0n) + receipt.gasUsed * receipt.effectiveGasPrice, observedAt: new Date().toISOString() });
         } catch {

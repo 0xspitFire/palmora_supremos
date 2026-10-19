@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { encodeFunctionData, parseAbi, toFunctionSelector, type Hex, type PublicClient } from 'viem';
 import { SEADROP_MINT_TOPIC, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
-import { classifyMint, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
+import { classifyMint, commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 
 const NFT_A = '0x5a5c9c3cd186d95eff4da56ce48a173c7e46455a';
 const NFT_B = '0x8572dc3c69eb735c6dccc1e89d087820e51361af';
@@ -17,6 +17,11 @@ describe('SeaDrop mint-method classification (T-013)', () => {
     expect(classifyMint(NFT_A, publicInput)).toBe('other');
     expect(classifyMint(null, publicInput)).toBe('other');
     expect(classifyMint(SEADROP_V1_ADDRESS, '0x')).toBe('other');
+  });
+
+  it('labels non-survey command failures accurately while keeping error text secret-safe', () => {
+    expect(commandErrorMessage(new Error('Invalid wallet file salt'), 'LIVE_RUN_FAILED')).toBe('LIVE_RUN_FAILED: Invalid wallet file salt');
+    expect(commandErrorMessage(new Error('URL: https://secret.example/key1234567890123456789012345678901234'), 'LIVE_RUN_FAILED')).toBe('LIVE_RUN_FAILED: URL: [url]');
   });
 });
 

@@ -17,7 +17,7 @@ import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@min
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
 import { resolveChainByNameFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
-import { surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
+import { commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
 import { probeRpc } from './rpc-probe.js';
 import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
@@ -32,6 +32,7 @@ import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereu
 import { assertFeePolicyApplyAllowed, assertTipMatchesStoredPolicy, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport, parseAbi } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
+import { normalizeWalletCommandArgs } from './wallet-command-routing.js';
 
 /** Read-only Ethereum port for CLI checks; the RPC value stays in memory and is never printed. */
 async function ethereumPort(): Promise<EngineIntelligencePort> {
@@ -249,12 +250,12 @@ async function validatedCampaign(runtime: Awaited<ReturnType<typeof createCliRun
   return { campaign: persistedCampaign(runtime, campaignId), wallets, simulationIds: simulationIds.length === wallets.length ? simulationIds : [], evidenceAt: nowIso };
 }
 
-const cli = yargs(hideBin(process.argv))
+const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .scriptName('mint-bot')
   .strict()
   .demandCommand(1)
   .help()
-  .command('wallet generate', 'Generate independently encrypted wallets', (args) => args
+  .command('wallet-generate', 'Generate independently encrypted wallets (`wallet generate`)', (args) => args
     .option('count', { type: 'number', demandOption: true })
     .option('output', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
       try {
@@ -265,7 +266,7 @@ const cli = yargs(hideBin(process.argv))
         wallets.forEach((wallet) => console.log(`${wallet.index}\t${wallet.address}`));
       } catch (error) { printError(error); }
     })
-  .command('wallet list', 'List wallet addresses without decrypting private keys', (args) => args
+  .command('wallet-list', 'List wallet addresses without decrypting private keys (`wallet list`)', (args) => args
     .option('file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
       try {
         if (turnkeyCustodyEnabled()) {
@@ -280,7 +281,7 @@ const cli = yargs(hideBin(process.argv))
         content.wallets.forEach((wallet) => console.log(`${wallet.index}\t${wallet.address}`));
       } catch (error) { printError(error); }
     })
-  .command('wallet import', 'Encrypt approved wallet env files for local testing', (args) => args
+  .command('wallet-import', 'Encrypt approved wallet env files for local testing (`wallet import`)', (args) => args
     .option('input-dir', { type: 'string', default: DEFAULT_WALLET_IMPORT_ROOT })
     .option('files', { type: 'string', demandOption: true, description: 'Comma-separated .env basenames' })
     .option('output', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
@@ -300,7 +301,7 @@ const cli = yargs(hideBin(process.argv))
         console.log(`Imported ${count} wallets into ${output}`);
       } catch (error) { printError(error); }
     })
-  .command('wallet import-turnkey', 'Encrypt and import approved wallet env files into Turnkey', (args) => args
+  .command('wallet-import-turnkey', 'Encrypt and import approved wallet env files into Turnkey (`wallet import-turnkey`)', (args) => args
     .option('input-dir', { type: 'string', default: DEFAULT_WALLET_IMPORT_ROOT })
     .option('files', { type: 'string', demandOption: true, description: 'Comma-separated .env basenames' })
     .option('map-output', { type: 'string' })
@@ -423,7 +424,7 @@ const cli = yargs(hideBin(process.argv))
         }
         await ensureParent(args.file);
         await writeFile(args.file, `killed at ${new Date().toISOString()}\n`, { flag: 'wx' });
-        const runtime = await createCliRuntime(runtimeRoot);
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         await runtime.application.command('kill', { reason: 'operator CLI kill switch' });
         console.log(`Kill switch enabled: ${args.file}`);
       } catch (error) {
@@ -492,7 +493,7 @@ const cli = yargs(hideBin(process.argv))
       } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
     })
   .command('reconcile', 'Reconcile persisted in-flight runs before admission', {}, async () => {
-    const runtime = await createCliRuntime(runtimeRoot);
+    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
     const response = await runtime.application.command('reconcile');
     process.stdout.write(`${json(response)}\n`);
   })
@@ -918,7 +919,7 @@ const cli = yargs(hideBin(process.argv))
         if (plan) await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, runId: args.runId, type: 'quantity_plan', at: new Date().toISOString(), data: { ...plan, campaignId: preview.campaignId } }); });
         let runResponse: unknown;
         let runError: string | undefined;
-        try { runResponse = await runtime.application.command('run', { runId: args.runId, wallets }); } catch (error) { runError = plainFeePolicyMessage(surveyErrorMessage(error)); }
+        try { runResponse = await runtime.application.command('run', { runId: args.runId, wallets }); } catch (error) { runError = plainFeePolicyMessage(commandErrorMessage(error, 'LIVE_RUN_FAILED')); }
         const report = describeLiveRunResult(runtime.store.snapshot(), args.runId);
         process.stdout.write(`${json({ state: runError === undefined ? 'RunFinished' : 'RunStopped', ...(runError === undefined ? {} : { stoppedBecause: runError }), message: report.summary, report, run: runResponse ?? null })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
@@ -935,7 +936,7 @@ const cli = yargs(hideBin(process.argv))
   })
   .command('summary', 'Read canonical run and accounting facts', (args) => args
     .option('run-id', { type: 'string' }), async (args) => {
-    const runtime = await createCliRuntime(runtimeRoot);
+    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
     try {
       const response = await runtime.application.command('summary', args.runId ? { runId: args.runId } : {});
       process.stdout.write(`${json(response)}\n`);

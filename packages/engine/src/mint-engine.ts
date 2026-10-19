@@ -69,6 +69,7 @@ import { createBroadcaster } from './broadcasters/index.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
 import { KillSwitch, SpendTracker } from './safety.js';
 import { createLogger, childLogger } from './logger.js';
+import { safeEndpointReference } from './endpoint-reference.js';
 import {
   assertDirectChainExecutionPolicy,
   assertDurableReservationProvider,
@@ -829,7 +830,7 @@ export class MintEngine {
             id: attemptId,
             executionId,
             transactionIntentId,
-            endpoint: result.endpoint,
+            endpoint: safeEndpointReference(result.endpoint),
             responseClass,
             ...(resultHash ? { txHash: resultHash } : {}),
             nonce,
@@ -868,7 +869,7 @@ export class MintEngine {
 
         walletLog.info({
           event: 'tx_broadcast', txHash: successResult.txHash,
-          endpoint: successResult.endpoint, latencyMs: successResult.latencyMs,
+          endpoint: safeEndpointReference(successResult.endpoint), latencyMs: successResult.latencyMs,
         }, `Tx broadcast: ${successResult.txHash}`);
         submittedHash = successResult.txHash;
         submissionAttemptId = selectedSubmission?.attemptId ?? attemptIdByResultIndex.get(successResultIndex);

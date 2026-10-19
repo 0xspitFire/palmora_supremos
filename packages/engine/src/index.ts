@@ -180,6 +180,7 @@ export type { ReconciliationInput, ReconciliationAction, ExactChainStatus } from
 
 // Logger
 export { createLogger, childLogger } from './logger.js';
+export { safeEndpointReference } from './endpoint-reference.js';
 
 // Secret references
 export { readSecret, readSecretList, resolveChainEndpoints, hasSecret, SECRET_ROOT } from './secrets.js';

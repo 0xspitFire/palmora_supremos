@@ -106,6 +106,17 @@ describe('live-run command wiring', () => {
     expect(body).toContain('{ acceptPersonalLiveLocalCustody: true, startCoordinator: false }');
   });
 
+  it('keeps post-run operational commands from replaying coordinator startup reconciliation', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
+    for (const [command, next] of [['kill', 'reconcile'], ['reconcile', 'survey-seadrop'], ['summary', 'fund']] as const) {
+      const start = source.indexOf(`.command('${command}'`);
+      const end = source.indexOf(`.command('${next}'`, start);
+      expect(start).toBeGreaterThan(0);
+      expect(source.slice(start, end)).toContain('{ startCoordinator: false }');
+    }
+  });
+
   it('records the quantity plan at live-prepare, keyed by campaign', async () => {
     const { readFile } = await import('node:fs/promises');
     const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
