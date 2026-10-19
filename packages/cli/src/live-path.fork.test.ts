@@ -84,7 +84,7 @@ describe.skipIf(!enabled)('Personal Live path on a local Ethereum fork (T-027)',
     const plan = buildLivePlan(report, { killSwitchPresent: false, custody: 'local' });
     expect(plan.blockers).toEqual([]);
     expect(plan.verdict).toBe('ready');
-    const confirm = liveConfirmationPhrase(nft!, plan.totalMaxExposureEth);
+    const confirm = liveConfirmationPhrase(nft!, plan.quantity, plan.totalMaxExposureEth);
 
     // 2. Chain evidence, accepted by typed phrase.
     const client = createPublicClient({ transport: http(rpcUrl!) });

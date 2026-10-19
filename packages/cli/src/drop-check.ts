@@ -35,7 +35,7 @@ export async function planAutoQuantity(port: IntelligenceChainPort, args: { cont
   return plan;
 }
 
-export async function checkDrop(port: IntelligenceChainPort, contract: string, wallets: readonly string[], options: { quantity?: number; score?: number | null; simulate: boolean; now?: Date; limits?: ReadinessLimits }): Promise<DropCheckReport> {
+export async function checkDrop(port: IntelligenceChainPort, contract: string, wallets: readonly string[], options: { quantity?: number; maxQuantity?: number; score?: number | null; simulate: boolean; now?: Date; limits?: ReadinessLimits }): Promise<DropCheckReport> {
   const limits = options.limits ?? D033_READINESS_LIMITS;
   const now = (options.now ?? new Date()).getTime();
   if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) return { contract, verdict: 'blocked', summary: 'That is not a valid contract address.', drop: null, quantity: 0, wallets: [] };
@@ -51,10 +51,12 @@ export async function checkDrop(port: IntelligenceChainPort, contract: string, w
   if (status === 'ended') return { contract, verdict: 'blocked', summary: 'This mint has ended.', drop: dropView, quantity: 0, wallets: [] };
   if (drop.priceWei > limits.paidMaxPricePerNftWei) return { contract, verdict: 'blocked', summary: `Price ${formatEth(drop.priceWei)} ETH is above your ${formatEth(limits.paidMaxPricePerNftWei)} ETH per-NFT limit.`, drop: dropView, quantity: 0, wallets: [] };
   const free = drop.priceWei === 0n;
-  const planned = options.quantity ?? (free ? drop.maxPerWallet : Math.max(1, paidQuantityForScore(options.score ?? null)));
+  if (options.maxQuantity !== undefined && (!Number.isSafeInteger(options.maxQuantity) || options.maxQuantity < 1)) return { contract, verdict: 'blocked', summary: 'The quantity limit must be a whole number of 1 or more.', drop: dropView, quantity: 0, wallets: [] };
+  const freeAllowance = options.maxQuantity === undefined ? drop.maxPerWallet : Math.min(drop.maxPerWallet, options.maxQuantity);
+  const planned = options.quantity ?? (free ? freeAllowance : Math.max(1, paidQuantityForScore(options.score ?? null)));
   let quantity = drop.maxPerWallet > 0 ? Math.min(planned, drop.maxPerWallet) : planned;
   if (quantity < 1) return { contract, verdict: 'blocked', summary: 'The drop allows no mints per wallet.', drop: dropView, quantity: 0, wallets: [] };
-  // D-037: for a free mint at the full allowance, plan the largest quantity that fits the fee allowance at the current fee.
+  // D-037/D-055: for a free mint, plan up to the drop allowance or the owner's lower ceiling and reduce further for fees.
   let quantityPlan: DropCheckReport['quantityPlan'];
   if (free && options.quantity === undefined && wallets.length > 0 && port.estimateMintGas && port.baseFeePerGasWei) {
     const estimate = port.estimateMintGas.bind(port);

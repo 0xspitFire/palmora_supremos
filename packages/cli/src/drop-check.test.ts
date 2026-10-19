@@ -88,6 +88,18 @@ describe('checkDrop (CLI validate/simulate)', () => {
     expect(report.summary).toContain('Planned 3 of 5 NFTs per wallet: at 1 gwei');
   });
 
+  it('treats a live quantity limit as a ceiling and still runs the fee planner', async () => {
+    const port = new Port() as Port & { estimateMintGas?: (w: string, c: string, q: number) => Promise<bigint | null>; baseFeePerGasWei?: () => Promise<bigint | null> };
+    port.drop = { ...port.drop!, maxPerWallet: 100 };
+    port.estimateMintGas = async (_wallet, _contract, quantity) => 101_101n + 69_131n * BigInt(quantity);
+    port.baseFeePerGasWei = async () => 450_000_000n;
+    port.balances.set(W1, 10n ** 18n);
+    const report = await checkDrop(port, NFT, [W1], { simulate: true, maxQuantity: 4, now: NOW });
+    expect(report).toMatchObject({ verdict: 'ok', quantity: 3, quantityPlan: { desired: 4, planned: 3, maxFeeGwei: '1' } });
+    expect(port.simulated).toEqual([[W1, 3, 0n]]);
+    expect((await checkDrop(port, NFT, [W1], { simulate: true, maxQuantity: 0, now: NOW })).summary).toContain('quantity limit');
+  });
+
   it('blocks a free mint with the reason when even one NFT does not fit, and never reduces an explicit quantity', async () => {
     const port = new Port() as Port & { estimateMintGas?: (w: string, c: string, q: number) => Promise<bigint | null>; baseFeePerGasWei?: () => Promise<bigint | null> };
     port.estimateMintGas = async (_wallet, _contract, quantity) => 101_101n + 69_131n * BigInt(quantity);

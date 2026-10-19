@@ -737,18 +737,20 @@ const cli = yargs(hideBin(process.argv))
   .command('live-plan','Read-only: is a FREE Ethereum mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
     .option('contract', { type: 'string', demandOption: true })
     .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
+    .option('quantity-limit', { type: 'number', describe: 'Maximum NFTs per wallet; the fee planner may reduce it further' })
     .option('rpc-url', { type: 'string', describe: 'Override the Ethereum RPC (https only)' }), async (args) => {
       try {
         const wallets = checkWallets(args.wallets);
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : await ethereumPort();
-        const report = await checkDrop(port, args.contract, wallets, { simulate: true });
+        const report = await checkDrop(port, args.contract, wallets, { simulate: true, ...(args.quantityLimit === undefined ? {} : { maxQuantity: args.quantityLimit }) });
         const plan = buildLivePlan(report, { killSwitchPresent: existsSync(DEFAULT_KILL_FILE), custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local' });
-        process.stdout.write(`${json({ ...plan, ...(plan.verdict === 'ready' ? { confirmationPhrase: liveConfirmationPhrase(args.contract, plan.totalMaxExposureEth), planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null } : {}) })}\n`);
+        process.stdout.write(`${json({ ...plan, ...(plan.verdict === 'ready' ? { confirmationPhrase: liveConfirmationPhrase(args.contract, plan.quantity, plan.totalMaxExposureEth), planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null } : {}) })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('live-prepare', 'Record a live FREE Ethereum campaign from a ready live-plan. Spends nothing; approve, arm and run are still separate steps', (args) => args
     .option('contract', { type: 'string', demandOption: true })
     .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
+    .option('quantity-limit', { type: 'number', describe: 'Maximum NFTs per wallet; use the same value passed to live-plan' })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
     .option('priority-fee-gwei', { type: 'number', default: 0.1, describe: 'Tip per gas (more than 0, at most 2)' })
     .option('confirm', { type: 'string', demandOption: true, describe: 'The confirmation phrase live-plan printed' })
@@ -756,7 +758,7 @@ const cli = yargs(hideBin(process.argv))
       try {
         const wallets = checkWallets(args.wallets);
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : await ethereumPort();
-        const report = await checkDrop(port, args.contract, wallets, { simulate: true });
+        const report = await checkDrop(port, args.contract, wallets, { simulate: true, ...(args.quantityLimit === undefined ? {} : { maxQuantity: args.quantityLimit }) });
         const plan = buildLivePlan(report, { killSwitchPresent: existsSync(DEFAULT_KILL_FILE), custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local' });
         const file = walletFile(args.walletFile);
         const readyWallets = assertLivePrepareAllowed({ plan, contract: args.contract, confirm: args.confirm, priorityFeeGwei: args.priorityFeeGwei, walletFileAddresses: await publicWallets(file) });
