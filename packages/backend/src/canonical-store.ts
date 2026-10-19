@@ -36,6 +36,18 @@ import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
 import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
+/** Defense in depth: canonical evidence may contain only an opaque provider label, never a URL. */
+function safeAttemptEndpoint(value: string): string {
+  const label = value.trim();
+  if (
+    label.length === 0
+    || label.length > 80
+    || /(?:\/\/|[/?#@]|%[0-9a-f]{2})/i.test(label)
+    || !/^[a-z0-9._:-]+$/i.test(label)
+  ) return 'rpc';
+  return label;
+}
+
 export interface CanonicalAdmissionInput {
   run: RunRecord;
   intent: IntentRecord;
@@ -563,7 +575,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const id = input.id;
     const executionId = input.executionId;
     const transactionIntentId = input.transactionIntentId;
-    const endpoint = input.endpoint;
+    const endpoint = safeAttemptEndpoint(input.endpoint);
     const responseClass = input.responseClass;
     const nonce = input.nonce;
     const attemptedAt = input.attemptedAt;
@@ -795,7 +807,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const runId = row.run_id ?? '';
       if (!runIds.has(runId) || !row.execution_id) return [];
       const state = executionState(row.response_class);
-      return [{ id: row.id, executionId: row.execution_id, runId, wallet: row.address, ...(row.nonce === null ? {} : { nonce: row.nonce }), ...(row.tx_hash === null ? {} : { hash: row.tx_hash }), endpoint: row.endpoint, ...(row.redacted_error === null ? {} : { redactedError: row.redacted_error }), state, createdAt: row.attempted_at, updatedAt: row.attempted_at } satisfies AttemptRecord];
+      return [{ id: row.id, executionId: row.execution_id, runId, wallet: row.address, ...(row.nonce === null ? {} : { nonce: row.nonce }), ...(row.tx_hash === null ? {} : { hash: row.tx_hash }), endpoint: safeAttemptEndpoint(row.endpoint), ...(row.redacted_error === null ? {} : { redactedError: row.redacted_error }), state, createdAt: row.attempted_at, updatedAt: row.attempted_at } satisfies AttemptRecord];
     });
   }
 
@@ -1019,7 +1031,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (prior) return;
     const intentId = this.intentRowIdFromExecution(attempt.executionId, attempt.wallet, attempt.runId);
     if (!intentId) throw new Error('TRANSACTION_INTENT_REQUIRED');
-    this.databaseStore.recordAttempt({ id: attempt.id, transactionIntentId: intentId, endpoint: attempt.endpoint ?? 'engine', responseClass: attempt.state, ...(attempt.nonce === undefined ? {} : { nonce: attempt.nonce }), ...(attempt.hash === undefined ? {} : { txHash: attempt.hash }), ...(attempt.redactedError === undefined ? {} : { redactedError: attempt.redactedError }), ...(attempt.replacementOfId === undefined ? {} : { replacementOfId: attempt.replacementOfId }), executionId: attempt.executionId, attemptedAt: attempt.createdAt });
+    this.databaseStore.recordAttempt({ id: attempt.id, transactionIntentId: intentId, endpoint: safeAttemptEndpoint(attempt.endpoint ?? 'engine'), responseClass: attempt.state, ...(attempt.nonce === undefined ? {} : { nonce: attempt.nonce }), ...(attempt.hash === undefined ? {} : { txHash: attempt.hash }), ...(attempt.redactedError === undefined ? {} : { redactedError: attempt.redactedError }), ...(attempt.replacementOfId === undefined ? {} : { replacementOfId: attempt.replacementOfId }), executionId: attempt.executionId, attemptedAt: attempt.createdAt });
     const target = attempt.state.toLowerCase();
     const nextState = target === 'pending' ? 'submitted' : target;
     this.transitionExecutionSafe(attempt.executionId, nextState, `engine attempt ${attempt.state}`);

@@ -308,6 +308,27 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  it('never persists a credential-bearing endpoint from engine lifecycle evidence', async () => {
+    const value = await fixture(ETHEREUM, true);
+    try {
+      const campaignValue = await campaign(value, ETHEREUM, true);
+      const prepared = await armed(value, campaignValue);
+      const admission = await value.store.admitExecution(prepared.input);
+      const execution = admission.executions[0]!;
+      await value.store.persistEngineAttempt({
+        id: 'redacted-endpoint-attempt',
+        executionId: execution.executionId,
+        transactionIntentId: execution.intentId,
+        endpoint: 'https://user:password@secret.provider.example/v2/api-key?token=secret',
+        responseClass: 'accepted',
+        txHash: `0x${'7'.repeat(64)}`,
+        nonce: 7,
+        attemptedAt: NOW,
+      });
+      expect(value.store.snapshot().attempts.find((item) => item.id === 'redacted-endpoint-attempt')?.endpoint).toBe('rpc');
+    } finally { await close(value); }
+  });
+
   it('does not overwrite a provider-settled reservation during coordinator post-processing', async () => {
     const value = await fixture(ETHEREUM);
     try {
