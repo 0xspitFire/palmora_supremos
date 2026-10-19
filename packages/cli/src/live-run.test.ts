@@ -5,14 +5,14 @@ import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult
 const W1 = '0x1111111111111111111111111111111111111111';
 const W2 = '0x2222222222222222222222222222222222222222';
 const RUN = 'run_abcdef12345678';
+const reservation = (wallet: string, extra: Record<string, unknown> = {}) => ({ id: `res_${wallet.slice(2, 4)}`, runId: RUN, campaignId: 'c1', wallet, amountWei: 100_000_000_000_000n, accountingDate: '2026-10-08', status: 'reserved', createdAt: '', updatedAt: '', ...extra });
 
-function state(over: { runState?: string; mode?: string; reservations?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>>; events?: unknown[] } = {}): BackendState {
-  const reservation = (wallet: string, extra: Record<string, unknown> = {}) => ({ id: `res_${wallet.slice(2, 4)}`, runId: RUN, campaignId: 'c1', wallet, amountWei: 100_000_000_000_000n, accountingDate: '2026-10-08', status: 'reserved', createdAt: '', updatedAt: '', ...extra });
+function state(over: { runState?: string; mode?: string; reservations?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>>; events?: unknown[]; maxRunWei?: bigint } = {}): BackendState {
   return {
-    campaigns: [{ id: 'c1', contract: '0xabc', quantity: 2 }],
+    campaigns: [{ id: 'c1', contract: '0xabc', quantity: 2, mintPriceWei: 0n, feePolicy: { totalFeeBudgetWei: 100_000_000_000_000n }, spendPolicy: { maxRunWei: over.maxRunWei ?? 200_000_000_000_000n } }],
     runs: [{ id: RUN, intentId: 'i1', campaignId: 'c1', mode: over.mode ?? 'live', state: over.runState ?? 'Armed' }],
     intents: [{ id: 'i1', runId: RUN, campaignId: 'c1', wallets: [W1, W2] }],
-    reservations: over.reservations ?? [reservation(W1), reservation(W2)],
+    reservations: over.reservations ?? [],
     receipts: over.receipts ?? [],
     attempts: [],
     events: over.events ?? [{ id: 'e1', type: 'quantity_plan', at: '', data: { campaignId: 'c1', reduced: true, message: 'Fees were high, so 2 NFTs instead of 5.', maxFeeGwei: '12' } }],
@@ -27,12 +27,13 @@ describe('guided live run preview and confirmation (T-024 stage 2)', () => {
     expect(liveRunPhrase(RUN, '0.0003')).not.toBe(preview.phrase);
   });
 
-  it('refuses a dry run, a run that is not armed, missing or open reservations', () => {
+  it('refuses a dry run, a run that is not armed, an invalid exposure, or inconsistent existing reservations', () => {
     expect(() => previewLiveRun(state({ mode: 'dry-run' }), RUN)).toThrow('LIVE_RUN_REQUIRED');
     expect(() => previewLiveRun(state({ runState: 'Completed' }), RUN)).toThrow('RUN_NOT_ARMED');
-    expect(() => previewLiveRun(state({ reservations: [] }), RUN)).toThrow('RESERVATIONS_NOT_READY');
-    expect(() => previewLiveRun(state({ reservations: [{ id: 'r', runId: RUN, wallet: W1, amountWei: 1n, status: 'reserved' }] }), RUN)).toThrow('RESERVATIONS_NOT_READY');
-    expect(() => previewLiveRun(state({ reservations: [{ runId: RUN, wallet: W1, amountWei: 1n, status: 'settled' }, { runId: RUN, wallet: W2, amountWei: 1n, status: 'reserved' }] }), RUN)).toThrow('RESERVATIONS_NOT_READY');
+    expect(() => previewLiveRun(state({ maxRunWei: 199_999_999_999_999n }), RUN)).toThrow('PLANNED_EXPOSURE_INVALID');
+    expect(() => previewLiveRun(state({ reservations: [{ id: 'r', runId: RUN, wallet: W1, amountWei: 1n, status: 'reserved' }] }), RUN)).toThrow('RESERVATION_EXPOSURE_MISMATCH');
+    expect(() => previewLiveRun(state({ reservations: [{ runId: RUN, wallet: W1, amountWei: 100_000_000_000_000n, status: 'settled' }, { runId: RUN, wallet: W2, amountWei: 100_000_000_000_000n, status: 'reserved' }] }), RUN)).toThrow('RESERVATION_EXPOSURE_MISMATCH');
+    expect(() => previewLiveRun(state({ reservations: [reservation(W1), reservation(W2)] }), RUN)).not.toThrow();
     expect(() => previewLiveRun(state(), 'run_missing')).toThrow('RUN_NOT_FOUND');
   });
 
