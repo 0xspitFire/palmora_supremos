@@ -9,8 +9,8 @@ import { hideBin } from 'yargs/helpers';
 import { canonicalPolicyDigest, createTurnkeyClient, generateAndEncryptWallets, importAndEncryptWallets, importPrivateKeyToTurnkey, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyPolicyAst, validateTurnkeyWalletMap } from '@mint-bot/engine';
 import type { WalletImportRecord } from '@mint-bot/engine';
 import type { TurnkeyWalletMap } from '@mint-bot/engine';
-import { configuredSecretRoot, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
-import { resolveWalletPath, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
+import { configuredSecretRoot, configuredWalletPath, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
+import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
@@ -68,12 +68,12 @@ function intelligenceRepository(): { repo: IntelligenceRepository; close(): void
 const runtimeRoot = process.cwd();
 const blocked = (error: unknown) => JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false, policy: { robinhoodFreePerWalletCapWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI.toString(), robinhoodFreeActivePeriodCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI.toString(), robinhoodPaidMintsEnabled: false } });
 
-const DEFAULT_WALLET_FILE = join(runtimeRoot, 'Rets', 'wallets', 'wallets.json');
+const DEFAULT_WALLET_FILE = configuredWalletPath(runtimeRoot);
 const DEFAULT_KILL_FILE = join(runtimeRoot, 'Rets', 'state', 'killswitch');
 const DEFAULT_WALLET_IMPORT_ROOT = '/home/Junayd/W3/Rets/wallets';
 
 function walletFile(value: string | undefined): string {
-  return resolveWalletPath(runtimeRoot, value ?? process.env.MINT_BOT_WALLET_FILE ?? './Rets/wallets/wallets.json');
+  return configuredWalletPath(runtimeRoot, value ?? process.env.MINT_BOT_WALLET_FILE);
 }
 
 async function ensureParent(path: string): Promise<void> {
@@ -884,9 +884,10 @@ const cli = yargs(hideBin(process.argv))
     .option('max-fee-gwei', { type: 'number', describe: 'Highest fee per gas the run may sign with. Use the value live-plan printed; the default (100) is far above the free-mint fee allowance, so a live free mint with the default is refused.' })
     .option('idempotency-key', { type: 'string' }), async (args) => {
     if (args.maxFeeGwei !== undefined && (!Number.isFinite(args.maxFeeGwei) || args.maxFeeGwei <= 0 || args.maxFeeGwei > 500)) { process.stdout.write(`${blocked(new Error('MAX_FEE_GWEI_OUT_OF_RANGE: use more than 0 and at most 500'))}\n`); return; }
-    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, args.maxFeeGwei === undefined ? undefined : { maxFeePerGasGwei: args.maxFeeGwei }, { acceptPersonalLiveLocalCustody: true });
     try {
-      const wallets = await publicWallets(walletFile(args.walletFile));
+      const file = walletFile(args.walletFile);
+      const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, ...(args.maxFeeGwei === undefined ? {} : { maxFeePerGasGwei: args.maxFeeGwei }) }, { acceptPersonalLiveLocalCustody: true });
+      const wallets = await publicWallets(file);
       const response = await runtime.application.command('run', { runId: args.runId, wallets, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
       process.stdout.write(`${json(response)}\n`);
     } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
@@ -903,9 +904,10 @@ const cli = yargs(hideBin(process.argv))
           return;
         }
         assertLiveRunAllowed({ preview, confirm: args.confirm, maxFeeGwei: args.maxFeeGwei });
-        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { maxFeePerGasGwei: args.maxFeeGwei as number }, { acceptPersonalLiveLocalCustody: true });
+        const file = walletFile(args.walletFile);
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, maxFeePerGasGwei: args.maxFeeGwei as number }, { acceptPersonalLiveLocalCustody: true });
         // Copy the plan onto the run so the summary command shows it too.
-        const wallets = await publicWallets(walletFile(args.walletFile));
+        const wallets = await publicWallets(file);
         assertWalletFileMatchesRun(preview, wallets);
         const plan = quantityPlanForRun(runtime.store.snapshot().events, args.runId, preview.campaignId);
         if (plan) await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, runId: args.runId, type: 'quantity_plan', at: new Date().toISOString(), data: { ...plan, campaignId: preview.campaignId } }); });

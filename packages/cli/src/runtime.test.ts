@@ -1,10 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createCliRuntime, personalLiveLocalCustodyAllowed, type SpendAlertSink } from './runtime.js';
+import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, type SpendAlertSink } from './runtime.js';
 import { PERSONAL_LIVE_FLEET_POLICY, type EngineAdapter } from '@mint-bot/backend';
 
 describe('CLI runtime custody boundaries', () => {
+  it('accepts only wallet files under the workspace or configured external secret wallet roots', () => {
+    const root = '/workspace/mintbot';
+    const priorSecretRoot = process.env.MINT_BOT_SECRET_ROOT;
+    process.env.MINT_BOT_SECRET_ROOT = '/secure/mintbot';
+    try {
+      expect(configuredWalletPath(root)).toBe('/secure/mintbot/wallets/wallets.json');
+      expect(configuredWalletPath(root, '/secure/mintbot/wallets/selected.json')).toBe('/secure/mintbot/wallets/selected.json');
+      expect(configuredWalletPath(root, '/workspace/mintbot/Rets/wallets/local.json')).toBe('/workspace/mintbot/Rets/wallets/local.json');
+      expect(() => configuredWalletPath(root, '/secure/mintbot/other.json')).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
+      expect(() => configuredWalletPath(root, '/tmp/wallets.json')).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
+    } finally {
+      if (priorSecretRoot === undefined) delete process.env.MINT_BOT_SECRET_ROOT; else process.env.MINT_BOT_SECRET_ROOT = priorSecretRoot;
+    }
+  });
+
   it('does not read Turnkey files when dry-run explicitly disables custody loading', async () => {
     const root = await mkdtemp(join('/tmp', 'mintbot-runtime-'));
     const priorCustody = process.env.MINT_BOT_CUSTODY;
