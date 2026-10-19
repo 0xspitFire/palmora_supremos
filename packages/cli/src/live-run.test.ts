@@ -102,7 +102,8 @@ describe('live-run command wiring', () => {
     expect(body.indexOf('if (args.confirm === undefined)')).toBeLessThan(body.indexOf('assertLiveRunAllowed('));
     expect(body.indexOf('assertLiveRunAllowed(')).toBeLessThan(body.indexOf('acceptPersonalLiveLocalCustody: true'));
     expect(body.indexOf("type: 'quantity_plan'")).toBeLessThan(body.indexOf("command('run'"));
-    expect(body.indexOf('{ startCoordinator: false }')).toBeGreaterThan(0);
+    expect(body).toContain('{ startCoordinator: false }');
+    expect(body).toContain('{ acceptPersonalLiveLocalCustody: true, startCoordinator: false }');
   });
 
   it('records the quantity plan at live-prepare, keyed by campaign', async () => {
