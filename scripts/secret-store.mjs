@@ -45,6 +45,7 @@ export const SECRET_NAMES = Object.freeze([
   'ROBINHOOD_RPC_URL',
   'INK_RPC_URL',
   'BASE_RPC_URL',
+  'BASE_ARCHIVE_RPC',
   'OPENSEA_API',
   'ALCHEMY_API',
   'ROBINHOOD_ARCHIVE_RPC',
