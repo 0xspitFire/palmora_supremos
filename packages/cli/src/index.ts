@@ -886,7 +886,10 @@ const cli = yargs(hideBin(process.argv))
     if (args.maxFeeGwei !== undefined && (!Number.isFinite(args.maxFeeGwei) || args.maxFeeGwei <= 0 || args.maxFeeGwei > 500)) { process.stdout.write(`${blocked(new Error('MAX_FEE_GWEI_OUT_OF_RANGE: use more than 0 and at most 500'))}\n`); return; }
     try {
       const file = walletFile(args.walletFile);
-      const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, ...(args.maxFeeGwei === undefined ? {} : { maxFeePerGasGwei: args.maxFeeGwei }) }, { acceptPersonalLiveLocalCustody: true });
+      // `arm` already completed startup reconciliation before persisting this run. Starting a new
+      // coordinator here would classify that intentionally Armed run as unresolved and block the
+      // only command that can execute it.
+      const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, ...(args.maxFeeGwei === undefined ? {} : { maxFeePerGasGwei: args.maxFeeGwei }) }, { acceptPersonalLiveLocalCustody: true, startCoordinator: false });
       const wallets = await publicWallets(file);
       const response = await runtime.application.command('run', { runId: args.runId, wallets, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
       process.stdout.write(`${json(response)}\n`);
@@ -905,7 +908,9 @@ const cli = yargs(hideBin(process.argv))
         }
         assertLiveRunAllowed({ preview, confirm: args.confirm, maxFeeGwei: args.maxFeeGwei });
         const file = walletFile(args.walletFile);
-        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, maxFeePerGasGwei: args.maxFeeGwei as number }, { acceptPersonalLiveLocalCustody: true });
+        // Preserve the Ready startup state established by `arm`; restarting the coordinator would
+        // see this persisted Armed run as unresolved and prevent its own execution.
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, maxFeePerGasGwei: args.maxFeeGwei as number }, { acceptPersonalLiveLocalCustody: true, startCoordinator: false });
         // Copy the plan onto the run so the summary command shows it too.
         const wallets = await publicWallets(file);
         assertWalletFileMatchesRun(preview, wallets);
@@ -921,7 +926,7 @@ const cli = yargs(hideBin(process.argv))
   .command('execute', 'Compatibility alias for run', (args) => args
     .option('run-id', { type: 'string', demandOption: true })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE }), async (args) => {
-    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { acceptPersonalLiveLocalCustody: true });
+    const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { acceptPersonalLiveLocalCustody: true, startCoordinator: false });
     try {
       const wallets = await publicWallets(walletFile(args.walletFile));
       const response = await runtime.application.command('execute', { runId: args.runId, wallets });
