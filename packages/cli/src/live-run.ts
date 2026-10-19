@@ -12,7 +12,7 @@ export interface LiveRunPreview {
   contract: string;
   wallets: string[];
   quantityPerWallet: number;
-  /** The most that can be spent: the sum of what was reserved at arming. */
+  /** The most that admission will reserve after final confirmation and before signing. */
   maxExposureWei: string;
   maxExposureEth: string;
   /** The fee per gas the plan was made at, or null when no plan was recorded. */
@@ -43,9 +43,17 @@ export function previewLiveRun(state: RunState, runId: string): LiveRunPreview {
   const campaign = state.campaigns.find((item) => item.id === run.campaignId);
   const intent = state.intents.find((item) => item.id === run.intentId);
   if (!campaign || !intent) throw new Error('RUN_RECORDS_INCOMPLETE');
+  const fee = campaign.feePolicy.totalFeeBudgetWei;
+  if (fee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
+  const perWallet = campaign.mintPriceWei * BigInt(campaign.quantity) + fee;
+  const total = perWallet * BigInt(intent.wallets.length);
+  if (intent.wallets.length === 0 || perWallet <= 0n || total > campaign.spendPolicy.maxRunWei) throw new Error('PLANNED_EXPOSURE_INVALID');
+  // Admission creates every reservation atomically only after the final typed confirmation. Normally there are none
+  // at preview time; if a replay ever finds them, they must exactly match the immutable intent and planned exposure.
   const reservations = state.reservations.filter((item) => item.runId === runId);
-  if (reservations.length === 0 || reservations.length !== intent.wallets.length || reservations.some((item) => item.status !== 'reserved')) throw new Error('RESERVATIONS_NOT_READY: every wallet needs its own reservation in the reserved state');
-  const total = reservations.reduce((sum, item) => sum + item.amountWei, 0n);
+  if (reservations.length > 0 && (reservations.length !== intent.wallets.length || reservations.some((item) => item.status !== 'reserved') || reservations.reduce((sum, item) => sum + item.amountWei, 0n) !== total)) {
+    throw new Error('RESERVATION_EXPOSURE_MISMATCH');
+  }
   const plan = quantityPlanForRun(state.events, runId, campaign.id);
   const maxExposureEth = formatEth(total);
   return {
