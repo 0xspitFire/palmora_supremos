@@ -21,7 +21,6 @@ const ALLOWED_KEYS = new Set([
 ]);
 
 export function parseArchiveReference(sourceReference, defaultKey) {
-  assertNativeWslWorkspace();
   const defaultReference = defaultKey.startsWith('ETHEREUM_')
     ? APPROVED_ETHEREUM_ARCHIVE_REFERENCE
     : defaultKey.startsWith('BASE_')
@@ -62,6 +61,7 @@ function assertNativeWslWorkspace() {
 }
 
 export async function readArchiveValue(sourceReference, defaultKey) {
+  assertNativeWslWorkspace();
   const { filePath, key } = parseArchiveReference(sourceReference, defaultKey);
   const values = await readApprovedFile(filePath, [key]);
   const value = values.get(key);
@@ -70,6 +70,7 @@ export async function readArchiveValue(sourceReference, defaultKey) {
 }
 
 export async function readArchiveValues(sourceReference, defaultKey, keys) {
+  assertNativeWslWorkspace();
   const parsed = parseArchiveReference(sourceReference, defaultKey);
   for (const key of keys) {
     if (!ALLOWED_KEYS.has(key)) throw new Error('Archive reference key is not approved');
