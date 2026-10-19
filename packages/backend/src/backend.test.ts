@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { DurableStore } from './store.js';
 import { SpendLedger } from './spend-ledger.js';
@@ -254,6 +254,10 @@ describe('backend Phase 1 blockers', () => {
 
   it('exposes canonical missing-run errors and confines wallet paths', () => {
     const store = new DurableStore(); expect(new Phase2ReadModelService().run(store.snapshot(), 'missing').issues[0]?.code).toBe('RUN_NOT_FOUND'); const root = join('C:', 'project'); expect(resolveWalletPath(root)).toBe(join(resolveWalletPath(root), '.')); expect(() => resolveWalletPath(root, './Rets/other')).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
+    const external = resolve('/secure/mintbot/wallets');
+    expect(resolveWalletPath(root, join(external, 'wallets.json'), [external])).toBe(join(external, 'wallets.json'));
+    expect(() => resolveWalletPath(root, resolve(external, '..', 'other.json'), [external])).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
+    expect(() => resolveWalletPath(root, join(external, '..', 'wallets-elsewhere', 'wallets.json'), [external])).toThrow('WALLET_PATH_OUTSIDE_APPROVED_ROOT');
   });
 
   it('refuses live Ethereum execution on a non-canonical store before any reservation or engine call (T-003)', async () => {

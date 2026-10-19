@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
 import { openDatabase } from '@mint-bot/database';
 import { readTurnkeySecretConfig, readTurnkeyWalletMap, turnkeyPolicyRef, TurnkeySigner, type WalletInfo } from '@mint-bot/engine';
@@ -15,6 +15,13 @@ export type CustodyMode = 'local' | 'turnkey';
 
 export function configuredSecretRoot(projectRoot: string): string {
   return resolve(process.env.MINT_BOT_SECRET_ROOT ?? resolve(projectRoot, 'Rets'));
+}
+
+/** Local encrypted wallets may live in the workspace wallet directory or under the configured external secret root. */
+export function configuredWalletPath(projectRoot: string, requestedPath?: string): string {
+  const externalWalletRoot = join(configuredSecretRoot(projectRoot), 'wallets');
+  const requested = requestedPath ?? join(externalWalletRoot, 'wallets.json');
+  return resolveWalletPath(projectRoot, requested, [externalWalletRoot]);
 }
 
 export function configuredCustodyMode(): CustodyMode {
@@ -69,7 +76,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     ? { ...adapterOptions, ...turnkeyOptions }
     : { ...turnkeyOptions, ...adapterOptions };
   const actualEngine = engine ?? createMintEngineAdapter({
-    walletFile: resolveWalletPath(projectRoot),
+    walletFile: configuredWalletPath(projectRoot),
     killSwitchFile: resolve(projectRoot, 'Rets', 'state', 'killswitch'),
     secretRoot,
     logFile: resolve(projectRoot, 'Rets', 'state', 'mint-bot.log'),
@@ -88,5 +95,5 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   // The owner's CLI may accept a recorded local key file for Personal Live (D-043); the service never passes this, so unattended runs still need Turnkey or a cloud key service.
   const coordinator = new ExecutionCoordinator(store, actualEngine, { alerts: { cap: (reason, runId) => alertSink.cap(reason, runId) }, ...(personalLiveLocalCustodyAllowed(runtimeOptions.acceptPersonalLiveLocalCustody, useTurnkey) ? { acceptPersonalLiveLocalCustody: true } : {}) });
   if (runtimeOptions.startCoordinator !== false) await coordinator.start();
-  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY }), walletRoot: resolveWalletPath(projectRoot), setAlertSink: (sink) => { alertSink = sink; } };
+  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY }), walletRoot: join(configuredSecretRoot(projectRoot), 'wallets'), setAlertSink: (sink) => { alertSink = sink; } };
 }

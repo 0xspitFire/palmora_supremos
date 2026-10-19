@@ -137,3 +137,18 @@ describe('live quantity-limit command wiring (D-055)', () => {
     }
   });
 });
+
+describe('Personal Live wallet-file wiring', () => {
+  it('passes the validated configured wallet file into both execution commands', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
+    const runStart = source.indexOf(".command('run'");
+    const liveRunStart = source.indexOf(".command('live-run'", runStart);
+    const executeStart = source.indexOf(".command('execute'", liveRunStart);
+    for (const body of [source.slice(runStart, liveRunStart), source.slice(liveRunStart, executeStart)]) {
+      expect(body).toContain('const file = walletFile(args.walletFile)');
+      expect(body).toContain('walletFile: file');
+      expect(body).toContain('publicWallets(file)');
+    }
+  });
+});
