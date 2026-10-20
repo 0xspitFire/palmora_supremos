@@ -13,7 +13,7 @@ import { DurableStore } from './store.js';
 import type { AttemptRecord, Campaign, ChainEvidenceRecord, EngineAdapter, IntentRecord, RunRecord } from './types.js';
 import { PERSONAL_LIVE_FLEET_POLICY, ethToWei, validateFleetSpendPolicy, type FleetSpendPolicy } from './fleet-policy.js';
 
-import { ETHEREUM, ROBINHOOD, NOW, WALLET_ONE, WALLET_TWO, CONTRACT, noopEngine, OPEN_FLEET_POLICY, fixture, close, campaignInput, campaign, armed, type Fixture } from './canonical-fixtures.js';
+import { BASE, BASE_NOW, ETHEREUM, ROBINHOOD, NOW, WALLET_ONE, WALLET_TWO, CONTRACT, noopEngine, OPEN_FLEET_POLICY, fixture, close, campaignInput, campaign, armed, type Fixture } from './canonical-fixtures.js';
 
 describe('CanonicalStoreBridge', () => {
   it('fails closed when the normalized database is below migration 15', async () => {
@@ -593,6 +593,26 @@ describe('CanonicalStoreBridge', () => {
         const second = await armed(value, await campaign(value, ETHEREUM));
         await expect(value.store.admitExecution(second.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
         expect(reservationCount(value)).toBe(2);
+      } finally { await close(value); }
+    });
+
+    it('enforces Base rolling exposure at 0.0012 ETH across runs after the finalized first proof', async () => {
+      const value = await fixture(BASE);
+      try {
+        const first = await armed(value, await campaign(value, BASE), [WALLET_ONE]);
+        const firstAdmission = await value.store.admitExecution(first.input);
+        const firstExecution = firstAdmission.executions[0]!;
+        value.db.prepare("INSERT INTO transaction_attempt (id, transaction_intent_id, endpoint, response_class, tx_hash, attempted_at, execution_id, chain_profile_id) VALUES (?, ?, 'base-primary', 'accepted', ?, ?, ?, ?)").run('base-first-attempt', firstExecution.intentId, `0x${'a'.repeat(64)}`, BASE_NOW, firstExecution.executionId, `profile-${BASE}`);
+        value.db.prepare("INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, l1_data_fee_wei, operator_fee_wei, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, 'confirmed', 1, ?, 1, '1', '1', '1', '1', 'ethereum_final', 'test-independent-providers', ?, ?)").run('base-first-receipt', 'base-first-attempt', `0x${'a'.repeat(64)}`, `0x${'b'.repeat(64)}`, BASE_NOW, firstExecution.executionId);
+        await value.store.settleExecutionComponents(firstAdmission.reservations[0]!.id, { actualMintValueWei: 0n, actualL2ExecutionGasWei: 1n, actualL1DataGasWei: 2n, authoritativeReceiptId: 'base-first-receipt' });
+        expect(value.db.prepare('SELECT status, settled_l2_execution_gas_wei, settled_l1_data_gas_wei FROM spend_reservation WHERE id = ?').get(firstAdmission.reservations[0]!.id)).toEqual({ status: 'settled', settled_l2_execution_gas_wei: '1', settled_l1_data_gas_wei: '2' });
+
+        const fiveWallets = Array.from({ length: 5 }, (_, index) => `0x${String(index + 3).repeat(40)}`);
+        const atCap = await armed(value, await campaign(value, BASE), fiveWallets);
+        expect((await value.store.admitExecution(atCap.input)).reservations).toHaveLength(5);
+
+        const aboveCap = await armed(value, await campaign(value, BASE), [`0x${'9'.repeat(40)}`]);
+        await expect(value.store.admitExecution(aboveCap.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
       } finally { await close(value); }
     });
 

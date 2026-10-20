@@ -72,7 +72,13 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
     ? `Drop and wallets are ready: ${walletsReady.length} wallet(s) would each mint ${report.quantity} NFT(s) and could spend at most ${total} ETH in total (budget ${formatEth(dailyBudgetWei)} ETH). Nothing has been sent.`
     : `Not ready: ${blockers.length} thing(s) to fix before a live mint. Nothing has been sent.`;
   const nextSteps = ready
-    ? [
+    ? context.chainId === 8453 ? [
+        '1. Run base-enable status with the current evidence file, then record the free-only enablement using the exact line it prints.',
+        '2. Run live-prepare with --chain base and the confirmation phrase this plan printed. Canonical admission enforces the one-wallet, one-NFT first proof until it finalizes.',
+        '3. Run record-simulation for that campaign (good for 30 minutes).',
+        '4. Keep the kill switch engaged while preparing, then run live-readiness status --chain base and record with the exact line it prints (good for 15 minutes).',
+        '5. Run approve, then arm with --mode live. Release the kill switch only under separate owner authority, then run with the approved maximum fee. Each step refuses unless every Base gate passes.',
+      ] : [
         '1. Run fee-policy status. If it says the stored policy differs, run fee-policy apply with the line it prints.',
         '2. Run chain-evidence status, then chain-evidence accept with the line it prints (good for 7 days).',
         '3. Run live-prepare with the confirmation phrase this plan printed. It only records the campaign; nothing is spent.',

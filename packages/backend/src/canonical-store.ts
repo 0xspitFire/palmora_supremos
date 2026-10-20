@@ -35,7 +35,7 @@ import type {
 import type { BackendStore } from './store.js';
 import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
-import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
+import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 /** Defense in depth: canonical evidence may contain only an opaque provider label, never a URL. */
 function safeAttemptEndpoint(value: string): string {
@@ -713,7 +713,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         if (!existing) {
           this.assertCanonicalFeePolicy(input.campaign, input.campaign.feePolicy);
           this.assertCaps(canonicalWallet.walletId, input.campaign, rollingCutoff, amount, totalRunExposure);
-          this.assertFleetDailyCap(mintClassForFleet, rollingCutoff, amount);
+          this.assertFleetDailyCap(input.campaign.chainId, mintClassForFleet, rollingCutoff, amount);
           const fee = input.campaign.feePolicy;
           const mintValueWei = input.campaign.mintPriceWei * BigInt(input.campaign.quantity);
           const l2ExecutionGasWei = fee.l2ExecutionGasBudgetWei ?? 0n;
@@ -744,7 +744,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       this.updateRunState(input.run.id, 'active', input.run);
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution_run', entityId: input.run.id, newState: 'active', actor: this.actor, reason: 'canonical admission persisted before engine side effect', policySnapshot: { kind: 'event', eventType: 'admission', eventData: { reservationCount: wallets.length } }, occurredAt: admissionIso });
       const notices: FleetNotice[] = [];
-      if (this.fleetPolicy && mintClassForFleet === 'paid' && this.fleetDailyExposure('paid', rollingCutoff) > this.fleetPolicy.paidHeadroomAlertWei) notices.push('PAID_DAILY_HEADROOM_USED');
+      const activeFleetPolicy = this.fleetPolicyFor(input.campaign.chainId);
+      if (activeFleetPolicy && mintClassForFleet === 'paid' && this.fleetDailyExposure(input.campaign.chainId, 'paid', rollingCutoff) > activeFleetPolicy.paidHeadroomAlertWei) notices.push('PAID_DAILY_HEADROOM_USED');
       this.db.exec('COMMIT');
       return { reservations, executions: [...executionIds.values()], ...(notices.length > 0 ? { notices } : {}) };
     } catch (error) {
@@ -1557,7 +1558,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   /** Run-level fleet checks that need no reservation rows; runs before any write. */
   private assertFleetRunLimits(input: CanonicalAdmissionInput, mintClass: 'free' | 'paid'): void {
-    const policy = this.fleetPolicy;
+    const policy = this.fleetPolicyFor(input.campaign.chainId);
     if (!policy) {
       if (input.run.mode === 'live') throw new Error('FLEET_SPEND_POLICY_REQUIRED');
       return;
@@ -1574,7 +1575,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   /** D-032: at most N wallets per paid mint, counting wallets already holding pending or settled exposure on this campaign. */
   private assertPaidWalletsPerMint(input: CanonicalAdmissionInput): void {
-    const policy = this.fleetPolicy;
+    const policy = this.fleetPolicyFor(input.campaign.chainId);
     if (!policy) return;
     const existing = this.db.prepare("SELECT DISTINCT wallet_id FROM spend_reservation WHERE campaign_id = ? AND status IN ('reserved', 'settled')").all(input.campaign.id) as Array<{ wallet_id: string }>;
     const walletIds = new Set(existing.map((row) => row.wallet_id));
@@ -1582,19 +1583,23 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (walletIds.size > policy.paidMaxWalletsPerMint) throw new Error('PAID_WALLET_LIMIT_EXCEEDED');
   }
 
-  private assertFleetDailyCap(mintClass: 'free' | 'paid', rollingCutoff: string, amount: bigint): void {
-    const policy = this.fleetPolicy;
+  private assertFleetDailyCap(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string, amount: bigint): void {
+    const policy = this.fleetPolicyFor(chainId);
     if (!policy) return;
     const cap = mintClass === 'free' ? policy.freeDailyCapWei : policy.paidDailyCapWei;
-    if (this.fleetDailyExposure(mintClass, rollingCutoff) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
+    if (this.fleetDailyExposure(chainId, mintClass, rollingCutoff) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
   }
 
-  /** Pending plus settled exposure across every wallet. A row with unknown mint value counts toward both classes. */
-  private fleetDailyExposure(mintClass: 'free' | 'paid', rollingCutoff: string): bigint {
-    const rows = this.db.prepare("SELECT COALESCE(reserved_amount_wei, amount_wei) AS amount, mint_value_wei FROM spend_reservation WHERE status = 'reserved' OR (status = 'settled' AND (julianday(settled_at) IS NULL OR julianday(settled_at) >= julianday(?)))").all(rollingCutoff) as Array<{ amount: string; mint_value_wei: string | null }>;
+  /** Pending plus recently settled exposure for the same chain. Unknown mint value counts toward both classes. */
+  private fleetDailyExposure(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string): bigint {
+    const rows = this.db.prepare("SELECT COALESCE(sr.reserved_amount_wei, sr.amount_wei) AS amount, sr.mint_value_wei FROM spend_reservation sr JOIN chain_profile cp ON cp.id = sr.chain_profile_id WHERE cp.chain_id = ? AND (sr.status = 'reserved' OR (sr.status = 'settled' AND (julianday(sr.settled_at) IS NULL OR julianday(sr.settled_at) >= julianday(?))))").all(chainId, rollingCutoff) as Array<{ amount: string; mint_value_wei: string | null }>;
     return rows
       .filter((row) => row.mint_value_wei === null || (mintClass === 'free' ? BigInt(row.mint_value_wei) === 0n : BigInt(row.mint_value_wei) > 0n))
       .reduce((total, row) => total + BigInt(row.amount), 0n);
+  }
+
+  private fleetPolicyFor(chainId: 1 | 8453 | 4663): FleetSpendPolicy | undefined {
+    return chainId === BASE_CHAIN_ID ? BASE_PERSONAL_LIVE_FLEET_POLICY : this.fleetPolicy;
   }
 
   private runExposure(runId: string): bigint {

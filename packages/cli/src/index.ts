@@ -730,7 +730,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const phrase = liveReadinessPhrase(wallets.length, chainId);
         if (args.action === 'status') {
           const operational = runtime.store.snapshot().runtime.operational;
-          process.stdout.write(`${json({ state: operational ? 'Recorded' : 'NotRecorded', message: operational ? (operational.expiresAt > new Date().toISOString() ? `Readiness was recorded and is good until ${operational.expiresAt}.` : `Readiness was recorded but expired at ${operational.expiresAt}; record it again before arming.`) : 'Readiness is not recorded. Recording checks the RPC, Telegram, the backup, the kill switch and your wallet file, then records the result for 15 minutes.', wallets, copyThisToRecord: `live-readiness record --confirm "${phrase}"` })}\n`);
+          process.stdout.write(`${json({ state: operational ? 'Recorded' : 'NotRecorded', message: operational ? (operational.expiresAt > new Date().toISOString() ? `Readiness was recorded and is good until ${operational.expiresAt}.` : `Readiness was recorded but expired at ${operational.expiresAt}; record it again before arming.`) : 'Readiness is not recorded. Recording checks the RPC, Telegram, the backup, the kill switch and your wallet file, then records the result for 15 minutes.', wallets, copyThisToRecord: `live-readiness record --chain ${args.chain} --confirm "${phrase}"` })}\n`);
           return;
         }
         if (turnkeyCustodyEnabled()) throw new Error('TURNKEY_CUSTODY_ACTIVE: this record is for a local wallet file; with Turnkey in use, live needs the Turnkey custody proof instead');
@@ -787,11 +787,9 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
       try {
         const chainId = args.chain === 'base' ? 8453 : 1;
         const wallets = checkWallets(args.wallets);
-        if (chainId === 8453 && wallets.length !== 1) throw new Error('BASE_FIRST_REHEARSAL_REQUIRES_ONE_WALLET');
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : chainId === 8453 ? await basePort() : await ethereumPort();
         const report = await checkDrop(port, args.contract, wallets, { simulate: true, ...(args.quantityLimit === undefined ? {} : { maxQuantity: args.quantityLimit }) });
         const plan = buildLivePlan(report, { killSwitchPresent: existsSync(DEFAULT_KILL_FILE), custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local', chainId });
-        if (chainId === 8453 && plan.quantity !== 1) throw new Error('BASE_FIRST_REHEARSAL_REQUIRES_ONE_NFT');
         const file = walletFile(args.walletFile);
         const readyWallets = assertLivePrepareAllowed({ plan, contract: args.contract, confirm: args.confirm, priorityFeeGwei: args.priorityFeeGwei, walletFileAddresses: await publicWallets(file), killSwitchPresent: existsSync(DEFAULT_KILL_FILE) });
         const fields = liveFreeCampaignFields({ quantity: plan.quantity, wallets: readyWallets.length, tipWei: parseGwei(args.priorityFeeGwei.toString()), chainId });

@@ -8,6 +8,13 @@ import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { assertBaseLiveAllowed } from './base-enablement.js';
 import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
 
+export function receiptAuthorizesSettlement(chainId: 1 | 8453 | 4663, receipt: Pick<ReceiptRecord, 'state' | 'finalityStage' | 'robinhoodFinality'>): boolean {
+  if (receipt.state !== 'Confirmed' && receipt.state !== 'Failed') return false;
+  if (chainId === 1) return true;
+  if (receipt.finalityStage !== 'ethereum_final') return false;
+  return chainId !== 4663 || receipt.robinhoodFinality === 'final';
+}
+
 export class ExecutionCoordinator {
   readonly ledger: SpendLedger;
   private readonly evidence: EvidenceService;
@@ -266,8 +273,8 @@ export class ExecutionCoordinator {
     for (const reservation of state.reservations.filter(item => item.runId === runId && item.status !== 'released')) {
       const walletAttempts = attempts.filter(attempt => attempt.wallet.toLowerCase() === reservation.wallet.toLowerCase());
       const confirmed = walletAttempts.find(attempt => attempt.state === 'Confirmed');
-      const receipt = confirmed && receipts.find(item => item.executionId === confirmed.executionId && item.finalityStage === 'ethereum_final' && (campaign.chainId !== 4663 || item.robinhoodFinality === 'final'));
-      const failedReceipt = receipts.find(item => item.state === 'Failed' && walletAttempts.some(attempt => attempt.executionId === item.executionId));
+      const receipt = confirmed && receipts.find(item => item.executionId === confirmed.executionId && item.state === 'Confirmed' && receiptAuthorizesSettlement(campaign.chainId, item));
+      const failedReceipt = receipts.find(item => item.state === 'Failed' && receiptAuthorizesSettlement(campaign.chainId, item) && walletAttempts.some(attempt => attempt.executionId === item.executionId));
       const reorgReceipt = receipts.find(item => item.state === 'Reorged' && walletAttempts.some(attempt => attempt.executionId === item.executionId));
       if (receipt || failedReceipt) this.setReservation(reservation, 'settled', (receipt ?? failedReceipt)!.actualSpendWei);
       else if (reorgReceipt) this.setReservation(reservation, 'reorged', reorgReceipt.actualSpendWei);
@@ -293,7 +300,7 @@ export class ExecutionCoordinator {
     if (new Set(executionIds).size !== executionIds.length) throw new Error('DUPLICATE_EXECUTION_ID');
     if (attempts.some(item => item.runId !== runId || !executionIds.includes(item.executionId)) || receipts.some(item => item.runId !== runId || !executionIds.includes(item.executionId))) throw new Error('INVALID_ENGINE_EXECUTION_FACTS');
     if (new Set(attempts.map(item => item.id)).size !== attempts.length || new Set(receipts.map(item => item.id)).size !== receipts.length) throw new Error('DUPLICATE_ENGINE_FACT_ID');
-    if (receipts.some(receipt => !['Confirmed', 'Reorged', 'Failed'].includes(receipt.state) || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined || receipt.actualSpendWei < 0n)) throw new Error('INVALID_RECEIPT_FACT');
+    if (receipts.some(receipt => !['Pending', 'Confirmed', 'Reorged', 'Failed'].includes(receipt.state) || (receipt.state === 'Pending' && (!allowUnfinalizedL2 || chainId === 1)) || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined || receipt.actualSpendWei < 0n)) throw new Error('INVALID_RECEIPT_FACT');
     if (chainId !== 1 && !allowUnfinalizedL2 && receipts.some(receipt => receipt.finalityStage !== 'ethereum_final')) throw new Error('L2_FINALITY_REQUIRED');
     if (chainId === 4663 && receipts.some(receipt => receipt.finalityStage === 'ethereum_final' && receipt.robinhoodFinality !== 'final')) throw new Error('ROBINHOOD_FINALITY_REQUIRED');
   }

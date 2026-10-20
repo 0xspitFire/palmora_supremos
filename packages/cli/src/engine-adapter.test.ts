@@ -1,8 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { assertWithinAdmittedExposure, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
+import { assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
 import { canonicalExecutionIdentity } from '@mint-bot/engine';
 
 const campaign = { mintPriceWei: 1_000n, quantity: 2 };
+
+describe('Base adapter wiring (D-057)', () => {
+  it('maps canonical chain 8453 into the Engine Base target', () => {
+    expect(chainName(8453)).toBe('base');
+  });
+
+  it('requires independent providers to agree on every settlement gas fact', () => {
+    const receipt = { blockHash: '0xabc', blockNumber: 10n, status: 'success', gasUsed: 20n, effectiveGasPrice: 30n };
+    expect(baseReceiptFactsAgree(receipt, { ...receipt, blockHash: '0xAbC' })).toBe(true);
+    for (const changed of [
+      { blockHash: '0xdef' },
+      { blockNumber: 11n },
+      { status: 'reverted' },
+      { gasUsed: 21n },
+      { effectiveGasPrice: 31n },
+    ]) expect(baseReceiptFactsAgree(receipt, { ...receipt, ...changed })).toBe(false);
+  });
+});
 
 describe('pre-sign exposure guard (T-010)', () => {
   it('allows a transaction that exactly matches the admitted value and fits the reservation', () => {

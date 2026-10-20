@@ -53,6 +53,14 @@ describe('Personal Live plan (read-only)', () => {
     const plan = buildLivePlan(report([row(1, 'ready')], { quantityPlan: { desired: 5, planned: 3, reduced: true, reason: 'reduced_for_fees', maxFeeGwei: '1.1', message: 'Planned 3 of 5 NFTs per wallet because fees are high.' } }), context);
     expect(plan.quantityNote).toContain('Planned 3 of 5');
   });
+
+  it('uses the Base policy and owner enablement procedure without permanently forcing first-proof quantity', () => {
+    const plan = buildLivePlan(report([row(1, 'ready')], { quantity: 4 }), { ...context, chainId: 8453 });
+    expect(plan).toMatchObject({ verdict: 'ready', quantity: 4, dailyBudgetEth: '0.0012' });
+    expect(plan.nextSteps.join(' ')).toContain('base-enable status');
+    expect(plan.nextSteps.join(' ')).toContain('--chain base');
+    expect(liveFreeCampaignFields({ quantity: 4, wallets: 1, tipWei: 100_000_000n, chainId: 8453 }).quantity).toBe(4);
+  });
 });
 
 describe('typed confirmation', () => {

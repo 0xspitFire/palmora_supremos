@@ -11,6 +11,7 @@ import type {
   ReservationSettlementComponents,
   SpendReservationProvider,
   SupportedChainId,
+  ChainConfig,
 } from './types.js';
 
 export type ExecutionGate = 'simulation' | 'admission' | 'sign' | 'broadcast' | 'provider';
@@ -35,6 +36,18 @@ function baseGrantIsCurrent(grant: BaseEnablementGrant | undefined, now: Date): 
   if (typeof grant !== 'object' || grant === null || grant.freeAllowed !== true || grant.paidAllowed !== false || typeof grant.expiresAt !== 'string') return false;
   const expires = Date.parse(grant.expiresAt);
   return Number.isFinite(expires) && expires > now.getTime();
+}
+
+/** Derive an executable Base profile only after the immutable owner grant passes the Engine gate. */
+export function authorizedBaseExecutionProfile(
+  config: ChainConfig,
+  dryRun: boolean,
+  grant: BaseEnablementGrant | undefined,
+  now: Date = new Date(),
+): ChainConfig {
+  if (config.chainId !== 8453) throw new LifecycleGateError('BASE_PROFILE_REQUIRED', 'admission', 'Base execution profile requires chain 8453');
+  assertDirectChainExecutionPolicy(8453, undefined, dryRun, undefined, now, grant);
+  return Object.freeze({ ...config, verificationStatus: 'verified' as const, executionEnabled: true });
 }
 
 /**
@@ -225,7 +238,7 @@ export function lifecycleStateForFinality(
   stage: FinalityStage,
   receiptStatus: 'success' | 'reverted',
 ): 'included' | 'posted' | 'ethereum_final' | 'failed' {
-  if (receiptStatus === 'reverted') return 'failed';
+  if (receiptStatus === 'reverted' && (chainId === 1 || stage === 'ethereum_final')) return 'failed';
   if (chainId === 4663 || chainId === 8453) {
     if (stage === 'ethereum_final') return 'ethereum_final';
     if (stage === 'posted') return 'posted';
@@ -235,11 +248,11 @@ export function lifecycleStateForFinality(
 
 export function shouldSettleReceipt(
   chainId: SupportedChainId,
-  receiptStatus: 'success' | 'reverted',
+  _receiptStatus: 'success' | 'reverted',
   finalityStage: FinalityStage,
 ): boolean {
-  if (receiptStatus === 'reverted') return true;
-  return chainId === 1 || finalityStage === 'ethereum_final';
+  if (chainId === 1) return true;
+  return finalityStage === 'ethereum_final';
 }
 
 /** Split authoritative receipt gas without counting the priority component twice. */

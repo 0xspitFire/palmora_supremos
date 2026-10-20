@@ -81,8 +81,9 @@ export function createCanonicalLifecycleStore(store: BackendStore): EngineLifecy
   };
 }
 
-function chainName(chainId: Campaign['chainId']): MintJobConfig['target']['chain'] {
+export function chainName(chainId: Campaign['chainId']): MintJobConfig['target']['chain'] {
   if (chainId === 1) return 'ethereum';
+  if (chainId === 8453) return 'base';
   if (chainId === 4663) return 'robinhood';
   throw new Error(`UNSUPPORTED_ENGINE_CHAIN:${chainId}`);
 }
@@ -98,6 +99,17 @@ export function paidRunMintValueCapEth(campaign: Campaign): number {
   const cap = asFiniteNumber(campaign.spendPolicy.maxRunWei, 'max_run_spend');
   if (cap <= 0) throw new Error('PAID_RUN_MINT_VALUE_CAP_REQUIRED');
   return cap;
+}
+
+export function baseReceiptFactsAgree(
+  primary: { blockHash: string; blockNumber: bigint; status: string; gasUsed: bigint; effectiveGasPrice: bigint },
+  fallback: { blockHash: string; blockNumber: bigint; status: string; gasUsed: bigint; effectiveGasPrice: bigint },
+): boolean {
+  return primary.blockHash.toLowerCase() === fallback.blockHash.toLowerCase()
+    && primary.blockNumber === fallback.blockNumber
+    && primary.status === fallback.status
+    && primary.gasUsed === fallback.gasUsed
+    && primary.effectiveGasPrice === fallback.effectiveGasPrice;
 }
 
 async function loadWallets(path: string): Promise<Array<{ index: number; address: Address }>> {
@@ -248,7 +260,7 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
         executionId,
         runId,
         ...(submittedAttemptId ? { transactionAttemptId: submittedAttemptId } : {}),
-        state: wallet.lifecycleState === 'reorged' ? 'Reorged' : failed ? 'Failed' : 'Confirmed',
+        state: wallet.lifecycleState === 'reorged' ? 'Reorged' : campaign.chainId === 8453 && pending ? 'Pending' : failed ? 'Failed' : 'Confirmed',
         ...((campaign.chainId === 4663 || campaign.chainId === 8453) && (wallet.finalityStage === 'soft' || wallet.finalityStage === 'posted' || wallet.finalityStage === 'ethereum_final') ? { finalityStage: wallet.finalityStage } : {}),
         ...(campaign.chainId === 4663 && robinhoodFinality(wallet.finalityStage) ? { robinhoodFinality: robinhoodFinality(wallet.finalityStage) } : {}),
         blockNumber: wallet.blockNumber,
@@ -411,7 +423,7 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
           try {
             const hash = attempt.hash as Hash;
             const [primaryReceipt, fallbackReceipt] = await Promise.all([client.getTransactionReceipt({ hash }), fallback.getTransactionReceipt({ hash })]);
-            if (primaryReceipt.blockHash.toLowerCase() !== fallbackReceipt.blockHash.toLowerCase() || primaryReceipt.status !== fallbackReceipt.status) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on receipt facts' };
+            if (!baseReceiptFactsAgree(primaryReceipt, fallbackReceipt)) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on receipt facts' };
             const [primaryFinality, fallbackFinality] = await Promise.all([
               primaryObserver.observe({ txHash: hash, txBlockNumber: primaryReceipt.blockNumber }),
               fallbackObserver.observe({ txHash: hash, txBlockNumber: fallbackReceipt.blockNumber }),
@@ -429,14 +441,15 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
             const stage = primaryFinality.stage;
             if (stage !== 'soft' && stage !== 'posted' && stage !== 'ethereum_final') return { result: 'unknown', attempts: [], receipts: [], reason: 'Base observer returned an invalid finality stage' };
             weakest = stage === 'soft' ? 'soft' : stage === 'posted' && weakest === 'final' ? 'posted' : weakest;
-            updatedAttempts.push({ ...attempt, state: primaryReceipt.status === 'success' && stage === 'ethereum_final' ? 'Confirmed' : primaryReceipt.status === 'reverted' ? 'Failed' : 'Submitted', updatedAt: new Date().toISOString() });
-            receipts.push({ id: `${attempt.executionId}:base:${primaryReceipt.blockHash}:${stage}`, executionId: attempt.executionId, runId: run.id, transactionAttemptId: attempt.id, state: primaryReceipt.status === 'success' ? 'Confirmed' : 'Failed', finalityStage: stage, finalitySource: 'base-independent-safe-finalized-heads', blockNumber: primaryReceipt.blockNumber, blockHash: primaryReceipt.blockHash, gasUsed: primaryReceipt.gasUsed, effectiveGasPrice: primaryReceipt.effectiveGasPrice, l1DataFeeWei: fees.l1DataFeeWei, operatorFeeWei: fees.operatorFeeWei, actualSpendWei: (primaryReceipt.status === 'success' ? intent.campaignSnapshot.mintPriceWei * BigInt(intent.campaignSnapshot.quantity) : 0n) + primaryReceipt.gasUsed * primaryReceipt.effectiveGasPrice + fees.l1DataFeeWei + fees.operatorFeeWei, observedAt: new Date().toISOString() });
+            const finalized = stage === 'ethereum_final';
+            updatedAttempts.push({ ...attempt, state: finalized ? (primaryReceipt.status === 'success' ? 'Confirmed' : 'Failed') : 'Submitted', updatedAt: new Date().toISOString() });
+            receipts.push({ id: `${attempt.executionId}:base:${primaryReceipt.blockHash}:${stage}`, executionId: attempt.executionId, runId: run.id, transactionAttemptId: attempt.id, state: finalized ? (primaryReceipt.status === 'success' ? 'Confirmed' : 'Failed') : 'Pending', finalityStage: stage, finalitySource: 'base-independent-safe-finalized-heads', blockNumber: primaryReceipt.blockNumber, blockHash: primaryReceipt.blockHash, gasUsed: primaryReceipt.gasUsed, effectiveGasPrice: primaryReceipt.effectiveGasPrice, l1DataFeeWei: fees.l1DataFeeWei, operatorFeeWei: fees.operatorFeeWei, actualSpendWei: (primaryReceipt.status === 'success' ? intent.campaignSnapshot.mintPriceWei * BigInt(intent.campaignSnapshot.quantity) : 0n) + primaryReceipt.gasUsed * primaryReceipt.effectiveGasPrice + fees.l1DataFeeWei + fees.operatorFeeWei, observedAt: new Date().toISOString() });
           } catch (error) {
             if (error instanceof Error && (error.message.startsWith('BASE_RECEIPT_') || error.message.startsWith('BASE_OPERATOR_'))) return { result: 'unknown', attempts: [], receipts: [], reason: error.message };
           }
         }
         if (receipts.length === 0) return { result: 'unknown', attempts: updatedAttempts, receipts, reason: 'Base receipt unavailable; outcome unresolved' };
-        if (receipts.some((receipt) => receipt.state === 'Failed')) return { result: 'failed', attempts: updatedAttempts, receipts };
+        if (receipts.some((receipt) => receipt.state === 'Failed' && receipt.finalityStage === 'ethereum_final')) return { result: 'failed', attempts: updatedAttempts, receipts };
         return { result: weakest, attempts: updatedAttempts, receipts };
       }
       if (intent.campaignSnapshot.chainId === 4663) {

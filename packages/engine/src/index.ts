@@ -161,6 +161,7 @@ export { mapChainStatus } from './reconciliation.js';
 export {
   LifecycleGateError,
   assertDirectChainExecutionPolicy,
+  authorizedBaseExecutionProfile,
   assertDurableReservationProvider,
   assertSimulationFresh,
   assertTimingWindow,

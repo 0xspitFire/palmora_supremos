@@ -73,6 +73,7 @@ import { createLogger, childLogger } from './logger.js';
 import { safeEndpointReference } from './endpoint-reference.js';
 import {
   assertDirectChainExecutionPolicy,
+  authorizedBaseExecutionProfile,
   assertDurableReservationProvider,
   assertSimulationFresh,
   assertTimingWindow,
@@ -527,8 +528,11 @@ export class MintEngine {
         // reference. Raw keys must never enter configuration or logs.
         flashbotsAuth = await buildFlashbotsAuthSigner('FLASHBOTS_KEY_PATH', scope, secretRoot);
       }
+      const broadcastChainConfig = chainId === 8453
+        ? authorizedBaseExecutionProfile(chainConfig, this.config.safety.dryRun, this.config.safety.baseGrant, this.now())
+        : chainConfig;
       const broadcaster = createBroadcaster(
-        chainConfig,
+        broadcastChainConfig,
         this.config.broadcast.mode,
         this.config.broadcast.rpcEndpoints,
         flashbotsAuth
@@ -937,7 +941,8 @@ export class MintEngine {
           receiptCanonical: true,
         });
         const lifecycleState = lifecycleStateForFinality(chainId, receipt.finalityStage, receipt.status);
-        const productSuccess = receipt.status === 'success' && (chainId === 1 || receipt.finalityStage === 'ethereum_final');
+        const authoritative = chainId === 1 || receipt.finalityStage === 'ethereum_final';
+        const productSuccess = receipt.status === 'success' && authoritative;
         const reconciliationState = reconciliation.state === 'matched'
           ? 'matched'
           : reconciliation.state === 'reorged' ? 'reorged' : 'ambiguous';
@@ -994,7 +999,7 @@ export class MintEngine {
         return {
           walletIndex,
           address: walletAddress,
-          status: productSuccess ? 'success' : receipt.status === 'reverted' ? 'failed' : 'timeout',
+          status: productSuccess ? 'success' : receipt.status === 'reverted' && authoritative ? 'failed' : 'timeout',
           txHash: receipt.txHash,
           nonce,
           blockNumber: receipt.blockNumber,
@@ -1015,7 +1020,7 @@ export class MintEngine {
           reconciliationState,
           durationMs: this.now().getTime() - startTime,
           error: receipt.status === 'reverted'
-            ? 'Transaction reverted on-chain'
+            ? authoritative ? 'Transaction reverted on-chain' : `${chainId === 8453 ? 'Base' : 'Robinhood'} revert is pending Ethereum finality`
             : productSuccess ? undefined : `${chainId === 8453 ? 'Base' : 'Robinhood'} finality is pending Ethereum finality`,
           simulation,
         };
