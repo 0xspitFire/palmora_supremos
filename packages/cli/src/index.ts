@@ -27,7 +27,7 @@ import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFr
 import { ENABLEMENT_DAYS, runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { BASE_ENABLEMENT_DAYS, runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
-import { createPersonalLiveProbes, liveReadinessPhrase } from './personal-live-cli.js';
+import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
 import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
 import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, recordWalletSimulations, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
 import { assertFeePolicyApplyAllowed, assertTipMatchesStoredPolicy, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
@@ -487,7 +487,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           maxRunWei: parseEther(args.maxSpendEth.toString()),
           dailyCapWei: parseEther(args.dailyCapEth.toString()),
           gasCeilingWei: parseEther(args.maxSpendEth.toString()),
-          broadcastMode: chainId === 1 ? 'flashbots' : 'sequencer',
+          broadcastMode: chainId === 4663 ? 'sequencer' : 'public',
           chainVerification: { chainId, status: chainId === 1 ? 'verified' : 'unverified', seaDropCompatible: chainId === 1 || chainId === 8453, endpointReference: chainId === 1 ? 'ETHEREUM_RPC_REFERENCE' : chainId === 8453 ? 'BASE_RPC_REFERENCE' : 'ROBINHOOD_RPC_REFERENCE' },
           mintPriceWei: 0n,
           feePolicy,
@@ -729,7 +729,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const wallets = await publicWallets(file);
         const phrase = liveReadinessPhrase(wallets.length, chainId);
         if (args.action === 'status') {
-          const operational = runtime.store.snapshot().runtime.operational;
+          const storedOperational = runtime.store.snapshot().runtime.operational;
+          const operational = readinessMatchesChain(storedOperational, chainId) ? storedOperational : undefined;
           process.stdout.write(`${json({ state: operational ? 'Recorded' : 'NotRecorded', message: operational ? (operational.expiresAt > new Date().toISOString() ? `Readiness was recorded and is good until ${operational.expiresAt}.` : `Readiness was recorded but expired at ${operational.expiresAt}; record it again before arming.`) : 'Readiness is not recorded. Recording checks the RPC, Telegram, the backup, the kill switch and your wallet file, then records the result for 15 minutes.', wallets, copyThisToRecord: `live-readiness record --chain ${args.chain} --confirm "${phrase}"` })}\n`);
           return;
         }
@@ -812,7 +813,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           maxRunWei: fields.maxRunWei,
           dailyCapWei: fields.dailyCapWei,
           gasCeilingWei: fields.gasCeilingWei,
-          broadcastMode: chainId === 1 ? 'public' : 'sequencer',
+          broadcastMode: 'public',
           chainVerification: { chainId, status: 'verified', seaDropCompatible: true, evidenceId: evidence.id, checkedAt: evidence.checkedAt, sourceBlock: evidence.sourceBlock, endpointReference: evidence.endpointIdentity },
           mintPriceWei: fields.mintPriceWei,
           feePolicy: fields.feePolicy,

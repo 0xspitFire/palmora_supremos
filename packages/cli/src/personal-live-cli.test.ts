@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { createPersonalLiveProbes, liveReadinessPhrase } from './personal-live-cli.js';
+import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
 
 const A = '0x1111111111111111111111111111111111111111';
 const B = '0x2222222222222222222222222222222222222222';
@@ -61,6 +61,14 @@ describe('the real checks behind live-readiness record (D-043)', () => {
   it('names the wallet count in the confirmation phrase', () => {
     expect(liveReadinessPhrase(6)).toBe('RECORD-LIVE-READINESS 6 wallets');
     expect(liveReadinessPhrase(6)).not.toBe(liveReadinessPhrase(2));
+  });
+
+  it('does not present readiness recorded for another chain', () => {
+    expect(readinessMatchesChain({ custody: { chainId: 8453 } }, 8453)).toBe(true);
+    expect(readinessMatchesChain({ custody: { chainId: 8453 } }, 1)).toBe(false);
+    expect(readinessMatchesChain({ custody: { chainId: 1 } }, 8453)).toBe(false);
+    expect(readinessMatchesChain({ custody: {} }, 1)).toBe(true);
+    expect(readinessMatchesChain(undefined, 1)).toBe(false);
   });
 
   it('counts the stored kill switch flag as well as the file', async () => {

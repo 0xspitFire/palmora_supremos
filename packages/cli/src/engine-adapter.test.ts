@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
-import { canonicalExecutionIdentity } from '@mint-bot/engine';
+import { assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, engineConfigFromCampaign, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
+import { canonicalExecutionIdentity, createBroadcaster } from '@mint-bot/engine';
 
 const campaign = { mintPriceWei: 1_000n, quantity: 2 };
 
@@ -19,6 +19,34 @@ describe('Base adapter wiring (D-057)', () => {
       { gasUsed: 21n },
       { effectiveGasPrice: 31n },
     ]) expect(baseReceiptFactsAgree(receipt, { ...receipt, ...changed })).toBe(false);
+  });
+
+  it('composes Base live execution as one send to the owner-bound primary RPC', async () => {
+    const baseCampaign = {
+      id: 'base-campaign', state: 'Draft', chainId: 8453, contract: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', strategy: 'seadrop-v1-public', quantity: 1, dryRun: false,
+      spendPolicy: { maxRunWei: 200_000_000_000_000n, dailyCapWei: 200_000_000_000_000n, gasCeilingWei: 200_000_000_000_000n },
+      chainVerification: { chainId: 8453, status: 'verified', seaDropCompatible: true, sourceBlock: 1n, endpointReference: 'BASE_RPC_URL' },
+      mintPriceWei: 0n,
+      feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, freeTotalSpendCapWei: 200_000_000_000_000n, l2ExecutionGasBudgetWei: 199_999_900_000_000n, l1DataGasBudgetWei: 0n, totalFeeBudgetWei: 200_000_000_000_000n },
+      broadcastMode: 'public', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+    } as const;
+    const config = engineConfigFromCampaign(baseCampaign, {
+      killSwitchFile: '/tmp/test-kill', secretRoot: '/tmp/test-secrets', logFile: '/tmp/test.log', maxFeePerGasGwei: 0.1, gasLimitPadding: 1.2, maxReplacementBumps: 0,
+      getState: () => ({}) as never, transact: async (mutate) => mutate({} as never),
+    }, false, 1);
+    expect(config.broadcast.mode).toBe('public');
+
+    const destinations: string[] = [];
+    const priorFetch = globalThis.fetch;
+    globalThis.fetch = (async (input) => {
+      destinations.push(String(input));
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'1'.repeat(64)}` }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      const broadcaster = createBroadcaster({ chainId: 8453, name: 'Base', blockTimeMs: 2_000, confirmationDepth: 1, rpcEndpoints: ['https://primary.invalid', 'https://fallback.invalid'], isL2: true, verificationStatus: 'verified', finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final', notes: 'test' }, executionEnabled: true }, config.broadcast.mode, []);
+      await broadcaster.broadcast(['0x02']);
+      expect(destinations).toEqual(['https://primary.invalid']);
+    } finally { globalThis.fetch = priorFetch; }
   });
 });
 

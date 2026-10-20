@@ -68,6 +68,7 @@ import type { FinalityObserver } from './finality-observer.js';
 import { LocalEncryptedSigner } from './signer.js';
 import { createBroadcaster } from './broadcasters/index.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
+import { assertBaseProviderAgreement, type BaseAgreementClient } from './base-provider-agreement.js';
 import { KillSwitch, SpendTracker } from './safety.js';
 import { createLogger, childLogger } from './logger.js';
 import { safeEndpointReference } from './endpoint-reference.js';
@@ -349,6 +350,14 @@ export class MintEngine {
       const wallets = allWallets.slice(0, this.config.fleet.maxWallets);
       engineLog.info({ walletCount: wallets.length }, 'Wallets loaded');
 
+      if (chainId === 8453 && !this.config.safety.dryRun) {
+        await assertBaseProviderAgreement(
+          publicClient as unknown as BaseAgreementClient,
+          baseFallbackClient as unknown as BaseAgreementClient,
+          wallets.map((wallet) => wallet.address),
+        );
+      }
+
       // ── 5. Preflight checks ─────────────────────────────────
       this.checkKill();
       const nonceManager = new NonceManagerImpl(publicClient);
@@ -515,6 +524,16 @@ export class MintEngine {
         `${fundedWallets.length}/${wallets.length} wallets funded`);
 
       engineLog.info({ event: 'simulation_passed', walletCount: simulations.size }, 'Per-wallet setup simulation complete');
+
+      // Re-check immediately before broadcaster construction so simulation or
+      // funding latency cannot turn an earlier agreement into stale authority.
+      if (chainId === 8453 && !this.config.safety.dryRun) {
+        await assertBaseProviderAgreement(
+          publicClient as unknown as BaseAgreementClient,
+          baseFallbackClient as unknown as BaseAgreementClient,
+          fundedWallets.map((wallet) => wallet.address),
+        );
+      }
 
       // ── 6. Create broadcaster ───────────────────────────────
       let flashbotsAuth = this.config.broadcast.flashbotsAuthSigner;

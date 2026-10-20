@@ -125,7 +125,7 @@ export class BackendApplication {
     if (input.chainId !== 1 && input.chainId !== 8453 && input.chainId !== 4663) throw new Error('CHAIN_EXECUTION_BLOCKED');
     if (input.broadcastMode === 'flashbots' && input.chainId !== 1) throw new Error('FLASHBOTS_ETHEREUM_ONLY');
     if (input.chainId === 4663 && input.broadcastMode !== 'sequencer') throw new Error('ROBINHOOD_SEQUENCER_REQUIRED');
-    if (input.chainId === 8453 && input.broadcastMode !== 'sequencer') throw new Error('BASE_SEQUENCER_REQUIRED');
+    if (input.chainId === 8453 && input.broadcastMode !== 'public') throw new Error('BASE_SINGLE_PRIMARY_RPC_REQUIRED');
     if (input.chainId === 8453 && input.quantity > 4) throw new Error('BASE_QUANTITY_LIMIT_EXCEEDED');
     if (input.chainId === 1 && input.broadcastMode === 'sequencer') throw new Error('SEQUENCER_ROBINHOOD_ONLY');
     if (input.chainVerification.chainId !== input.chainId) throw new Error('CHAIN_VERIFICATION_MISMATCH');

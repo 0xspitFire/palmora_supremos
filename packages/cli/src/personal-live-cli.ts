@@ -4,6 +4,16 @@ import { readFile } from 'node:fs/promises';
 import type { PublicClient } from 'viem';
 import type { PersonalLiveProbes } from '@mint-bot/backend';
 
+/** A readiness record is usable only for the chain named by its custody proof. */
+export function readinessMatchesChain(
+  operational: { custody?: { chainId?: 1 | 8453 } } | undefined,
+  chainId: 1 | 8453,
+): boolean {
+  if (!operational?.custody) return false;
+  // Historical Ethereum readiness records predate the explicit chain field.
+  return (operational.custody.chainId ?? 1) === chainId;
+}
+
 /**
  * The real checks behind `live-readiness record` (D-043). Each probe only reads: the RPC, the wallet file's bytes and
  * public addresses, Telegram's health endpoint, the backup status file, and whether the kill-switch file exists.

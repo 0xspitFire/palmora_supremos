@@ -330,13 +330,15 @@ function receiptState(state: string): AttemptRecord['state'] {
 }
 
 export function canonicalReceiptFinalityStage(chainId: 1 | 8453 | 4663, state: string, l2Finality?: AttemptRecord['robinhoodFinality'] | ReceiptRecord['finalityStage']): DatabaseReceiptRecord['finalityStage'] {
-  if (state !== 'Confirmed' && state !== 'Pending') return 'unknown';
   if (chainId === ROBINHOOD_CHAIN_ID || chainId === BASE_CHAIN_ID) {
+    if (state === 'Failed' && (l2Finality === 'final' || l2Finality === 'ethereum_final')) return 'ethereum_final';
+    if (state !== 'Confirmed' && state !== 'Pending') return 'unknown';
     if (l2Finality === 'soft') return 'soft';
     if (l2Finality === 'posted') return 'posted';
     if (l2Finality === 'final' || l2Finality === 'ethereum_final') return 'ethereum_final';
     return 'unknown';
   }
+  if (state !== 'Confirmed' && state !== 'Pending') return 'unknown';
   if (l2Finality === 'soft') return 'soft';
   if (l2Finality === 'posted') return 'posted';
   if (l2Finality === 'final' || l2Finality === 'ethereum_final') return 'ethereum_final';
@@ -686,7 +688,15 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         const outstanding = completed ? undefined : this.db.prepare(`SELECT 1 AS ok
             FROM spend_reservation sr
             JOIN chain_profile cp ON cp.id = sr.chain_profile_id
-            WHERE cp.chain_id = ? AND sr.status IN ('reserved', 'settled')
+            WHERE cp.chain_id = ? AND (
+              sr.status = 'reserved'
+              OR (sr.status = 'settled' AND NOT EXISTS (
+                SELECT 1 FROM transaction_receipt r
+                WHERE r.execution_id = sr.execution_id
+                  AND r.finality_stage = 'ethereum_final'
+                  AND r.status IN ('confirmed', 'reverted')
+              ))
+            )
             LIMIT 1`).get(BASE_CHAIN_ID);
         assertBaseFirstRehearsal({ completed: Boolean(completed), outstanding: Boolean(outstanding), walletCount: wallets.length, quantity: input.campaign.quantity });
       }

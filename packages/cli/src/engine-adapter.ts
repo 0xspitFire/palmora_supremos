@@ -175,7 +175,7 @@ export function baseGrantFrom(record: unknown, now: Date): BaseEnablementGrant |
   return valid ? Object.freeze({ expiresAt: valid.expiresAt, freeAllowed: true as const, paidAllowed: false as const }) : undefined;
 }
 
-function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
+export function engineConfigFromCampaign(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
   const chain = chainName(campaign.chainId);
   const robinhoodGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : undefined;
   const baseGrant = campaign.chainId === 8453 ? baseGrantFrom(options.baseEnablement?.(), new Date()) : undefined;
@@ -202,7 +202,9 @@ function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRu
     broadcast: {
       // Dry runs must not require relay credentials. Live Ethereum still
       // defaults to the Flashbots-backed auto route through the campaign.
-      mode: dryRun && campaign.chainId === 1 ? 'public' : campaign.broadcastMode ?? (campaign.chainId === 1 ? 'auto' : 'sequencer'),
+      // D-057 binds Base to one owner-approved primary RPC. The other Base
+      // endpoint is observation-only and must never receive the signed tx.
+      mode: campaign.chainId === 8453 ? 'public' : dryRun && campaign.chainId === 1 ? 'public' : campaign.broadcastMode ?? (campaign.chainId === 1 ? 'auto' : 'sequencer'),
       rpcEndpoints: [],
       blastParallel: false,
       secretScope: 'mainnet',
@@ -322,7 +324,7 @@ export function preSignReservationGate<R extends { status: string; amountWei: bi
 export function createMintEngineAdapter(options: MintEngineAdapterOptions): EngineAdapter {
   const run = async (campaign: Campaign, wallets: readonly string[], dryRun: boolean, runId: string, intentId?: string, reservationProvider?: SpendReservationProvider): Promise<ExecutionResult> => {
     await assertWalletSelection(options, wallets);
-    const config = makeConfig(campaign, options, dryRun, wallets.length);
+    const config = engineConfigFromCampaign(campaign, options, dryRun, wallets.length);
     const persistedRun = options.getState().runs.find((run) => run.id === runId);
     const engineOptions = {
       ...(reservationProvider ? { reservationProvider } : {}),

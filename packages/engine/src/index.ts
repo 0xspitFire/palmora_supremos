@@ -52,6 +52,8 @@ export { MintError, MintErrorType } from './types.js';
 // Engine
 export { MintEngine } from './mint-engine.js';
 export type { MintEngineOptions } from './mint-engine.js';
+export { assertBaseProviderAgreement } from './base-provider-agreement.js';
+export type { BaseAgreementClient } from './base-provider-agreement.js';
 
 // Chain config
 export { getChainConfig, getChainByName, getAllChains, resolveChainId, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS, OPENSEA_FEE_COLLECTOR } from './chains.js';

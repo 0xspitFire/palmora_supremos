@@ -69,7 +69,7 @@ export class ExecutionCoordinator {
       if (campaign.chainId === 4663 && campaign.broadcastMode !== 'sequencer') throw new Error('ROBINHOOD_SEQUENCER_REQUIRED');
       if (campaign.chainId === 4663 && campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), new Date());
       if (campaign.chainId === 8453) {
-        if (campaign.broadcastMode !== 'sequencer') throw new Error('BASE_SEQUENCER_REQUIRED');
+        if (campaign.broadcastMode !== 'public') throw new Error('BASE_SINGLE_PRIMARY_RPC_REQUIRED');
         if (campaign.quantity > 4) throw new Error('BASE_QUANTITY_LIMIT_EXCEEDED');
         if ((input.wallets ?? []).length > 6) throw new Error('BASE_FLEET_LIMIT_EXCEEDED');
         assertBaseLiveAllowed(campaign.feePolicy.kind, this.baseEnablement(), new Date());

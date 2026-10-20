@@ -33,6 +33,7 @@ describe('CanonicalStoreBridge', () => {
     expect(canonicalReceiptFinalityStage(8453, 'Confirmed')).toBe('unknown');
     expect(canonicalReceiptFinalityStage(8453, 'Confirmed', 'posted')).toBe('posted');
     expect(canonicalReceiptFinalityStage(8453, 'Confirmed', 'ethereum_final')).toBe('ethereum_final');
+    expect(canonicalReceiptFinalityStage(8453, 'Failed', 'ethereum_final')).toBe('ethereum_final');
   });
 
   it('rejects the JSON backend_state table as a live store', async () => {
@@ -613,6 +614,22 @@ describe('CanonicalStoreBridge', () => {
 
         const aboveCap = await armed(value, await campaign(value, BASE), [`0x${'9'.repeat(40)}`]);
         await expect(value.store.admitExecution(aboveCap.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+      } finally { await close(value); }
+    });
+
+    it('allows a bounded first-proof retry after an authoritative finalized revert', async () => {
+      const value = await fixture(BASE);
+      try {
+        const first = await armed(value, await campaign(value, BASE), [WALLET_ONE], [], '-reverted-proof');
+        const admission = await value.store.admitExecution(first.input);
+        const execution = admission.executions[0]!;
+        const txHash = `0x${'c'.repeat(64)}`;
+        value.db.prepare("INSERT INTO transaction_attempt (id, transaction_intent_id, endpoint, response_class, tx_hash, attempted_at, execution_id, chain_profile_id) VALUES (?, ?, 'base-primary', 'accepted', ?, ?, ?, ?)").run('base-reverted-attempt', execution.intentId, txHash, BASE_NOW, execution.executionId, `profile-${BASE}`);
+        value.db.prepare("INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, l1_data_fee_wei, operator_fee_wei, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, 'reverted', 1, ?, 1, '1', '1', '1', '1', 'ethereum_final', 'test-independent-providers', ?, ?)").run('base-reverted-receipt', 'base-reverted-attempt', txHash, `0x${'d'.repeat(64)}`, BASE_NOW, execution.executionId);
+        await value.store.settleExecutionComponents(admission.reservations[0]!.id, { actualMintValueWei: 0n, actualL2ExecutionGasWei: 1n, actualL1DataGasWei: 2n, authoritativeReceiptId: 'base-reverted-receipt' });
+
+        const retry = await armed(value, await campaign(value, BASE), [WALLET_TWO], [], '-retry-proof');
+        await expect(value.store.admitExecution(retry.input)).resolves.toMatchObject({ reservations: [{ wallet: WALLET_TWO }] });
       } finally { await close(value); }
     });
 

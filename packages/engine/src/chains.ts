@@ -23,7 +23,7 @@ const L2_STAGED_FINALITY: FinalityPolicy = {
 };
 
 import type { ChainConfig, FinalityPolicy, SupportedChainId } from './types.js';
-import { resolveChainEndpoints, readSecret, type SecretName } from './secrets.js';
+import { resolveChainEndpoints, type SecretName } from './secrets.js';
 
 /**
  * SeaDrop v1 singleton address — same across all EVM chains.
@@ -69,8 +69,9 @@ const CHAINS: Record<SupportedChainId, ChainConfig> = {
     isL2: true,
     verificationStatus: 'unverified',
     finalityPolicy: L2_STAGED_FINALITY,
-    // Phase 1 policy currently permits Ethereum only. Base remains inspectable
-    // until its sequencer configuration and confirmation policy are approved.
+    // Static execution remains disabled; a current D-057 owner grant derives
+    // the executable profile at runtime. Base broadcasts through one primary
+    // RPC and uses its independent fallback only for observation.
     executionEnabled: false,
   },
 
@@ -137,17 +138,7 @@ export async function resolveChainConfigFromSecrets(
   const refs = CHAIN_ENV_REFS[chainId];
   const endpoints = await resolveChainEndpoints(refs, scope, root);
 
-  let sequencerUrl: string | undefined = base.sequencerUrl;
-  if (chainId === 8453) {
-    try {
-      const configured = await readSecret('BASE_SEQUENCER_URL', scope, root);
-      sequencerUrl = configured || undefined;
-    } catch {
-      sequencerUrl = undefined;
-    }
-  }
-
-  return { ...base, rpcEndpoints: endpoints, sequencerUrl };
+  return { ...base, rpcEndpoints: endpoints };
 }
 
 /** Resolve a chain config by name, with secret-backed endpoints. */
