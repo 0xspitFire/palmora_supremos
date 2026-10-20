@@ -1,4 +1,4 @@
-import { MAX_FREE_TIP_WEI, PERSONAL_LIVE_FLEET_POLICY, formatEth } from '@mint-bot/backend';
+import { BASE_PERSONAL_LIVE_FLEET_POLICY, MAX_FREE_TIP_WEI, PERSONAL_LIVE_FLEET_POLICY, formatEth } from '@mint-bot/backend';
 import { parseEther } from 'viem';
 import type { DropCheckReport } from './drop-check.js';
 
@@ -12,6 +12,7 @@ export interface LivePlanContext {
   /** Is the kill-switch file present? Present means live runs are refused. null when it could not be checked. */
   killSwitchPresent: boolean | null;
   custody: 'local' | 'turnkey';
+  chainId?: 1 | 8453;
 }
 
 export interface LivePlan {
@@ -60,7 +61,8 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
 
   const perWalletWei = report.wallets.length > 0 && report.wallets[0]!.requiredEth ? toWei(report.wallets[0]!.requiredEth) : null;
   const totalWei = perWalletWei === null ? 0n : perWalletWei * BigInt(walletsReady.length);
-  const dailyBudgetWei = free ? PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei : PERSONAL_LIVE_FLEET_POLICY.paidDailyCapWei;
+  const fleetPolicy = context.chainId === 8453 ? BASE_PERSONAL_LIVE_FLEET_POLICY : PERSONAL_LIVE_FLEET_POLICY;
+  const dailyBudgetWei = free ? fleetPolicy.freeDailyCapWei : fleetPolicy.paidDailyCapWei;
   const within = perWalletWei === null ? null : totalWei <= dailyBudgetWei;
   if (within === false) blockers.push(`The most these wallets could spend (${formatEth(totalWei)} ETH) is above today's ${free ? 'free' : 'paid'} budget of ${formatEth(dailyBudgetWei)} ETH. Use fewer wallets.`);
 
@@ -135,10 +137,11 @@ export interface LiveFreeCampaignFields {
  * Numbers for a FREE Ethereum live campaign under the fee model of D-042: the whole per-wallet fee budget is the approved
  * free fee allowance (D-037), and the per-gas tip is separate and small. No mint value; the allowance is the only exposure.
  */
-export function liveFreeCampaignFields(args: { quantity: number; wallets: number; tipWei: bigint }): LiveFreeCampaignFields {
-  const allowance = PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei;
+export function liveFreeCampaignFields(args: { quantity: number; wallets: number; tipWei: bigint; chainId?: 1 | 8453 }): LiveFreeCampaignFields {
+  const policy = args.chainId === 8453 ? BASE_PERSONAL_LIVE_FLEET_POLICY : PERSONAL_LIVE_FLEET_POLICY;
+  const allowance = policy.freeFeeAllowanceWei;
   if (!Number.isSafeInteger(args.quantity) || args.quantity < 1) throw new Error('LIVE_QUANTITY_INVALID');
-  if (!Number.isSafeInteger(args.wallets) || args.wallets < 1 || BigInt(args.wallets) * allowance > PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei) throw new Error('LIVE_WALLET_COUNT_EXCEEDS_DAILY_BUDGET');
+  if (!Number.isSafeInteger(args.wallets) || args.wallets < 1 || BigInt(args.wallets) * allowance > policy.freeDailyCapWei) throw new Error('LIVE_WALLET_COUNT_EXCEEDS_DAILY_BUDGET');
   if (args.tipWei <= 0n || args.tipWei > MAX_FREE_TIP_WEI || args.tipWei >= allowance) throw new Error('LIVE_TIP_OUT_OF_RANGE');
   return {
     quantity: args.quantity,

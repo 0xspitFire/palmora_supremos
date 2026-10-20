@@ -76,11 +76,11 @@ describe('adapter wiring (T-010)', () => {
   });
 });
 
-describe('free-mint reserve caps per chain (D-042)', () => {
-  it('follows the approved fleet policy on Ethereum and leaves every other chain on the strict engine default', () => {
+describe('free-mint reserve caps per chain (D-042, D-057)', () => {
+  it('reports the approved Ethereum and Base policies while leaving Robinhood on its Engine default', () => {
     expect(freeMintReserveCapsFor(1)).toEqual({ perWalletCapWei: 400_000_000_000_000n, activePeriodCapWei: 2_400_000_000_000_000n });
     expect(freeMintReserveCapsFor(4663)).toBeUndefined();
-    expect(freeMintReserveCapsFor(8453)).toBeUndefined();
+    expect(freeMintReserveCapsFor(8453)).toEqual({ perWalletCapWei: 200_000_000_000_000n, activePeriodCapWei: 1_200_000_000_000_000n });
     expect(freeMintReserveCapsFor(0)).toBeUndefined();
   });
 });

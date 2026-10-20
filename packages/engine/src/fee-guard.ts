@@ -52,6 +52,8 @@ export type FreeMintSpendVerdict =
 
 export const FREE_MINT_PER_WALLET_RESERVE_CAP_WEI = 200_000_000_000_000n; // 0.0002 ETH
 export const FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI = 2_000_000_000_000_000n; // 0.002 ETH
+export const BASE_FREE_MINT_PER_WALLET_RESERVE_CAP_WEI = 200_000_000_000_000n; // 0.0002 ETH (D-057)
+export const BASE_FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI = 1_200_000_000_000_000n; // 0.0012 ETH (D-057)
 
 export type FreeMintReserveVerdict =
   | { allowed: true; perWalletCapWei: bigint; activePeriodCapWei: bigint }
@@ -68,6 +70,12 @@ export const DEFAULT_FREE_MINT_RESERVE_CAPS: FreeMintReserveCaps = Object.freeze
   activePeriodCapWei: FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI,
 });
 
+/** Base is pinned in the Engine so a caller cannot widen D-057 through config. */
+export const BASE_FREE_MINT_RESERVE_CAPS: FreeMintReserveCaps = Object.freeze({
+  perWalletCapWei: BASE_FREE_MINT_PER_WALLET_RESERVE_CAP_WEI,
+  activePeriodCapWei: BASE_FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI,
+});
+
 /**
  * Validate independent gas reservations against the FREE-mint caps (T-025, D-042). The caps come from the caller
  * per chain; a missing or invalid cap falls back to the strict default, so a mistake can only refuse more.
@@ -79,11 +87,13 @@ export function effectiveFreeMintReserveCaps(caps: FreeMintReserveCaps | undefin
 }
 
 /**
- * The caps the engine uses for one job (D-042). Only Ethereum may use caps the caller supplies, and they are validated;
- * every other chain gets the strict default no matter what is passed.
+ * The caps the engine uses for one job (D-042, D-057). Ethereum may use validated caller caps. Base always uses its
+ * tighter, Engine-pinned D-057 caps. Robinhood always uses the strict default. Caller input can never widen an L2 cap.
  */
 export function freeMintReserveCapsForChain(chain: 'ethereum' | 'base' | 'robinhood', supplied: FreeMintReserveCaps | undefined): FreeMintReserveCaps {
-  return effectiveFreeMintReserveCaps(chain === 'ethereum' ? supplied : undefined);
+  if (chain === 'ethereum') return effectiveFreeMintReserveCaps(supplied);
+  if (chain === 'base') return BASE_FREE_MINT_RESERVE_CAPS;
+  return DEFAULT_FREE_MINT_RESERVE_CAPS;
 }
 
 /** True when admitting this wallet's reserve would take the run's total free-mint reserve above the run cap. */

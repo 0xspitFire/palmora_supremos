@@ -30,6 +30,9 @@ describe('CanonicalStoreBridge', () => {
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'posted')).toBe('posted');
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'final')).toBe('ethereum_final');
     expect(canonicalReceiptFinalityStage(ETHEREUM, 'Confirmed')).toBe('ethereum_final');
+    expect(canonicalReceiptFinalityStage(8453, 'Confirmed')).toBe('unknown');
+    expect(canonicalReceiptFinalityStage(8453, 'Confirmed', 'posted')).toBe('posted');
+    expect(canonicalReceiptFinalityStage(8453, 'Confirmed', 'ethereum_final')).toBe('ethereum_final');
   });
 
   it('rejects the JSON backend_state table as a live store', async () => {
@@ -398,7 +401,7 @@ describe('CanonicalStoreBridge', () => {
       await value.store.persistEngineAttempt({ id: 'staged-attempt', executionId, transactionIntentId, endpoint: 'provider', responseClass: 'accepted', txHash, nonce: 9, attemptedAt: NOW });
       await expect(value.store.persistEngineReceipt({ id: 'invalid-status-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'invented', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, observedAt: NOW })).rejects.toThrow('LIFECYCLE_RECEIPT_STATUS_INVALID');
       await value.store.persistEngineReceipt({ id: 'staged-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'pending', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, finalityStage: 'soft', observedAt: NOW });
-      expect(value.db.prepare("SELECT status, finality_stage FROM transaction_receipt WHERE id = 'staged-receipt'").get()).toEqual({ status: 'pending', finality_stage: 'unknown' });
+      expect(value.db.prepare("SELECT status, finality_stage FROM transaction_receipt WHERE id = 'staged-receipt'").get()).toEqual({ status: 'pending', finality_stage: 'soft' });
       value.store.close();
       const reopenedDb = openDatabase(join(value.directory, 'state.sqlite'));
       reopened = new CanonicalStoreBridge(reopenedDb, { now: () => new Date(NOW) });

@@ -4,7 +4,7 @@ import type { AlertDeliveryRecord, AlertRecord, DomainEventRecord, FinalityObser
 import { ReadModels } from './read-models.js';
 import type { ActiveExecutionRow, ChainVerificationRow, DuplicateNonceIdentityRow, OrphanReservationRow, PendingReconciliationRow, ReadinessRow, ReorgExposureRow, ReplacementExposureRow, StaleSimulationRow } from './read-models.js';
 import type { AlertRow, EventRow, FinalityObservationView, JobRow, OpportunityDetailRow, SpendSummaryRow, WalletMetadataRow } from './phase2.js';
-import type { AuditEventRecord, ChainVerificationRecord, RobinhoodEnablementInput, RobinhoodEnablementRow, ExecutionRecord, ExecutionRunRecord, ReceiptRecord, ReconciliationRecord, ReorgEventRecord, ReorgResolutionRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
+import type { AuditEventRecord, ChainVerificationRecord, RobinhoodEnablementInput, RobinhoodEnablementRow, BaseEnablementInput, BaseEnablementRow, ExecutionRecord, ExecutionRunRecord, ReceiptRecord, ReconciliationRecord, ReorgEventRecord, ReorgResolutionRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
 import { SpendReservations } from './spend-reservations.js';
 import type { SettlementComponents } from './spend-reservations.js';
 
@@ -100,6 +100,9 @@ export class SqliteBackendStore implements BackendStore {
   public enableRobinhood(record: RobinhoodEnablementInput, chain: { chainProfileId: string; verificationId: string; sequencerEndpointReference: string; archiveEndpointReference: string }): void { this.repository.enableRobinhood(record, chain); }
   public latestRobinhoodEnablement(): RobinhoodEnablementRow | undefined { return this.repository.latestRobinhoodEnablement(); }
   public disableRobinhoodIfNotEnabled(now: Date): boolean { return this.repository.disableRobinhoodIfNotEnabled(now); }
+  public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string }): void { this.repository.enableBase(record, chain); }
+  public latestBaseEnablement(): BaseEnablementRow | undefined { return this.repository.latestBaseEnablement(); }
+  public disableBaseIfNotEnabled(now: Date): boolean { return this.repository.disableBaseIfNotEnabled(now); }
   public recordRetentionEvidence(record: RetentionEvidenceRecord): void { this.repository.recordRetentionEvidence(record); }
   public settleExecution(id: string, mintValueWei: bigint, l2ExecutionGasWei: bigint, l1DataGasWei: bigint): void { this.reservations.settleExecution(id, mintValueWei, l2ExecutionGasWei, l1DataGasWei); }
   public settleExecutionComponents(id: string, components: SettlementComponents, at?: Date): void { this.reservations.settleExecutionComponents(id, components, at); }

@@ -100,6 +100,9 @@ describe('Gate 3 lifecycle boundaries', () => {
     expect(shouldSettleReceipt(4663, 'success', 'soft')).toBe(false);
     expect(shouldSettleReceipt(4663, 'success', 'posted')).toBe(false);
     expect(shouldSettleReceipt(4663, 'success', 'ethereum_final')).toBe(true);
+    expect(shouldSettleReceipt(8453, 'success', 'soft')).toBe(false);
+    expect(shouldSettleReceipt(8453, 'success', 'posted')).toBe(false);
+    expect(shouldSettleReceipt(8453, 'success', 'ethereum_final')).toBe(true);
     expect(shouldSettleReceipt(1, 'reverted', 'confirmed')).toBe(true);
     const components = actualSettlementComponents(100n, 7n, 20n);
     expect(components.actualL2ExecutionGasWei + (components.actualPriorityFeeComponentWei ?? 0n) + components.actualL1DataGasWei).toBe(107n);
@@ -155,9 +158,12 @@ describe('Robinhood enablement grant (D-040, Key 2): refused unless a current ow
     }
   });
 
-  it('does not touch other chains', () => {
+  it('does not touch Ethereum and independently gates Base', () => {
     expect(() => assertDirectChainExecutionPolicy(1, 1n, false, undefined, now)).not.toThrow();
-    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, current, now)).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, false, undefined, now)).toThrowError(/Base live execution/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, false, undefined, now, { expiresAt: current.expiresAt, freeAllowed: true, paidAllowed: false })).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, undefined, now, { expiresAt: current.expiresAt, freeAllowed: true, paidAllowed: false })).toThrowError(/Paid Base/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, true, undefined, now)).not.toThrow();
   });
 });
 
@@ -168,7 +174,7 @@ describe('the engine hands its Robinhood grant to the policy at every check', ()
     const calls = source.match(/assertDirectChainExecutionPolicy\(/g)?.length ?? 0;
     const granted = source.match(/this\.config\.safety\.robinhoodGrant/g)?.length ?? 0;
     expect(calls).toBe(5);
-    expect(granted).toBe(5);
+    expect(granted).toBe(6);
     expect(source).not.toMatch(/process\.env[^\n]*(ROBINHOOD|GRANT)/i);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_FREE_MINT_RESERVE_CAPS, effectiveFreeMintReserveCaps, exceedsRunReserveCap, freeMintReserveCapsForChain, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, validateFeeBudget, assertPriorityFeeIsNotBudget, validateFreeMintReserve, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget } from './fee-guard.js';
+import { BASE_FREE_MINT_RESERVE_CAPS, DEFAULT_FREE_MINT_RESERVE_CAPS, effectiveFreeMintReserveCaps, exceedsRunReserveCap, freeMintReserveCapsForChain, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, validateFeeBudget, assertPriorityFeeIsNotBudget, validateFreeMintReserve, validateFreeMintSpend, paidMintExecutionBlock, validatePaidQuantity, validatePaidGasExposure, replacementPriorityBudget } from './fee-guard.js';
 
 describe('validateFeeBudget', () => {
   it('accepts a budget that covers gas + value as worst-case total', () => {
@@ -135,11 +135,12 @@ describe('validateFreeMintReserve with per-chain caps (D-042)', () => {
     expect(effectiveFreeMintReserveCaps({ perWalletCapWei: 10n ** 18n, activePeriodCapWei: 1n })).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
   });
 
-  it('applies supplied caps on Ethereum only; Robinhood and Base stay strict whatever is passed (the gate the engine uses)', () => {
+  it('uses caller caps only on Ethereum and pins each L2 policy inside the Engine', () => {
     expect(freeMintReserveCapsForChain('ethereum', ETHEREUM_CAPS)).toBe(ETHEREUM_CAPS);
     expect(freeMintReserveCapsForChain('ethereum', undefined)).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
     expect(freeMintReserveCapsForChain('robinhood', ETHEREUM_CAPS)).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
-    expect(freeMintReserveCapsForChain('base', ETHEREUM_CAPS)).toBe(DEFAULT_FREE_MINT_RESERVE_CAPS);
+    expect(freeMintReserveCapsForChain('base', ETHEREUM_CAPS)).toBe(BASE_FREE_MINT_RESERVE_CAPS);
+    expect(freeMintReserveCapsForChain('base', undefined)).toEqual({ perWalletCapWei: 200_000_000_000_000n, activePeriodCapWei: 1_200_000_000_000_000n });
   });
 
   it('refuses the wallet that would take the run past the run cap and allows the one that reaches it exactly', () => {

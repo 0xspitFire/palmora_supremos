@@ -22,6 +22,8 @@ export interface CustodyReadiness {
   keystoreDigest?: string;
   wallets?: string[];
   confirmedBy?: string;
+  /** Required for attended Base custody so Ethereum evidence cannot be replayed cross-chain. */
+  chainId?: 1 | 8453;
 }
 
 /** Where a live run is happening, so a `local-personal-live` record can be judged against it (D-043). */
@@ -54,10 +56,12 @@ function assertReference(value: string, code: string): void {
  */
 function assertPersonalLiveLocalCustody(evidence: CustodyReadiness, now: Date, expected: CustodyPolicyBinding | undefined, personalLive: PersonalLiveContext | undefined): void {
   if (!personalLive || expected) throw new Error('CUSTODY_PROVIDER_UNAPPROVED');
-  if (personalLive.chainId !== 1) throw new Error('CUSTODY_PERSONAL_LIVE_ETHEREUM_ONLY');
+  if (personalLive.chainId !== 1 && personalLive.chainId !== 8453) throw new Error('CUSTODY_PERSONAL_LIVE_CHAIN_UNAPPROVED');
+  if (personalLive.chainId === 8453 && evidence.chainId !== 8453) throw new Error('CUSTODY_BASE_CHAIN_BINDING_REQUIRED');
   assertReference(evidence.providerIdentity, 'CUSTODY_PROVIDER_IDENTITY_REQUIRED');
   assertReference(evidence.policyReference, 'CUSTODY_POLICY_REFERENCE_REQUIRED');
   if (!/^personal-live[:\/-]/i.test(evidence.policyReference)) throw new Error('CUSTODY_POLICY_PROVIDER_MISMATCH');
+  if (personalLive.chainId === 8453 && !/^personal-live[:\/-]base[:\/-]/i.test(evidence.policyReference)) throw new Error('CUSTODY_BASE_POLICY_BINDING_REQUIRED');
   if (!DIGEST.test(evidence.policyDigest) || !evidence.keystoreDigest || !DIGEST.test(evidence.keystoreDigest)) throw new Error('CUSTODY_POLICY_DIGEST_REQUIRED');
   if (evidence.policyStatus !== 'approved') throw new Error('CUSTODY_POLICY_NOT_APPROVED');
   if (evidence.healthStatus !== 'healthy') throw new Error('CUSTODY_HEALTH_NOT_READY');

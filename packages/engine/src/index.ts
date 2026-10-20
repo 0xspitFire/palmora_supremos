@@ -7,6 +7,7 @@
 // Core types
 export type {
   RobinhoodEnablementGrant,
+  BaseEnablementGrant,
   SupportedChainId,
   BroadcastMode,
   ChainConfig,
@@ -105,8 +106,8 @@ export { NonceManagerImpl } from './nonce-manager.js';
 // Receipt watcher
 export { ReceiptWatcherImpl } from './receipt-watcher.js';
 export { ReceiptReorgedError, ReceiptTimeoutError } from './receipt-watcher.js';
-export { EthereumFinalityObserver, RobinhoodFinalityObserver } from './finality-observer.js';
-export type { FinalityObserver, FinalityObservation, FinalitySources, RobinhoodFinalitySources } from './finality-observer.js';
+export { BaseFinalityObserver, EthereumFinalityObserver, IndependentBaseFinalityObserver, RobinhoodFinalityObserver } from './finality-observer.js';
+export type { BaseFinalitySources, FinalityObserver, FinalityObservation, FinalitySources, RobinhoodFinalitySources } from './finality-observer.js';
 
 // Read-only Phase 2 chain facts
 export {
@@ -177,6 +178,8 @@ export type { ExecutionGate, SubmissionDisposition } from './lifecycle.js';
 export type { RobinhoodGateEvidence, RobinhoodGateResult } from './robinhood-gate.js';
 export type { SequencerObservation, RpcObservation, SequencerCorrelation } from './sequencer-correlation.js';
 export type { ReconciliationInput, ReconciliationAction, ExactChainStatus } from './reconciliation.js';
+export { BASE_GAS_PRICE_ORACLE, BASE_L1_BLOCK, BASE_FEE_SAFETY_BPS, applyBaseFeeSafetyMargin, baseOperatorFeeWei, baseReceiptFees, quoteBaseFeeBound, readBaseOperatorFee } from './base-fees.js';
+export type { BaseFeeBound, BaseReceiptFeeFields } from './base-fees.js';
 
 // Logger
 export { createLogger, childLogger } from './logger.js';

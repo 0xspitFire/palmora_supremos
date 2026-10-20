@@ -1,11 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPublicClient, http, parseAbi, type Address, type Hex } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { FinalityObserver } from './finality-observer.js';
-import type { MintJobConfig, Signer, SpendReservation, SpendReservationProvider, TransactionIntent, EngineLifecycleStore } from './types.js';
+import type { BaseEnablementGrant, MintJobConfig, RobinhoodEnablementGrant, Signer, SpendReservation, SpendReservationProvider, TransactionIntent, EngineLifecycleStore } from './types.js';
 
 /**
  * Bot-path rehearsal on a local Anvil fork (Robinhood step E2, T-022, D-038, owner option 2).
@@ -24,10 +24,13 @@ import type { MintJobConfig, Signer, SpendReservation, SpendReservationProvider,
  *   REHEARSAL_MAX_FEE_GWEI   optional max fee per gas for the engine (default 0.8, must stay above the fork's base fee)
  */
 const rpcUrl = process.env.ANVIL_REHEARSAL_RPC_URL;
-const chainName = (process.env.REHEARSAL_CHAIN ?? 'ethereum') as 'ethereum' | 'robinhood';
+const chainName = (process.env.REHEARSAL_CHAIN ?? 'ethereum') as 'ethereum' | 'base' | 'robinhood';
 const nft = process.env.REHEARSAL_NFT as Address | undefined;
 const paidMode = process.env.REHEARSAL_PAID === 'true';
-const chainId = chainName === 'robinhood' ? 4663 : 1;
+const chainId = chainName === 'robinhood' ? 4663 : chainName === 'base' ? 8453 : 1;
+const rehearsalNow = process.env.REHEARSAL_NOW_UNIX && /^\d+$/.test(process.env.REHEARSAL_NOW_UNIX)
+  ? new Date(Number(process.env.REHEARSAL_NOW_UNIX) * 1000)
+  : undefined;
 
 const isLoopback = (url: string | undefined): boolean => {
   if (!url) return false;
@@ -53,10 +56,10 @@ vi.mock('./lifecycle.js', async (importOriginal) => {
   return {
     ...actual,
     // Test process only and loopback fork only. Paid is admitted only for the explicit D-054 rehearsal process.
-    assertDirectChainExecutionPolicy: (id: number, value: bigint | undefined, dryRun: boolean): void => {
+    assertDirectChainExecutionPolicy: (id: number, value: bigint | undefined, dryRun: boolean, grant?: RobinhoodEnablementGrant, now?: Date, baseGrant?: BaseEnablementGrant): void => {
       // `value` is undefined only for the early check made before the drop is read; the later check carries the real price.
       if (id === 4663 && process.env.REHEARSAL_CHAIN === 'robinhood' && isLoopback(process.env.ANVIL_REHEARSAL_RPC_URL) && (value === undefined || value === 0n || process.env.REHEARSAL_PAID === 'true')) return;
-      return actual.assertDirectChainExecutionPolicy(id as never, value, dryRun);
+      return actual.assertDirectChainExecutionPolicy(id as never, value, dryRun, grant, now, baseGrant);
     },
   };
 });
@@ -134,6 +137,7 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
   const directory = mkdtempSync(join(tmpdir(), 'mintbot-rehearsal-'));
   const accounts = [privateKeyToAccount(generatePrivateKey()), privateKeyToAccount(generatePrivateKey())];
   let client: ReturnType<typeof createPublicClient>;
+  let cleanSnapshot: unknown;
 
   const config = (killSwitchFile: string, quantity = 1): MintJobConfig => ({
     target: { chain: chainName, contract: nft!, strategy: 'seadrop-v1-public', quantity, campaignId: 'rehearsal-campaign', policyRef: 'rehearsal' },
@@ -141,8 +145,18 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     timing: { mintStartUnix: 'auto', armBeforeMs: 60_000 },
     // The free-mint reserve cap (0.0002 ETH per wallet) bounds padded gas x max fee, so the fee is kept low here.
     fees: { maxFeePerGasGwei: Number(process.env.REHEARSAL_MAX_FEE_GWEI ?? '0.8'), maxPriorityFeePerGasGwei: 0.05, gasLimitPadding: 1.3 },
-    safety: { maxSpendEth: 0.01, dailySpendCapEth: 0.01, maxReplacementBumps: 0, dryRun: false, killSwitchFile },
-    broadcast: { mode: 'public', rpcEndpoints: [rpcUrl!], blastParallel: false },
+    safety: {
+      maxSpendEth: chainName === 'base' ? 0.0002 : 0.01,
+      dailySpendCapEth: chainName === 'base' ? 0.0012 : 0.01,
+      maxReplacementBumps: 0,
+      dryRun: false,
+      killSwitchFile,
+      ...(chainName === 'base' ? {
+        freeMintReserveCaps: { perWalletCapWei: 200_000_000_000_000n, activePeriodCapWei: 1_200_000_000_000_000n },
+        baseGrant: { expiresAt: '2099-01-01T00:00:00.000Z', freeAllowed: true as const, paidAllowed: false as const },
+      } : {}),
+    },
+    broadcast: { mode: 'public', rpcEndpoints: chainName === 'base' ? [rpcUrl!, rpcUrl!.replace('127.0.0.1', 'localhost')] : [rpcUrl!], blastParallel: false },
     observability: { logLevel: 'error', logFile: join(directory, 'engine.log') },
   });
   const killFile = (name: string): string => join(directory, name);
@@ -157,17 +171,23 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     for (const account of accounts) await rpc('anvil_setBalance', [account.address, '0x56BC75E2D63100000']); // 100 ETH on the fork only
     // A fresh Orbit-chain fork has no excess-blob-gas value in its head block, which makes Anvil refuse eth_call at 'latest'; one mined block fixes that.
     await rpc('evm_mine');
+    cleanSnapshot = await rpc('evm_snapshot');
+  });
+  beforeEach(async () => {
+    if (cleanSnapshot !== undefined) await rpc('evm_revert', [cleanSnapshot]);
+    cleanSnapshot = await rpc('evm_snapshot');
   });
   afterAll(() => { if (miner) clearInterval(miner); rmSync(directory, { recursive: true, force: true }); });
 
   // A fork keeps the base fee it inherited, which can sit above the engine's capped max fee; pin it low on the fork only.
   const lowBaseFee = async (): Promise<void> => { await rpc('anvil_setNextBlockBaseFeePerGas', ['0x2faf080']); await rpc('evm_mine'); };
 
-  async function run(signer: Signer, provider: SpendReservationProvider, store: EngineLifecycleStore, kill: string, runId: string, observer: FinalityObserver | undefined = chainId === 4663 ? finality('ethereum_final') : undefined) {
+  async function run(signer: Signer, provider: SpendReservationProvider, store: EngineLifecycleStore, kill: string, runId: string, observer: FinalityObserver | undefined = chainId === 4663 || chainId === 8453 ? finality('ethereum_final') : undefined) {
     await lowBaseFee();
     const { MintEngine } = await import('./mint-engine.js');
     return new MintEngine(config(kill), {
       reservationProvider: provider, lifecycleStore: store, signerFactory: async () => signer, ...(observer ? { finalityObserver: observer } : {}), runId, intentId: `${runId}-intent`, requestId: runId,
+      ...(rehearsalNow ? { now: () => rehearsalNow } : {}),
       identityForWallet: (wallet, id) => ({ executionId: `${id}:wallet:${wallet.index}`, transactionIntentId: `${id}:intent:${wallet.index}` }) as never,
     }).execute('rehearsal-not-a-secret');
   }
@@ -178,7 +198,7 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     const { store, attempts, receipts } = lifecycleStore();
     const before = await Promise.all(accounts.map((account) => balanceOf(account.address)));
     const result = await run(signer, provider, store, killFile('none-1'), 'rehearsal-1');
-    expect(signer.signed.sort()).toEqual([0, 1]);
+    expect(signer.signed.sort(), JSON.stringify(result.walletResults.map((wallet) => ({ status: wallet.status, error: wallet.error })))).toEqual([0, 1]);
     expect(result.walletResults.map((wallet) => wallet.status)).toEqual(['success', 'success']);
     expect(result.successCount).toBe(2);
     const after = await Promise.all(accounts.map((account) => balanceOf(account.address)));
@@ -233,7 +253,7 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     expect(await balanceOf(accounts[0]!.address)).toBe(afterFirst);
   }, 60_000);
 
-  it.skipIf(chainName !== 'robinhood')('Robinhood: a receipt at soft finality is not settled as final', async () => {
+  if (chainName === 'robinhood') it('Robinhood: a receipt at soft finality is not settled as final', async () => {
     const signer = new RehearsalSigner(accounts);
     const { provider, records } = reservationProvider();
     const { store } = lifecycleStore();

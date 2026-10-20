@@ -49,8 +49,9 @@ export function reconcileTransaction(input: ReconciliationInput): {
     if (input.observedHash && input.originalHash && input.observedHash.toLowerCase() !== input.originalHash.toLowerCase()) {
       return { action: 'record-replacement', reason: 'different hash observed for the same sender and nonce' };
     }
-    if (input.chainId === 4663 && input.finalityStage !== 'ethereum_final') {
-      return { action: 'mark-submitted', reason: `Robinhood receipt is ${input.finalityStage ?? 'soft'} and awaits Ethereum finality` };
+    if ((input.chainId === 8453 || input.chainId === 4663) && input.finalityStage !== 'ethereum_final') {
+      const chain = input.chainId === 8453 ? 'Base' : 'Robinhood';
+      return { action: 'mark-submitted', reason: `${chain} receipt is ${input.finalityStage ?? 'soft'} and awaits Ethereum finality` };
     }
     return { action: 'mark-confirmed', reason: 'receipt confirms successful inclusion' };
   }
@@ -91,7 +92,7 @@ export function mapChainStatus(input: {
   if (input.dropped) return 'dropped';
   if (!input.receiptVisible) return 'unresolved';
   if (input.receiptStatus === 'reverted') return 'reverted';
-  if (input.chainId === 4663) {
+  if (input.chainId === 8453 || input.chainId === 4663) {
     if (input.finalityStage === 'ethereum_final') return 'ethereum_final';
     if (input.finalityStage === 'posted') return 'posted';
     return 'included';

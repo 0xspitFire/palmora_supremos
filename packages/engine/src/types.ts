@@ -144,7 +144,7 @@ export interface MintStrategy {
   ): Promise<bigint>;
 
   /** Validate that a drop is currently mintable (timing, supply, etc.). */
-  validateDrop(drop: DropConfig): DropValidation;
+  validateDrop(drop: DropConfig, nowUnix?: number): DropValidation;
 }
 
 /** Result of drop validation. */
@@ -326,6 +326,7 @@ export interface LifecycleReceiptRecord {
   readonly gasUsed?: bigint;
   readonly effectiveGasPrice?: bigint;
   readonly l1DataFeeWei?: bigint;
+  readonly operatorFeeWei?: bigint;
   readonly priorityFeeComponentWei?: bigint;
   readonly finalityStage: FinalityStage;
   readonly finalitySource?: string;
@@ -464,6 +465,7 @@ export interface MintReceipt {
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
   readonly l1DataFeeWei?: bigint;
+  readonly operatorFeeWei?: bigint;
   readonly priorityFeeComponentWei?: bigint;
   readonly confirmations: number;
   readonly finalityStage: FinalityStage;
@@ -492,8 +494,10 @@ export interface WalletMintResult {
   readonly effectiveGasPrice?: bigint;
   /** Explicitly observed L1 data fee; never estimated at settlement. */
   readonly l1DataFeeWei?: bigint;
+  /** Explicitly observed Base operator fee; never estimated at settlement. */
+  readonly operatorFeeWei?: bigint;
   readonly totalFeeWei?: bigint;
-  /** Mint value + L2 gas + explicitly observed L1 data fee. */
+  /** Mint value + L2 gas + explicitly observed L1 data and operator fees. */
   readonly totalCostWei?: bigint;
   readonly error?: string;
   readonly durationMs: number;
@@ -535,6 +539,7 @@ export interface RobinhoodEnablementGrant {
   readonly expiresAt: string;
   readonly paidAllowed: boolean;
 }
+export interface BaseEnablementGrant { readonly expiresAt: string; readonly freeAllowed: true; readonly paidAllowed: false; }
 
 /** Full mint job configuration. */
 export interface MintJobConfig {
@@ -583,6 +588,7 @@ export interface MintJobConfig {
      * configuration, flags or the environment; the command line passes it only from the stored, validated owner record.
      */
     readonly robinhoodGrant?: RobinhoodEnablementGrant;
+    readonly baseGrant?: BaseEnablementGrant;
   };
 readonly broadcast: {
     readonly mode: BroadcastMode;

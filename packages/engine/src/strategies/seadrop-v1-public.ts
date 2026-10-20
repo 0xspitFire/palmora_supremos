@@ -185,10 +185,10 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
     return gasEstimate;
   }
 
-  validateDrop(drop: DropConfig): DropValidation {
+  validateDrop(drop: DropConfig, nowUnix = Math.floor(Date.now() / 1000)): DropValidation {
     const errors: string[] = [];
     const warnings: string[] = [];
-    const now = Math.floor(Date.now() / 1000);
+    const now = nowUnix;
 
     // Check timing
     if (drop.startTime > 0 && now < drop.startTime) {

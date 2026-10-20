@@ -27,16 +27,22 @@ const custody = (overrides: Partial<CustodyReadiness> = {}): CustodyReadiness =>
 } as CustodyReadiness);
 const context = { chainId: 1, wallets: [WALLET_ONE] };
 
-describe('a local keystore for Ethereum Personal Live (D-043)', () => {
+describe('a local keystore for attended Personal Live (D-043, D-057)', () => {
   it('is accepted with owner-recorded evidence for Ethereum and the named wallets', () => {
     expect(() => assertCustodyReadiness(custody(), NOW, undefined, context)).not.toThrow();
   });
 
-  it('is refused without a Personal Live context, when a Turnkey or cloud-key binding is expected, and for any chain but Ethereum', () => {
+  it('is refused without context, with a cloud binding, or on an unapproved chain', () => {
     expect(() => assertCustodyReadiness(custody(), NOW)).toThrow('CUSTODY_PROVIDER_UNAPPROVED');
     expect(() => assertCustodyReadiness(custody(), NOW, { provider: 'turnkey', providerIdentity: 'x', policyReference: 'turnkey:p', policyDigest: DIGEST }, context)).toThrow('CUSTODY_PROVIDER_UNAPPROVED');
-    expect(() => assertCustodyReadiness(custody(), NOW, undefined, { chainId: 4663, wallets: [WALLET_ONE] })).toThrow('CUSTODY_PERSONAL_LIVE_ETHEREUM_ONLY');
-    expect(() => assertCustodyReadiness(custody(), NOW, undefined, { chainId: 8453, wallets: [WALLET_ONE] })).toThrow('CUSTODY_PERSONAL_LIVE_ETHEREUM_ONLY');
+    expect(() => assertCustodyReadiness(custody(), NOW, undefined, { chainId: 4663, wallets: [WALLET_ONE] })).toThrow('CUSTODY_PERSONAL_LIVE_CHAIN_UNAPPROVED');
+  });
+
+  it('accepts Base only with an explicit Base chain and policy binding', () => {
+    const baseContext = { chainId: 8453, wallets: [WALLET_ONE] };
+    expect(() => assertCustodyReadiness(custody(), NOW, undefined, baseContext)).toThrow('CUSTODY_BASE_CHAIN_BINDING_REQUIRED');
+    expect(() => assertCustodyReadiness(custody({ chainId: 8453 }), NOW, undefined, baseContext)).toThrow('CUSTODY_BASE_POLICY_BINDING_REQUIRED');
+    expect(() => assertCustodyReadiness(custody({ chainId: 8453, policyReference: 'personal-live:base:d057-v1' }), NOW, undefined, baseContext)).not.toThrow();
   });
 
   it('is refused for a wallet it does not name, an expired or over-long record, a missing digest or confirmation, and a wrong policy', () => {

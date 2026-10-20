@@ -100,6 +100,8 @@ export interface ReceiptRecord {
   confirmations: number;
   gasUsed?: bigint;
   effectiveGasPrice?: bigint;
+  l1DataFeeWei?: bigint;
+  operatorFeeWei?: bigint;
   finalityStage?: 'unknown' | 'soft' | 'posted' | 'ethereum_final';
   finalitySource?: string;
   executionId?: string;
@@ -170,6 +172,22 @@ export interface RobinhoodEnablementRow {
   confirmationDigest: string;
   createdAt: string;
 }
+
+export type BaseEnablementEvidence = Record<'reviewedCode' | 'forkRehearsal' | 'finality' | 'endpointAgreement' | 'feeObservation' | 'liveSimulation' | 'custodyReadiness', true>;
+export interface BaseEnablementInput {
+  id: string;
+  approvedAt: string;
+  expiresAt: string;
+  evidence: BaseEnablementEvidence;
+  evidenceDigest: string;
+  confirmationDigest: string;
+  strategyVersion: string;
+  feePolicyVersion: string;
+  primaryEndpointReference: string;
+  fallbackEndpointReference: string;
+  custodyMode: 'local-personal-live';
+}
+export interface BaseEnablementRow extends BaseEnablementInput { approvedBy: string; freeAllowed: true; paidAllowed: false; createdAt: string; }
 
 export interface ReorgEventRecord {
   id: string;
@@ -443,12 +461,12 @@ export class DurableRepository {
 
   public recordReceipt(record: ReceiptRecord): void {
     this.immediate(() => {
-      for (const amount of [record.gasUsed, record.effectiveGasPrice]) if (amount !== undefined && amount < 0n) throw new Error('receipt amounts must be non-negative');
+      for (const amount of [record.gasUsed, record.effectiveGasPrice, record.l1DataFeeWei, record.operatorFeeWei]) if (amount !== undefined && amount < 0n) throw new Error('receipt amounts must be non-negative');
       const attempt = this.db.prepare('SELECT tx_hash, execution_id, chain_profile_id FROM transaction_attempt WHERE id = ?').get(record.transactionAttemptId) as { tx_hash: string | null; execution_id: string | null; chain_profile_id: string | null } | undefined;
       if (!attempt) throw new Error('transaction attempt not found for receipt');
       if (attempt.tx_hash === null || attempt.tx_hash.toLowerCase() !== record.txHash.toLowerCase()) throw new Error('receipt hash does not match transaction attempt');
       if (record.executionId !== undefined && record.executionId !== attempt.execution_id) throw new Error('receipt does not match execution');
-      this.db.prepare('INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.transactionAttemptId, record.txHash, record.status, record.blockNumber ?? null, record.blockHash ?? null, record.confirmations, record.gasUsed?.toString() ?? null, record.effectiveGasPrice?.toString() ?? null, record.finalityStage ?? 'unknown', safeText(record.finalitySource, 'receipt finality source') ?? null, record.observedAt, attempt.execution_id);
+      this.db.prepare('INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, l1_data_fee_wei, operator_fee_wei, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.transactionAttemptId, record.txHash, record.status, record.blockNumber ?? null, record.blockHash ?? null, record.confirmations, record.gasUsed?.toString() ?? null, record.effectiveGasPrice?.toString() ?? null, record.l1DataFeeWei?.toString() ?? null, record.operatorFeeWei?.toString() ?? null, record.finalityStage ?? 'unknown', safeText(record.finalitySource, 'receipt finality source') ?? null, record.observedAt, attempt.execution_id);
     });
   }
 
@@ -543,6 +561,38 @@ export class DurableRepository {
       if (latest && Date.parse(latest.approvedAt) <= now.getTime() && now.getTime() < Date.parse(latest.expiresAt)) return false;
       this.db.prepare('UPDATE chain_profile SET execution_enabled = 0 WHERE id = ?').run(profile.id);
       this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(`robinhood-disabled:${profile.id}:${at}`, 'chain_profile', profile.id, 'execution_enabled', 'execution_disabled', 'system', 'Robinhood enablement expired or missing', at);
+      return true;
+    });
+  }
+
+  public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string }): void {
+    const steps = ['reviewedCode', 'forkRehearsal', 'finality', 'endpointAgreement', 'feeObservation', 'liveSimulation', 'custodyReadiness'] as const;
+    if (steps.some((step) => record.evidence[step] !== true) || Object.keys(record.evidence).length !== steps.length) throw new Error('Base enablement evidence is incomplete');
+    if (![record.evidenceDigest, record.confirmationDigest].every((value) => /^[0-9a-f]{64}$/.test(value))) throw new Error('Base enablement requires evidence and confirmation digests');
+    if (record.primaryEndpointReference === record.fallbackEndpointReference) throw new Error('Base enablement requires independent endpoint references');
+    this.immediate(() => {
+      this.db.prepare("INSERT INTO base_enablement (id, approved_by, approved_at, expires_at, free_allowed, paid_allowed, evidence_json, evidence_digest, confirmation_digest, strategy_version, fee_policy_version, primary_endpoint_reference, fallback_endpoint_reference, custody_mode, created_at) VALUES (?, 'owner-cli', ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, record.approvedAt, record.expiresAt, JSON.stringify(record.evidence), record.evidenceDigest, record.confirmationDigest, record.strategyVersion, record.feePolicyVersion, record.primaryEndpointReference, record.fallbackEndpointReference, record.custodyMode, record.approvedAt);
+      this.recordChainVerification({ id: chain.verificationId, chainProfileId: chain.chainProfileId, chainId: 8453, status: 'verified', evidence: { finalityPassed: true, seaDropCompatible: true, positiveLivePath: false, archiveForkPassed: true, reconciliationPassed: true, baseEnablementId: record.id, expiresAt: record.expiresAt, evidenceDigest: record.evidenceDigest, endpointIdentity: record.primaryEndpointReference, archiveEndpointIdentity: record.fallbackEndpointReference, strategyVersion: record.strategyVersion, sourceBlock: '10000000', sourceBlockHash: 'base-archive-verification-anchor' }, checkedAt: record.approvedAt, approvedBy: 'owner-cli', approvedAt: record.approvedAt, executionEnabled: true });
+    });
+  }
+
+  public latestBaseEnablement(): BaseEnablementRow | undefined {
+    const row = this.db.prepare('SELECT * FROM base_enablement ORDER BY rowid DESC LIMIT 1').get() as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    let evidence: unknown;
+    try { evidence = JSON.parse(String(row['evidence_json'])); } catch { return undefined; }
+    return { id: String(row['id']), approvedBy: String(row['approved_by']), approvedAt: String(row['approved_at']), expiresAt: String(row['expires_at']), freeAllowed: true, paidAllowed: false, evidence: evidence as BaseEnablementEvidence, evidenceDigest: String(row['evidence_digest']), confirmationDigest: String(row['confirmation_digest']), strategyVersion: String(row['strategy_version']), feePolicyVersion: String(row['fee_policy_version']), primaryEndpointReference: String(row['primary_endpoint_reference']), fallbackEndpointReference: String(row['fallback_endpoint_reference']), custodyMode: 'local-personal-live', createdAt: String(row['created_at']) };
+  }
+
+  public disableBaseIfNotEnabled(now: Date): boolean {
+    const at = now.toISOString();
+    return this.immediate(() => {
+      const profile = this.db.prepare('SELECT id, execution_enabled FROM chain_profile WHERE chain_id = 8453').get() as { id: string; execution_enabled: number } | undefined;
+      if (!profile || profile.execution_enabled !== 1) return false;
+      const latest = this.latestBaseEnablement();
+      if (latest && Date.parse(latest.approvedAt) <= now.getTime() && now.getTime() < Date.parse(latest.expiresAt)) return false;
+      this.db.prepare('UPDATE chain_profile SET execution_enabled = 0 WHERE id = ?').run(profile.id);
+      this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(`base-disabled:${profile.id}:${at}`, 'chain_profile', profile.id, 'execution_enabled', 'execution_disabled', 'system', 'Base enablement expired or missing', at);
       return true;
     });
   }

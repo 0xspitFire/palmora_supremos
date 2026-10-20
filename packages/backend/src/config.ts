@@ -2,7 +2,7 @@ export type SecretStore = 'MINT_BOT_SECRETS' | 'TEST_BOT';
 export const MAINNET_SECRET_FILE_REFERENCE = 'Rets/MINT_BOT_SECRETS.env';
 export const APPROVED_KEYSTORE_REFERENCE = './Rets/wallets';
 export interface SecretReference { store: SecretStore; key: 'ETHEREUM_RPC_URL' | 'ROBINHOOD_RPC_URL' | 'INK_RPC_URL' | 'BASE_RPC_URL' | 'OPENSEA_API' | 'ALCHEMY_API' | 'ROBINHOOD_ARCHIVE_RPC' | 'TEST_WALLET_PK' | 'TEST_WALLET_ADDR' | 'TG_BOT_TOKEN' | 'TG_CHAT_ID'; }
-export interface BackendConfig { secretStore: SecretStore; rpcReference: SecretReference; chainId: 1 | 4663; flashbotsEnabled: boolean; flashbotsAuthReference?: string; sequencerUrl?: string; archiveReference?: string; }
+export interface BackendConfig { secretStore: SecretStore; rpcReference: SecretReference; chainId: 1 | 8453 | 4663; flashbotsEnabled: boolean; flashbotsAuthReference?: string; sequencerUrl?: string; archiveReference?: string; }
 export function assertSafeConfig(config: BackendConfig): void {
   if (config.rpcReference.store !== config.secretStore) throw new Error('SECRET_STORE_MISMATCH');
   if (config.chainId === 1 && config.rpcReference.key !== 'ETHEREUM_RPC_URL') throw new Error('INVALID_ETHEREUM_RPC_REFERENCE');

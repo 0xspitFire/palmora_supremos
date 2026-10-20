@@ -32,14 +32,16 @@ const sha = (text: string): string => `0x${createHash('sha256').update(text).dig
 export class PersonalLiveReadinessService {
   constructor(private readonly store: BackendStore, private readonly probes: PersonalLiveProbes, private readonly now: () => Date = () => new Date()) {}
 
-  async record(args: { wallets: readonly string[]; confirmedBy: string; storePath: string; secretStoreReference: string }): Promise<ReadinessOutcome> {
+  async record(args: { wallets: readonly string[]; confirmedBy: string; storePath: string; secretStoreReference: string; chainId?: 1 | 8453 }): Promise<ReadinessOutcome> {
     const failures: ReadinessFailure[] = [];
     const attempt = async <T>(check: ReadinessFailure['check'], label: string, run: () => Promise<T>): Promise<T | undefined> => {
       try { return await run(); } catch (error) { failures.push({ check, message: `${label} could not be checked (${error instanceof Error ? error.message.split(':')[0] : 'error'}).` }); return undefined; }
     };
     const now = this.now();
-    const chain = await attempt('chain', 'The Ethereum RPC', () => this.probes.chain());
-    if (chain && chain.chainId !== 1) failures.push({ check: 'chain', message: `The RPC is chain ${chain.chainId}, not Ethereum.` });
+    const expectedChainId = args.chainId ?? 1;
+    const chainName = expectedChainId === 8453 ? 'Base' : 'Ethereum';
+    const chain = await attempt('chain', `The ${chainName} RPC`, () => this.probes.chain());
+    if (chain && chain.chainId !== expectedChainId) failures.push({ check: 'chain', message: `The RPC is chain ${chain.chainId}, not ${chainName}.` });
     if (chain && chain.headAgeSeconds > MAX_HEAD_AGE_SECONDS) failures.push({ check: 'chain', message: `The RPC's newest block is ${Math.round(chain.headAgeSeconds)} seconds old, so it is behind.` });
     const keystore = await attempt('keystore', 'The wallet file', () => this.probes.keystore());
     const wallets = [...new Set(args.wallets.map((wallet) => wallet.toLowerCase()))].sort();
@@ -56,8 +58,8 @@ export class PersonalLiveReadinessService {
     if (killed === true) failures.push({ check: 'kill_switch', message: 'The kill switch is on. Remove it deliberately when you are ready to run, then record readiness again.' });
 
     const state = this.store.snapshot();
-    const evidence = state.chainEvidence.find((item) => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled && item.expiresAt > now.toISOString());
-    if (!evidence) failures.push({ check: 'chain_evidence', message: 'Ethereum chain evidence has not been accepted yet (or it expired). Run chain-evidence accept first.' });
+    const evidence = state.chainEvidence.find((item) => item.chainId === expectedChainId && item.status === 'accepted' && item.executionEnabled && item.expiresAt > now.toISOString());
+    if (!evidence) failures.push({ check: 'chain_evidence', message: `${chainName} chain evidence has not been accepted yet (or it expired).` });
     const reconciledAt = state.runtime.reconciliationCompletedAt;
     if (state.runtime.startupState !== 'Ready' || !reconciledAt || Date.parse(reconciledAt) > now.getTime()) failures.push({ check: 'reconciliation', message: 'Startup reconciliation has not completed.' });
     if (failures.length > 0 || !keystore || !reconciledAt) return { recorded: false, failures };
@@ -78,8 +80,8 @@ export class PersonalLiveReadinessService {
       custody: {
         provider: 'local-personal-live',
         providerIdentity: 'local-encrypted-keystore',
-        policyReference: 'personal-live:ethereum-v1',
-        policyDigest: sha('personal-live:ethereum-v1'),
+        policyReference: expectedChainId === 8453 ? 'personal-live:base:d057-v1' : 'personal-live:ethereum-v1',
+        policyDigest: sha(expectedChainId === 8453 ? 'personal-live:base:d057-v1' : 'personal-live:ethereum-v1'),
         policyStatus: 'approved',
         healthStatus: 'healthy',
         attestationStatus: 'verified',
@@ -89,10 +91,11 @@ export class PersonalLiveReadinessService {
         keystoreDigest: keystore.digest,
         wallets: [...wallets],
         confirmedBy: args.confirmedBy,
+        chainId: expectedChainId,
       },
     };
     // Belt and braces: the same check `arm` will make, with the same context, before anything is written.
-    const context: PersonalLiveContext = { chainId: 1, wallets };
+    const context: PersonalLiveContext = { chainId: expectedChainId, wallets };
     assertLiveOperationalReadiness(probe, now, undefined, context);
     await this.store.transaction((next) => {
       next.runtime.dependencies = { engine: true, chain: true, backup: true, notifications: true };

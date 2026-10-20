@@ -45,6 +45,6 @@ export function createPersonalLiveProbes(options: {
 }
 
 /** The phrase that records readiness; it names how many wallets, so a copied phrase for another set does not match. */
-export function liveReadinessPhrase(walletCount: number): string {
-  return `RECORD-LIVE-READINESS ${walletCount} wallets`;
+export function liveReadinessPhrase(walletCount: number, chainId: 1 | 8453 = 1): string {
+  return `${chainId === 8453 ? 'RECORD-BASE-LIVE-READINESS' : 'RECORD-LIVE-READINESS'} ${walletCount} wallets`;
 }
