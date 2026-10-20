@@ -633,6 +633,23 @@ describe('CanonicalStoreBridge', () => {
       } finally { await close(value); }
     });
 
+    it('does not unlock expanded Base runs until the finalized first proof is settled', async () => {
+      const value = await fixture(BASE);
+      try {
+        const first = await armed(value, await campaign(value, BASE), [WALLET_ONE], [], '-unsettled-proof');
+        const admission = await value.store.admitExecution(first.input);
+        const execution = admission.executions[0]!;
+        const txHash = `0x${'e'.repeat(64)}`;
+        value.db.prepare("INSERT INTO transaction_attempt (id, transaction_intent_id, endpoint, response_class, tx_hash, attempted_at, execution_id, chain_profile_id) VALUES (?, ?, 'base-primary', 'accepted', ?, ?, ?, ?)").run('base-unsettled-attempt', execution.intentId, txHash, BASE_NOW, execution.executionId, `profile-${BASE}`);
+        value.db.prepare("INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, l1_data_fee_wei, operator_fee_wei, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, 'confirmed', 1, ?, 1, '1', '1', '1', '1', 'ethereum_final', 'test-independent-providers', ?, ?)").run('base-unsettled-receipt', 'base-unsettled-attempt', txHash, `0x${'f'.repeat(64)}`, BASE_NOW, execution.executionId);
+
+        const expandedCampaign = await value.application.createCampaign({ ...campaignInput(BASE), quantity: 4 });
+        const expanded = await armed(value, expandedCampaign, [WALLET_ONE, WALLET_TWO], [], '-premature-expansion');
+        await expect(value.store.admitExecution(expanded.input)).rejects.toThrow('BASE_FIRST_REHEARSAL_PENDING_FINALIZATION');
+        expect(value.db.prepare('SELECT status FROM spend_reservation WHERE id = ?').get(admission.reservations[0]!.id)).toEqual({ status: 'reserved' });
+      } finally { await close(value); }
+    });
+
     it('rolls back every wallet of a run when a later wallet would cross the fleet cap', async () => {
       const value = await fixture(ETHEREUM, false, true, undefined, true, policy({ freeDailyCapWei: 67n }));
       try {

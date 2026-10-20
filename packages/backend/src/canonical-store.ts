@@ -683,7 +683,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
           JOIN collection col ON col.id = d.collection_id
           JOIN contract ct ON ct.id = col.contract_id
           JOIN chain_profile cp ON cp.id = ct.chain_profile_id
-          WHERE cp.chain_id = ? AND r.status = 'confirmed' AND r.finality_stage = 'ethereum_final'
+          JOIN spend_reservation sr ON sr.execution_id = e.id
+          WHERE cp.chain_id = ?
+            AND r.status = 'confirmed'
+            AND r.finality_stage = 'ethereum_final'
+            AND sr.status = 'settled'
           LIMIT 1`).get(BASE_CHAIN_ID);
         const outstanding = completed ? undefined : this.db.prepare(`SELECT 1 AS ok
             FROM spend_reservation sr
