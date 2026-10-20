@@ -8,13 +8,13 @@ const root = resolve(process.cwd());
 const fixture = readFixture(resolve(root, 'Fixtures/base-seadrop-fixture.env'));
 const archive = await readArchiveValue(undefined, 'BASE_ARCHIVE_RPC');
 const rpcUrl = 'http://127.0.0.1:8547';
-const required = ['BASE_FORK_BLOCK', 'BASE_SEADROP_TX_HASH', 'BASE_SEADROP_NFT', 'BASE_SEADROP_FEE_RECIPIENT', 'BASE_SEADROP_MINT_VALUE_WEI', 'BASE_SEADROP_QUANTITY'];
+const required = ['BASE_FORK_BLOCK', 'BASE_SEADROP_TX_HASH', 'BASE_SEADROP_NFT', 'BASE_SEADROP_FEE_RECIPIENT', 'BASE_SEADROP_MINT_VALUE_WEI', 'BASE_SEADROP_QUANTITY', 'BASE_FREE_FORK_BLOCK', 'BASE_FREE_BLOCK_TIMESTAMP', 'BASE_FREE_SEADROP_NFT'];
 for (const name of required) if (!fixture[name]) throw new Error(`${name} fixture reference is required`);
 if (!/^\d+$/.test(fixture.BASE_FORK_BLOCK)) throw new Error('BASE_FORK_BLOCK must be a decimal block number');
 
 const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', [
   '--fork-url', archive,
-  '--fork-block-number', fixture.BASE_FORK_BLOCK,
+  '--fork-block-number', fixture.BASE_FREE_FORK_BLOCK,
   '--chain-id', '8453',
   '--host', '127.0.0.1',
   '--port', '8547',
@@ -28,8 +28,22 @@ try {
   const reportFile = join(reportDir, 'report.json');
   const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
   if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
-  const code = await run(process.execPath, [vitest, 'run', 'packages/engine/src/base.fork.test.ts', '--reporter=json', '--outputFile', reportFile], {
+  const code = await run(process.execPath, [vitest, 'run',
+    'packages/engine/src/base.fork.test.ts',
+    'packages/engine/src/bot-path.fork.test.ts',
+    'packages/engine/src/base-fees.test.ts',
+    'packages/engine/src/base-finality.test.ts',
+    'packages/engine/src/fee-guard.test.ts',
+    'packages/backend/src/base-enablement.test.ts',
+    'packages/backend/src/base-policy.test.ts',
+    'packages/cli/src/engine-adapter.test.ts',
+    '--reporter=json', '--outputFile', reportFile], {
     ANVIL_BASE_RPC_URL: rpcUrl,
+    ANVIL_REHEARSAL_RPC_URL: rpcUrl,
+    REHEARSAL_CHAIN: 'base',
+    REHEARSAL_NFT: fixture.BASE_FREE_SEADROP_NFT,
+    REHEARSAL_MAX_FEE_GWEI: '0.1',
+    REHEARSAL_NOW_UNIX: fixture.BASE_FREE_BLOCK_TIMESTAMP,
     ...Object.fromEntries(required.map((name) => [name, fixture[name]])),
   });
   if (code !== 0) printFailures(reportFile);
@@ -97,4 +111,3 @@ function assertStrictReport(file) {
   const report = JSON.parse(readFileSync(file, 'utf8'));
   if (Number(report.numPendingTests ?? 0) !== 0 || Number(report.numTodoTests ?? 0) !== 0 || Number(report.numSkippedTests ?? 0) !== 0) throw new Error('Base strict runner requires zero skipped or todo tests');
 }
-

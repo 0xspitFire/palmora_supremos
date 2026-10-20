@@ -1,4 +1,5 @@
 export * from './types.js';
+export { BASE_EVIDENCE_STEPS, assertBaseFirstRehearsal, assertBaseLiveAllowed, validBaseEnablement, type BaseEnablement, type BaseEvidenceStep } from './base-enablement.js';
 export { ROBINHOOD_EVIDENCE_STEPS, assertRobinhoodLiveAllowed, validRobinhoodEnablement, type RobinhoodEnablement, type RobinhoodEvidenceStep } from './robinhood-enablement.js';
 export { PauseWatch, type PauseSpan } from './pause-watch.js';
 export { DurableStore } from './store.js';
@@ -7,7 +8,7 @@ export { SqliteStateStore } from './sqlite-store.js';
 export { CanonicalStoreBridge, PHASE1_ZERO_ADMISSION_BUFFERS, canonicalReceiptFinalityStage, rebindExecutionResult } from './canonical-store.js';
 export type { CanonicalAdmissionInput, CanonicalAdmissionResult, CanonicalExecutionStore, PreparedExecution } from './canonical-store.js';
 export { SpendLedger } from './spend-ledger.js';
-export { PERSONAL_LIVE_FLEET_POLICY, ethToWei, validateFleetSpendPolicy } from './fleet-policy.js';
+export { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY, ethToWei, validateFleetSpendPolicy } from './fleet-policy.js';
 export type { FleetNotice, FleetSpendPolicy } from './fleet-policy.js';
 export { ReadinessService } from './readiness.js';
 export { NotificationDispatcher, OneWayNotificationDispatcher, redactNotificationText } from './notifications.js';

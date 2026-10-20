@@ -1,4 +1,5 @@
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
+import { assertBaseFirstRehearsal, assertBaseLiveAllowed } from './base-enablement.js';
 import { unresolvedRunIds } from './kill-switch-release.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type {
@@ -34,7 +35,7 @@ import type {
 import type { BackendStore } from './store.js';
 import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
-import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
+import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 /** Defense in depth: canonical evidence may contain only an opaque provider label, never a URL. */
 function safeAttemptEndpoint(value: string): string {
@@ -73,6 +74,7 @@ export interface CanonicalExecutionStore extends BackendStore {
   abortRemaining(reason: string): Promise<void>;
   /** Key 2 for Robinhood (D-040): the owner's enablement record, or undefined when there is none. */
   robinhoodEnablement?(): unknown;
+  baseEnablement?(): unknown;
 }
 
 interface DatabaseRunRow {
@@ -124,6 +126,8 @@ interface DatabaseReceiptRow {
   confirmations: number;
   gas_used: string | null;
   effective_gas_price: string | null;
+  l1_data_fee_wei: string | null;
+  operator_fee_wei: string | null;
   finality_stage: string;
   finality_source: string | null;
   observed_at: string;
@@ -193,6 +197,7 @@ const EMPTY_RUNTIME: BackendState['runtime'] = {
 };
 
 const ROBINHOOD_CHAIN_ID = 4663;
+const BASE_CHAIN_ID = 8453;
 const ETHEREUM_CHAIN_ID = 1;
 export const PHASE1_ZERO_ADMISSION_BUFFERS = Object.freeze({
   replacementBudgetWei: 0n,
@@ -324,16 +329,19 @@ function receiptState(state: string): AttemptRecord['state'] {
   return 'Failed';
 }
 
-export function canonicalReceiptFinalityStage(chainId: 1 | 4663, state: string, robinhoodFinality?: AttemptRecord['robinhoodFinality']): DatabaseReceiptRecord['finalityStage'] {
-  if (chainId === ROBINHOOD_CHAIN_ID) {
-    if (robinhoodFinality === 'soft') return 'soft';
-    if (robinhoodFinality === 'posted') return 'posted';
-    if (robinhoodFinality === 'final') return 'ethereum_final';
+export function canonicalReceiptFinalityStage(chainId: 1 | 8453 | 4663, state: string, l2Finality?: AttemptRecord['robinhoodFinality'] | ReceiptRecord['finalityStage']): DatabaseReceiptRecord['finalityStage'] {
+  if (chainId === ROBINHOOD_CHAIN_ID || chainId === BASE_CHAIN_ID) {
+    if (state === 'Failed' && (l2Finality === 'final' || l2Finality === 'ethereum_final')) return 'ethereum_final';
+    if (state !== 'Confirmed' && state !== 'Pending') return 'unknown';
+    if (l2Finality === 'soft') return 'soft';
+    if (l2Finality === 'posted') return 'posted';
+    if (l2Finality === 'final' || l2Finality === 'ethereum_final') return 'ethereum_final';
     return 'unknown';
   }
-  if (robinhoodFinality === 'soft') return 'soft';
-  if (robinhoodFinality === 'posted') return 'posted';
-  if (robinhoodFinality === 'final') return 'ethereum_final';
+  if (state !== 'Confirmed' && state !== 'Pending') return 'unknown';
+  if (l2Finality === 'soft') return 'soft';
+  if (l2Finality === 'posted') return 'posted';
+  if (l2Finality === 'final' || l2Finality === 'ethereum_final') return 'ethereum_final';
   if (state === 'Confirmed') return 'ethereum_final';
   return 'unknown';
 }
@@ -408,7 +416,7 @@ function normalizeCampaignSnapshot(value: unknown): Campaign | undefined {
 }
 
 function mapChainVerification(row: { chain_id: number; status: string; checked_at: string; evidence_json: string; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; feed_endpoint_reference: string | null } | undefined, fallback: ChainVerification | undefined, asOf = new Date()): ChainVerification {
-  const chainId = (row?.chain_id ?? fallback?.chainId) as 1 | 4663;
+  const chainId = (row?.chain_id ?? fallback?.chainId) as 1 | 8453 | 4663;
   const evidence = decode<Record<string, unknown>>(row?.evidence_json);
   const expiresAt = typeof evidence?.expiresAt === 'string' ? Date.parse(evidence.expiresAt) : Number.NaN;
   const expired = row !== undefined && (!Number.isFinite(expiresAt) || expiresAt <= asOf.getTime());
@@ -594,7 +602,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public async persistEngineReceipt(record: unknown): Promise<void> {
     this.ensureOpen();
-    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; status?: string; blockNumber?: bigint; blockHash?: string; confirmations?: number; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; finalityStage?: string; robinhoodFinality?: 'soft' | 'posted' | 'final'; finalitySource?: string; observedAt?: string };
+    const input = record as { id?: string; executionId?: string; transactionAttemptId?: string; txHash?: string; status?: string; blockNumber?: bigint; blockHash?: string; confirmations?: number; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; operatorFeeWei?: bigint; finalityStage?: string; robinhoodFinality?: 'soft' | 'posted' | 'final'; finalitySource?: string; observedAt?: string };
     if (typeof input.id !== 'string' || typeof input.executionId !== 'string' || typeof input.transactionAttemptId !== 'string' || typeof input.txHash !== 'string' || typeof input.status !== 'string' || typeof input.observedAt !== 'string') throw new Error('LIFECYCLE_RECEIPT_FACTS_REQUIRED');
     const id = input.id;
     const executionId = input.executionId;
@@ -618,11 +626,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const actualMintValueWei = ['reverted', 'reorged', 'dropped'].includes(status) ? 0n : identity.valueWei;
     const actualL2ExecutionGasWei = (input.gasUsed ?? 0n) * (input.effectiveGasPrice ?? 0n);
     const actualL1DataGasWei = input.l1DataFeeWei ?? 0n;
-    const actualSpendWei = actualMintValueWei + actualL2ExecutionGasWei + actualL1DataGasWei;
+    const actualOperatorFeeWei = input.operatorFeeWei ?? 0n;
+    const actualSpendWei = actualMintValueWei + actualL2ExecutionGasWei + actualL1DataGasWei + actualOperatorFeeWei;
     await this.transaction((current) => {
       if (current.receipts.some((receipt) => receipt.id === id)) return;
-       current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(finalityStage ? { finalityStage: finalityStage as ReceiptRecord['finalityStage'] } : {}), ...(input.finalitySource ? { finalitySource: input.finalitySource } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, actualSpendWei, observedAt });
-      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution', entityId: executionId, actor: this.actor, reason: 'lifecycle receipt accounting components', newState: 'receipt_accounting', policySnapshot: { kind: 'receipt_accounting', receiptId: id, actualSpendWei: actualSpendWei.toString(), actualMintValueWei: actualMintValueWei.toString(), actualL2ExecutionGasWei: actualL2ExecutionGasWei.toString(), actualL1DataGasWei: actualL1DataGasWei.toString() }, occurredAt: observedAt });
+       current.receipts.push({ id, executionId, runId: identity.runId, transactionAttemptId, state: mappedStatus, ...(finalityStage ? { finalityStage: finalityStage as ReceiptRecord['finalityStage'] } : {}), ...(input.finalitySource ? { finalitySource: input.finalitySource } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'soft' ? { robinhoodFinality: 'soft' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'posted' ? { robinhoodFinality: 'posted' } : {}), ...(identity.chainId === ROBINHOOD_CHAIN_ID && finalityStage === 'ethereum_final' ? { robinhoodFinality: 'final' } : {}), blockNumber, blockHash, ...(input.l1DataFeeWei === undefined ? {} : { l1DataFeeWei: input.l1DataFeeWei }), ...(input.operatorFeeWei === undefined ? {} : { operatorFeeWei: input.operatorFeeWei }), actualSpendWei, observedAt });
+      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution', entityId: executionId, actor: this.actor, reason: 'lifecycle receipt accounting components', newState: 'receipt_accounting', policySnapshot: { kind: 'receipt_accounting', receiptId: id, actualSpendWei: actualSpendWei.toString(), actualMintValueWei: actualMintValueWei.toString(), actualL2ExecutionGasWei: actualL2ExecutionGasWei.toString(), actualL1DataGasWei: actualL1DataGasWei.toString(), actualOperatorFeeWei: actualOperatorFeeWei.toString() }, occurredAt: observedAt });
     });
   }
 
@@ -647,6 +656,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const armedWallets = new Set(input.intent.wallets.map((wallet) => wallet.toLowerCase()));
     if (wallets.some((wallet) => !armedWallets.has(wallet.toLowerCase()))) throw new Error('INTENT_WALLET_MISMATCH');
     if (input.campaign.chainId === ROBINHOOD_CHAIN_ID && input.campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), this.now());
+    if (input.campaign.chainId === BASE_CHAIN_ID) assertBaseLiveAllowed(input.campaign.feePolicy.kind, this.baseEnablement(), this.now());
     const requestFingerprint = this.runFingerprint(input.run.id);
     if (input.run.requestDigest !== requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
     const mintClassForFleet: 'free' | 'paid' = input.campaign.mintPriceWei === 0n ? 'free' : 'paid';
@@ -663,6 +673,36 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       if (input.run.mode === 'live') {
         assertAndAdvanceAdmissionClock(this.db, admissionTime);
         assertNoStalePendingReservations(this.db, admissionTime);
+      }
+      if (input.campaign.chainId === BASE_CHAIN_ID && input.run.mode === 'live') {
+        const completed = this.db.prepare(`SELECT 1 AS ok
+          FROM transaction_receipt r
+          JOIN execution e ON e.id = r.execution_id
+          JOIN campaign c ON c.id = e.campaign_id
+          JOIN "drop" d ON d.id = c.drop_id
+          JOIN collection col ON col.id = d.collection_id
+          JOIN contract ct ON ct.id = col.contract_id
+          JOIN chain_profile cp ON cp.id = ct.chain_profile_id
+          JOIN spend_reservation sr ON sr.execution_id = e.id
+          WHERE cp.chain_id = ?
+            AND r.status = 'confirmed'
+            AND r.finality_stage = 'ethereum_final'
+            AND sr.status = 'settled'
+          LIMIT 1`).get(BASE_CHAIN_ID);
+        const outstanding = completed ? undefined : this.db.prepare(`SELECT 1 AS ok
+            FROM spend_reservation sr
+            JOIN chain_profile cp ON cp.id = sr.chain_profile_id
+            WHERE cp.chain_id = ? AND (
+              sr.status = 'reserved'
+              OR (sr.status = 'settled' AND NOT EXISTS (
+                SELECT 1 FROM transaction_receipt r
+                WHERE r.execution_id = sr.execution_id
+                  AND r.finality_stage = 'ethereum_final'
+                  AND r.status IN ('confirmed', 'reverted')
+              ))
+            )
+            LIMIT 1`).get(BASE_CHAIN_ID);
+        assertBaseFirstRehearsal({ completed: Boolean(completed), outstanding: Boolean(outstanding), walletCount: wallets.length, quantity: input.campaign.quantity });
       }
       if (mintClassForFleet === 'paid') this.assertPaidWalletsPerMint(input);
       this.persistIntent(input.intent, undefined);
@@ -687,7 +727,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         if (!existing) {
           this.assertCanonicalFeePolicy(input.campaign, input.campaign.feePolicy);
           this.assertCaps(canonicalWallet.walletId, input.campaign, rollingCutoff, amount, totalRunExposure);
-          this.assertFleetDailyCap(mintClassForFleet, rollingCutoff, amount);
+          this.assertFleetDailyCap(input.campaign.chainId, mintClassForFleet, rollingCutoff, amount);
           const fee = input.campaign.feePolicy;
           const mintValueWei = input.campaign.mintPriceWei * BigInt(input.campaign.quantity);
           const l2ExecutionGasWei = fee.l2ExecutionGasBudgetWei ?? 0n;
@@ -718,7 +758,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       this.updateRunState(input.run.id, 'active', input.run);
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution_run', entityId: input.run.id, newState: 'active', actor: this.actor, reason: 'canonical admission persisted before engine side effect', policySnapshot: { kind: 'event', eventType: 'admission', eventData: { reservationCount: wallets.length } }, occurredAt: admissionIso });
       const notices: FleetNotice[] = [];
-      if (this.fleetPolicy && mintClassForFleet === 'paid' && this.fleetDailyExposure('paid', rollingCutoff) > this.fleetPolicy.paidHeadroomAlertWei) notices.push('PAID_DAILY_HEADROOM_USED');
+      const activeFleetPolicy = this.fleetPolicyFor(input.campaign.chainId);
+      if (activeFleetPolicy && mintClassForFleet === 'paid' && this.fleetDailyExposure(input.campaign.chainId, 'paid', rollingCutoff) > activeFleetPolicy.paidHeadroomAlertWei) notices.push('PAID_DAILY_HEADROOM_USED');
       this.db.exec('COMMIT');
       return { reservations, executions: [...executionIds.values()], ...(notices.length > 0 ? { notices } : {}) };
     } catch (error) {
@@ -760,7 +801,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const mintPriceWei = BigInt(row.mint_price_wei);
       const verification = mapChainVerification(row.verification_status ? { chain_id: row.chain_id, status: row.verification_status, checked_at: row.verification_checked_at ?? row.created_at, evidence_json: row.verification_evidence_json ?? '{}', sequencer_endpoint_reference: row.sequencer_endpoint_reference, archive_endpoint_reference: row.archive_endpoint_reference, feed_endpoint_reference: row.feed_endpoint_reference } : undefined, source?.chainVerification, this.now());
       const updated = this.db.prepare("SELECT MAX(occurred_at) AS at FROM state_transition WHERE entity_type = 'campaign' AND entity_id = ?").get(row.id) as { at: string | null };
-      return { id: row.id, state: backendCampaignState(row.state), chainId: row.chain_id as 1 | 4663, contract: row.address, strategy: row.strategy, quantity: source?.quantity ?? 1, dryRun: source?.dryRun ?? true, spendPolicy: mapSpendPolicy(source?.spendPolicy), createdAt: row.created_at, updatedAt: updated.at ?? row.created_at, ...(source?.broadcastMode ? { broadcastMode: source.broadcastMode } : {}), ...(source?.openingAt ? { openingAt: source.openingAt } : {}), ...(source?.tMinusMs === undefined ? {} : { tMinusMs: source.tMinusMs }), chainVerification: verification, mintPriceWei, feePolicy: this.readFeePolicy(row.chain_profile_id, mintPriceWei, source?.feePolicy) };
+      return { id: row.id, state: backendCampaignState(row.state), chainId: row.chain_id as 1 | 8453 | 4663, contract: row.address, strategy: row.strategy, quantity: source?.quantity ?? 1, dryRun: source?.dryRun ?? true, spendPolicy: mapSpendPolicy(source?.spendPolicy), createdAt: row.created_at, updatedAt: updated.at ?? row.created_at, ...(source?.broadcastMode ? { broadcastMode: source.broadcastMode } : {}), ...(source?.openingAt ? { openingAt: source.openingAt } : {}), ...(source?.tMinusMs === undefined ? {} : { tMinusMs: source.tMinusMs }), chainVerification: verification, mintPriceWei, feePolicy: this.readFeePolicy(row.chain_profile_id, mintPriceWei, source?.feePolicy) };
     });
   }
 
@@ -818,7 +859,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private readReceipts(runs: readonly RunRecord[]): ReceiptRecord[] {
-    const rows = this.db.prepare(`SELECT r.id, r.transaction_attempt_id, r.execution_id, r.tx_hash, r.status, r.block_number, r.block_hash, r.confirmations, r.gas_used, r.effective_gas_price, r.finality_stage, r.finality_source, r.observed_at, e.run_id FROM transaction_receipt r JOIN transaction_attempt a ON a.id = r.transaction_attempt_id LEFT JOIN execution e ON e.id = r.execution_id ORDER BY r.observed_at, r.id`).all() as DatabaseReceiptRow[];
+    const rows = this.db.prepare(`SELECT r.id, r.transaction_attempt_id, r.execution_id, r.tx_hash, r.status, r.block_number, r.block_hash, r.confirmations, r.gas_used, r.effective_gas_price, r.l1_data_fee_wei, r.operator_fee_wei, r.finality_stage, r.finality_source, r.observed_at, e.run_id FROM transaction_receipt r JOIN transaction_attempt a ON a.id = r.transaction_attempt_id LEFT JOIN execution e ON e.id = r.execution_id ORDER BY r.observed_at, r.id`).all() as DatabaseReceiptRow[];
     const runIds = new Set(runs.map((run) => run.id));
     return rows.flatMap((row) => {
       if (!row.execution_id || !row.run_id || !runIds.has(row.run_id)) return [];
@@ -831,7 +872,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const lifecycleAccounting = accountingRows.map((item) => decode<{ kind?: string; receiptId?: string; actualSpendWei?: string }>(item.policy_snapshot_json)).find((item) => item?.kind === 'receipt_accounting' && item.receiptId === row.id);
       const ledgerAmount = ledgerRows.reduce((total, item) => total + BigInt(item.amount_wei), 0n);
       const actualSpendWei = settled?.settled_amount_wei === null || settled?.settled_amount_wei === undefined ? ledgerRows.length > 0 ? ledgerAmount : lifecycleAccounting?.actualSpendWei === undefined ? undefined : BigInt(lifecycleAccounting.actualSpendWei) : BigInt(settled.settled_amount_wei);
-      return [{ id: row.id, executionId: row.execution_id, runId: row.run_id, transactionAttemptId: row.transaction_attempt_id, state, finalityStage: row.finality_stage as ReceiptRecord['finalityStage'] ?? undefined, ...(finality ? { robinhoodFinality: finality } : {}), ...(row.block_number === null ? {} : { blockNumber: BigInt(row.block_number) }), ...(row.block_hash === null ? {} : { blockHash: row.block_hash }), ...(row.gas_used === null ? {} : { gasUsed: BigInt(row.gas_used) }), ...(row.effective_gas_price === null ? {} : { effectiveGasPrice: BigInt(row.effective_gas_price) }), ...(actualSpendWei === undefined ? {} : { actualSpendWei }), observedAt: row.observed_at } satisfies ReceiptRecord];
+      return [{ id: row.id, executionId: row.execution_id, runId: row.run_id, transactionAttemptId: row.transaction_attempt_id, state, finalityStage: row.finality_stage as ReceiptRecord['finalityStage'] ?? undefined, ...(finality ? { robinhoodFinality: finality } : {}), ...(row.block_number === null ? {} : { blockNumber: BigInt(row.block_number) }), ...(row.block_hash === null ? {} : { blockHash: row.block_hash }), ...(row.gas_used === null ? {} : { gasUsed: BigInt(row.gas_used) }), ...(row.effective_gas_price === null ? {} : { effectiveGasPrice: BigInt(row.effective_gas_price) }), ...(row.l1_data_fee_wei === null ? {} : { l1DataFeeWei: BigInt(row.l1_data_fee_wei) }), ...(row.operator_fee_wei === null ? {} : { operatorFeeWei: BigInt(row.operator_fee_wei) }), ...(actualSpendWei === undefined ? {} : { actualSpendWei }), observedAt: row.observed_at } satisfies ReceiptRecord];
     });
   }
 
@@ -842,10 +883,10 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private readReservations(): Reservation[] {
     const rows = this.db.prepare(`SELECT r.id, r.wallet_id, r.execution_id, r.transaction_intent_id, r.idempotency_key, r.amount_wei, r.reserved_amount_wei, r.settled_amount_wei, r.usage_date, r.status, r.created_at, r.settled_at, cp.chain_id, r.campaign_id, e.run_id FROM spend_reservation r LEFT JOIN chain_profile cp ON cp.id = r.chain_profile_id LEFT JOIN execution e ON e.id = r.execution_id ORDER BY r.created_at, r.id`).all() as DatabaseReservationRow[];
-    return rows.map((row) => this.mapReservation(row, row.run_id ?? '', row.chain_id as 1 | 4663 | null));
+    return rows.map((row) => this.mapReservation(row, row.run_id ?? '', row.chain_id as 1 | 8453 | 4663 | null));
   }
 
-  private mapReservation(row: DatabaseReservationRow, runId: string, chainId: 1 | 4663 | null): Reservation {
+  private mapReservation(row: DatabaseReservationRow, runId: string, chainId: 1 | 8453 | 4663 | null): Reservation {
     const status = row.status === 'expired' ? 'released' : row.status;
     return { id: row.id, runId, campaignId: row.campaign_id ?? '', ...(chainId === null ? {} : { chainId }), wallet: this.walletAddress(row.wallet_id), amountWei: BigInt(row.reserved_amount_wei || row.amount_wei), ...(row.settled_amount_wei === null ? {} : { actualAmountWei: BigInt(row.settled_amount_wei) }), accountingDate: row.usage_date, status, createdAt: row.created_at, updatedAt: row.settled_at ?? row.created_at };
   }
@@ -895,7 +936,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     for (const record of rows.map((row): ChainEvidenceRecord => {
       const evidence = decode<Record<string, unknown>>(row.evidence_json) ?? {};
       const checkedAt = row.checked_at;
-      return { id: String(evidence.backendEvidenceId ?? row.id), chainId: row.chain_id as 1 | 4663, status: row.status === 'verified' ? 'accepted' : row.status === 'execution_blocked' ? 'rejected' : 'pending', executionEnabled: row.execution_enabled === 1, seaDropCompatible: Boolean(evidence.seaDropCompatible), positiveLivePath: Boolean(evidence.positiveLivePath), archiveForkPassed: Boolean(evidence.archiveForkPassed), negativeCases: (evidence.negativeCases ?? {}) as ChainEvidenceRecord['negativeCases'], reconciliationPassed: Boolean(evidence.reconciliationPassed), finalityPassed: Boolean(evidence.finalityPassed), endpointIdentity: String(evidence.endpointIdentity ?? row.feed_endpoint_reference ?? row.sequencer_endpoint_reference ?? ''), ...(evidence.archiveEndpointIdentity ? { archiveEndpointIdentity: String(evidence.archiveEndpointIdentity) } : {}), strategyVersion: String(evidence.strategyVersion ?? 'database'), checkedAt, expiresAt: String(evidence.expiresAt ?? checkedAt), sourceBlock: asBigInt(evidence.sourceBlock), sourceBlockHash: String(evidence.sourceBlockHash ?? ''), ...(evidence.acceptedAt ? { acceptedAt: String(evidence.acceptedAt) } : {}), ...(evidence.acceptedBy ? { acceptedBy: String(evidence.acceptedBy) } : {}), ...(evidence.approvalProof ? { approvalProof: String(evidence.approvalProof) } : {}) };
+      return { id: String(evidence.backendEvidenceId ?? row.id), chainId: row.chain_id as 1 | 8453 | 4663, status: row.status === 'verified' ? 'accepted' : row.status === 'execution_blocked' ? 'rejected' : 'pending', executionEnabled: row.execution_enabled === 1, seaDropCompatible: Boolean(evidence.seaDropCompatible), positiveLivePath: Boolean(evidence.positiveLivePath), archiveForkPassed: Boolean(evidence.archiveForkPassed), negativeCases: (evidence.negativeCases ?? {}) as ChainEvidenceRecord['negativeCases'], reconciliationPassed: Boolean(evidence.reconciliationPassed), finalityPassed: Boolean(evidence.finalityPassed), endpointIdentity: String(evidence.endpointIdentity ?? row.feed_endpoint_reference ?? row.sequencer_endpoint_reference ?? ''), ...(evidence.archiveEndpointIdentity ? { archiveEndpointIdentity: String(evidence.archiveEndpointIdentity) } : {}), strategyVersion: String(evidence.strategyVersion ?? 'database'), checkedAt, expiresAt: String(evidence.expiresAt ?? checkedAt), sourceBlock: asBigInt(evidence.sourceBlock), sourceBlockHash: String(evidence.sourceBlockHash ?? ''), ...(evidence.acceptedAt ? { acceptedAt: String(evidence.acceptedAt) } : {}), ...(evidence.acceptedBy ? { acceptedBy: String(evidence.acceptedBy) } : {}), ...(evidence.approvalProof ? { approvalProof: String(evidence.approvalProof) } : {}) };
     })) latestById.set(record.id, record);
     return [...latestById.values()];
   }
@@ -1045,18 +1086,18 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private persistReceipt(receipt: ReceiptRecord, prior: ReceiptRecord | undefined): void {
     if (prior) return;
-    const chain = this.db.prepare('SELECT cp.chain_id FROM execution e JOIN campaign c ON c.id = e.campaign_id JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id WHERE e.id = ?').get(receipt.executionId) as { chain_id: 1 | 4663 } | undefined;
+    const chain = this.db.prepare('SELECT cp.chain_id FROM execution e JOIN campaign c ON c.id = e.campaign_id JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id WHERE e.id = ?').get(receipt.executionId) as { chain_id: 1 | 8453 | 4663 } | undefined;
     if (!chain) throw new Error('EXECUTION_CHAIN_REQUIRED');
     const attempt = receipt.transactionAttemptId ? this.db.prepare('SELECT id FROM transaction_attempt WHERE id = ? AND execution_id = ?').get(receipt.transactionAttemptId, receipt.executionId) as { id: string } | undefined : this.db.prepare('SELECT id FROM transaction_attempt WHERE execution_id = ? ORDER BY attempted_at DESC, id DESC LIMIT 1').get(receipt.executionId) as { id: string } | undefined;
     if (!attempt || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined) throw new Error('RECEIPT_PERSISTENCE_FACTS_REQUIRED');
     const chainId = chain.chain_id;
-    const finalityStage = canonicalReceiptFinalityStage(chainId, receipt.state, receipt.robinhoodFinality);
+    const finalityStage = canonicalReceiptFinalityStage(chainId, receipt.state, receipt.finalityStage ?? receipt.robinhoodFinality);
     // Posted is the configured settlement stage for the L2 path and is
     // represented as a confirmed receipt with its posted finality evidence.
     // Soft/pending observations remain non-terminal until a later update.
     const staged = finalityStage === 'soft' || finalityStage === 'posted' || (receipt.state === 'Pending' && finalityStage !== 'ethereum_final');
     const persistedStatus = receipt.state === 'Reorged' ? 'reorged' : receipt.state === 'Failed' ? 'reverted' : staged ? 'pending' : 'confirmed';
-    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: persistedStatus, blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, ...(receipt.gasUsed === undefined ? {} : { gasUsed: receipt.gasUsed }), ...(receipt.effectiveGasPrice === undefined ? {} : { effectiveGasPrice: receipt.effectiveGasPrice }), finalityStage, finalitySource: receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : 'ethereum-confirmation', observedAt: receipt.observedAt });
+    this.databaseStore.recordReceipt({ id: receipt.id, transactionAttemptId: attempt.id, executionId: receipt.executionId, txHash: this.attemptHash(attempt.id), status: persistedStatus, blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, confirmations: 0, ...(receipt.gasUsed === undefined ? {} : { gasUsed: receipt.gasUsed }), ...(receipt.effectiveGasPrice === undefined ? {} : { effectiveGasPrice: receipt.effectiveGasPrice }), ...(receipt.l1DataFeeWei === undefined ? {} : { l1DataFeeWei: receipt.l1DataFeeWei }), ...(receipt.operatorFeeWei === undefined ? {} : { operatorFeeWei: receipt.operatorFeeWei }), finalityStage, finalitySource: receipt.finalitySource ?? (receipt.robinhoodFinality ? 'blockchain' : chainId === ROBINHOOD_CHAIN_ID ? 'l2-receipt-only' : chainId === BASE_CHAIN_ID ? 'base-safe-finalized-heads' : 'ethereum-confirmation'), observedAt: receipt.observedAt });
     this.transitionExecutionSafe(receipt.executionId, persistedStatus === 'confirmed' ? 'confirmed' : persistedStatus === 'reorged' ? 'reorged' : staged ? 'submitted' : 'failed', `receipt ${receipt.state}`);
   }
 
@@ -1198,8 +1239,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return { chainProfileId: profile.id, contractId, dropId };
   }
 
-  private ensureFeePolicy(chainProfileId: string, policy: FeePolicy, chainId: 1 | 4663): void {
+  private ensureFeePolicy(chainProfileId: string, policy: FeePolicy, chainId: 1 | 8453 | 4663): void {
     if (policy.kind === 'paid' && chainId === ROBINHOOD_CHAIN_ID) assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), this.now());
+    if (chainId === BASE_CHAIN_ID) assertBaseLiveAllowed(policy.kind, this.baseEnablement(), this.now());
     const existing = this.db.prepare('SELECT paid_mints_enabled FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(chainProfileId) as { paid_mints_enabled: number } | undefined;
     if (existing) {
       if (policy.kind === 'paid' && existing.paid_mints_enabled !== 1) throw new Error('PAID_MINT_POLICY_REQUIRED');
@@ -1213,7 +1255,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
    * Numbers for a chain's stored fee policy (D-042). On Ethereum, with a fleet policy configured, they come from the
    * approved fleet policy, never from whichever campaign happens to be created first. Other chains keep the old rule.
    */
-  private feePolicySeed(policy: FeePolicy, chainId: 1 | 4663): { maxTotalFeeWei: bigint; freeCapWei: bigint; priorityComponentWei: bigint } {
+  private feePolicySeed(policy: FeePolicy, chainId: 1 | 8453 | 4663): { maxTotalFeeWei: bigint; freeCapWei: bigint; priorityComponentWei: bigint } {
     if (chainId === ETHEREUM_CHAIN_ID && this.fleetPolicy) {
       const largest = this.fleetPolicy.freeFeeAllowanceWei > this.fleetPolicy.paidFeeAllowanceWei ? this.fleetPolicy.freeFeeAllowanceWei : this.fleetPolicy.paidFeeAllowanceWei;
       return { maxTotalFeeWei: largest, freeCapWei: this.fleetPolicy.freeFeeAllowanceWei, priorityComponentWei: APPROVED_ETHEREUM_TIP_WEI };
@@ -1221,7 +1263,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return { maxTotalFeeWei: policy.totalFeeBudgetWei ?? 0n, freeCapWei: policy.freeTotalSpendCapWei ?? 0n, priorityComponentWei: policy.configuredPriorityFeeWei };
   }
 
-  private insertFeePolicyRow(chainProfileId: string, chainId: 1 | 4663, values: { maxTotalFeeWei: bigint; freeCapWei: bigint; priorityComponentWei: bigint; paidMintsEnabled: boolean }): void {
+  private insertFeePolicyRow(chainProfileId: string, chainId: 1 | 8453 | 4663, values: { maxTotalFeeWei: bigint; freeCapWei: bigint; priorityComponentWei: bigint; paidMintsEnabled: boolean }): void {
     // The count makes each stored version unique even when the same numbers are installed twice (or the clock is fixed).
     const sequence = (this.db.prepare('SELECT COUNT(*) AS n FROM fee_policy WHERE chain_profile_id = ?').get(chainProfileId) as { n: number }).n;
     const snapshot = { chainProfileId, sequence, ...Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value)])) };
@@ -1237,6 +1279,28 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (!row) return undefined;
     return { recordId: row.id, approvedBy: row.approvedBy, approvedAt: row.approvedAt, expiresAt: row.expiresAt, paidAllowed: row.paidAllowed, evidence: row.evidence };
   }
+
+  public baseEnablement(): unknown {
+    const row = this.databaseStore.latestBaseEnablement();
+    if (!row) return undefined;
+    return { recordId: row.id, approvedBy: row.approvedBy, approvedAt: row.approvedAt, expiresAt: row.expiresAt, freeAllowed: row.freeAllowed, paidAllowed: row.paidAllowed, evidence: row.evidence, evidenceDigest: row.evidenceDigest, strategyVersion: row.strategyVersion, feePolicyVersion: row.feePolicyVersion, primaryEndpointReference: row.primaryEndpointReference, fallbackEndpointReference: row.fallbackEndpointReference, custodyMode: row.custodyMode };
+  }
+
+  public ensureBaseChainProfile(): { id: string; created: boolean } {
+    const existing = this.db.prepare('SELECT id FROM chain_profile WHERE chain_id = ?').get(BASE_CHAIN_ID) as { id: string } | undefined;
+    if (existing) return { id: existing.id, created: false };
+    const id = canonicalId('chain', 'base-8453');
+    this.db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, BASE_CHAIN_ID, 'Base', '[]', 1, this.now().toISOString());
+    return { id, created: true };
+  }
+
+  public enableBase(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<'reviewedCode' | 'forkRehearsal' | 'finality' | 'endpointAgreement' | 'feeObservation' | 'liveSimulation' | 'custodyReadiness', true>; evidenceDigest: string; confirmationDigest: string; strategyVersion: string; feePolicyVersion: string; primaryEndpointReference: string; fallbackEndpointReference: string; custodyMode: 'local-personal-live' }): void {
+    this.ensureOpen();
+    const profile = this.ensureBaseChainProfile();
+    this.databaseStore.enableBase(input, { chainProfileId: profile.id, verificationId: canonicalId('verification', `base-enable:${input.id}`) });
+  }
+
+  public disableExpiredBase(): boolean { this.ensureOpen(); return this.databaseStore.disableBaseIfNotEnabled(this.now()); }
 
   /** Creates the Robinhood chain profile row when there is none (disabled and unverified, like Ethereum's). */
   public ensureRobinhoodChainProfile(): { id: string; created: boolean } {
@@ -1378,8 +1442,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return wallet;
   }
 
-  private chainProfileForCampaign(campaignId: string): { id: string; chainId: 1 | 4663 } | undefined {
-    const row = this.db.prepare('SELECT cp.id, cp.chain_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id WHERE c.id = ?').get(campaignId) as { id: string; chain_id: 1 | 4663 } | undefined;
+  private chainProfileForCampaign(campaignId: string): { id: string; chainId: 1 | 8453 | 4663 } | undefined {
+    const row = this.db.prepare('SELECT cp.id, cp.chain_id FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id WHERE c.id = ?').get(campaignId) as { id: string; chain_id: 1 | 8453 | 4663 } | undefined;
     return row ? { id: row.id, chainId: row.chain_id } : undefined;
   }
 
@@ -1417,8 +1481,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return row.tx_hash;
   }
 
-  private executionIdentity(executionId: string): { runId: string; campaignId: string; wallet: string; transactionIntentId: string; chainId: 1 | 4663; chainProfileId: string; valueWei: bigint } | undefined {
-    const row = this.db.prepare('SELECT e.run_id, e.campaign_id, e.transaction_intent_id, ti.value_wei, w.address, cp.chain_id, cp.id AS chain_profile_id FROM execution e JOIN transaction_intent ti ON ti.id = e.transaction_intent_id JOIN wallet w ON w.id = e.wallet_id JOIN chain_profile cp ON cp.id = w.chain_profile_id WHERE e.id = ?').get(executionId) as { run_id: string | null; campaign_id: string; transaction_intent_id: string; value_wei: string; address: string; chain_id: 1 | 4663; chain_profile_id: string } | undefined;
+  private executionIdentity(executionId: string): { runId: string; campaignId: string; wallet: string; transactionIntentId: string; chainId: 1 | 8453 | 4663; chainProfileId: string; valueWei: bigint } | undefined {
+    const row = this.db.prepare('SELECT e.run_id, e.campaign_id, e.transaction_intent_id, ti.value_wei, w.address, cp.chain_id, cp.id AS chain_profile_id FROM execution e JOIN transaction_intent ti ON ti.id = e.transaction_intent_id JOIN wallet w ON w.id = e.wallet_id JOIN chain_profile cp ON cp.id = w.chain_profile_id WHERE e.id = ?').get(executionId) as { run_id: string | null; campaign_id: string; transaction_intent_id: string; value_wei: string; address: string; chain_id: 1 | 8453 | 4663; chain_profile_id: string } | undefined;
     if (!row?.run_id) return undefined;
     return { runId: row.run_id, campaignId: row.campaign_id, wallet: row.address, transactionIntentId: row.transaction_intent_id, chainId: row.chain_id, chainProfileId: row.chain_profile_id, valueWei: BigInt(row.value_wei) };
   }
@@ -1427,7 +1491,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return this.snapshot().runs.find((run) => run.id === runId);
   }
 
-  private runChain(runId: string, runs: readonly RunRecord[]): 1 | 4663 {
+  private runChain(runId: string, runs: readonly RunRecord[]): 1 | 8453 | 4663 {
     const run = runs.find((candidate) => candidate.id === runId);
     if (!run) return ETHEREUM_CHAIN_ID;
     const row = this.chainProfileForCampaign(run.campaignId);
@@ -1476,6 +1540,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const profile = this.chainProfileForCampaign(campaign.id);
     if (!profile) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
     if (profile.chainId === ROBINHOOD_CHAIN_ID && fee.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), this.now());
+    if (profile.chainId === BASE_CHAIN_ID) assertBaseLiveAllowed(fee.kind, this.baseEnablement(), this.now());
     const totalFee = fee.totalFeeBudgetWei ?? 0n;
     if (profile.chainId === ETHEREUM_CHAIN_ID && fee.kind === 'paid' && campaign.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
     if (totalFee < 0n || totalFee > campaign.spendPolicy.gasCeilingWei) throw new Error('GAS_CEILING_EXCEEDED');
@@ -1492,6 +1557,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (!profile) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
     if (profile.chain_id !== campaign.chainId) throw new Error('CHAIN_PROFILE_IDENTITY_MISMATCH');
     if (campaign.chainId === ROBINHOOD_CHAIN_ID) assertRobinhoodLiveAllowed('free', this.robinhoodEnablement(), this.now());
+    if (campaign.chainId === BASE_CHAIN_ID) assertBaseLiveAllowed(campaign.feePolicy.kind, this.baseEnablement(), this.now());
     if (profile.execution_enabled !== 1) throw new Error('CHAIN_EXECUTION_DISABLED');
     const verification = this.db.prepare('SELECT status, evidence_json FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1').get(profile.id) as { status: string; evidence_json: string } | undefined;
     const evidence = decodeRecord<{ expiresAt?: string }>(verification?.evidence_json);
@@ -1506,7 +1572,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   /** Run-level fleet checks that need no reservation rows; runs before any write. */
   private assertFleetRunLimits(input: CanonicalAdmissionInput, mintClass: 'free' | 'paid'): void {
-    const policy = this.fleetPolicy;
+    const policy = this.fleetPolicyFor(input.campaign.chainId);
     if (!policy) {
       if (input.run.mode === 'live') throw new Error('FLEET_SPEND_POLICY_REQUIRED');
       return;
@@ -1523,7 +1589,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   /** D-032: at most N wallets per paid mint, counting wallets already holding pending or settled exposure on this campaign. */
   private assertPaidWalletsPerMint(input: CanonicalAdmissionInput): void {
-    const policy = this.fleetPolicy;
+    const policy = this.fleetPolicyFor(input.campaign.chainId);
     if (!policy) return;
     const existing = this.db.prepare("SELECT DISTINCT wallet_id FROM spend_reservation WHERE campaign_id = ? AND status IN ('reserved', 'settled')").all(input.campaign.id) as Array<{ wallet_id: string }>;
     const walletIds = new Set(existing.map((row) => row.wallet_id));
@@ -1531,19 +1597,23 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (walletIds.size > policy.paidMaxWalletsPerMint) throw new Error('PAID_WALLET_LIMIT_EXCEEDED');
   }
 
-  private assertFleetDailyCap(mintClass: 'free' | 'paid', rollingCutoff: string, amount: bigint): void {
-    const policy = this.fleetPolicy;
+  private assertFleetDailyCap(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string, amount: bigint): void {
+    const policy = this.fleetPolicyFor(chainId);
     if (!policy) return;
     const cap = mintClass === 'free' ? policy.freeDailyCapWei : policy.paidDailyCapWei;
-    if (this.fleetDailyExposure(mintClass, rollingCutoff) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
+    if (this.fleetDailyExposure(chainId, mintClass, rollingCutoff) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
   }
 
-  /** Pending plus settled exposure across every wallet. A row with unknown mint value counts toward both classes. */
-  private fleetDailyExposure(mintClass: 'free' | 'paid', rollingCutoff: string): bigint {
-    const rows = this.db.prepare("SELECT COALESCE(reserved_amount_wei, amount_wei) AS amount, mint_value_wei FROM spend_reservation WHERE status = 'reserved' OR (status = 'settled' AND (julianday(settled_at) IS NULL OR julianday(settled_at) >= julianday(?)))").all(rollingCutoff) as Array<{ amount: string; mint_value_wei: string | null }>;
+  /** Pending plus recently settled exposure for the same chain. Unknown mint value counts toward both classes. */
+  private fleetDailyExposure(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string): bigint {
+    const rows = this.db.prepare("SELECT COALESCE(sr.reserved_amount_wei, sr.amount_wei) AS amount, sr.mint_value_wei FROM spend_reservation sr JOIN chain_profile cp ON cp.id = sr.chain_profile_id WHERE cp.chain_id = ? AND (sr.status = 'reserved' OR (sr.status = 'settled' AND (julianday(sr.settled_at) IS NULL OR julianday(sr.settled_at) >= julianday(?))))").all(chainId, rollingCutoff) as Array<{ amount: string; mint_value_wei: string | null }>;
     return rows
       .filter((row) => row.mint_value_wei === null || (mintClass === 'free' ? BigInt(row.mint_value_wei) === 0n : BigInt(row.mint_value_wei) > 0n))
       .reduce((total, row) => total + BigInt(row.amount), 0n);
+  }
+
+  private fleetPolicyFor(chainId: 1 | 8453 | 4663): FleetSpendPolicy | undefined {
+    return chainId === BASE_CHAIN_ID ? BASE_PERSONAL_LIVE_FLEET_POLICY : this.fleetPolicy;
   }
 
   private runExposure(runId: string): bigint {

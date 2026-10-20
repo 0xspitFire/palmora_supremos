@@ -36,4 +36,12 @@ describe('receipt watcher recovery boundaries', () => {
 
     await expect(watcher.waitForReceipt(hash, 1)).rejects.toBeInstanceOf(ReceiptReorgedError);
   });
+
+  it('refuses Base settlement when the independent provider disagrees on receipt facts', async () => {
+    const receipt = { transactionHash: hash, blockHash, blockNumber: 42n, status: 'success', gasUsed: 21_000n, effectiveGasPrice: 2n, l1Fee: 3n, operatorFee: 4n };
+    const client = { getTransactionReceipt: async () => receipt, getBlockNumber: async () => 42n } as unknown as PublicClient;
+    const fallback = { getTransactionReceipt: async () => ({ ...receipt, gasUsed: 21_001n }) } as unknown as PublicClient;
+    const watcher = new ReceiptWatcherImpl(client, { chainId: 8453, baseFallbackClient: fallback, initialPollMs: 1, maxPollMs: 1, maxWaitMs: 100, finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final' }, finalityObserver: { observe: async () => ({ chainId: 8453 as const, stage: 'ethereum_final' as const, ready: true, canonical: true, observedAt: new Date() }) } });
+    await expect(watcher.waitForReceipt(hash, 1)).rejects.toThrow('BASE_PROVIDER_RECEIPT_DISAGREEMENT');
+  });
 });

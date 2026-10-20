@@ -9,6 +9,7 @@ export type CommandName = 'resolve' | 'validate' | 'prepare' | 'simulate' | 'dry
 export type JobKind = 'execute' | 'reconcile' | 'notification' | 'health' | 'phase2';
 export type JobState = 'scheduled' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
 export type CheckOutcome = 'pass' | 'fail' | 'unknown' | 'stale';
+export type ExecutionChainId = 1 | 8453 | 4663;
 
 export interface Provenance {
   kind: 'backend_store' | 'chain_observation' | 'eligibility_check' | 'simulation' | 'reconciliation' | 'notification_event';
@@ -55,7 +56,7 @@ export interface ScheduledJobRecord {
 }
 
 export interface Campaign {
-  id: string; state: CampaignState; chainId: 1 | 4663; contract: string; strategy: string;
+  id: string; state: CampaignState; chainId: ExecutionChainId; contract: string; strategy: string;
   quantity: number; dryRun: boolean; spendPolicy: SpendPolicy; createdAt: string; updatedAt: string;
   broadcastMode?: 'flashbots' | 'public' | 'sequencer';
   chainVerification: ChainVerification;
@@ -67,8 +68,8 @@ export interface Campaign {
 }
 export interface SpendPolicy { maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; }
 export interface FeePolicy { kind: 'free' | 'paid'; configuredPriorityFeeWei: bigint; freeTotalSpendCapWei?: bigint; l2ExecutionGasBudgetWei?: bigint; l1DataGasBudgetWei?: bigint; totalFeeBudgetWei?: bigint; }
-export interface ChainVerification { chainId: 1 | 4663; status: ChainVerificationStatus; seaDropCompatible: boolean; evidenceId?: string; checkedAt?: string; sourceBlock?: bigint; endpointReference: string; }
-export interface ChainEvidenceRecord { id: string; chainId: 1 | 4663; status: 'pending' | 'accepted' | 'rejected'; executionEnabled: boolean; seaDropCompatible: boolean; positiveLivePath: boolean; archiveForkPassed: boolean; negativeCases: Record<RobinhoodNegativeCase, boolean>; reconciliationPassed: boolean; finalityPassed: boolean; endpointIdentity: string; archiveEndpointIdentity?: string; strategyVersion: string; checkedAt: string; expiresAt: string; sourceBlock: bigint; sourceBlockHash: string; acceptedAt?: string; acceptedBy?: string; approvalProof?: string; }
+export interface ChainVerification { chainId: ExecutionChainId; status: ChainVerificationStatus; seaDropCompatible: boolean; evidenceId?: string; checkedAt?: string; sourceBlock?: bigint; endpointReference: string; }
+export interface ChainEvidenceRecord { id: string; chainId: ExecutionChainId; status: 'pending' | 'accepted' | 'rejected'; executionEnabled: boolean; seaDropCompatible: boolean; positiveLivePath: boolean; archiveForkPassed: boolean; negativeCases: Record<RobinhoodNegativeCase, boolean>; reconciliationPassed: boolean; finalityPassed: boolean; endpointIdentity: string; archiveEndpointIdentity?: string; strategyVersion: string; checkedAt: string; expiresAt: string; sourceBlock: bigint; sourceBlockHash: string; acceptedAt?: string; acceptedBy?: string; approvalProof?: string; }
 export interface SimulationEvidenceRecord { id: string; campaignId: string; wallet: string; inputDigest: string; success: boolean; sourceBlock: bigint; sourceBlockHash: string; checkedAt: string; expiresAt: string; gasEstimate?: bigint; worstCaseFeeWei: bigint; }
 export interface EventRecord { id: string; runId?: string; type: string; at: string; data: Record<string, unknown>; }
 export interface NotificationOutboxRecord { id: string; sourceEventId: string; runId?: string; type: string; text: string; state: 'pending' | 'delivering' | 'delivered' | 'failed'; attempts: number; createdAt: string; deliveredAt?: string; retentionUntil?: string; deliveryLeaseUntil?: string; lastError?: string; nextAttemptAt?: string; canonicalLink?: string; }
@@ -76,8 +77,8 @@ export interface RunRecord { id: string; intentId: string; campaignId: string; m
 export interface IntentRecord { id: string; runId: string; campaignId: string; campaignSnapshot: Campaign; wallets: readonly string[]; policy: SpendPolicy; feePolicy: FeePolicy; chainVerification: ChainVerification; simulationIds: readonly string[]; evidenceAt: string; createdAt: string; }
 export interface AttemptRecord { id: string; executionId: string; runId: string; wallet: string; nonce?: number; hash?: string; endpoint?: string; redactedError?: string; replacementOfId?: string; state: ExecutionState; robinhoodFinality?: RobinhoodFinality; createdAt: string; updatedAt: string; }
 export interface ReconciliationRecord { id: string; runId: string; attemptId?: string; result: ReconciliationResult; observedAt: string; reason?: string; }
-export interface ReceiptRecord { id: string; executionId: string; runId: string; transactionAttemptId?: string; state: ExecutionState; finalityStage?: 'unknown' | 'soft' | 'posted' | 'ethereum_final'; finalitySource?: string; robinhoodFinality?: RobinhoodFinality; blockNumber?: bigint; blockHash?: string; gasUsed?: bigint; effectiveGasPrice?: bigint; actualSpendWei?: bigint; observedAt: string; }
-export interface Reservation { id: string; runId: string; campaignId: string; chainId?: 1 | 4663; wallet: string; amountWei: bigint; actualAmountWei?: bigint; accountingDate: string; status: 'reserved' | 'settled' | 'released' | 'reorged'; createdAt: string; updatedAt: string; }
+export interface ReceiptRecord { id: string; executionId: string; runId: string; transactionAttemptId?: string; state: ExecutionState; finalityStage?: 'unknown' | 'soft' | 'posted' | 'ethereum_final'; finalitySource?: string; robinhoodFinality?: RobinhoodFinality; blockNumber?: bigint; blockHash?: string; gasUsed?: bigint; effectiveGasPrice?: bigint; l1DataFeeWei?: bigint; operatorFeeWei?: bigint; actualSpendWei?: bigint; observedAt: string; }
+export interface Reservation { id: string; runId: string; campaignId: string; chainId?: ExecutionChainId; wallet: string; amountWei: bigint; actualAmountWei?: bigint; accountingDate: string; status: 'reserved' | 'settled' | 'released' | 'reorged'; createdAt: string; updatedAt: string; }
 export interface ReadinessCheck {
   wallet: string;
   campaignId?: string;
@@ -92,7 +93,7 @@ export interface ReadinessCheck {
   provenance?: Provenance[];
 }
 export interface DependencyReadiness { engine: boolean; chain: boolean; backup: boolean; notifications: boolean; }
-export interface CustodyReadiness { provider: 'turnkey' | 'kms' | 'local' | 'local-personal-live' | 'custom'; providerIdentity: string; policyReference: string; policyDigest: string; policyStatus: 'approved' | 'rejected' | 'unknown'; healthStatus: 'healthy' | 'unhealthy' | 'unknown'; attestationStatus: 'verified' | 'failed' | 'unknown'; evidenceId: string; observedAt: string; expiresAt: string; keystoreDigest?: string; wallets?: string[]; confirmedBy?: string; }
+export interface CustodyReadiness { provider: 'turnkey' | 'kms' | 'local' | 'local-personal-live' | 'custom'; providerIdentity: string; policyReference: string; policyDigest: string; policyStatus: 'approved' | 'rejected' | 'unknown'; healthStatus: 'healthy' | 'unhealthy' | 'unknown'; attestationStatus: 'verified' | 'failed' | 'unknown'; evidenceId: string; observedAt: string; expiresAt: string; keystoreDigest?: string; wallets?: string[]; confirmedBy?: string; chainId?: 1 | 8453; }
 export interface OperationalReadiness { secretStoreReference?: string; storePath?: string; signerReady: boolean; custody?: CustodyReadiness; killSwitchEngaged: boolean; notificationReady: boolean; chainVerification: ChainVerificationStatus; lastReconciliationAt: string; observedAt: string; expiresAt: string; }
 export interface RuntimeStatus { startupState: StartupState; reconciliationCompletedAt?: string; blockingReasons: string[]; dependencies: DependencyReadiness; operational?: OperationalReadiness; chainTimeOffsetMs?: number; chainTimeObservedAt?: string; }
 export interface BackendState { schemaVersion: 1; campaigns: Campaign[]; runs: RunRecord[]; intents: IntentRecord[]; attempts: AttemptRecord[]; receipts: ReceiptRecord[]; reconciliations: ReconciliationRecord[]; reservations: Reservation[]; events: EventRecord[]; notificationOutbox: NotificationOutboxRecord[]; chainEvidence: ChainEvidenceRecord[]; simulations: SimulationEvidenceRecord[]; readiness: ReadinessCheck[]; jobs: ScheduledJobRecord[]; runtime: RuntimeStatus; killed: boolean; killReason?: string; }

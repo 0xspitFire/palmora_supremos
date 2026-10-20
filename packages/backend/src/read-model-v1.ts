@@ -707,7 +707,7 @@ export class Phase2ReadModelService {
     return gateCheck('chain_verified', 'pass', true, 'Chain verification is current.', verification.checkedAt ?? null, evidence?.expiresAt ?? null, provenance, freshness);
   }
 
-  private chainGate(context: ProjectionContext, chainId: 1 | 4663, evidenceId?: string): GateSummary {
+  private chainGate(context: ProjectionContext, chainId: 1 | 8453 | 4663, evidenceId?: string): GateSummary {
     const evidence = context.state.chainEvidence.find(item => item.id === evidenceId) ?? context.state.chainEvidence.filter(item => item.chainId === chainId).sort((left, right) => right.checkedAt.localeCompare(left.checkedAt))[0];
     const verification = evidence ? this.chainEvidenceCheck(context, chainId, evidence) : gateCheck('chain_verified', 'unknown', true, 'No chain verification evidence is available.', null, null, undefined, UNKNOWN_FRESHNESS);
     const evidenceCurrent = evidence ? gateCheck('evidence_current', evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion).status === 'fresh' ? 'pass' : evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion).status === 'stale' ? 'stale' : 'unknown', true, evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion).status === 'fresh' ? 'Evidence is within its freshness window.' : 'Evidence freshness is not current.', evidence.checkedAt, evidence.expiresAt, evidenceProvenance(evidence), evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion)) : gateCheck('evidence_current', 'unknown', true, 'No chain evidence freshness is available.', null, null, undefined, UNKNOWN_FRESHNESS);
@@ -717,7 +717,7 @@ export class Phase2ReadModelService {
     return { decision, checks, blockers, nextAction: blockers[0]?.safeAction ?? 'Inspect' };
   }
 
-  private chainEvidenceCheck(context: ProjectionContext, chainId: 1 | 4663, evidence: BackendState['chainEvidence'][number]): GateCheck {
+  private chainEvidenceCheck(context: ProjectionContext, chainId: 1 | 8453 | 4663, evidence: BackendState['chainEvidence'][number]): GateCheck {
     const freshness = evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion);
     const provenance = evidenceProvenance(evidence);
     if (chainId === 4663) return gateCheck('chain_verified', 'fail', true, 'Robinhood is characterized but execution remains blocked.', evidence.checkedAt, evidence.expiresAt, provenance, freshness);
@@ -824,18 +824,18 @@ export class Phase2ReadModelService {
     return { id: campaign.id, state: campaign.state, chainId: campaign.chainId.toString(), contract: addressValue(campaign.contract), quantity: campaign.quantity.toString(), cost: sourcedAmount(campaign.mintPriceWei * BigInt(campaign.quantity), 'estimated', freshness, provenance), gate: this.chainGate(context, campaign.chainId, campaign.chainVerification.evidenceId), freshness, provenance };
   }
 
-  private attemptReadModel(context: ProjectionContext, attempt: AttemptRecord, attemptNumber: number, chainId: 1 | 4663, receipt?: ReceiptRecord): TransactionAttemptReadModel {
+  private attemptReadModel(context: ProjectionContext, attempt: AttemptRecord, attemptNumber: number, chainId: 1 | 8453 | 4663, receipt?: ReceiptRecord): TransactionAttemptReadModel {
     const provenance = [storeProvenance(`attempt:${attempt.id}`, attempt.createdAt)];
-    const finality = receipt || attempt.robinhoodFinality !== undefined ? finalityModel(context, chainId, receipt?.finalityStage === 'ethereum_final' && chainId === 1 ? 'confirmed' : receipt?.finalityStage ?? (attempt.robinhoodFinality === 'final' ? 'ethereum_final' : attempt.robinhoodFinality ?? 'unknown'), receipt?.state === 'Confirmed' && (chainId === 1 ? receipt.finalityStage === 'ethereum_final' : attempt.robinhoodFinality === 'final' && receipt.finalityStage === 'ethereum_final'), receipt?.observedAt ?? attempt.updatedAt, provenance) : null;
+    const finality = receipt || attempt.robinhoodFinality !== undefined ? finalityModel(context, chainId, receipt?.finalityStage === 'ethereum_final' && chainId === 1 ? 'confirmed' : receipt?.finalityStage ?? (attempt.robinhoodFinality === 'final' ? 'ethereum_final' : attempt.robinhoodFinality ?? 'unknown'), receipt?.state === 'Confirmed' && receipt.finalityStage === 'ethereum_final' && (chainId !== 4663 || attempt.robinhoodFinality === 'final'), receipt?.observedAt ?? attempt.updatedAt, provenance) : null;
     const reason = attempt.state === 'Failed' ? issue('ATTEMPT_FAILED', 'The transaction attempt failed; inspect its typed backend reason.', 'warning', 'Inspect', provenance[0]) : undefined;
     return { id: attempt.id, walletId: attempt.wallet, hash: attempt.hash ?? null, nonce: attempt.nonce === undefined ? null : attempt.nonce.toString(), attemptNumber: attemptNumber.toString(), replacementOfId: attempt.replacementOfId ?? null, state: attempt.state, finality, retry: DENIED_RETRY, ...(reason === undefined ? {} : { reason }), provenance };
   }
 
-  private receiptReadModel(context: ProjectionContext, receipt: ReceiptRecord, attempts: readonly AttemptRecord[], chainId: 1 | 4663): TransactionReceiptReadModel {
+  private receiptReadModel(context: ProjectionContext, receipt: ReceiptRecord, attempts: readonly AttemptRecord[], chainId: 1 | 8453 | 4663): TransactionReceiptReadModel {
     const attempt = attempts.find(item => item.id === receipt.transactionAttemptId);
     const provenance = [storeProvenance(`receipt:${receipt.id}`, receipt.observedAt)];
     const stage = chainId === 1 ? receipt.finalityStage === 'ethereum_final' ? 'confirmed' : 'unknown' : receipt.finalityStage ?? (receipt.robinhoodFinality === 'soft' ? 'soft' : receipt.robinhoodFinality === 'posted' ? 'posted' : receipt.robinhoodFinality === 'final' ? 'ethereum_final' : 'unknown');
-    const settlementReached = receipt.state === 'Confirmed' && (chainId === 1 ? receipt.finalityStage === 'ethereum_final' : receipt.robinhoodFinality === 'final' && receipt.finalityStage === 'ethereum_final');
+    const settlementReached = receipt.state === 'Confirmed' && receipt.finalityStage === 'ethereum_final' && (chainId !== 4663 || receipt.robinhoodFinality === 'final');
     const finality = finalityModel(context, chainId, stage, settlementReached, receipt.observedAt, provenance, receipt.state === 'Reorged' ? 'Receipt was downgraded after a canonicality change.' : undefined);
     const freshness = classifyFreshness(receipt.observedAt, null, context.now, context.freshnessPolicyVersion);
     const gasUsed = receipt.gasUsed === undefined ? null : sourcedQuantity(receipt.gasUsed, freshness, provenance);
@@ -850,7 +850,7 @@ export class Phase2ReadModelService {
     return { id: record.id, state, observedAt: record.observedAt, reason: safeReadModelText(record.reason), retry: DENIED_RETRY, provenance };
   }
 
-  private walletExecutionResults(context: ProjectionContext, attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], reconciliations: readonly ReconciliationRecord[], chainId: 1 | 4663): readonly WalletExecutionResult[] {
+  private walletExecutionResults(context: ProjectionContext, attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], reconciliations: readonly ReconciliationRecord[], chainId: 1 | 8453 | 4663): readonly WalletExecutionResult[] {
     const wallets = new Set(attempts.map(item => item.wallet));
     const results: WalletExecutionResult[] = [];
     for (const wallet of wallets) {
@@ -987,9 +987,9 @@ function sourcedAmountOrNull(value: bigint | undefined, kind: SourcedAmount['kin
 function sourcedQuantity(value: bigint | null, freshness: Freshness, provenance: readonly Provenance[]): SourcedQuantity { return { value: value === null ? null : value.toString(), unit: 'gas', freshness, provenance }; }
 function emptyReadinessSummary(freshness: Freshness): ReadinessSummary { return { total: '0', ready: '0', blocked: '0', unknown: '0', stale: '0', ineligible: '0', executing: '0', freshness }; }
 
-function finalityModel(context: ProjectionContext, chainId: 1 | 4663, stage: FinalityReadModel['stage'], settlementReached: boolean, observedAt: string, provenance: readonly Provenance[], downgradeReason?: string): FinalityReadModel {
+function finalityModel(context: ProjectionContext, chainId: 1 | 8453 | 4663, stage: FinalityReadModel['stage'], settlementReached: boolean, observedAt: string, provenance: readonly Provenance[], downgradeReason?: string): FinalityReadModel {
   const freshness = classifyFreshness(observedAt, null, context.now, context.freshnessPolicyVersion);
-  const requiredStage = chainId === 4663 ? 'ethereum_final' : 'confirmed';
+  const requiredStage = chainId === 1 ? 'confirmed' : 'ethereum_final';
   return { stage, requiredStage, settlementReached: settlementReached && stage === requiredStage, observedAt, freshness, provenance, ...(downgradeReason === undefined ? {} : { downgradeReason }) };
 }
 

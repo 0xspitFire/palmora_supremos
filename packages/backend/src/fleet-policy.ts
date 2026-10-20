@@ -41,6 +41,17 @@ export const PERSONAL_LIVE_FLEET_POLICY: Readonly<FleetSpendPolicy> = Object.fre
   paidFeeAllowanceWei: ethToWei('0.00037'),
 });
 
+/** Owner-approved Base Personal Live limits (D-057, 2026-10-19). */
+export const BASE_PERSONAL_LIVE_FLEET_POLICY: Readonly<FleetSpendPolicy> = Object.freeze({
+  freeDailyCapWei: ethToWei('0.0012'),
+  paidDailyCapWei: ethToWei('0.0082'),
+  paidHeadroomAlertWei: ethToWei('0.0075'),
+  paidMaxPricePerNftWei: ethToWei('0.0037'),
+  paidMaxWalletsPerMint: 2,
+  freeFeeAllowanceWei: ethToWei('0.0002'),
+  paidFeeAllowanceWei: ethToWei('0.0002'),
+});
+
 export function validateFleetSpendPolicy(policy: FleetSpendPolicy): FleetSpendPolicy {
   const amounts = [policy.freeDailyCapWei, policy.paidDailyCapWei, policy.paidHeadroomAlertWei, policy.paidMaxPricePerNftWei, policy.freeFeeAllowanceWei, policy.paidFeeAllowanceWei];
   if (amounts.some((amount) => typeof amount !== 'bigint' || amount <= 0n)) throw new Error('FLEET_SPEND_POLICY_INVALID');

@@ -13,7 +13,7 @@ import { DurableStore } from './store.js';
 import type { AttemptRecord, Campaign, ChainEvidenceRecord, EngineAdapter, IntentRecord, RunRecord } from './types.js';
 import { PERSONAL_LIVE_FLEET_POLICY, ethToWei, validateFleetSpendPolicy, type FleetSpendPolicy } from './fleet-policy.js';
 
-import { ETHEREUM, ROBINHOOD, NOW, WALLET_ONE, WALLET_TWO, CONTRACT, noopEngine, OPEN_FLEET_POLICY, fixture, close, campaignInput, campaign, armed, type Fixture } from './canonical-fixtures.js';
+import { BASE, BASE_NOW, ETHEREUM, ROBINHOOD, NOW, WALLET_ONE, WALLET_TWO, CONTRACT, noopEngine, OPEN_FLEET_POLICY, fixture, close, campaignInput, campaign, armed, type Fixture } from './canonical-fixtures.js';
 
 describe('CanonicalStoreBridge', () => {
   it('fails closed when the normalized database is below migration 15', async () => {
@@ -30,6 +30,10 @@ describe('CanonicalStoreBridge', () => {
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'posted')).toBe('posted');
     expect(canonicalReceiptFinalityStage(ROBINHOOD, 'Confirmed', 'final')).toBe('ethereum_final');
     expect(canonicalReceiptFinalityStage(ETHEREUM, 'Confirmed')).toBe('ethereum_final');
+    expect(canonicalReceiptFinalityStage(8453, 'Confirmed')).toBe('unknown');
+    expect(canonicalReceiptFinalityStage(8453, 'Confirmed', 'posted')).toBe('posted');
+    expect(canonicalReceiptFinalityStage(8453, 'Confirmed', 'ethereum_final')).toBe('ethereum_final');
+    expect(canonicalReceiptFinalityStage(8453, 'Failed', 'ethereum_final')).toBe('ethereum_final');
   });
 
   it('rejects the JSON backend_state table as a live store', async () => {
@@ -398,7 +402,7 @@ describe('CanonicalStoreBridge', () => {
       await value.store.persistEngineAttempt({ id: 'staged-attempt', executionId, transactionIntentId, endpoint: 'provider', responseClass: 'accepted', txHash, nonce: 9, attemptedAt: NOW });
       await expect(value.store.persistEngineReceipt({ id: 'invalid-status-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'invented', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, observedAt: NOW })).rejects.toThrow('LIFECYCLE_RECEIPT_STATUS_INVALID');
       await value.store.persistEngineReceipt({ id: 'staged-receipt', executionId, transactionAttemptId: 'staged-attempt', txHash, status: 'pending', blockNumber: 19n, blockHash: `0x${'8'.repeat(64)}`, finalityStage: 'soft', observedAt: NOW });
-      expect(value.db.prepare("SELECT status, finality_stage FROM transaction_receipt WHERE id = 'staged-receipt'").get()).toEqual({ status: 'pending', finality_stage: 'unknown' });
+      expect(value.db.prepare("SELECT status, finality_stage FROM transaction_receipt WHERE id = 'staged-receipt'").get()).toEqual({ status: 'pending', finality_stage: 'soft' });
       value.store.close();
       const reopenedDb = openDatabase(join(value.directory, 'state.sqlite'));
       reopened = new CanonicalStoreBridge(reopenedDb, { now: () => new Date(NOW) });
@@ -590,6 +594,59 @@ describe('CanonicalStoreBridge', () => {
         const second = await armed(value, await campaign(value, ETHEREUM));
         await expect(value.store.admitExecution(second.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
         expect(reservationCount(value)).toBe(2);
+      } finally { await close(value); }
+    });
+
+    it('enforces Base rolling exposure at 0.0012 ETH across runs after the finalized first proof', async () => {
+      const value = await fixture(BASE);
+      try {
+        const first = await armed(value, await campaign(value, BASE), [WALLET_ONE]);
+        const firstAdmission = await value.store.admitExecution(first.input);
+        const firstExecution = firstAdmission.executions[0]!;
+        value.db.prepare("INSERT INTO transaction_attempt (id, transaction_intent_id, endpoint, response_class, tx_hash, attempted_at, execution_id, chain_profile_id) VALUES (?, ?, 'base-primary', 'accepted', ?, ?, ?, ?)").run('base-first-attempt', firstExecution.intentId, `0x${'a'.repeat(64)}`, BASE_NOW, firstExecution.executionId, `profile-${BASE}`);
+        value.db.prepare("INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, l1_data_fee_wei, operator_fee_wei, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, 'confirmed', 1, ?, 1, '1', '1', '1', '1', 'ethereum_final', 'test-independent-providers', ?, ?)").run('base-first-receipt', 'base-first-attempt', `0x${'a'.repeat(64)}`, `0x${'b'.repeat(64)}`, BASE_NOW, firstExecution.executionId);
+        await value.store.settleExecutionComponents(firstAdmission.reservations[0]!.id, { actualMintValueWei: 0n, actualL2ExecutionGasWei: 1n, actualL1DataGasWei: 2n, authoritativeReceiptId: 'base-first-receipt' });
+        expect(value.db.prepare('SELECT status, settled_l2_execution_gas_wei, settled_l1_data_gas_wei FROM spend_reservation WHERE id = ?').get(firstAdmission.reservations[0]!.id)).toEqual({ status: 'settled', settled_l2_execution_gas_wei: '1', settled_l1_data_gas_wei: '2' });
+
+        const fiveWallets = Array.from({ length: 5 }, (_, index) => `0x${String(index + 3).repeat(40)}`);
+        const atCap = await armed(value, await campaign(value, BASE), fiveWallets);
+        expect((await value.store.admitExecution(atCap.input)).reservations).toHaveLength(5);
+
+        const aboveCap = await armed(value, await campaign(value, BASE), [`0x${'9'.repeat(40)}`]);
+        await expect(value.store.admitExecution(aboveCap.input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+      } finally { await close(value); }
+    });
+
+    it('allows a bounded first-proof retry after an authoritative finalized revert', async () => {
+      const value = await fixture(BASE);
+      try {
+        const first = await armed(value, await campaign(value, BASE), [WALLET_ONE], [], '-reverted-proof');
+        const admission = await value.store.admitExecution(first.input);
+        const execution = admission.executions[0]!;
+        const txHash = `0x${'c'.repeat(64)}`;
+        value.db.prepare("INSERT INTO transaction_attempt (id, transaction_intent_id, endpoint, response_class, tx_hash, attempted_at, execution_id, chain_profile_id) VALUES (?, ?, 'base-primary', 'accepted', ?, ?, ?, ?)").run('base-reverted-attempt', execution.intentId, txHash, BASE_NOW, execution.executionId, `profile-${BASE}`);
+        value.db.prepare("INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, l1_data_fee_wei, operator_fee_wei, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, 'reverted', 1, ?, 1, '1', '1', '1', '1', 'ethereum_final', 'test-independent-providers', ?, ?)").run('base-reverted-receipt', 'base-reverted-attempt', txHash, `0x${'d'.repeat(64)}`, BASE_NOW, execution.executionId);
+        await value.store.settleExecutionComponents(admission.reservations[0]!.id, { actualMintValueWei: 0n, actualL2ExecutionGasWei: 1n, actualL1DataGasWei: 2n, authoritativeReceiptId: 'base-reverted-receipt' });
+
+        const retry = await armed(value, await campaign(value, BASE), [WALLET_TWO], [], '-retry-proof');
+        await expect(value.store.admitExecution(retry.input)).resolves.toMatchObject({ reservations: [{ wallet: WALLET_TWO }] });
+      } finally { await close(value); }
+    });
+
+    it('does not unlock expanded Base runs until the finalized first proof is settled', async () => {
+      const value = await fixture(BASE);
+      try {
+        const first = await armed(value, await campaign(value, BASE), [WALLET_ONE], [], '-unsettled-proof');
+        const admission = await value.store.admitExecution(first.input);
+        const execution = admission.executions[0]!;
+        const txHash = `0x${'e'.repeat(64)}`;
+        value.db.prepare("INSERT INTO transaction_attempt (id, transaction_intent_id, endpoint, response_class, tx_hash, attempted_at, execution_id, chain_profile_id) VALUES (?, ?, 'base-primary', 'accepted', ?, ?, ?, ?)").run('base-unsettled-attempt', execution.intentId, txHash, BASE_NOW, execution.executionId, `profile-${BASE}`);
+        value.db.prepare("INSERT INTO transaction_receipt (id, transaction_attempt_id, tx_hash, status, block_number, block_hash, confirmations, gas_used, effective_gas_price, l1_data_fee_wei, operator_fee_wei, finality_stage, finality_source, observed_at, execution_id) VALUES (?, ?, ?, 'confirmed', 1, ?, 1, '1', '1', '1', '1', 'ethereum_final', 'test-independent-providers', ?, ?)").run('base-unsettled-receipt', 'base-unsettled-attempt', txHash, `0x${'f'.repeat(64)}`, BASE_NOW, execution.executionId);
+
+        const expandedCampaign = await value.application.createCampaign({ ...campaignInput(BASE), quantity: 4 });
+        const expanded = await armed(value, expandedCampaign, [WALLET_ONE, WALLET_TWO], [], '-premature-expansion');
+        await expect(value.store.admitExecution(expanded.input)).rejects.toThrow('BASE_FIRST_REHEARSAL_PENDING_FINALIZATION');
+        expect(value.db.prepare('SELECT status FROM spend_reservation WHERE id = ?').get(admission.reservations[0]!.id)).toEqual({ status: 'reserved' });
       } finally { await close(value); }
     });
 

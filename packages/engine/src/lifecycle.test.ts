@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Address, Hash } from 'viem';
 import {
   assertDirectChainExecutionPolicy,
+  authorizedBaseExecutionProfile,
   assertDurableReservationProvider,
   assertSimulationFresh,
   assertTimingWindow,
@@ -19,7 +20,7 @@ import { mapChainStatus, reconcileTransaction } from './reconciliation.js';
 import { ReceiptReorgedError } from './receipt-watcher.js';
 import { zeroizePrivateKeyArray } from './signer.js';
 import { MintEngine } from './mint-engine.js';
-import type { MintJobConfig } from './types.js';
+import type { ChainConfig, MintJobConfig } from './types.js';
 
 const wallet = '0x1111111111111111111111111111111111111111' as Address;
 const hash = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as Hash;
@@ -100,11 +101,30 @@ describe('Gate 3 lifecycle boundaries', () => {
     expect(shouldSettleReceipt(4663, 'success', 'soft')).toBe(false);
     expect(shouldSettleReceipt(4663, 'success', 'posted')).toBe(false);
     expect(shouldSettleReceipt(4663, 'success', 'ethereum_final')).toBe(true);
+    expect(shouldSettleReceipt(8453, 'success', 'soft')).toBe(false);
+    expect(shouldSettleReceipt(8453, 'success', 'posted')).toBe(false);
+    expect(shouldSettleReceipt(8453, 'success', 'ethereum_final')).toBe(true);
+    expect(lifecycleStateForFinality(8453, 'soft', 'reverted')).toBe('included');
+    expect(lifecycleStateForFinality(8453, 'posted', 'reverted')).toBe('posted');
+    expect(lifecycleStateForFinality(8453, 'ethereum_final', 'reverted')).toBe('failed');
+    expect(shouldSettleReceipt(8453, 'reverted', 'soft')).toBe(false);
+    expect(shouldSettleReceipt(8453, 'reverted', 'posted')).toBe(false);
+    expect(shouldSettleReceipt(8453, 'reverted', 'ethereum_final')).toBe(true);
     expect(shouldSettleReceipt(1, 'reverted', 'confirmed')).toBe(true);
     const components = actualSettlementComponents(100n, 7n, 20n);
     expect(components.actualL2ExecutionGasWei + (components.actualPriorityFeeComponentWei ?? 0n) + components.actualL1DataGasWei).toBe(107n);
     expect(components.actualMintValueWei).toBe(0n);
     expect(mapChainStatus({ chainId: 4663, receiptVisible: true, receiptStatus: 'success', finalityStage: 'posted' })).toBe('posted');
+  });
+
+  it('derives an executable Base profile only from dry-run policy or a current owner grant', () => {
+    const profile: ChainConfig = { chainId: 8453, name: 'Base', blockTimeMs: 2_000, confirmationDepth: 1, rpcEndpoints: [], isL2: true, verificationStatus: 'unverified', finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final', notes: 'test' }, executionEnabled: false };
+    const now = new Date('2026-10-20T00:00:00.000Z');
+    expect(authorizedBaseExecutionProfile(profile, true, undefined, now)).toMatchObject({ verificationStatus: 'verified', executionEnabled: true });
+    expect(() => authorizedBaseExecutionProfile(profile, false, undefined, now)).toThrow('Base live execution requires a current owner enablement record');
+    expect(() => authorizedBaseExecutionProfile(profile, false, { expiresAt: now.toISOString(), freeAllowed: true, paidAllowed: false }, now)).toThrow('Base live execution requires a current owner enablement record');
+    expect(authorizedBaseExecutionProfile(profile, false, { expiresAt: '2026-10-21T00:00:00.000Z', freeAllowed: true, paidAllowed: false }, now)).toMatchObject({ verificationStatus: 'verified', executionEnabled: true });
+    expect(profile.executionEnabled).toBe(false);
   });
 
   it('propagates receipt reorg evidence without releasing the reservation', () => {
@@ -155,9 +175,12 @@ describe('Robinhood enablement grant (D-040, Key 2): refused unless a current ow
     }
   });
 
-  it('does not touch other chains', () => {
+  it('does not touch Ethereum and independently gates Base', () => {
     expect(() => assertDirectChainExecutionPolicy(1, 1n, false, undefined, now)).not.toThrow();
-    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, current, now)).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, false, undefined, now)).toThrowError(/Base live execution/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, false, undefined, now, { expiresAt: current.expiresAt, freeAllowed: true, paidAllowed: false })).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, undefined, now, { expiresAt: current.expiresAt, freeAllowed: true, paidAllowed: false })).toThrowError(/Paid Base/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, true, undefined, now)).not.toThrow();
   });
 });
 
@@ -168,7 +191,7 @@ describe('the engine hands its Robinhood grant to the policy at every check', ()
     const calls = source.match(/assertDirectChainExecutionPolicy\(/g)?.length ?? 0;
     const granted = source.match(/this\.config\.safety\.robinhoodGrant/g)?.length ?? 0;
     expect(calls).toBe(5);
-    expect(granted).toBe(5);
+    expect(granted).toBe(6);
     expect(source).not.toMatch(/process\.env[^\n]*(ROBINHOOD|GRANT)/i);
   });
 });

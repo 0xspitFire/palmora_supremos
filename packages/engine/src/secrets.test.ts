@@ -9,7 +9,8 @@ import { resolveChainConfigFromSecrets } from './chains.js';
 const FIXTURE_MAINNET = [
   'ETHEREUM_RPC_URL=https://eth-mainnet.example/primary',
   'ETHEREUM_RPC_FBACK=https://eth-mainnet.example/fallback',
-  'BASE_SEQUENCER_URL=https://sequencer.example/base',
+  'BASE_RPC_URL=https://base-mainnet.example/primary',
+  'BASE_RPC_FBACK=https://base-mainnet.example/fallback',
   'ROBINHOOD_RPC_URL=https://robinhood-mainnet.example/primary',
   'FLASHBOTS_KEY_PATH=/secrets/flashbots-signer.key',
   '',
@@ -54,9 +55,9 @@ describe('secret reference resolver', () => {
   });
 
   it('reports missing references without revealing values', async () => {
-    expect(await hasSecret('BASE_RPC_URL', 'mainnet', dir)).toBe(false);
-    await expect(readSecret('BASE_RPC_URL', 'mainnet', dir)).rejects.toThrow(
-      'Missing configured secret reference: BASE_RPC_URL',
+    expect(await hasSecret('BASE_ARCHIVE_RPC', 'mainnet', dir)).toBe(false);
+    await expect(readSecret('BASE_ARCHIVE_RPC', 'mainnet', dir)).rejects.toThrow(
+      'Missing configured secret reference: BASE_ARCHIVE_RPC',
     );
   });
 
@@ -74,9 +75,10 @@ describe('secret-backed chain config resolution', () => {
     expect(config.executionEnabled).toBe(true);
   });
 
-  it('resolves the Base sequencer reference when configured', async () => {
+  it('resolves Base primary and observation-only fallback references without a sequencer route', async () => {
     const config = await resolveChainConfigFromSecrets(8453, 'mainnet', dir);
-    expect(config.sequencerUrl).toBe('https://sequencer.example/base');
+    expect(config.rpcEndpoints).toEqual(['https://base-mainnet.example/primary', 'https://base-mainnet.example/fallback']);
+    expect(config.sequencerUrl).toBeUndefined();
   });
 
   it('keeps Robinhood execution blocked regardless of endpoint availability', async () => {

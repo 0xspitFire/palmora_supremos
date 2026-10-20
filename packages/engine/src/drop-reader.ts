@@ -61,10 +61,11 @@ export async function readAndValidateDrop(
   nftContract: Address,
   chainId: SupportedChainId,
   strategyName: string,
+  observedAt = new Date(),
 ): Promise<{ drop: DropConfig; validation: DropValidation }> {
   const strategy = getStrategy(strategyName);
   const drop = await strategy.readDrop(client, nftContract, chainId);
-  const validation = strategy.validateDrop(drop);
+  const validation = strategy.validateDrop(drop, observedAt.getTime() / 1000);
   return { drop, validation };
 }
 
@@ -84,6 +85,7 @@ export async function simulateMint(
   quantity: number,
   value: bigint,
   walletIndex = -1,
+  checkedAt = new Date(),
 ): Promise<SimulationEvidence> {
   const calldata = strategy.buildCalldata(drop, minter, quantity);
 
@@ -98,13 +100,13 @@ export async function simulateMint(
       data: calldata,
       value,
     });
-    return { walletIndex, address: minter, sourceBlock, checkedAt: new Date(), success: true };
+    return { walletIndex, address: minter, sourceBlock, checkedAt, success: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     let revertType: string | undefined;
     if (/insufficient|fund/i.test(message)) revertType = 'insufficient-funds';
     else if (/sold|supply/i.test(message)) revertType = 'supply';
     else if (/price|value/i.test(message)) revertType = 'price';
-    return { walletIndex, address: minter, sourceBlock, checkedAt: new Date(), success: false, revertType, error: `Simulation reverted: ${message}` };
+    return { walletIndex, address: minter, sourceBlock, checkedAt, success: false, revertType, error: `Simulation reverted: ${message}` };
   }
 }

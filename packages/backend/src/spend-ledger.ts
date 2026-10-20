@@ -3,10 +3,10 @@ import type { BackendStore } from './store.js';
 import type { BackendState, Reservation } from './types.js';
 export class SpendLedger {
   constructor(private readonly store: BackendStore) {}
-  async reserve(runId: string, campaignId: string, wallet: string, amountWei: bigint, capWei: bigint, chainId?: 1 | 4663, dailyCapWei?: bigint): Promise<Reservation> {
+  async reserve(runId: string, campaignId: string, wallet: string, amountWei: bigint, capWei: bigint, chainId?: 1 | 8453 | 4663, dailyCapWei?: bigint): Promise<Reservation> {
     return (await this.reserveBatch(runId, campaignId, [wallet], amountWei, capWei, chainId, dailyCapWei))[0]!;
   }
-  async reserveBatch(runId: string, campaignId: string, wallets: readonly string[], amountWei: bigint, capWei: bigint, chainId?: 1 | 4663, dailyCapWei?: bigint, beforeReserve?: (state: BackendState) => void): Promise<Reservation[]> {
+  async reserveBatch(runId: string, campaignId: string, wallets: readonly string[], amountWei: bigint, capWei: bigint, chainId?: 1 | 8453 | 4663, dailyCapWei?: bigint, beforeReserve?: (state: BackendState) => void): Promise<Reservation[]> {
     if (wallets.length === 0) throw new Error('EMPTY_RESERVATION_BATCH');
     if (amountWei < 0n || capWei < 0n || (dailyCapWei !== undefined && dailyCapWei < 0n)) throw new Error('INVALID_SPEND_AMOUNT');
     if (new Set(wallets.map(wallet => wallet.toLowerCase())).size !== wallets.length) throw new Error('DUPLICATE_WALLET');

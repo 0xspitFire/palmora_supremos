@@ -60,18 +60,21 @@ import { getChainConfig, resolveChainByNameFromSecrets } from './chains.js';
 import { exceedsRunReserveCap, freeMintReserveCapsForChain, replacementPriorityBudget, validateFeeBudget, validateFreeMintReserve, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
 import { reserveThenSign, robinhoodL1DataGasWei } from './pre-sign.js';
+import { quoteBaseFeeBound } from './base-fees.js';
 import { NonceManagerImpl } from './nonce-manager.js';
 import { ReceiptReorgedError, ReceiptTimeoutError, ReceiptWatcherImpl } from './receipt-watcher.js';
-import { EthereumFinalityObserver } from './finality-observer.js';
+import { BaseFinalityObserver, EthereumFinalityObserver, IndependentBaseFinalityObserver } from './finality-observer.js';
 import type { FinalityObserver } from './finality-observer.js';
 import { LocalEncryptedSigner } from './signer.js';
 import { createBroadcaster } from './broadcasters/index.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
+import { assertBaseProviderAgreement, type BaseAgreementClient } from './base-provider-agreement.js';
 import { KillSwitch, SpendTracker } from './safety.js';
 import { createLogger, childLogger } from './logger.js';
 import { safeEndpointReference } from './endpoint-reference.js';
 import {
   assertDirectChainExecutionPolicy,
+  authorizedBaseExecutionProfile,
   assertDurableReservationProvider,
   assertSimulationFresh,
   assertTimingWindow,
@@ -117,6 +120,8 @@ function lifecycleErrorType(code: string): MintErrorType {
     case 'DURABLE_LIFECYCLE_STORE_REQUIRED': return MintErrorType.DURABLE_RESERVATION_REQUIRED;
     case 'PAID_ROBINHOOD_BLOCKED': return MintErrorType.PAID_ROBINHOOD_BLOCKED;
     case 'CHAIN_4663_EXECUTION_DISABLED': return MintErrorType.CHAIN_EXECUTION_DISABLED;
+    case 'CHAIN_8453_EXECUTION_DISABLED': return MintErrorType.CHAIN_EXECUTION_DISABLED;
+    case 'PAID_BASE_BLOCKED': return MintErrorType.CHAIN_EXECUTION_DISABLED;
     case 'AMBIGUOUS_SUBMISSION': return MintErrorType.AMBIGUOUS_SUBMISSION;
     case 'INVALID_SIMULATION_FRESHNESS': return MintErrorType.INVALID_CONFIG;
     case 'INVALID_TIMING_GATE': return MintErrorType.INVALID_CONFIG;
@@ -231,7 +236,7 @@ export class MintEngine {
     try {
       const configuredChainId = this.config.target.chain === 'ethereum' ? 1 : this.config.target.chain === 'base' ? 8453 : 4663;
       // This runs before any mutable chain registry flag is consulted.
-      assertDirectChainExecutionPolicy(configuredChainId, undefined, this.config.safety.dryRun, this.config.safety.robinhoodGrant);
+      assertDirectChainExecutionPolicy(configuredChainId, undefined, this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
       assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
       if (!this.config.safety.dryRun && (!this.lifecycleStore || this.lifecycleStore.durable !== true || this.lifecycleStore.storeKind !== 'normalized-sqlite')) {
         throw new LifecycleGateError('DURABLE_LIFECYCLE_STORE_REQUIRED', 'admission', 'Live execution requires a normalized durable lifecycle store');
@@ -257,17 +262,18 @@ export class MintEngine {
       const chainConfig = await resolveChainByNameFromSecrets(this.config.target.chain, scope, secretRoot);
       const chainId = chainConfig.chainId;
       engineLog.info({ chain: chainConfig.name, chainId }, 'Chain resolved');
-      if (!this.config.safety.dryRun && !chainConfig.executionEnabled) {
+      const durableOwnerGrant = chainId === 8453 ? this.config.safety.baseGrant !== undefined : chainId === 4663 ? this.config.safety.robinhoodGrant !== undefined : false;
+      if (!this.config.safety.dryRun && !chainConfig.executionEnabled && !durableOwnerGrant) {
         throw new MintError(MintErrorType.RPC_ERROR, `Execution is disabled for ${chainConfig.name} by the Phase 1 chain policy`);
       }
-      if (!this.config.safety.dryRun && chainConfig.verificationStatus !== 'verified') {
+      if (!this.config.safety.dryRun && chainConfig.verificationStatus !== 'verified' && !durableOwnerGrant) {
         throw new MintError(MintErrorType.RPC_ERROR, `Execution is blocked for ${chainConfig.name}: chain verification status is "${chainConfig.verificationStatus}"`);
       }
 
       // Robinhood requires staged finality and integrated operational gates that
       // are not available in this standalone engine path. Fail closed rather
       // than reporting a receipt as product success before Ethereum finality.
-      assertDirectChainExecutionPolicy(chainId, undefined, this.config.safety.dryRun, this.config.safety.robinhoodGrant);
+      assertDirectChainExecutionPolicy(chainId, undefined, this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
 
       // ── 2. Create RPC client ────────────────────────────────
       const rpcUrl = this.config.broadcast.rpcEndpoints[0] ?? chainConfig.rpcEndpoints[0];
@@ -280,6 +286,15 @@ export class MintEngine {
         chain: viemChain,
         transport: http(rpcUrl),
       }) as PublicClient;
+      const baseFallbackUrl = chainId === 8453
+        ? this.config.broadcast.rpcEndpoints[1] ?? chainConfig.rpcEndpoints.find((endpoint) => endpoint !== rpcUrl)
+        : undefined;
+      if (chainId === 8453 && !this.config.safety.dryRun && (!baseFallbackUrl || baseFallbackUrl === rpcUrl)) {
+        throw new MintError(MintErrorType.RPC_ERROR, 'Base live execution requires an independent fallback RPC');
+      }
+      const baseFallbackClient = baseFallbackUrl
+        ? createPublicClient({ chain: viemChain, transport: http(baseFallbackUrl) }) as PublicClient
+        : undefined;
 
       const observedChainId = await publicClient.getChainId();
       if (observedChainId !== chainId) {
@@ -296,6 +311,7 @@ export class MintEngine {
         this.config.target.contract,
         chainId,
         this.config.target.strategy,
+        this.now(),
       );
 
       engineLog.info({
@@ -318,7 +334,7 @@ export class MintEngine {
         );
       }
       const mintCostPerWallet = drop.mintPrice * BigInt(this.config.target.quantity);
-      assertDirectChainExecutionPolicy(chainId, mintCostPerWallet, this.config.safety.dryRun, this.config.safety.robinhoodGrant);
+      assertDirectChainExecutionPolicy(chainId, mintCostPerWallet, this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
       if (!this.config.safety.dryRun) {
         assertTimingWindow(
           drop.startTime,
@@ -334,6 +350,14 @@ export class MintEngine {
       const wallets = allWallets.slice(0, this.config.fleet.maxWallets);
       engineLog.info({ walletCount: wallets.length }, 'Wallets loaded');
 
+      if (chainId === 8453 && !this.config.safety.dryRun) {
+        await assertBaseProviderAgreement(
+          publicClient as unknown as BaseAgreementClient,
+          baseFallbackClient as unknown as BaseAgreementClient,
+          wallets.map((wallet) => wallet.address),
+        );
+      }
+
       // ── 5. Preflight checks ─────────────────────────────────
       this.checkKill();
       const nonceManager = new NonceManagerImpl(publicClient);
@@ -344,11 +368,18 @@ export class MintEngine {
           receiptBlockHash: async (hash: Hash) => (await publicClient.getTransactionReceipt({ hash })).blockHash,
           canonicalBlockHash: async (blockNumber: bigint) => (await publicClient.getBlock({ blockNumber })).hash,
         }, chainConfig.confirmationDepth)
+        : chainConfig.chainId === 8453
+          ? new IndependentBaseFinalityObserver(
+            new BaseFinalityObserver({ chainId: 8453, currentBlockNumber: () => publicClient.getBlockNumber(), receiptBlockHash: async (hash: Hash) => (await publicClient.getTransactionReceipt({ hash })).blockHash, canonicalBlockHash: async (blockNumber: bigint) => (await publicClient.getBlock({ blockNumber })).hash, safeBlockNumber: async () => (await publicClient.getBlock({ blockTag: 'safe' })).number, finalizedBlockNumber: async () => (await publicClient.getBlock({ blockTag: 'finalized' })).number }),
+            new BaseFinalityObserver({ chainId: 8453, currentBlockNumber: () => baseFallbackClient!.getBlockNumber(), receiptBlockHash: async (hash: Hash) => (await baseFallbackClient!.getTransactionReceipt({ hash })).blockHash, canonicalBlockHash: async (blockNumber: bigint) => (await baseFallbackClient!.getBlock({ blockNumber })).hash, safeBlockNumber: async () => (await baseFallbackClient!.getBlock({ blockTag: 'safe' })).number, finalizedBlockNumber: async () => (await baseFallbackClient!.getBlock({ blockTag: 'finalized' })).number }),
+          )
         : undefined);
       const receiptWatcher = new ReceiptWatcherImpl(publicClient, {
+        chainId: chainConfig.chainId,
         maxWaitMs: chainConfig.isL2 ? 30_000 : 120_000,
         finalityPolicy: chainConfig.finalityPolicy,
         ...(finalityObserver ? { finalityObserver } : {}),
+        ...(baseFallbackClient ? { baseFallbackClient } : {}),
       });
 
       // Check funding
@@ -378,7 +409,7 @@ export class MintEngine {
         gasLimits.set(wallet.index, padded);
         const simulation = await simulateMint(
           publicClient, strategy, drop, wallet.address,
-          this.config.target.quantity, mintCostPerWallet, wallet.index,
+          this.config.target.quantity, mintCostPerWallet, wallet.index, this.now(),
         );
         this.checkKill();
         simulations.set(wallet.index, { ...simulation, gasEstimate: estimate });
@@ -399,7 +430,7 @@ export class MintEngine {
         gasLimit: paddedGasLimit,
         // Robinhood/Base charge an L1 data fee. When undeclared, require the
         // operator to have supplied a bound via the config that covers it.
-        l1DataFeeAllowanceWei: chainConfig.isL2 ? BigInt(Math.ceil(Number(paddedGasLimit) / 16)) : 0n,
+        l1DataFeeAllowanceWei: chainConfig.chainId === 4663 ? robinhoodL1DataGasWei(paddedGasLimit, parseGwei(this.config.fees.maxFeePerGasGwei.toString())) : 0n,
       });
       if (!budgetVerdict.ok) {
         throw new MintError(MintErrorType.INVALID_CONFIG, `Fee budget refuses to arm: ${budgetVerdict.reason}`);
@@ -409,7 +440,7 @@ export class MintEngine {
           configuredPriorityFeeWei: parseGwei(this.config.fees.maxPriorityFeePerGasGwei.toString()),
           actualPriorityComponentWei: 0n,
           l2ExecutionGasReservationWei: maxGasCostPerWallet,
-          l1DataGasReservationWei: chainConfig.isL2 ? BigInt(Math.ceil(Number(paddedGasLimit) / 16)) : 0n,
+          l1DataGasReservationWei: chainConfig.chainId === 4663 ? robinhoodL1DataGasWei(paddedGasLimit, parseGwei(this.config.fees.maxFeePerGasGwei.toString())) : 0n,
         });
         if (freeExposure.status !== 'ok') {
           throw new MintError(MintErrorType.INVALID_CONFIG, 'FREE-mint fee exposure policy rejected the configuration');
@@ -427,7 +458,7 @@ export class MintEngine {
             gasLimit,
             configuredPriorityFeeWei: parseGwei(this.config.fees.maxPriorityFeePerGasGwei.toString()),
             actualPriorityComponentWei: 0n,
-            l1DataGasReservationWei: chainConfig.isL2 ? BigInt(Math.ceil(Number(gasLimit) / 16)) : 0n,
+            l1DataGasReservationWei: chainConfig.chainId === 4663 ? robinhoodL1DataGasWei(gasLimit, parseGwei(this.config.fees.maxFeePerGasGwei.toString())) : 0n,
           });
           if (!exposure.allowed) throw new MintError(MintErrorType.INVALID_CONFIG, exposure.reason);
         }
@@ -454,7 +485,7 @@ export class MintEngine {
       if (mintCostPerWallet === 0n) {
         for (const wallet of wallets) {
           const gasLimit = gasLimits.get(wallet.index) ?? 0n;
-          const l1DataGas = chainConfig.isL2 ? BigInt(Math.ceil(Number(gasLimit) / 16)) : 0n;
+          const l1DataGas = chainConfig.chainId === 4663 ? robinhoodL1DataGasWei(gasLimit, parseGwei(this.config.fees.maxFeePerGasGwei.toString())) : 0n;
           const reserve = gasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString()) + l1DataGas;
           const reserveVerdict = validateFreeMintReserve({ perWalletReserveWei: reserve, activePeriodReserveWei: reserve }, freeReserveCaps);
           if (!reserveVerdict.allowed) freeReserveErrorByWallet.set(wallet.index, reserveVerdict.reason);
@@ -467,7 +498,7 @@ export class MintEngine {
           continue;
         }
         const walletGasLimit = gasLimits.get(wallet.index) ?? paddedGasLimit;
-        const walletMaxCost = mintCostPerWallet + walletGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString()) + (mintCostPerWallet === 0n && chainConfig.isL2 ? BigInt(Math.ceil(Number(walletGasLimit) / 16)) : 0n);
+        const walletMaxCost = mintCostPerWallet + walletGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString()) + (mintCostPerWallet === 0n && chainConfig.chainId === 4663 ? robinhoodL1DataGasWei(walletGasLimit, parseGwei(this.config.fees.maxFeePerGasGwei.toString())) : 0n);
         const balance = await publicClient.getBalance({ address: wallet.address });
         const freeReserve = freeReserveByWallet.get(wallet.index) ?? 0n;
         if (freeReserveErrorByWallet.has(wallet.index)) {
@@ -494,6 +525,16 @@ export class MintEngine {
 
       engineLog.info({ event: 'simulation_passed', walletCount: simulations.size }, 'Per-wallet setup simulation complete');
 
+      // Re-check immediately before broadcaster construction so simulation or
+      // funding latency cannot turn an earlier agreement into stale authority.
+      if (chainId === 8453 && !this.config.safety.dryRun) {
+        await assertBaseProviderAgreement(
+          publicClient as unknown as BaseAgreementClient,
+          baseFallbackClient as unknown as BaseAgreementClient,
+          fundedWallets.map((wallet) => wallet.address),
+        );
+      }
+
       // ── 6. Create broadcaster ───────────────────────────────
       let flashbotsAuth = this.config.broadcast.flashbotsAuthSigner;
       if (
@@ -506,8 +547,11 @@ export class MintEngine {
         // reference. Raw keys must never enter configuration or logs.
         flashbotsAuth = await buildFlashbotsAuthSigner('FLASHBOTS_KEY_PATH', scope, secretRoot);
       }
+      const broadcastChainConfig = chainId === 8453
+        ? authorizedBaseExecutionProfile(chainConfig, this.config.safety.dryRun, this.config.safety.baseGrant, this.now())
+        : chainConfig;
       const broadcaster = createBroadcaster(
-        chainConfig,
+        broadcastChainConfig,
         this.config.broadcast.mode,
         this.config.broadcast.rpcEndpoints,
         flashbotsAuth
@@ -614,6 +658,8 @@ export class MintEngine {
       drop.mintPrice * BigInt(this.config.target.quantity),
       this.config.safety.dryRun,
       this.config.safety.robinhoodGrant,
+      this.now(),
+      this.config.safety.baseGrant,
     );
     assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
     const admissionGate = new AdmissionGate();
@@ -642,7 +688,7 @@ export class MintEngine {
           };
         }
         // Robinhood only: the owner's enablement must still be current at the moment this wallet is about to be prepared and signed (D-050).
-        assertDirectChainExecutionPolicy(chainId, drop.mintPrice * BigInt(this.config.target.quantity), this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now());
+        assertDirectChainExecutionPolicy(chainId, drop.mintPrice * BigInt(this.config.target.quantity), this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
 
         const simulation = simulations.get(walletIndex);
         if (!this.config.safety.dryRun && !simulation?.success) {
@@ -698,6 +744,16 @@ export class MintEngine {
           };
         }
 
+        const baseFeeBound = chainId === 8453 ? await quoteBaseFeeBound(publicClient, tx) : undefined;
+        const nonL2ExecutionReserveWei = baseFeeBound?.totalWei ?? (chainId === 4663 ? robinhoodL1DataGasWei(gasLimit, tx.maxFeePerGas!) : 0n);
+        if (value === 0n) {
+          const reserveVerdict = validateFreeMintReserve({
+            perWalletReserveWei: gasLimit * tx.maxFeePerGas! + nonL2ExecutionReserveWei,
+            activePeriodReserveWei: gasLimit * tx.maxFeePerGas! + nonL2ExecutionReserveWei,
+          }, freeMintReserveCapsForChain(this.config.target.chain, this.config.safety.freeMintReserveCaps));
+          if (!reserveVerdict.allowed) throw new MintError(MintErrorType.INVALID_CONFIG, reserveVerdict.reason, walletIndex);
+        }
+
         executionId = identity.executionId;
         transactionIntentId = identity.transactionIntentId;
         const intent: TransactionIntent = {
@@ -750,7 +806,7 @@ export class MintEngine {
             transactionIntentId,
             mintValueWei: value,
             l2ExecutionGasWei: gasLimit * tx.maxFeePerGas!,
-            l1DataGasWei: chainId === 4663 ? robinhoodL1DataGasWei(gasLimit, tx.maxFeePerGas!) : 0n,
+            l1DataGasWei: nonL2ExecutionReserveWei,
             priorityFeeComponentWei: tx.maxPriorityFeePerGas!,
             replacementBudgetWei: replacementPriorityBudget(tx.maxPriorityFeePerGas!),
             freeMint: value === 0n,
@@ -759,6 +815,11 @@ export class MintEngine {
               chainId,
               freeMint: value === 0n,
               priorityFeeComponentWei: tx.maxPriorityFeePerGas!.toString(),
+              ...(baseFeeBound ? {
+                baseL1DataFeeBoundWei: baseFeeBound.l1DataFeeWei.toString(),
+                baseOperatorFeeBoundWei: baseFeeBound.operatorFeeWei.toString(),
+                baseUnsignedTxSize: baseFeeBound.unsignedTxSize,
+              } : {}),
             },
           };
         // T-021: the amounts reserved must be the amounts in the transaction, the signer is only called after
@@ -899,7 +960,8 @@ export class MintEngine {
           receiptCanonical: true,
         });
         const lifecycleState = lifecycleStateForFinality(chainId, receipt.finalityStage, receipt.status);
-        const productSuccess = receipt.status === 'success' && (chainId !== 4663 || receipt.finalityStage === 'ethereum_final');
+        const authoritative = chainId === 1 || receipt.finalityStage === 'ethereum_final';
+        const productSuccess = receipt.status === 'success' && authoritative;
         const reconciliationState = reconciliation.state === 'matched'
           ? 'matched'
           : reconciliation.state === 'reorged' ? 'reorged' : 'ambiguous';
@@ -915,8 +977,9 @@ export class MintEngine {
           gasUsed: receipt.gasUsed,
           effectiveGasPrice: receipt.effectiveGasPrice,
           ...(receipt.l1DataFeeWei === undefined ? {} : { l1DataFeeWei: receipt.l1DataFeeWei }),
+          ...(receipt.operatorFeeWei === undefined ? {} : { operatorFeeWei: receipt.operatorFeeWei }),
           finalityStage: receipt.finalityStage,
-          finalitySource: chainId === 4663 ? 'robinhood-staged-observer' : 'ethereum-confirmation',
+          finalitySource: chainId === 4663 ? 'robinhood-staged-observer' : chainId === 8453 ? 'base-safe-finalized-heads' : 'ethereum-confirmation',
           observedAt: this.now().toISOString(),
         });
         await this.persistReconciliation({
@@ -933,7 +996,7 @@ export class MintEngine {
           const components = {
             ...actualSettlementComponents(
               actualGasCostWei,
-              receipt.l1DataFeeWei ?? 0n,
+              (receipt.l1DataFeeWei ?? 0n) + (receipt.operatorFeeWei ?? 0n),
               receipt.priorityFeeComponentWei ?? 0n,
             ),
             actualMintValueWei,
@@ -941,12 +1004,13 @@ export class MintEngine {
           if (reservation.settleComponents) await reservation.settleComponents(components);
           else await reservation.settle(
             actualMintValueWei,
-            actualGasCostWei + (receipt.l1DataFeeWei ?? 0n),
+            actualGasCostWei + (receipt.l1DataFeeWei ?? 0n) + (receipt.operatorFeeWei ?? 0n),
           );
         }
 
         const actualL1DataFeeWei = receipt.l1DataFeeWei ?? 0n;
-        const totalFeeWei = actualGasCostWei + actualL1DataFeeWei;
+        const actualOperatorFeeWei = receipt.operatorFeeWei ?? 0n;
+        const totalFeeWei = actualGasCostWei + actualL1DataFeeWei + actualOperatorFeeWei;
         // totalCostWei is the all-in amount. L1 is added only when the chain
         // provides an authoritative receipt component.
         const totalCost = totalFeeWei + actualMintValueWei;
@@ -954,7 +1018,7 @@ export class MintEngine {
         return {
           walletIndex,
           address: walletAddress,
-          status: productSuccess ? 'success' : receipt.status === 'reverted' ? 'failed' : 'timeout',
+          status: productSuccess ? 'success' : receipt.status === 'reverted' && authoritative ? 'failed' : 'timeout',
           txHash: receipt.txHash,
           nonce,
           blockNumber: receipt.blockNumber,
@@ -963,6 +1027,7 @@ export class MintEngine {
           gasUsed: receipt.gasUsed,
           effectiveGasPrice: receipt.effectiveGasPrice,
           l1DataFeeWei: actualL1DataFeeWei,
+          operatorFeeWei: actualOperatorFeeWei,
           totalFeeWei,
           totalCostWei: totalCost,
           executionId,
@@ -974,8 +1039,8 @@ export class MintEngine {
           reconciliationState,
           durationMs: this.now().getTime() - startTime,
           error: receipt.status === 'reverted'
-            ? 'Transaction reverted on-chain'
-            : productSuccess ? undefined : 'Robinhood finality is pending Ethereum finality',
+            ? authoritative ? 'Transaction reverted on-chain' : `${chainId === 8453 ? 'Base' : 'Robinhood'} revert is pending Ethereum finality`
+            : productSuccess ? undefined : `${chainId === 8453 ? 'Base' : 'Robinhood'} finality is pending Ethereum finality`,
           simulation,
         };
 

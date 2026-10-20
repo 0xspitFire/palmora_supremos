@@ -48,6 +48,43 @@ export interface RobinhoodFinalitySources extends FinalitySources {
   isEthereumFinal(txHash: Hash, txBlockNumber: bigint): Promise<boolean>;
 }
 
+export interface BaseFinalitySources extends FinalitySources {
+  safeBlockNumber(): Promise<bigint>;
+  finalizedBlockNumber(): Promise<bigint>;
+}
+
+/** Base settles only after its canonical block is included in the finalized L2 head (D-057). */
+export class BaseFinalityObserver implements FinalityObserver {
+  constructor(private readonly sources: BaseFinalitySources, private readonly now: () => Date = () => new Date()) {
+    if (sources.chainId !== 8453) throw new Error('BaseFinalityObserver requires chain ID 8453');
+  }
+
+  async observe(input: { txHash: Hash; txBlockNumber: bigint }): Promise<FinalityObservation> {
+    const canonical = await isCanonical(this.sources, input.txHash, input.txBlockNumber);
+    if (canonical === false) return this.observation('soft', false, false, 'receipt-not-canonical');
+    if (canonical === null) return this.observation('soft', null, false, 'canonicality-unknown');
+    const [safe, finalized] = await Promise.all([this.sources.safeBlockNumber(), this.sources.finalizedBlockNumber()]);
+    if (finalized >= input.txBlockNumber) return this.observation('ethereum_final', true, true);
+    if (safe >= input.txBlockNumber) return this.observation('posted', true, false, 'ethereum-finality-pending');
+    return this.observation('soft', true, false, 'l1-derivation-pending');
+  }
+
+  private observation(stage: FinalityStage, canonical: boolean | null, ready: boolean, reason?: string): FinalityObservation {
+    return { chainId: 8453, stage, canonical, ready, observedAt: this.now(), reason };
+  }
+}
+
+/** Requires two independently configured Base observers to report the same canonical stage. */
+export class IndependentBaseFinalityObserver implements FinalityObserver {
+  constructor(private readonly primary: FinalityObserver, private readonly fallback: FinalityObserver) {}
+
+  async observe(input: { txHash: Hash; txBlockNumber: bigint }): Promise<FinalityObservation> {
+    const [left, right] = await Promise.all([this.primary.observe(input), this.fallback.observe(input)]);
+    if (left.chainId !== 8453 || right.chainId !== 8453 || left.stage !== right.stage || left.canonical !== right.canonical || left.ready !== right.ready) throw new Error('BASE_PROVIDER_FINALITY_DISAGREEMENT');
+    return left;
+  }
+}
+
 export class RobinhoodFinalityObserver implements FinalityObserver {
   constructor(private readonly sources: RobinhoodFinalitySources, private readonly confirmationDepth: number, private readonly now: () => Date = () => new Date()) {
     if (sources.chainId !== 4663) throw new Error('RobinhoodFinalityObserver requires chain ID 4663');

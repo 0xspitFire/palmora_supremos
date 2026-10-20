@@ -1,8 +1,54 @@
 import { describe, expect, it } from 'vitest';
-import { assertWithinAdmittedExposure, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
-import { canonicalExecutionIdentity } from '@mint-bot/engine';
+import { assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, engineConfigFromCampaign, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
+import { canonicalExecutionIdentity, createBroadcaster } from '@mint-bot/engine';
 
 const campaign = { mintPriceWei: 1_000n, quantity: 2 };
+
+describe('Base adapter wiring (D-057)', () => {
+  it('maps canonical chain 8453 into the Engine Base target', () => {
+    expect(chainName(8453)).toBe('base');
+  });
+
+  it('requires independent providers to agree on every settlement gas fact', () => {
+    const receipt = { blockHash: '0xabc', blockNumber: 10n, status: 'success', gasUsed: 20n, effectiveGasPrice: 30n };
+    expect(baseReceiptFactsAgree(receipt, { ...receipt, blockHash: '0xAbC' })).toBe(true);
+    for (const changed of [
+      { blockHash: '0xdef' },
+      { blockNumber: 11n },
+      { status: 'reverted' },
+      { gasUsed: 21n },
+      { effectiveGasPrice: 31n },
+    ]) expect(baseReceiptFactsAgree(receipt, { ...receipt, ...changed })).toBe(false);
+  });
+
+  it('composes Base live execution as one send to the owner-bound primary RPC', async () => {
+    const baseCampaign = {
+      id: 'base-campaign', state: 'Draft', chainId: 8453, contract: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', strategy: 'seadrop-v1-public', quantity: 1, dryRun: false,
+      spendPolicy: { maxRunWei: 200_000_000_000_000n, dailyCapWei: 200_000_000_000_000n, gasCeilingWei: 200_000_000_000_000n },
+      chainVerification: { chainId: 8453, status: 'verified', seaDropCompatible: true, sourceBlock: 1n, endpointReference: 'BASE_RPC_URL' },
+      mintPriceWei: 0n,
+      feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, freeTotalSpendCapWei: 200_000_000_000_000n, l2ExecutionGasBudgetWei: 199_999_900_000_000n, l1DataGasBudgetWei: 0n, totalFeeBudgetWei: 200_000_000_000_000n },
+      broadcastMode: 'public', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+    } as const;
+    const config = engineConfigFromCampaign(baseCampaign, {
+      killSwitchFile: '/tmp/test-kill', secretRoot: '/tmp/test-secrets', logFile: '/tmp/test.log', maxFeePerGasGwei: 0.1, gasLimitPadding: 1.2, maxReplacementBumps: 0,
+      getState: () => ({}) as never, transact: async (mutate) => mutate({} as never),
+    }, false, 1);
+    expect(config.broadcast.mode).toBe('public');
+
+    const destinations: string[] = [];
+    const priorFetch = globalThis.fetch;
+    globalThis.fetch = (async (input) => {
+      destinations.push(String(input));
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: `0x${'1'.repeat(64)}` }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      const broadcaster = createBroadcaster({ chainId: 8453, name: 'Base', blockTimeMs: 2_000, confirmationDepth: 1, rpcEndpoints: ['https://primary.invalid', 'https://fallback.invalid'], isL2: true, verificationStatus: 'verified', finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final', notes: 'test' }, executionEnabled: true }, config.broadcast.mode, []);
+      await broadcaster.broadcast(['0x02']);
+      expect(destinations).toEqual(['https://primary.invalid']);
+    } finally { globalThis.fetch = priorFetch; }
+  });
+});
 
 describe('pre-sign exposure guard (T-010)', () => {
   it('allows a transaction that exactly matches the admitted value and fits the reservation', () => {
@@ -76,11 +122,11 @@ describe('adapter wiring (T-010)', () => {
   });
 });
 
-describe('free-mint reserve caps per chain (D-042)', () => {
-  it('follows the approved fleet policy on Ethereum and leaves every other chain on the strict engine default', () => {
+describe('free-mint reserve caps per chain (D-042, D-057)', () => {
+  it('reports the approved Ethereum and Base policies while leaving Robinhood on its Engine default', () => {
     expect(freeMintReserveCapsFor(1)).toEqual({ perWalletCapWei: 400_000_000_000_000n, activePeriodCapWei: 2_400_000_000_000_000n });
     expect(freeMintReserveCapsFor(4663)).toBeUndefined();
-    expect(freeMintReserveCapsFor(8453)).toBeUndefined();
+    expect(freeMintReserveCapsFor(8453)).toEqual({ perWalletCapWei: 200_000_000_000_000n, activePeriodCapWei: 1_200_000_000_000_000n });
     expect(freeMintReserveCapsFor(0)).toBeUndefined();
   });
 });

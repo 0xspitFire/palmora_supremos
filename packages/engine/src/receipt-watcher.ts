@@ -13,8 +13,11 @@
 import type { Hash, PublicClient } from 'viem';
 import type { FinalityPolicy, FinalityStage, MintReceipt, ReceiptWatcher as IReceiptWatcher } from './types.js';
 import type { FinalityObserver } from './finality-observer.js';
+import { baseReceiptFees, readBaseOperatorFee } from './base-fees.js';
 
 export interface ReceiptWatcherOptions {
+  /** Exact chain controls receipt fee-field requirements. */
+  chainId?: 1 | 8453 | 4663;
   /** Initial poll interval in ms. Default: 500 */
   initialPollMs?: number;
   /** Maximum poll interval in ms. Default: 8000 */
@@ -27,6 +30,8 @@ export interface ReceiptWatcherOptions {
   finalityPolicy?: FinalityPolicy;
   /** Observer that advances staged L2 finality; absent means only soft is known. */
   finalityObserver?: FinalityObserver | ((txHash: Hash, blockNumber: bigint) => Promise<FinalityStage>);
+  /** Independently configured Base provider, required by the live engine before settlement. */
+  baseFallbackClient?: PublicClient;
 }
 
 export class ReceiptReorgedError extends Error {
@@ -47,16 +52,18 @@ export class ReceiptTimeoutError extends Error {
 }
 
 type ResolvedReceiptWatcherOptions =
-  Required<Omit<ReceiptWatcherOptions, 'finalityObserver'>> &
-  Pick<ReceiptWatcherOptions, 'finalityObserver'>;
+  Required<Omit<ReceiptWatcherOptions, 'finalityObserver' | 'baseFallbackClient'>> &
+  Pick<ReceiptWatcherOptions, 'finalityObserver' | 'baseFallbackClient'>;
 
 const DEFAULT_OPTIONS: ResolvedReceiptWatcherOptions = {
+  chainId: 1,
   initialPollMs: 500,
   maxPollMs: 8_000,
   maxWaitMs: 120_000,
   backoffMultiplier: 2,
   finalityPolicy: { stages: ['confirmed'], settlementStage: 'confirmed' },
   finalityObserver: undefined,
+  baseFallbackClient: undefined,
 };
 
 export class ReceiptWatcherImpl implements IReceiptWatcher {
@@ -106,8 +113,30 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
             const componentReceipt = receipt as typeof receipt & {
               l1Fee?: bigint;
               l1DataFee?: bigint;
+              operatorFee?: bigint;
+              operatorFeeScalar?: bigint | number;
+              operatorFeeConstant?: bigint;
               priorityFeeComponentWei?: bigint;
             };
+            let baseFees: ReturnType<typeof baseReceiptFees> | undefined;
+            if (this.options.chainId === 8453) {
+              const fallbackClient = this.options.baseFallbackClient;
+              if (!fallbackClient) throw new Error('BASE_FALLBACK_PROVIDER_REQUIRED');
+              const fallbackReceipt = await fallbackClient.getTransactionReceipt({ hash: txHash });
+              if (fallbackReceipt.blockHash.toLowerCase() !== receipt.blockHash.toLowerCase()
+                || fallbackReceipt.blockNumber !== receipt.blockNumber
+                || fallbackReceipt.status !== receipt.status
+                || fallbackReceipt.gasUsed !== receipt.gasUsed
+                || fallbackReceipt.effectiveGasPrice !== receipt.effectiveGasPrice) throw new Error('BASE_PROVIDER_RECEIPT_DISAGREEMENT');
+              const fallbackFields = fallbackReceipt as typeof fallbackReceipt & { l1Fee?: bigint; l1DataFee?: bigint; operatorFee?: bigint };
+              const [primaryOperatorFee, fallbackOperatorFee] = await Promise.all([
+                componentReceipt.operatorFee ?? readBaseOperatorFee(this.client, receipt.gasUsed, receipt.blockNumber),
+                fallbackFields.operatorFee ?? readBaseOperatorFee(fallbackClient, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber),
+              ]);
+              if ((componentReceipt.l1DataFee ?? componentReceipt.l1Fee) !== (fallbackFields.l1DataFee ?? fallbackFields.l1Fee)
+                || primaryOperatorFee !== fallbackOperatorFee) throw new Error('BASE_PROVIDER_FEE_DISAGREEMENT');
+              baseFees = baseReceiptFees(componentReceipt, receipt.gasUsed, primaryOperatorFee);
+            }
             return {
               txHash,
               status: receipt.status === 'success' ? 'success' : 'reverted',
@@ -115,7 +144,7 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
               blockHash: receipt.blockHash,
               gasUsed: receipt.gasUsed,
               effectiveGasPrice: receipt.effectiveGasPrice,
-              ...(componentReceipt.l1DataFee === undefined && componentReceipt.l1Fee === undefined
+              ...(baseFees ? { l1DataFeeWei: baseFees.l1DataFeeWei, operatorFeeWei: baseFees.operatorFeeWei } : componentReceipt.l1DataFee === undefined && componentReceipt.l1Fee === undefined
                 ? {}
                 : { l1DataFeeWei: componentReceipt.l1DataFee ?? componentReceipt.l1Fee }),
               ...(componentReceipt.priorityFeeComponentWei === undefined
@@ -132,6 +161,7 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
         }
       } catch (error) {
         if (error instanceof ReceiptReorgedError) throw error;
+        if (error instanceof Error && (error.message.startsWith('BASE_RECEIPT_') || error.message.startsWith('BASE_OPERATOR_') || error.message.startsWith('BASE_PROVIDER_') || error.message === 'BASE_FALLBACK_PROVIDER_REQUIRED')) throw error;
         // Receipt not found yet — this is expected, keep polling
       }
 

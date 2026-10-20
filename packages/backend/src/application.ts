@@ -1,4 +1,5 @@
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
+import { assertBaseLiveAllowed } from './base-enablement.js';
 import { randomUUID } from 'node:crypto';
 import type { Campaign, ChainVerification, CommandName, FeePolicy, ValidatedCampaign } from './types.js';
 import type { BackendStore } from './store.js';
@@ -6,7 +7,7 @@ import { ExecutionCoordinator } from './coordinator.js';
 import { HealthService } from './health.js';
 import { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI } from './policy.js';
 import { liveRequestDigest } from './evidence.js';
-import type { FleetSpendPolicy } from './fleet-policy.js';
+import { BASE_PERSONAL_LIVE_FLEET_POLICY, type FleetSpendPolicy } from './fleet-policy.js';
 
 export interface CommandResponse<T> { id: string; state: string; nextAction: string; createdAt: string; retryable: boolean; blockingReason?: string; data?: T; }
 export interface CampaignInput { chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; }
@@ -121,9 +122,11 @@ export class BackendApplication {
     if (input.openingAt !== undefined && !Number.isFinite(Date.parse(input.openingAt))) throw new Error('INVALID_OPENING_TIME');
     if (input.tMinusMs !== undefined && (!Number.isFinite(input.tMinusMs) || input.tMinusMs < 0)) throw new Error('INVALID_T_MINUS');
     if (input.maxRunWei < 0n || input.dailyCapWei < 0n || input.gasCeilingWei < 0n || (input.mintPriceWei ?? 0n) < 0n) throw new Error('INVALID_SPEND_POLICY');
-    if (input.chainId !== 1 && input.chainId !== 4663) throw new Error('CHAIN_EXECUTION_BLOCKED');
+    if (input.chainId !== 1 && input.chainId !== 8453 && input.chainId !== 4663) throw new Error('CHAIN_EXECUTION_BLOCKED');
     if (input.broadcastMode === 'flashbots' && input.chainId !== 1) throw new Error('FLASHBOTS_ETHEREUM_ONLY');
     if (input.chainId === 4663 && input.broadcastMode !== 'sequencer') throw new Error('ROBINHOOD_SEQUENCER_REQUIRED');
+    if (input.chainId === 8453 && input.broadcastMode !== 'public') throw new Error('BASE_SINGLE_PRIMARY_RPC_REQUIRED');
+    if (input.chainId === 8453 && input.quantity > 4) throw new Error('BASE_QUANTITY_LIMIT_EXCEEDED');
     if (input.chainId === 1 && input.broadcastMode === 'sequencer') throw new Error('SEQUENCER_ROBINHOOD_ONLY');
     if (input.chainVerification.chainId !== input.chainId) throw new Error('CHAIN_VERIFICATION_MISMATCH');
     if (input.feePolicy.configuredPriorityFeeWei < 0n) throw new Error('INVALID_PRIORITY_FEE_POLICY');
@@ -135,6 +138,7 @@ export class BackendApplication {
     const mintPriceWei = input.mintPriceWei ?? 0n;
     if (input.feePolicy.kind === 'paid') {
       if (input.chainId === 4663) assertRobinhoodLiveAllowed('paid', (this.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), new Date());
+      if (input.chainId === 8453) assertBaseLiveAllowed('paid', (this.store as { baseEnablement?: () => unknown }).baseEnablement?.(), new Date());
       if (input.chainId === 1 && input.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
       if (mintPriceWei <= 0n) throw new Error('PAID_MINT_VALUE_REQUIRED');
       const allInExposure = mintPriceWei * BigInt(input.quantity) + totalFeeBudget;
@@ -143,8 +147,8 @@ export class BackendApplication {
       if (mintPriceWei !== 0n) throw new Error('FREE_MINT_VALUE_MUST_BE_ZERO');
       // D-042: an Ethereum free campaign may carry the approved per-wallet fee allowance as its fee budget, with the tip
       // kept separate and small. Anything else uses the old rule (cap = twice the tip, budget within the cap).
-      const approvedAllowanceWei = this.options.fleetPolicy?.freeFeeAllowanceWei;
-      const perWalletBudgetShape = input.chainId === 1 && approvedAllowanceWei !== undefined && input.feePolicy.freeTotalSpendCapWei === approvedAllowanceWei;
+      const approvedAllowanceWei = input.chainId === 8453 ? BASE_PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei : this.options.fleetPolicy?.freeFeeAllowanceWei;
+      const perWalletBudgetShape = (input.chainId === 1 || input.chainId === 8453) && approvedAllowanceWei !== undefined && input.feePolicy.freeTotalSpendCapWei === approvedAllowanceWei;
       if (perWalletBudgetShape) {
         if (input.feePolicy.configuredPriorityFeeWei <= 0n || input.feePolicy.configuredPriorityFeeWei > MAX_FREE_TIP_WEI) throw new Error('FREE_TIP_OUT_OF_RANGE');
         if (totalFeeBudget > approvedAllowanceWei!) throw new Error('FREE_TOTAL_SPEND_CAP_EXCEEDED');
@@ -155,6 +159,7 @@ export class BackendApplication {
       }
       if (input.chainId === 4663) assertRobinhoodFreePolicy(input.gasCeilingWei, input.dailyCapWei, totalFeeBudget);
       if (input.chainId === 4663 && input.dailyCapWei > ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI) throw new Error('ROBINHOOD_ACTIVE_PERIOD_CAP_EXCEEDED');
+      if (input.chainId === 8453 && (input.dailyCapWei > BASE_PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei || totalFeeBudget > BASE_PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei)) throw new Error('BASE_FREE_CAP_EXCEEDED');
     }
     const now = new Date().toISOString(); const campaign: Campaign = { id: `cmp_${randomUUID()}`, state: 'Draft', chainId: input.chainId, contract: input.contract, strategy: input.strategy, quantity: input.quantity, dryRun: input.dryRun ?? true, spendPolicy: { maxRunWei: input.maxRunWei, dailyCapWei: input.dailyCapWei, gasCeilingWei: input.gasCeilingWei }, chainVerification: input.chainVerification, mintPriceWei, feePolicy: input.feePolicy, ...(input.broadcastMode ? { broadcastMode: input.broadcastMode } : {}), ...(input.openingAt ? { openingAt: input.openingAt } : {}), ...(input.tMinusMs === undefined ? {} : { tMinusMs: input.tMinusMs }), createdAt: now, updatedAt: now };
     await this.store.transaction(state => { state.campaigns.push(campaign); }); return campaign;

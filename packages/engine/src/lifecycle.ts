@@ -6,10 +6,12 @@ import type {
   ExecutionIdentity,
   FinalityStage,
   RobinhoodEnablementGrant,
+  BaseEnablementGrant,
   SimulationEvidence,
   ReservationSettlementComponents,
   SpendReservationProvider,
   SupportedChainId,
+  ChainConfig,
 } from './types.js';
 
 export type ExecutionGate = 'simulation' | 'admission' | 'sign' | 'broadcast' | 'provider';
@@ -30,6 +32,23 @@ function grantIsCurrent(grant: RobinhoodEnablementGrant | undefined, now: Date):
   const expires = Date.parse(grant.expiresAt);
   return Number.isFinite(expires) && Number.isFinite(now.getTime()) && expires > now.getTime();
 }
+function baseGrantIsCurrent(grant: BaseEnablementGrant | undefined, now: Date): grant is BaseEnablementGrant {
+  if (typeof grant !== 'object' || grant === null || grant.freeAllowed !== true || grant.paidAllowed !== false || typeof grant.expiresAt !== 'string') return false;
+  const expires = Date.parse(grant.expiresAt);
+  return Number.isFinite(expires) && expires > now.getTime();
+}
+
+/** Derive an executable Base profile only after the immutable owner grant passes the Engine gate. */
+export function authorizedBaseExecutionProfile(
+  config: ChainConfig,
+  dryRun: boolean,
+  grant: BaseEnablementGrant | undefined,
+  now: Date = new Date(),
+): ChainConfig {
+  if (config.chainId !== 8453) throw new LifecycleGateError('BASE_PROFILE_REQUIRED', 'admission', 'Base execution profile requires chain 8453');
+  assertDirectChainExecutionPolicy(8453, undefined, dryRun, undefined, now, grant);
+  return Object.freeze({ ...config, verificationStatus: 'verified' as const, executionEnabled: true });
+}
 
 /**
  * Hard chain policy. A mutable runtime flag may never turn 4663 into a live execution path: only a current, owner-written
@@ -42,7 +61,13 @@ export function assertDirectChainExecutionPolicy(
   dryRun: boolean,
   grant?: RobinhoodEnablementGrant,
   now: Date = new Date(),
+  baseGrant?: BaseEnablementGrant,
 ): void {
+  if (chainId === 8453) {
+    if (mintValueWei !== undefined && mintValueWei > 0n) throw new LifecycleGateError('PAID_BASE_BLOCKED', 'admission', 'Paid Base execution is disabled until its separate rehearsal and owner record');
+    if (!dryRun && !baseGrantIsCurrent(baseGrant, now)) throw new LifecycleGateError('CHAIN_8453_EXECUTION_DISABLED', 'admission', 'Base live execution requires a current owner enablement record');
+    return;
+  }
   if (chainId !== 4663) return;
   const granted = grantIsCurrent(grant, now);
   if (mintValueWei !== undefined && mintValueWei > 0n && !(granted && grant.paidAllowed)) {
@@ -213,8 +238,8 @@ export function lifecycleStateForFinality(
   stage: FinalityStage,
   receiptStatus: 'success' | 'reverted',
 ): 'included' | 'posted' | 'ethereum_final' | 'failed' {
-  if (receiptStatus === 'reverted') return 'failed';
-  if (chainId === 4663) {
+  if (receiptStatus === 'reverted' && (chainId === 1 || stage === 'ethereum_final')) return 'failed';
+  if (chainId === 4663 || chainId === 8453) {
     if (stage === 'ethereum_final') return 'ethereum_final';
     if (stage === 'posted') return 'posted';
   }
@@ -223,11 +248,11 @@ export function lifecycleStateForFinality(
 
 export function shouldSettleReceipt(
   chainId: SupportedChainId,
-  receiptStatus: 'success' | 'reverted',
+  _receiptStatus: 'success' | 'reverted',
   finalityStage: FinalityStage,
 ): boolean {
-  if (receiptStatus === 'reverted') return true;
-  return chainId !== 4663 || finalityStage === 'ethereum_final';
+  if (chainId === 1) return true;
+  return finalityStage === 'ethereum_final';
 }
 
 /** Split authoritative receipt gas without counting the priority component twice. */

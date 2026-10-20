@@ -2,7 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { createPublicClient, http, formatEther, formatGwei, type Address, type Hash } from 'viem';
 import {
   MintEngine,
+  BaseFinalityObserver,
   RobinhoodFinalityObserver,
+  baseReceiptFees,
+  readBaseOperatorFee,
   canonicalExecutionIdentity,
   resolveChainByNameFromSecrets,
   type EngineLifecycleStore,
@@ -10,6 +13,7 @@ import {
   type MintJobResult,
   type ReservationSettlementComponents,
   type RobinhoodEnablementGrant,
+  type BaseEnablementGrant,
   type SignerFactory,
   type SpendReservationProvider,
   type WalletInfo,
@@ -25,7 +29,7 @@ import type {
   ReconciliationUpdate,
   RunRecord,
 } from '@mint-bot/backend';
-import { PERSONAL_LIVE_FLEET_POLICY, validRobinhoodEnablement } from '@mint-bot/backend';
+import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY, validBaseEnablement, validRobinhoodEnablement } from '@mint-bot/backend';
 import { promptHiddenPassphrase } from './secure-prompt.js';
 import { createNitroFinalitySources } from './robinhood-readonly.js';
 import { parseGasUsedForL1, reconcileRobinhood } from './robinhood-reconcile.js';
@@ -52,6 +56,7 @@ export interface MintEngineAdapterOptions {
   readonly settleComponents?: (reservationId: string, components: ReservationSettlementComponents) => Promise<void>;
   /** Robinhood only (D-050): returns the owner's stored enablement record, or undefined. The only source of the engine's Robinhood grant. */
   readonly robinhoodEnablement?: () => unknown;
+  readonly baseEnablement?: () => unknown;
 }
 
 type CanonicalLifecycleDelegate = BackendStore & {
@@ -76,8 +81,9 @@ export function createCanonicalLifecycleStore(store: BackendStore): EngineLifecy
   };
 }
 
-function chainName(chainId: Campaign['chainId']): MintJobConfig['target']['chain'] {
+export function chainName(chainId: Campaign['chainId']): MintJobConfig['target']['chain'] {
   if (chainId === 1) return 'ethereum';
+  if (chainId === 8453) return 'base';
   if (chainId === 4663) return 'robinhood';
   throw new Error(`UNSUPPORTED_ENGINE_CHAIN:${chainId}`);
 }
@@ -93,6 +99,17 @@ export function paidRunMintValueCapEth(campaign: Campaign): number {
   const cap = asFiniteNumber(campaign.spendPolicy.maxRunWei, 'max_run_spend');
   if (cap <= 0) throw new Error('PAID_RUN_MINT_VALUE_CAP_REQUIRED');
   return cap;
+}
+
+export function baseReceiptFactsAgree(
+  primary: { blockHash: string; blockNumber: bigint; status: string; gasUsed: bigint; effectiveGasPrice: bigint },
+  fallback: { blockHash: string; blockNumber: bigint; status: string; gasUsed: bigint; effectiveGasPrice: bigint },
+): boolean {
+  return primary.blockHash.toLowerCase() === fallback.blockHash.toLowerCase()
+    && primary.blockNumber === fallback.blockNumber
+    && primary.status === fallback.status
+    && primary.gasUsed === fallback.gasUsed
+    && primary.effectiveGasPrice === fallback.effectiveGasPrice;
 }
 
 async function loadWallets(path: string): Promise<Array<{ index: number; address: Address }>> {
@@ -136,11 +153,13 @@ async function assertWalletSelection(options: MintEngineAdapterOptions, addresse
 }
 
 /**
- * FREE-mint gas reserve caps for the engine, per chain (D-042). Ethereum follows the approved fleet policy
- * (D-033, D-037); every other chain, Robinhood included, keeps the engine's strict default.
+ * FREE-mint gas reserve caps for the engine, per chain (D-042, D-057). Ethereum and Base expose their approved
+ * policies to the job summary. The Engine independently pins Base and refuses caller attempts to widen it.
  */
 export function freeMintReserveCapsFor(chainId: number): { perWalletCapWei: bigint; activePeriodCapWei: bigint } | undefined {
-  return chainId === 1 ? { perWalletCapWei: PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei, activePeriodCapWei: PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei } : undefined;
+  if (chainId === 1) return { perWalletCapWei: PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei, activePeriodCapWei: PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei };
+  if (chainId === 8453) return { perWalletCapWei: BASE_PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei, activePeriodCapWei: BASE_PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei };
+  return undefined;
 }
 
 /**
@@ -151,10 +170,15 @@ export function robinhoodGrantFrom(record: unknown, now: Date): RobinhoodEnablem
   const valid = validRobinhoodEnablement(record, now);
   return valid ? Object.freeze({ expiresAt: valid.expiresAt, paidAllowed: valid.paidAllowed }) : undefined;
 }
+export function baseGrantFrom(record: unknown, now: Date): BaseEnablementGrant | undefined {
+  const valid = validBaseEnablement(record, now);
+  return valid ? Object.freeze({ expiresAt: valid.expiresAt, freeAllowed: true as const, paidAllowed: false as const }) : undefined;
+}
 
-function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
+export function engineConfigFromCampaign(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
   const chain = chainName(campaign.chainId);
   const robinhoodGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : undefined;
+  const baseGrant = campaign.chainId === 8453 ? baseGrantFrom(options.baseEnablement?.(), new Date()) : undefined;
   const reserveCaps = freeMintReserveCapsFor(campaign.chainId);
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
@@ -173,11 +197,14 @@ function makeConfig(campaign: Campaign, options: MintEngineAdapterOptions, dryRu
       paidRunMintValueCapEth: paidRunMintValueCapEth(campaign),
       ...(reserveCaps ? { freeMintReserveCaps: reserveCaps } : {}),
       ...(robinhoodGrant ? { robinhoodGrant } : {}),
+      ...(baseGrant ? { baseGrant } : {}),
     },
     broadcast: {
       // Dry runs must not require relay credentials. Live Ethereum still
       // defaults to the Flashbots-backed auto route through the campaign.
-      mode: dryRun && campaign.chainId === 1 ? 'public' : campaign.broadcastMode ?? (campaign.chainId === 1 ? 'auto' : 'sequencer'),
+      // D-057 binds Base to one owner-approved primary RPC. The other Base
+      // endpoint is observation-only and must never receive the signed tx.
+      mode: campaign.chainId === 8453 ? 'public' : dryRun && campaign.chainId === 1 ? 'public' : campaign.broadcastMode ?? (campaign.chainId === 1 ? 'auto' : 'sequencer'),
       rpcEndpoints: [],
       blastParallel: false,
       secretScope: 'mainnet',
@@ -235,11 +262,15 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
         executionId,
         runId,
         ...(submittedAttemptId ? { transactionAttemptId: submittedAttemptId } : {}),
-        state: wallet.lifecycleState === 'reorged' ? 'Reorged' : failed ? 'Failed' : 'Confirmed',
-        ...(campaign.chainId === 4663 && (wallet.finalityStage === 'soft' || wallet.finalityStage === 'posted' || wallet.finalityStage === 'ethereum_final') ? { finalityStage: wallet.finalityStage } : {}),
+        state: wallet.lifecycleState === 'reorged' ? 'Reorged' : campaign.chainId === 8453 && pending ? 'Pending' : failed ? 'Failed' : 'Confirmed',
+        ...((campaign.chainId === 4663 || campaign.chainId === 8453) && (wallet.finalityStage === 'soft' || wallet.finalityStage === 'posted' || wallet.finalityStage === 'ethereum_final') ? { finalityStage: wallet.finalityStage } : {}),
         ...(campaign.chainId === 4663 && robinhoodFinality(wallet.finalityStage) ? { robinhoodFinality: robinhoodFinality(wallet.finalityStage) } : {}),
         blockNumber: wallet.blockNumber,
         blockHash: wallet.blockHash,
+        ...(wallet.gasUsed === undefined ? {} : { gasUsed: wallet.gasUsed }),
+        ...(wallet.effectiveGasPrice === undefined ? {} : { effectiveGasPrice: wallet.effectiveGasPrice }),
+        ...(wallet.l1DataFeeWei === undefined ? {} : { l1DataFeeWei: wallet.l1DataFeeWei }),
+        ...(wallet.operatorFeeWei === undefined ? {} : { operatorFeeWei: wallet.operatorFeeWei }),
         actualSpendWei: wallet.totalCostWei,
         observedAt: now,
       });
@@ -293,7 +324,7 @@ export function preSignReservationGate<R extends { status: string; amountWei: bi
 export function createMintEngineAdapter(options: MintEngineAdapterOptions): EngineAdapter {
   const run = async (campaign: Campaign, wallets: readonly string[], dryRun: boolean, runId: string, intentId?: string, reservationProvider?: SpendReservationProvider): Promise<ExecutionResult> => {
     await assertWalletSelection(options, wallets);
-    const config = makeConfig(campaign, options, dryRun, wallets.length);
+    const config = engineConfigFromCampaign(campaign, options, dryRun, wallets.length);
     const persistedRun = options.getState().runs.find((run) => run.id === runId);
     const engineOptions = {
       ...(reservationProvider ? { reservationProvider } : {}),
@@ -372,6 +403,57 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       const endpoint = config.rpcEndpoints[0];
       if (!endpoint) return { result: 'unknown', attempts: [], receipts: [], reason: 'chain endpoint unavailable' };
       const client = createPublicClient({ transport: http(endpoint) });
+      if (intent.campaignSnapshot.chainId === 8453) {
+        const fallbackEndpoint = config.rpcEndpoints[1];
+        if (!fallbackEndpoint) return { result: 'unknown', attempts: [], receipts: [], reason: 'independent Base fallback endpoint unavailable' };
+        const fallback = createPublicClient({ transport: http(fallbackEndpoint) });
+        const observerFor = (source: typeof client) => new BaseFinalityObserver({
+          chainId: 8453,
+          currentBlockNumber: () => source.getBlockNumber(),
+          receiptBlockHash: async (hash) => (await source.getTransactionReceipt({ hash })).blockHash,
+          canonicalBlockHash: async (blockNumber) => (await source.getBlock({ blockNumber })).hash,
+          safeBlockNumber: async () => (await source.getBlock({ blockTag: 'safe' })).number,
+          finalizedBlockNumber: async () => (await source.getBlock({ blockTag: 'finalized' })).number,
+        });
+        const primaryObserver = observerFor(client);
+        const fallbackObserver = observerFor(fallback);
+        const updatedAttempts: AttemptRecord[] = [];
+        const receipts: ReceiptRecord[] = [];
+        let weakest: 'soft' | 'posted' | 'final' = 'final';
+        for (const attempt of attempts) {
+          if (!attempt.hash || attempt.nonce === undefined) continue;
+          try {
+            const hash = attempt.hash as Hash;
+            const [primaryReceipt, fallbackReceipt] = await Promise.all([client.getTransactionReceipt({ hash }), fallback.getTransactionReceipt({ hash })]);
+            if (!baseReceiptFactsAgree(primaryReceipt, fallbackReceipt)) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on receipt facts' };
+            const [primaryFinality, fallbackFinality] = await Promise.all([
+              primaryObserver.observe({ txHash: hash, txBlockNumber: primaryReceipt.blockNumber }),
+              fallbackObserver.observe({ txHash: hash, txBlockNumber: fallbackReceipt.blockNumber }),
+            ]);
+            if (primaryFinality.stage !== fallbackFinality.stage || primaryFinality.canonical !== fallbackFinality.canonical) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on finality' };
+            if (primaryFinality.canonical !== true) return { result: primaryFinality.canonical === false ? 'reorged' : 'unknown', attempts: [], receipts: [], reason: primaryFinality.reason };
+            const fields = primaryReceipt as typeof primaryReceipt & { l1Fee?: bigint; l1DataFee?: bigint; operatorFee?: bigint; operatorFeeScalar?: bigint | number; operatorFeeConstant?: bigint };
+            const fallbackFields = fallbackReceipt as typeof fallbackReceipt & { l1Fee?: bigint; l1DataFee?: bigint; operatorFee?: bigint };
+            const [primaryOperatorFee, fallbackOperatorFee] = await Promise.all([
+              fields.operatorFee ?? readBaseOperatorFee(client, primaryReceipt.gasUsed, primaryReceipt.blockNumber),
+              fallbackFields.operatorFee ?? readBaseOperatorFee(fallback, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber),
+            ]);
+            if (primaryOperatorFee !== fallbackOperatorFee || (fields.l1DataFee ?? fields.l1Fee) !== (fallbackFields.l1DataFee ?? fallbackFields.l1Fee)) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on fee components' };
+            const fees = baseReceiptFees(fields, primaryReceipt.gasUsed, primaryOperatorFee);
+            const stage = primaryFinality.stage;
+            if (stage !== 'soft' && stage !== 'posted' && stage !== 'ethereum_final') return { result: 'unknown', attempts: [], receipts: [], reason: 'Base observer returned an invalid finality stage' };
+            weakest = stage === 'soft' ? 'soft' : stage === 'posted' && weakest === 'final' ? 'posted' : weakest;
+            const finalized = stage === 'ethereum_final';
+            updatedAttempts.push({ ...attempt, state: finalized ? (primaryReceipt.status === 'success' ? 'Confirmed' : 'Failed') : 'Submitted', updatedAt: new Date().toISOString() });
+            receipts.push({ id: `${attempt.executionId}:base:${primaryReceipt.blockHash}:${stage}`, executionId: attempt.executionId, runId: run.id, transactionAttemptId: attempt.id, state: finalized ? (primaryReceipt.status === 'success' ? 'Confirmed' : 'Failed') : 'Pending', finalityStage: stage, finalitySource: 'base-independent-safe-finalized-heads', blockNumber: primaryReceipt.blockNumber, blockHash: primaryReceipt.blockHash, gasUsed: primaryReceipt.gasUsed, effectiveGasPrice: primaryReceipt.effectiveGasPrice, l1DataFeeWei: fees.l1DataFeeWei, operatorFeeWei: fees.operatorFeeWei, actualSpendWei: (primaryReceipt.status === 'success' ? intent.campaignSnapshot.mintPriceWei * BigInt(intent.campaignSnapshot.quantity) : 0n) + primaryReceipt.gasUsed * primaryReceipt.effectiveGasPrice + fees.l1DataFeeWei + fees.operatorFeeWei, observedAt: new Date().toISOString() });
+          } catch (error) {
+            if (error instanceof Error && (error.message.startsWith('BASE_RECEIPT_') || error.message.startsWith('BASE_OPERATOR_'))) return { result: 'unknown', attempts: [], receipts: [], reason: error.message };
+          }
+        }
+        if (receipts.length === 0) return { result: 'unknown', attempts: updatedAttempts, receipts, reason: 'Base receipt unavailable; outcome unresolved' };
+        if (receipts.some((receipt) => receipt.state === 'Failed' && receipt.finalityStage === 'ethereum_final')) return { result: 'failed', attempts: updatedAttempts, receipts };
+        return { result: weakest, attempts: updatedAttempts, receipts };
+      }
       if (intent.campaignSnapshot.chainId === 4663) {
         // Robinhood: final only when canonical and Ethereum-final; the settled amount is the observed cost (T-035 piece 2).
         const observer = new RobinhoodFinalityObserver(createNitroFinalitySources(client), 1);

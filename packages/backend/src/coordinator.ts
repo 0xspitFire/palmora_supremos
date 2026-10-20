@@ -5,7 +5,15 @@ import { SpendLedger } from './spend-ledger.js';
 import { EvidenceService, liveRequestDigest } from './evidence.js';
 import { rebindExecutionResult, type CanonicalExecutionStore } from './canonical-store.js';
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
+import { assertBaseLiveAllowed } from './base-enablement.js';
 import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
+
+export function receiptAuthorizesSettlement(chainId: 1 | 8453 | 4663, receipt: Pick<ReceiptRecord, 'state' | 'finalityStage' | 'robinhoodFinality'>): boolean {
+  if (receipt.state !== 'Confirmed' && receipt.state !== 'Failed') return false;
+  if (chainId === 1) return true;
+  if (receipt.finalityStage !== 'ethereum_final') return false;
+  return chainId !== 4663 || receipt.robinhoodFinality === 'final';
+}
 
 export class ExecutionCoordinator {
   readonly ledger: SpendLedger;
@@ -60,6 +68,12 @@ export class ExecutionCoordinator {
       if (!campaign.chainVerification.evidenceId || !campaign.chainVerification.checkedAt || campaign.chainVerification.sourceBlock === undefined) throw new Error('CHAIN_VERIFICATION_EVIDENCE_REQUIRED');
       if (campaign.chainId === 4663 && campaign.broadcastMode !== 'sequencer') throw new Error('ROBINHOOD_SEQUENCER_REQUIRED');
       if (campaign.chainId === 4663 && campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), new Date());
+      if (campaign.chainId === 8453) {
+        if (campaign.broadcastMode !== 'public') throw new Error('BASE_SINGLE_PRIMARY_RPC_REQUIRED');
+        if (campaign.quantity > 4) throw new Error('BASE_QUANTITY_LIMIT_EXCEEDED');
+        if ((input.wallets ?? []).length > 6) throw new Error('BASE_FLEET_LIMIT_EXCEEDED');
+        assertBaseLiveAllowed(campaign.feePolicy.kind, this.baseEnablement(), new Date());
+      }
       if (campaign.chainId === 1 && campaign.feePolicy.kind === 'paid') {
         if (campaign.broadcastMode !== 'public') throw new Error('PAID_ETHEREUM_PUBLIC_MODE_REQUIRED');
         const fee = campaign.feePolicy.totalFeeBudgetWei;
@@ -107,6 +121,7 @@ export class ExecutionCoordinator {
       assertRobinhoodLiveAllowed('free', this.robinhoodEnablement(), new Date());
       if (campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), new Date());
     }
+    if (campaign.chainId === 8453) assertBaseLiveAllowed(campaign.feePolicy.kind, this.baseEnablement(), new Date());
     const totalFee = campaign.feePolicy.totalFeeBudgetWei;
     if (totalFee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
     const reservationAmount = campaign.mintPriceWei * BigInt(campaign.quantity) + totalFee;
@@ -257,9 +272,9 @@ export class ExecutionCoordinator {
   private applyAccountingToState(state: BackendState, campaign: Campaign, runId: string, attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[]): void {
     for (const reservation of state.reservations.filter(item => item.runId === runId && item.status !== 'released')) {
       const walletAttempts = attempts.filter(attempt => attempt.wallet.toLowerCase() === reservation.wallet.toLowerCase());
-      const confirmed = walletAttempts.find(attempt => attempt.state === 'Confirmed' && (campaign.chainId === 1 || attempt.robinhoodFinality === 'final'));
-      const receipt = confirmed && receipts.find(item => item.executionId === confirmed.executionId);
-      const failedReceipt = receipts.find(item => item.state === 'Failed' && walletAttempts.some(attempt => attempt.executionId === item.executionId));
+      const confirmed = walletAttempts.find(attempt => attempt.state === 'Confirmed');
+      const receipt = confirmed && receipts.find(item => item.executionId === confirmed.executionId && item.state === 'Confirmed' && receiptAuthorizesSettlement(campaign.chainId, item));
+      const failedReceipt = receipts.find(item => item.state === 'Failed' && receiptAuthorizesSettlement(campaign.chainId, item) && walletAttempts.some(attempt => attempt.executionId === item.executionId));
       const reorgReceipt = receipts.find(item => item.state === 'Reorged' && walletAttempts.some(attempt => attempt.executionId === item.executionId));
       if (receipt || failedReceipt) this.setReservation(reservation, 'settled', (receipt ?? failedReceipt)!.actualSpendWei);
       else if (reorgReceipt) this.setReservation(reservation, 'reorged', reorgReceipt.actualSpendWei);
@@ -281,21 +296,22 @@ export class ExecutionCoordinator {
     run.updatedAt = new Date().toISOString();
   }
 
-  private assertEngineFacts(runId: string, chainId: 1 | 4663, executionIds: readonly string[], attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], allowUnfinalizedRobinhood = false): void {
+  private assertEngineFacts(runId: string, chainId: 1 | 8453 | 4663, executionIds: readonly string[], attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], allowUnfinalizedL2 = false): void {
     if (new Set(executionIds).size !== executionIds.length) throw new Error('DUPLICATE_EXECUTION_ID');
     if (attempts.some(item => item.runId !== runId || !executionIds.includes(item.executionId)) || receipts.some(item => item.runId !== runId || !executionIds.includes(item.executionId))) throw new Error('INVALID_ENGINE_EXECUTION_FACTS');
     if (new Set(attempts.map(item => item.id)).size !== attempts.length || new Set(receipts.map(item => item.id)).size !== receipts.length) throw new Error('DUPLICATE_ENGINE_FACT_ID');
-    if (receipts.some(receipt => !['Confirmed', 'Reorged', 'Failed'].includes(receipt.state) || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined || receipt.actualSpendWei < 0n)) throw new Error('INVALID_RECEIPT_FACT');
-    if (chainId === 4663 && !allowUnfinalizedRobinhood && receipts.some(receipt => !receipt.robinhoodFinality)) throw new Error('ROBINHOOD_FINALITY_REQUIRED');
+    if (receipts.some(receipt => !['Pending', 'Confirmed', 'Reorged', 'Failed'].includes(receipt.state) || (receipt.state === 'Pending' && (!allowUnfinalizedL2 || chainId === 1)) || receipt.blockNumber === undefined || !receipt.blockHash || receipt.actualSpendWei === undefined || receipt.actualSpendWei < 0n)) throw new Error('INVALID_RECEIPT_FACT');
+    if (chainId !== 1 && !allowUnfinalizedL2 && receipts.some(receipt => receipt.finalityStage !== 'ethereum_final')) throw new Error('L2_FINALITY_REQUIRED');
+    if (chainId === 4663 && receipts.some(receipt => receipt.finalityStage === 'ethereum_final' && receipt.robinhoodFinality !== 'final')) throw new Error('ROBINHOOD_FINALITY_REQUIRED');
   }
 
-  private assertReconciliationCoherence(runId: string, chainId: 1 | 4663, result: string, existingAttempts: readonly AttemptRecord[], attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[]): void {
+  private assertReconciliationCoherence(runId: string, chainId: 1 | 8453 | 4663, result: string, existingAttempts: readonly AttemptRecord[], attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[]): void {
     const expected = [...new Set(existingAttempts.map(item => item.executionId))];
     if (['confirmed', 'final', 'reorged'].includes(result)) {
       if (expected.length === 0) throw new Error('TERMINAL_RECONCILIATION_FACTS_REQUIRED');
       if (expected.some(id => !receipts.some(receipt => receipt.executionId === id))) throw new Error('INCOMPLETE_TERMINAL_RECEIPTS');
     }
-    if (result === 'final' && (chainId !== 4663 || receipts.some(receipt => receipt.state !== 'Confirmed' || receipt.robinhoodFinality !== 'final'))) throw new Error('INVALID_FINALITY_COHERENCE');
+    if (result === 'final' && (chainId === 1 || receipts.some(receipt => receipt.state !== 'Confirmed' || receipt.finalityStage !== 'ethereum_final' || (chainId === 4663 && receipt.robinhoodFinality !== 'final')))) throw new Error('INVALID_FINALITY_COHERENCE');
     if (result === 'confirmed' && (chainId !== 1 || receipts.some(receipt => receipt.state !== 'Confirmed'))) throw new Error('INVALID_FINALITY_COHERENCE');
     if (result === 'reorged' && receipts.some(receipt => receipt.state !== 'Reorged')) throw new Error('INVALID_REORG_COHERENCE');
     if (result === 'failed' && attempts.length === 0 && receipts.length === 0) throw new Error('FAILED_RECONCILIATION_FACTS_REQUIRED');
@@ -308,6 +324,7 @@ export class ExecutionCoordinator {
 
   /** Key 2 (D-040). Only the canonical store can supply it; any other store means no record, so Robinhood stays refused. */
   private robinhoodEnablement(): unknown { return this.canonicalStore()?.robinhoodEnablement?.(); }
+  private baseEnablement(): unknown { return this.canonicalStore()?.baseEnablement?.(); }
 
   private canonicalStore(): CanonicalExecutionStore | undefined {
     const candidate = this.store as Partial<CanonicalExecutionStore>;

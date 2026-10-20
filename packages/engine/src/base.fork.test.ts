@@ -54,7 +54,7 @@ describe.skipIf(!enabled || !rpcUrl || !blockText || !txHash || !nft || !feeReci
     const tx = await fork('eth_getTransactionByHash', [txHash]);
     const receipt = await fork('eth_getTransactionReceipt', [txHash]);
     expect(receipt?.status).toBe('0x1');
-    expect(BigInt(receipt?.blockNumber)).toBe(BigInt(blockText!));
+    expect(BigInt(receipt?.blockNumber)).toBeLessThanOrEqual(BigInt(blockText!));
     expect(tx?.to.toLowerCase()).toBe(SEADROP_V1_ADDRESS.toLowerCase());
     expect(BigInt(tx?.value)).toBe(BigInt(mintValue!));
     const decoded = decodeFunctionData({ abi: mintPublicAbi, data: tx.input as Hex });
@@ -111,4 +111,3 @@ describe.skipIf(!enabled || !rpcUrl || !blockText || !txHash || !nft || !feeReci
     expect(config.executionEnabled).toBe(false);
   });
 });
-
