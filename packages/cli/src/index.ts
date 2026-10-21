@@ -6,9 +6,9 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { type Address, type Hex, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { canonicalPolicyDigest, createTurnkeyClient, generateAndEncryptWallets, importAndEncryptWallets, importPrivateKeyToTurnkey, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyPolicyAst, validateTurnkeyWalletMap } from '@mint-bot/engine';
+import { LocalEncryptedSigner, canonicalPolicyDigest, createTurnkeyClient, generateAndEncryptWallets, importAndEncryptWallets, importPrivateKeyToTurnkey, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyPolicyAst, validateTurnkeyWalletMap } from '@mint-bot/engine';
 import type { WalletImportRecord } from '@mint-bot/engine';
-import type { TurnkeyWalletMap } from '@mint-bot/engine';
+import type { Signer, SignerFactory, TurnkeyWalletMap } from '@mint-bot/engine';
 import { configuredSecretRoot, configuredWalletPath, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
 import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
@@ -823,7 +823,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           const planData = { campaignId: campaign.id, desired: report.quantityPlan.desired, planned: report.quantityPlan.planned, reduced: report.quantityPlan.reduced, reason: report.quantityPlan.reason, maxFeeGwei: report.quantityPlan.maxFeeGwei, message: report.quantityPlan.message };
           await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, type: 'quantity_plan', at: new Date().toISOString(), data: planData }); });
         }
-        process.stdout.write(`${json({ state: 'Prepared', campaignId: campaign.id, wallets: readyWallets, quantity: fields.quantity, maxExposureEth: plan.totalMaxExposureEth, planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null, nextSteps: [`approve --campaign-id ${campaign.id}`, `arm --campaign-id ${campaign.id} --mode live`, 'remove the kill-switch file only when you are ready', 'run --run-id <the run id arm prints> --max-fee-gwei <the planning max fee above>'] })}\n`);
+        process.stdout.write(`${json({ state: 'Prepared', campaignId: campaign.id, wallets: readyWallets, quantity: fields.quantity, maxExposureEth: plan.totalMaxExposureEth, planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null, nextSteps: [`approve --campaign-id ${campaign.id}`, `arm --campaign-id ${campaign.id} --mode live`, 'remove the kill-switch file only when you are ready', 'live-run --run-id <the run id arm prints> --max-fee-gwei <the planning max fee above>'] })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args
@@ -924,6 +924,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
       // only command that can execute it.
       const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, ...(args.maxFeeGwei === undefined ? {} : { maxFeePerGasGwei: args.maxFeeGwei }) }, { acceptPersonalLiveLocalCustody: true, startCoordinator: false });
       const wallets = await publicWallets(file);
+      const selected = runtime.store.snapshot().runs.find((candidate) => candidate.id === args.runId);
+      if (selected?.mode === 'live') throw new Error('LIVE_RUN_GUIDED_COMMAND_REQUIRED');
       const response = await runtime.application.command('run', { runId: args.runId, wallets, ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}) });
       process.stdout.write(`${json(response)}\n`);
     } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
@@ -941,19 +943,41 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         }
         assertLiveRunAllowed({ preview, confirm: args.confirm, maxFeeGwei: args.maxFeeGwei });
         const file = walletFile(args.walletFile);
-        // Preserve the Ready startup state established by `arm`; restarting the coordinator would
-        // see this persisted Armed run as unresolved and prevent its own execution.
-        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, maxFeePerGasGwei: args.maxFeeGwei as number }, { acceptPersonalLiveLocalCustody: true, startCoordinator: false });
-        // Copy the plan onto the run so the summary command shows it too.
-        const wallets = await publicWallets(file);
-        assertWalletFileMatchesRun(preview, wallets);
-        const plan = quantityPlanForRun(runtime.store.snapshot().events, args.runId, preview.campaignId);
-        if (plan) await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, runId: args.runId, type: 'quantity_plan', at: new Date().toISOString(), data: { ...plan, campaignId: preview.campaignId } }); });
-        let runResponse: unknown;
-        let runError: string | undefined;
-        try { runResponse = await runtime.application.command('run', { runId: args.runId, wallets }); } catch (error) { runError = plainFeePolicyMessage(commandErrorMessage(error, 'LIVE_RUN_FAILED')); }
-        const report = describeLiveRunResult(runtime.store.snapshot(), args.runId);
-        process.stdout.write(`${json({ state: runError === undefined ? 'RunFinished' : 'RunStopped', ...(runError === undefined ? {} : { stoppedBecause: runError }), message: report.summary, report, run: runResponse ?? null })}\n`);
+        const executeConfirmedRun = async (localSigner?: Signer): Promise<void> => {
+          let signer = localSigner;
+          const signerFactory: SignerFactory | undefined = signer ? async () => {
+            if (!signer) throw new Error('PREAUTHENTICATED_SIGNER_ALREADY_CONSUMED');
+            const transferred = signer;
+            signer = undefined;
+            return transferred;
+          } : undefined;
+          // Preserve the Ready startup state established by `arm`; restarting the coordinator would
+          // see this persisted Armed run as unresolved and prevent its own execution. For local custody,
+          // decrypt and authenticate the local keystore before admission can move the run to Active.
+          // Ownership transfers exactly once to MintEngine; otherwise this scope zeroizes it.
+          try {
+            const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file, maxFeePerGasGwei: args.maxFeeGwei as number, ...(signerFactory ? { signerFactory, passphraseProvider: async () => '' } : {}) }, { acceptPersonalLiveLocalCustody: true, startCoordinator: false });
+            // Copy the plan onto the run so the summary command shows it too.
+            const wallets = await publicWallets(file);
+            assertWalletFileMatchesRun(preview, wallets);
+            const plan = quantityPlanForRun(runtime.store.snapshot().events, args.runId, preview.campaignId);
+            if (plan) await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, runId: args.runId, type: 'quantity_plan', at: new Date().toISOString(), data: { ...plan, campaignId: preview.campaignId } }); });
+            let runResponse: unknown;
+            let runError: string | undefined;
+            try { runResponse = await runtime.application.command('run', { runId: args.runId, wallets }); } catch (error) { runError = plainFeePolicyMessage(commandErrorMessage(error, 'LIVE_RUN_FAILED')); }
+            const report = describeLiveRunResult(runtime.store.snapshot(), args.runId);
+            process.stdout.write(`${json({ state: runError === undefined ? 'RunFinished' : 'RunStopped', ...(runError === undefined ? {} : { stoppedBecause: runError }), message: report.summary, report, run: runResponse ?? null })}\n`);
+          } finally { signer?.zeroize(); }
+        };
+        if (turnkeyCustodyEnabled()) await executeConfirmedRun();
+        else await withHiddenPassphrase(async (passphrase) => {
+          const signer = await LocalEncryptedSigner.fromFile(file, passphrase);
+          try {
+            const signerWallets = (await signer.listWallets()).map((wallet) => wallet.address);
+            assertWalletFileMatchesRun(preview, signerWallets);
+            await executeConfirmedRun(signer);
+          } finally { signer.zeroize(); }
+        });
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('execute', 'Compatibility alias for run', (args) => args
@@ -962,6 +986,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { acceptPersonalLiveLocalCustody: true, startCoordinator: false });
     try {
       const wallets = await publicWallets(walletFile(args.walletFile));
+      const selected = runtime.store.snapshot().runs.find((candidate) => candidate.id === args.runId);
+      if (selected?.mode === 'live') throw new Error('LIVE_RUN_GUIDED_COMMAND_REQUIRED');
       const response = await runtime.application.command('execute', { runId: args.runId, wallets });
       process.stdout.write(`${json(response)}\n`);
     } catch (error) { process.stdout.write(`${blocked(error)}\n`); }

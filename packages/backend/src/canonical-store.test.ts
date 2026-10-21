@@ -79,6 +79,22 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  it('projects an owner-approved Base enablement as accepted runtime evidence', async () => {
+    const value = await fixture(BASE, false, false, '2099-01-01T00:00:00.000Z', false, OPEN_FLEET_POLICY, () => new Date(BASE_NOW));
+    try {
+      value.store.enableBase({
+        id: 'base-enable-runtime-evidence', approvedAt: BASE_NOW, expiresAt: '2026-10-27T14:00:00.000Z',
+        evidence: { reviewedCode: true, forkRehearsal: true, finality: true, endpointAgreement: true, feeObservation: true, liveSimulation: true, custodyReadiness: true },
+        evidenceDigest: 'a'.repeat(64), confirmationDigest: 'b'.repeat(64), strategyVersion: 'seadrop-v1-public@1', feePolicyVersion: 'base-free-d057-v1',
+        primaryEndpointReference: 'BASE_RPC_URL', fallbackEndpointReference: 'BASE_RPC_FBACK', custodyMode: 'local-personal-live',
+      });
+      expect(value.store.snapshot().chainEvidence.at(-1)).toMatchObject({
+        chainId: BASE, status: 'accepted', executionEnabled: true, positiveLivePath: true,
+        acceptedAt: BASE_NOW, acceptedBy: 'owner-cli', approvalProof: 'a'.repeat(64),
+      });
+    } finally { await close(value); }
+  });
+
   it('rejects receipts whose execution graph has no canonical chain identity', async () => {
     const value = await fixture(ETHEREUM);
     try {
