@@ -14,7 +14,11 @@ if (!process.env.STORE_PATH || !process.env.BACKUP_DIR || source === destination
   throw new Error('STORE_PATH and BACKUP_DIR must be separate explicit paths');
 }
 if (retentionDays !== 30) throw new Error('Encrypted backup retention must be exactly 30 days');
-if (!process.env.BACKUP_ENCRYPTION_KEY) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
+async function backupKey() {
+  const value = process.env.BACKUP_ENCRYPTION_KEY ?? (process.env.BACKUP_ENCRYPTION_KEY_FILE ? (await readFile(resolve(process.env.BACKUP_ENCRYPTION_KEY_FILE), 'utf8')).trim() : '');
+  if (value.length < 32 || /[\r\n]/.test(value)) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
+  return value;
+}
 
 await mkdir(destinationRoot, { recursive: true });
 const sourceMetadata = await lstat(source);
@@ -35,7 +39,7 @@ try {
   await access(temporary);
   const plaintext = await readFile(temporary);
   const iv = randomBytes(12);
-  const key = createHash('sha256').update(process.env.BACKUP_ENCRYPTION_KEY, 'utf8').digest();
+  const key = createHash('sha256').update(await backupKey(), 'utf8').digest();
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const header = Buffer.from('MINTBOT1', 'ascii');
@@ -54,9 +58,9 @@ const checksumTemporary = `${checksumPath}.${process.pid}.tmp`;
 await writeFile(checksumTemporary, `${checksum}  ${basename(target)}\n`, { mode: 0o600, flag: 'wx' });
 await rename(checksumTemporary, checksumPath);
 if (statusPath) {
-  await mkdir(dirname(resolve(statusPath)), { recursive: true, mode: 0o700 });
+  await mkdir(dirname(resolve(statusPath)), { recursive: true, mode: 0o750 });
   const statusTemporary = `${resolve(statusPath)}.${process.pid}.tmp`;
-  await writeFile(statusTemporary, `${JSON.stringify({ status: 'ok', operation: 'backup', file: basename(target), sha256: checksum, encrypted: true, retentionDays, recordedAt: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
+  await writeFile(statusTemporary, `${JSON.stringify({ status: 'ok', operation: 'backup', file: basename(target), sha256: checksum, encrypted: true, retentionDays, recordedAt: new Date().toISOString() })}\n`, { mode: 0o640, flag: 'wx' });
   await rename(statusTemporary, resolve(statusPath));
 }
 console.log(JSON.stringify({ status: 'ok', file: basename(target), sha256: checksum, encrypted: true, retentionDays }));

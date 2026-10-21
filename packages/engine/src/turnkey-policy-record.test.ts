@@ -7,6 +7,7 @@ import {
   projectTurnkeyProviderKey,
   signTurnkeyPolicyRecord,
   turnkeyPolicyApproverKeyId,
+  turnkeyProviderPolicyExpressions,
   validateTurnkeyActualProviderState,
   validateTurnkeyCanonicalPolicyRecord,
   verifyTurnkeySignedPolicyRecord,
@@ -27,7 +28,12 @@ function identity() {
   return { organizationId: ORG, organizationName: 'MintBot', userId: USER, username: 'mintbot-runtime' };
 }
 
+function organization(rootUserIds = ['root-user']) {
+  return { configs: { quorum: { threshold: 1, userIds: rootUserIds } } };
+}
+
 function providerPolicy() {
+  const expressions = turnkeyProviderPolicyExpressions(enforcementPolicy());
   return {
     policyId: POLICY_ID,
     policyName: 'MintBot exact transaction',
@@ -35,8 +41,8 @@ function providerPolicy() {
     createdAt: timestamp('1800000000'),
     updatedAt: timestamp('1800000001'),
     notes: 'Reviewed production policy',
-    consensus: `approvers.any(user, user.id == '${USER}')`,
-    condition: "activity.type == 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2'",
+    consensus: expressions.consensus,
+    condition: expressions.condition,
   };
 }
 
@@ -92,6 +98,13 @@ function clone<T>(value: T): T {
 }
 
 describe('Turnkey signed canonical policy record', () => {
+  it('renders the reviewed provider CEL exactly', () => {
+    expect(turnkeyProviderPolicyExpressions(enforcementPolicy())).toEqual({
+      consensus: "approvers.any(user, user.id == 'user-1')",
+      condition: "activity.type == 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2' && private_key.id in ['key-1'] && eth.tx.chain_id == 1 && eth.tx.from in ['0x1111111111111111111111111111111111111111'] && eth.tx.to == '0x2222222222222222222222222222222222222222' && eth.tx.value == 0 && eth.tx.data == '0x161ac21f' && eth.tx.gas <= 200000 && eth.tx.max_fee_per_gas <= 1000000000 && eth.tx.max_priority_fee_per_gas <= 100000000",
+    });
+  });
+
   it('normalizes actual SDK response projections and verifies with a separately pinned Ed25519 key', () => {
     const { privateKey, publicKey } = generateKeyPairSync('ed25519');
     const canonical = record();
@@ -111,7 +124,7 @@ describe('Turnkey signed canonical policy record', () => {
 
     const tampered = clone(signed) as unknown as { record: { providerPolicy: { condition: string } } };
     tampered.record.providerPolicy.condition = 'true';
-    expect(() => verifyTurnkeySignedPolicyRecord(tampered, owner.publicKey, NOW)).toThrow(/DIGEST_MISMATCH|SIGNATURE_INVALID/);
+    expect(() => verifyTurnkeySignedPolicyRecord(tampered, owner.publicKey, NOW)).toThrow(/BINDING_INVALID|DIGEST_MISMATCH|SIGNATURE_INVALID/);
     expect(() => verifyTurnkeySignedPolicyRecord(signed, attacker.publicKey, NOW)).toThrow('TURNKEY_POLICY_SIGNATURE_INVALID');
     expect(() => verifyTurnkeySignedPolicyRecord({ ...signed, publicKey: attacker.publicKey.export({ type: 'spki', format: 'pem' }) }, owner.publicKey, NOW)).toThrow('TURNKEY_POLICY_SIGNATURE_INVALID');
 
@@ -138,6 +151,7 @@ describe('Turnkey signed canonical policy record', () => {
     const canonical = record();
     expect(() => validateTurnkeyActualProviderState(canonical, {
       whoami: identity(),
+      organization: organization(),
       policies: [mutate(providerPolicy())],
       privateKeys: [providerKey()],
     })).toThrow('TURNKEY_PROVIDER_POLICY_DRIFT');
@@ -145,15 +159,21 @@ describe('Turnkey signed canonical policy record', () => {
 
   it('detects authenticated identity and provider key drift while allowing unrelated organization keys', () => {
     const canonical = record();
-    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: { ...identity(), userId: 'other-user' }, policies: [providerPolicy()], privateKeys: [providerKey()] })).toThrow('TURNKEY_PROVIDER_IDENTITY_DRIFT');
-    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), policies: [providerPolicy()], privateKeys: [{ ...providerKey(), publicKey: `03${'cd'.repeat(32)}` }] })).toThrow('TURNKEY_PROVIDER_KEY_DRIFT');
-    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), policies: [providerPolicy()], privateKeys: [{ ...providerKey(), exported: true }] })).toThrow('TURNKEY_PROVIDER_KEY_DRIFT');
-    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), policies: [providerPolicy()], privateKeys: [providerKey(), providerKey('unrelated', '0x3333333333333333333333333333333333333333' as Address)] })).not.toThrow();
+    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: { ...identity(), userId: 'other-user' }, organization: organization(), policies: [providerPolicy()], privateKeys: [providerKey()] })).toThrow('TURNKEY_PROVIDER_IDENTITY_DRIFT');
+    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization(), policies: [providerPolicy()], privateKeys: [{ ...providerKey(), publicKey: `03${'cd'.repeat(32)}` }] })).toThrow('TURNKEY_PROVIDER_KEY_DRIFT');
+    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization(), policies: [providerPolicy()], privateKeys: [{ ...providerKey(), exported: true }] })).toThrow('TURNKEY_PROVIDER_KEY_DRIFT');
+    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization(), policies: [providerPolicy()], privateKeys: [providerKey(), providerKey('unrelated', '0x3333333333333333333333333333333333333333' as Address)] })).not.toThrow();
+  });
+
+  it('requires an isolated sole provider policy and a non-root runtime user', () => {
+    const canonical = record();
+    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization(), policies: [providerPolicy(), { ...providerPolicy(), policyId: 'broad-policy', condition: 'true' }], privateKeys: [providerKey()] })).toThrow('TURNKEY_PROVIDER_POLICY_INVENTORY_NOT_ISOLATED');
+    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization([USER]), policies: [providerPolicy()], privateKeys: [providerKey()] })).toThrow('TURNKEY_PROVIDER_RUNTIME_USER_MUST_BE_NON_ROOT');
   });
 
   it('rejects a duplicate provider key, wallet binding drift, and an unbound embedded approver key', () => {
     const canonical = record();
-    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), policies: [providerPolicy()], privateKeys: [providerKey(), providerKey()] })).toThrow('TURNKEY_PROVIDER_KEY_DUPLICATE');
+    expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization(), policies: [providerPolicy()], privateKeys: [providerKey(), providerKey()] })).toThrow('TURNKEY_PROVIDER_KEY_DUPLICATE');
     expect(() => validateTurnkeyCanonicalPolicyRecord({ ...canonical, wallets: [{ ...canonical.wallets[0]!, signWith: 'other-key' }] })).toThrow('TURNKEY_POLICY_RECORD_KEY_BINDING_INVALID');
     expect(() => validateTurnkeyCanonicalPolicyRecord({ ...canonical, wallets: [{ ...canonical.wallets[0]!, providerKey: { ...canonical.wallets[0]!.providerKey, exported: true } }] })).toThrow('TURNKEY_POLICY_RECORD_KEY_BINDING_INVALID');
     expect(() => validateTurnkeyCanonicalPolicyRecord({ ...canonical, approverPublicKey: 'attacker-controlled' })).toThrow('TURNKEY_POLICY_RECORD_INVALID');

@@ -13,11 +13,38 @@ export interface BackupJobPaths {
   killSwitchPath: string;
 }
 
+export interface BackupOffhostConfig {
+  required: boolean;
+  accountId?: string;
+  bucketName?: string;
+  objectPrefix?: string;
+  hostId?: string;
+  jurisdiction?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+}
+
 /** Runs one backup (scripts/backup-job.mjs). The key goes to the child's environment only; the result carries a code, never a path or the key. */
-export async function runBackupJob(paths: BackupJobPaths, key: string): Promise<{ ok: boolean; code?: string }> {
+export async function runBackupJob(paths: BackupJobPaths, key: string, offhost?: BackupOffhostConfig): Promise<{ ok: boolean; code?: string }> {
   try {
     const { stdout } = await exec(process.execPath, [paths.script], {
-      env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), STORE_PATH: paths.storePath, BACKUP_DIR: paths.backupDir, BACKUP_STATUS_PATH: paths.statusPath, KILL_SWITCH_PATH: paths.killSwitchPath, BACKUP_RETENTION_DAYS: '30', BACKUP_ENCRYPTION_KEY: key },
+      env: {
+        ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+        STORE_PATH: paths.storePath,
+        BACKUP_DIR: paths.backupDir,
+        BACKUP_STATUS_PATH: paths.statusPath,
+        KILL_SWITCH_PATH: paths.killSwitchPath,
+        BACKUP_RETENTION_DAYS: '30',
+        BACKUP_ENCRYPTION_KEY: key,
+        ...(offhost?.required ? { MINT_BOT_OFFHOST_BACKUP_REQUIRED: 'true' } : {}),
+        ...(offhost?.accountId ? { R2_ACCOUNT_ID: offhost.accountId } : {}),
+        ...(offhost?.bucketName ? { R2_BUCKET_NAME: offhost.bucketName } : {}),
+        ...(offhost?.objectPrefix ? { R2_OBJECT_PREFIX: offhost.objectPrefix } : {}),
+        ...(offhost?.hostId ? { MINT_BOT_HOST_ID: offhost.hostId } : {}),
+        ...(offhost?.jurisdiction ? { R2_JURISDICTION: offhost.jurisdiction } : {}),
+        ...(offhost?.accessKeyId ? { R2_ACCESS_KEY_ID: offhost.accessKeyId } : {}),
+        ...(offhost?.secretAccessKey ? { R2_SECRET_ACCESS_KEY: offhost.secretAccessKey } : {}),
+      },
       timeout: 10 * 60_000,
       maxBuffer: 1024 * 1024,
     });

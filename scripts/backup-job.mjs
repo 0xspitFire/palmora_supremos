@@ -5,9 +5,10 @@
 // BACKUP_ENCRYPTION_KEY, BACKUP_RETENTION_DAYS (must be 30). The key is passed on to the two existing scripts and is
 // never written anywhere. On any failure the status file says "failed" with a short code only (no path, no key).
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { r2ConfigFromEnv, uploadR2File } from './r2-upload.mjs';
 
 const run = promisify(execFile);
 const scripts = dirname(new URL(import.meta.url).pathname);
@@ -17,9 +18,9 @@ const backupDir = process.env.BACKUP_DIR ? resolve(process.env.BACKUP_DIR) : und
 
 async function writeStatus(body) {
   if (!statusPath) return;
-  await mkdir(dirname(statusPath), { recursive: true, mode: 0o700 });
+  await mkdir(dirname(statusPath), { recursive: true, mode: 0o750 });
   const temporary = `${statusPath}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify({ ...body, recordedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+  await writeFile(temporary, `${JSON.stringify({ ...body, recordedAt: new Date().toISOString() })}\n`, { mode: 0o640 });
   await rename(temporary, statusPath);
 }
 
@@ -34,6 +35,14 @@ async function script(name, extra = {}, base = process.env) {
     const { stdout } = await run(process.execPath, [resolve(scripts, name)], { env: { ...base, ...extra }, timeout: 4 * 60_000, maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout.trim().split('\n').at(-1));
   } catch { throw new Error(name === 'backup.mjs' ? 'BACKUP_SNAPSHOT_FAILED' : 'BACKUP_RESTORE_CHECK_FAILED'); }
+}
+
+async function backupKeyLength(environment = process.env) {
+  if (environment.BACKUP_ENCRYPTION_KEY !== undefined) return environment.BACKUP_ENCRYPTION_KEY.length;
+  if (!environment.BACKUP_ENCRYPTION_KEY_FILE) return 0;
+  const value = (await readFile(resolve(environment.BACKUP_ENCRYPTION_KEY_FILE), 'utf8')).trim();
+  if (/[\r\n]/.test(value)) return 0;
+  return value.length;
 }
 
 /** restore-check.mjs removes its temporary restored database but leaves the SQLite side files (-shm, -wal) beside it. Those can hold plaintext pages, so remove every leftover of this snapshot's restore check. */
@@ -71,8 +80,9 @@ export async function prune(directory, now = Date.now(), keepNewest = 1) {
 
 async function main() {
   if (Number(process.env.BACKUP_RETENTION_DAYS ?? RETENTION_DAYS) !== RETENTION_DAYS) throw new Error('BACKUP_RETENTION_MUST_BE_30_DAYS');
-  if (!process.env.BACKUP_ENCRYPTION_KEY) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
-  if (process.env.BACKUP_ENCRYPTION_KEY.length < 32) throw new Error('BACKUP_ENCRYPTION_KEY_TOO_SHORT');
+  const keyLength = await backupKeyLength();
+  if (keyLength === 0) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
+  if (keyLength < 32) throw new Error('BACKUP_ENCRYPTION_KEY_TOO_SHORT');
   if (!backupDir) throw new Error('BACKUP_DIR_REQUIRED');
   const made = await script('backup.mjs', {}, backupChildEnv(process.env));
   const snapshot = resolve(backupDir, made.file);
@@ -81,9 +91,16 @@ async function main() {
   try { restored = await script('restore-check.mjs', { RESTORE_SNAPSHOT: snapshot, RESTORE_VERIFICATION_ONLY: 'true' }); } catch (error) { await removeRestoreLeftovers(backupDir, made.file); await discard(); throw error; }
   await removeRestoreLeftovers(backupDir, made.file);
   if (restored.status !== 'ok') { await discard(); throw new Error('BACKUP_RESTORE_CHECK_FAILED'); }
+  const r2 = r2ConfigFromEnv(process.env);
+  let offHost;
+  if (r2) {
+    const snapshotUpload = await uploadR2File(r2, snapshot, made.file);
+    await uploadR2File(r2, `${snapshot}.sha256`, `${made.file}.sha256`);
+    offHost = { provider: 'cloudflare-r2', objectKey: snapshotUpload.objectKey, sha256: snapshotUpload.sha256, size: snapshotUpload.size };
+  }
   const removed = await prune(backupDir);
-  await writeStatus({ status: 'ok', operation: 'backup', file: made.file, sha256: made.sha256, encrypted: true, restoreVerified: true, retentionDays: RETENTION_DAYS, removedOld: removed.length });
-  console.log(JSON.stringify({ status: 'ok', file: made.file, restoreVerified: true, removedOld: removed.length }));
+  await writeStatus({ status: 'ok', operation: 'backup', file: made.file, sha256: made.sha256, encrypted: true, restoreVerified: true, retentionDays: RETENTION_DAYS, removedOld: removed.length, offHost: Boolean(offHost), remoteVerified: Boolean(offHost), ...(offHost ? { remote: offHost } : {}) });
+  console.log(JSON.stringify({ status: 'ok', file: made.file, restoreVerified: true, removedOld: removed.length, offHost: Boolean(offHost), remoteVerified: Boolean(offHost) }));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {

@@ -160,4 +160,40 @@ describe('phase 2 operations', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('requires a remotely retrieved off-host backup when the production profile says so', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mintbot-offhost-status-'));
+    try {
+      const statusPath = join(root, 'status.json');
+      await writeFile(statusPath, JSON.stringify({ status: 'ok', recordedAt: '2026-01-01T00:00:00.000Z', restoreVerified: true, offHost: false, remoteVerified: false }));
+      const store = new DurableStore();
+      await store.open();
+      await store.transaction((state) => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+      const jobs = new JsonJobStore(join(root, 'jobs.json'));
+      const orchestrator = new OrchestratorService(store, {} as BackendApplication, { start: async () => undefined, reconcile: async () => undefined }, { jobs, dryRunOnly: true, backupStatusPath: statusPath, requireOffHostBackup: true, now: () => new Date('2026-01-01T00:01:00.000Z'), logger: new RedactedLogger({ stdout: false }) });
+      await orchestrator.start();
+      expect(store.snapshot().runtime.blockingReasons).toContain('BACKUP_NOT_READY');
+      await orchestrator.stop();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('expires production off-host evidence after eight hours and recovers after a fresh verified backup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mintbot-offhost-freshness-'));
+    try {
+      const statusPath = join(root, 'status.json');
+      await writeFile(statusPath, JSON.stringify({ status: 'ok', recordedAt: '2025-12-31T15:00:00.000Z', offHost: true, remoteVerified: true }));
+      const store = new DurableStore();
+      await store.open();
+      await store.transaction((state) => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+      const jobs = new JsonJobStore(join(root, 'jobs.json'));
+      const orchestrator = new OrchestratorService(store, {} as BackendApplication, { start: async () => undefined, reconcile: async () => undefined }, { jobs, dryRunOnly: true, backupStatusPath: statusPath, requireOffHostBackup: true, now: () => new Date('2026-01-01T00:00:00.000Z'), logger: new RedactedLogger({ stdout: false }) });
+      await orchestrator.start();
+      expect(store.snapshot().runtime.blockingReasons).toContain('BACKUP_NOT_READY');
+      await writeFile(statusPath, JSON.stringify({ status: 'ok', recordedAt: '2025-12-31T23:59:00.000Z', offHost: true, remoteVerified: true }));
+      await orchestrator.tick();
+      expect(store.snapshot().runtime.startupState).toBe('Ready');
+      expect(store.snapshot().runtime.blockingReasons).not.toContain('BACKUP_NOT_READY');
+      await orchestrator.stop();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });

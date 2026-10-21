@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { parseTransaction, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { TurnkeySigner, isSecureTurnkeyFileAccess, validateTurnkeyWalletMap, type TurnkeySignerClient } from './turnkey-signer.js';
-import { createTurnkeyPolicyRecord, turnkeyPolicyRecordDigest } from './turnkey-policy-record.js';
+import { createTurnkeyPolicyRecord, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions } from './turnkey-policy-record.js';
 import { canonicalPolicyDigest, turnkeyPolicyRef, validateTurnkeyPolicyAst, type TurnkeyPolicyAst } from './turnkey-policy.js';
 
 const PRIVATE_KEY = `0x${'11'.repeat(32)}` as Hex;
@@ -26,11 +26,12 @@ function policy(overrides: Partial<TurnkeyPolicyAst['transaction']> = {}): Turnk
 }
 
 function identity() { return { organizationId: ORG, organizationName: 'MintBot', userId: USER, username: 'runtime' }; }
-function providerPolicy() { return { policyId: 'policy-test', policyName: 'exact', effect: 'EFFECT_ALLOW' as const, createdAt: timestamp('1'), updatedAt: timestamp('2'), notes: '', consensus: `user.id == '${USER}'`, condition: "activity.type == 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2'" }; }
+function organization(rootUserIds = ['root-user']) { return { configs: { quorum: { threshold: 1, userIds: rootUserIds } } }; }
+function providerPolicy(ast = policy()) { const expressions = turnkeyProviderPolicyExpressions(ast); return { policyId: 'policy-test', policyName: 'exact', effect: 'EFFECT_ALLOW' as const, createdAt: timestamp('1'), updatedAt: timestamp('2'), notes: '', consensus: expressions.consensus, condition: expressions.condition }; }
 function providerKey() { return { privateKeyId: KEY_ID, publicKey: `02${'ab'.repeat(32)}`, privateKeyName: 'mintbot-key', curve: 'CURVE_SECP256K1', addresses: [{ format: 'ADDRESS_FORMAT_ETHEREUM', address: WALLET }], privateKeyTags: [], createdAt: timestamp('1'), updatedAt: timestamp('2'), exported: false, imported: true }; }
 
 function record(ast = policy()) {
-  return createTurnkeyPolicyRecord({ environment: ENVIRONMENT, providerIdentity: identity(), providerPolicy: providerPolicy(), enforcementPolicy: ast, walletReferences: [{ index: 0, address: WALLET, signWith: KEY_ID }], providerKeys: [providerKey()], issuedAt: '2025-01-01T00:00:00.000Z', expiresAt: '2035-01-01T00:00:00.000Z' });
+  return createTurnkeyPolicyRecord({ environment: ENVIRONMENT, providerIdentity: identity(), providerPolicy: providerPolicy(ast), enforcementPolicy: ast, walletReferences: [{ index: 0, address: WALLET, signWith: KEY_ID }], providerKeys: [providerKey()], issuedAt: '2025-01-01T00:00:00.000Z', expiresAt: '2035-01-01T00:00:00.000Z' });
 }
 
 function intent(overrides: Record<string, unknown> = {}) {
@@ -46,6 +47,7 @@ function clientFor(overrides: Partial<TurnkeySignerClient> = {}): TurnkeySignerC
       return { signedTransaction, activity: { id: 'activity-1', organizationId: ORG, status: 'ACTIVITY_STATUS_COMPLETED', type: 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2', fingerprint: 'fingerprint-1', appProofs: [], intent: { signTransactionIntentV2: { signWith: input.signWith, unsignedTransaction: input.unsignedTransaction, type: input.type } }, result: { signTransactionResult: { signedTransaction } } } };
     },
     getWhoami: async () => identity(),
+    getOrganizationConfigs: async () => organization(),
     getPolicies: async () => ({ policies: [providerPolicy()] }),
     getPrivateKeys: async () => ({ privateKeys: [providerKey()] }),
     ...overrides,

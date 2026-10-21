@@ -26,6 +26,7 @@ export interface OrchestratorOptions {
   alerts?: AlertManager;
   backupStatusPath?: string;
   backupMaxAgeMs?: number;
+  requireOffHostBackup?: boolean;
 }
 export interface OrchestratorStatus {
   running: boolean;
@@ -131,11 +132,18 @@ export class OrchestratorService {
       await this.observeBackupStatus();
       this.switchOffExpiredRobinhood();
       this.recordReconciliationMetrics();
-      if (this.options.backupStatusPath && (this.lastBackupStatus !== 'ok' || this.lastBackupRecordedAt === undefined || this.now().getTime() - this.lastBackupRecordedAt > (this.options.backupMaxAgeMs ?? 30 * 86_400_000))) {
+      const backupReady = !this.options.backupStatusPath || (this.lastBackupStatus === 'ok' && this.lastBackupRecordedAt !== undefined && this.now().getTime() - this.lastBackupRecordedAt <= (this.options.backupMaxAgeMs ?? (this.options.requireOffHostBackup ? 8 * 60 * 60_000 : 30 * 86_400_000)));
+      if (!backupReady) {
         await this.store.transaction((state) => {
           state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'BACKUP_NOT_READY'])] };
         });
         return;
+      }
+      if (this.options.backupStatusPath && this.store.snapshot().runtime.blockingReasons.includes('BACKUP_NOT_READY')) {
+        await this.store.transaction((state) => {
+          const blockingReasons = state.runtime.blockingReasons.filter((reason) => reason !== 'BACKUP_NOT_READY');
+          state.runtime = { ...state.runtime, startupState: blockingReasons.length === 0 ? 'Ready' : state.runtime.startupState, blockingReasons };
+        });
       }
       const killed = this.store.snapshot().killed || (this.options.killSwitchProbe ? await this.options.killSwitchProbe() : false);
       const capacity = Math.max(0, this.maxConcurrentJobs - this.cachedJobs().filter((job) => job.state === 'running').length);
@@ -168,13 +176,14 @@ export class OrchestratorService {
   private async observeBackupStatus(): Promise<void> {
     if (!this.options.backupStatusPath) return;
     try {
-      const status = JSON.parse(await readFile(this.options.backupStatusPath, 'utf8')) as { status?: string; recordedAt?: string };
+      const status = JSON.parse(await readFile(this.options.backupStatusPath, 'utf8')) as { status?: string; recordedAt?: string; offHost?: boolean; remoteVerified?: boolean };
       const recordedAt = status.recordedAt ? Date.parse(status.recordedAt) : Number.NaN;
-      const fingerprint = `${status.status ?? 'unknown'}:${status.recordedAt ?? ''}`;
+      const fingerprint = `${status.status ?? 'unknown'}:${status.recordedAt ?? ''}:${status.offHost === true}:${status.remoteVerified === true}`;
       if (fingerprint === this.lastBackupObservation) return;
       this.lastBackupObservation = fingerprint;
       const recordedAtIsValid = Number.isFinite(recordedAt) && recordedAt <= this.now().getTime();
-      this.lastBackupStatus = status.status === 'ok' && recordedAtIsValid ? 'ok' : 'failed';
+      const offHostReady = !this.options.requireOffHostBackup || (status.offHost === true && status.remoteVerified === true);
+      this.lastBackupStatus = status.status === 'ok' && recordedAtIsValid && offHostReady ? 'ok' : 'failed';
       this.lastBackupRecordedAt = this.lastBackupStatus === 'ok' ? recordedAt : undefined;
       this.metrics.recordBackup(this.lastBackupStatus, this.lastBackupRecordedAt === undefined ? undefined : this.lastBackupRecordedAt / 1_000);
     } catch {

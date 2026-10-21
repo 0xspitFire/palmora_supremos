@@ -10,7 +10,11 @@ const snapshot = resolve(process.env.RESTORE_SNAPSHOT ?? '');
 const checksumFile = `${snapshot}.sha256`;
 const verificationOnly = process.env.RESTORE_VERIFICATION_ONLY === 'true';
 if (!process.env.RESTORE_SNAPSHOT || (!verificationOnly && !process.env.KILL_SWITCH_PATH)) throw new Error('RESTORE_SNAPSHOT and KILL_SWITCH_PATH are required');
-if (!process.env.BACKUP_ENCRYPTION_KEY) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
+async function backupKey() {
+  const value = process.env.BACKUP_ENCRYPTION_KEY ?? (process.env.BACKUP_ENCRYPTION_KEY_FILE ? (await readFile(resolve(process.env.BACKUP_ENCRYPTION_KEY_FILE), 'utf8')).trim() : '');
+  if (value.length < 32 || /[\r\n]/.test(value)) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
+  return value;
+}
 await access(snapshot, constants.R_OK);
 if (!verificationOnly) await access(process.env.KILL_SWITCH_PATH, constants.F_OK);
 const actual = createHash('sha256').update(await readFile(snapshot)).digest('hex');
@@ -21,7 +25,7 @@ if (encrypted.subarray(0, 8).toString('ascii') !== 'MINTBOT1') throw new Error('
 const iv = encrypted.subarray(8, 20);
 const authTag = encrypted.subarray(20, 36);
 const ciphertext = encrypted.subarray(36);
-const key = createHash('sha256').update(process.env.BACKUP_ENCRYPTION_KEY, 'utf8').digest();
+const key = createHash('sha256').update(await backupKey(), 'utf8').digest();
 const decipher = createDecipheriv('aes-256-gcm', key, iv);
 decipher.setAuthTag(authTag);
 const restoredPath = resolve(dirname(snapshot), `.${basename(snapshot)}.${process.pid}.restore.tmp`);

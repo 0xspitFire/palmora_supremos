@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { LocalEncryptedSigner, TurnkeySigner, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, isSecureTurnkeyFileAccess, readTurnkeySecretConfig, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
+import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, isSecureTurnkeyFileAccess, readTurnkeySecretConfig, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
 import type { WalletImportRecord } from '@mint-bot/engine';
 import type { Signer, SignerFactory, TurnkeyWalletReference } from '@mint-bot/engine';
 import { configuredSecretRoot, configuredWalletPath, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
@@ -35,6 +35,7 @@ import { createPublicClient, defineChain, http as httpTransport } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { normalizeWalletCommandArgs } from './wallet-command-routing.js';
 import { approvalConfirmation, approverRotationConfirmation, assertApprovalKeyOutsideRuntimeRoot, writeTurnkeyApprovalBundle } from './turnkey-approval.js';
+import { robinhoodTurnkeyPolicy } from './turnkey-policy-template.js';
 
 /** Read-only Ethereum port for CLI checks; the RPC value stays in memory and is never printed. */
 async function ethereumPort(): Promise<EngineIntelligencePort> {
@@ -354,6 +355,30 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .command('wallet-import-turnkey', 'Legacy command retained as a fail-closed migration guard', {}, async () => {
     try { throw new Error('TURNKEY_IMPORT_REQUIRES_SIGNED_POLICY_WORKFLOW'); } catch (error) { printError(error); }
   })
+  .command('turnkey-robinhood-policy-prepare', 'Create an owner-only exact free-mint enforcement policy for chain 4663', (args) => args
+    .option('policy-id', { type: 'string', default: 'pending-provider-policy', description: 'Exact provider policy ID returned by Turnkey; omit only to print the provider-policy template before creation' })
+    .option('nft-contract', { type: 'string', demandOption: true })
+    .option('fee-recipient', { type: 'string', demandOption: true })
+    .option('quantity', { type: 'number', default: 1 })
+    .option('gas-limit-max', { type: 'string', default: '500000' })
+    .option('max-fee-gwei', { type: 'string', default: '0.2' })
+    .option('priority-fee-gwei', { type: 'string', default: '0.1' })
+    .option('wallet-artifact', { type: 'string', description: 'Existing wallet map containing only public wallet/key references' })
+    .option('output', { type: 'string', description: 'Policy AST output under the secret root' }), async (args) => {
+      try {
+        if (!/^0x[0-9a-fA-F]{40}$/.test(args.nftContract) || !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient)) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
+        const secretRoot = configuredSecretRoot(runtimeRoot);
+        const config = await readTurnkeySecretConfig(secretRoot);
+        const artifactPath = turnkeyMapPath(args.walletArtifact ?? config.walletMapPath);
+        const artifact = JSON.parse(await readOwnerOnlyText(artifactPath, 'TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED')) as unknown;
+        const wallets = walletReferencesFromArtifact(artifact);
+        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: args.nftContract as Address, feeRecipient: args.feeRecipient as Address, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei });
+        const providerPolicy = turnkeyProviderPolicyExpressions(policy);
+        const output = turnkeySecretPath(args.output, 'turnkey-robinhood-policy-ast.json');
+        await writeTurnkeyJson(output, policy);
+        process.stdout.write(`${JSON.stringify({ ok: true, output, chainId: 4663, walletCount: wallets.length, policyId: args.policyId, policyDigest: canonicalPolicyDigest(policy), providerPolicy: { effect: 'EFFECT_ALLOW', ...providerPolicy, time: null } })}\n`);
+      } catch (error) { printError(error); }
+    })
   .command('turnkey-policy-propose', 'Snapshot actual Turnkey fields into an unsigned canonical policy record', (args) => args
     .option('policy-ast', { type: 'string', description: 'Owner-only canonical enforcement policy AST' })
     .option('wallet-artifact', { type: 'string', description: 'Owner-only legacy or v2 wallet map used only for public key references' })
@@ -371,8 +396,9 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           : policyFromLegacyWalletArtifact(artifact, config, wallets);
         if (policy.scope.organizationId !== config.organizationId || policy.scope.userId !== config.userId || policy.scope.environment !== config.environment) throw new Error('TURNKEY_POLICY_PROVIDER_BINDING_INVALID');
         const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
-        const [whoami, policies, keys] = await Promise.all([
+        const [whoami, organization, policies, keys] = await Promise.all([
           client.getWhoami({ organizationId: config.organizationId }),
+          client.getOrganizationConfigs({ organizationId: config.organizationId }),
           client.getPolicies({ organizationId: config.organizationId }),
           client.getPrivateKeys({ organizationId: config.organizationId }),
         ]);
@@ -390,6 +416,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           issuedAt: issuedAt.toISOString(),
           expiresAt: expiresAt.toISOString(),
         });
+        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys });
         const output = turnkeySecretPath(args.output, 'turnkey-policy-proposal.json');
         await writeTurnkeyJson(output, record);
         process.stdout.write(`${JSON.stringify({ ok: true, output, recordDigest: turnkeyPolicyRecordDigest(record), policyId: record.providerPolicy.policyId, walletCount: record.wallets.length, issuedAt: record.issuedAt, expiresAt: record.expiresAt })}\n`);
@@ -444,12 +471,13 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const record = verifyTurnkeySignedPolicyRecord(signed, publicKey);
         if (args.confirm !== `REGENERATE-TURNKEY-MAP ${turnkeyPolicyRecordDigest(record).slice(-8)} ${record.wallets.length}-WALLETS`) throw new Error('TURNKEY_MAP_CONFIRMATION_INVALID');
         const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
-        const [whoami, policies, keys] = await Promise.all([
+        const [whoami, organization, policies, keys] = await Promise.all([
           client.getWhoami({ organizationId: config.organizationId }),
+          client.getOrganizationConfigs({ organizationId: config.organizationId }),
           client.getPolicies({ organizationId: config.organizationId }),
           client.getPrivateKeys({ organizationId: config.organizationId }),
         ]);
-        validateTurnkeyActualProviderState(record, { whoami, policies: policies.policies, privateKeys: keys.privateKeys });
+        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys });
         await writeTurnkeyWalletMap(config.walletMapPath, { version: 2, policyRecordDigest: turnkeyPolicyRecordDigest(record), wallets: record.wallets.map(({ index, address, signWith }) => ({ index, address, signWith })) });
         process.stdout.write(`${JSON.stringify({ ok: true, walletCount: record.wallets.length, policyRecordDigest: turnkeyPolicyRecordDigest(record), liveProviderStateMatched: true })}\n`);
       } catch (error) { printError(error); }
