@@ -4,6 +4,7 @@ export const BASE_GAS_PRICE_ORACLE = '0x420000000000000000000000000000000000000F
 export const BASE_L1_BLOCK = '0x4200000000000000000000000000000000000015';
 export const BASE_FEE_SAFETY_BPS = 12_000n;
 const BPS = 10_000n;
+const MAX_UINT256 = (1n << 256n) - 1n;
 
 const GAS_PRICE_ORACLE_ABI = parseAbi([
   'function getL1FeeUpperBound(uint256 unsignedTxSize) view returns (uint256)',
@@ -51,9 +52,10 @@ export async function quoteBaseFeeBound(client: PublicClient, tx: TransactionSer
 }
 
 export interface BaseReceiptFeeFields {
-  readonly l1Fee?: bigint;
-  readonly l1DataFee?: bigint;
-  readonly operatorFee?: bigint;
+  /** Unknown-chain RPCs can expose EIP-2718 quantities as raw hex strings. */
+  readonly l1Fee?: bigint | string;
+  readonly l1DataFee?: bigint | string;
+  readonly operatorFee?: bigint | string;
   readonly operatorFeeScalar?: bigint | number;
   readonly operatorFeeConstant?: bigint;
 }
@@ -75,10 +77,20 @@ export async function readBaseOperatorFee(client: PublicClient, gasUsed: bigint,
 }
 
 export function baseReceiptFees(fields: BaseReceiptFeeFields, _gasUsed: bigint, oracleOperatorFee?: bigint): { l1DataFeeWei: bigint; operatorFeeWei: bigint } {
-  const l1DataFeeWei = fields.l1DataFee ?? fields.l1Fee;
-  if (l1DataFeeWei === undefined || l1DataFeeWei < 0n) throw new Error('BASE_RECEIPT_L1_FEE_REQUIRED');
-  const operatorFeeWei = fields.operatorFee ?? oracleOperatorFee;
-  if (operatorFeeWei === undefined) throw new Error('BASE_RECEIPT_OPERATOR_FEE_REQUIRED');
-  if (operatorFeeWei < 0n) throw new Error('BASE_RECEIPT_OPERATOR_FEE_MALFORMED');
+  const normalize = (value: bigint | string | undefined, required: string, malformed: string): bigint => {
+    if (value === undefined) throw new Error(required);
+    if (typeof value === 'bigint') {
+      if (value < 0n || value > MAX_UINT256) throw new Error(malformed);
+      return value;
+    }
+    if (value.length > 66 || !/^0x(?:0|[1-9a-f][0-9a-f]{0,63})$/i.test(value)) throw new Error(malformed);
+    return BigInt(value);
+  };
+  if (fields.l1DataFee === undefined && fields.l1Fee === undefined) throw new Error('BASE_RECEIPT_L1_FEE_REQUIRED');
+  const normalizedL1DataFee = fields.l1DataFee === undefined ? undefined : normalize(fields.l1DataFee, 'BASE_RECEIPT_L1_FEE_REQUIRED', 'BASE_RECEIPT_L1_FEE_MALFORMED');
+  const normalizedL1Fee = fields.l1Fee === undefined ? undefined : normalize(fields.l1Fee, 'BASE_RECEIPT_L1_FEE_REQUIRED', 'BASE_RECEIPT_L1_FEE_MALFORMED');
+  if (normalizedL1DataFee !== undefined && normalizedL1Fee !== undefined && normalizedL1DataFee !== normalizedL1Fee) throw new Error('BASE_RECEIPT_L1_FEE_MALFORMED');
+  const l1DataFeeWei = normalizedL1DataFee ?? normalizedL1Fee!;
+  const operatorFeeWei = normalize(fields.operatorFee ?? oracleOperatorFee, 'BASE_RECEIPT_OPERATOR_FEE_REQUIRED', 'BASE_RECEIPT_OPERATOR_FEE_MALFORMED');
   return { l1DataFeeWei, operatorFeeWei };
 }
