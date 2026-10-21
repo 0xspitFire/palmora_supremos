@@ -60,16 +60,16 @@ describe('scheduled backup job', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('leaves no snapshot and writes failed when the restore check fails, and never passes the status path to the snapshot step', async () => {
+  it('verifies scheduled snapshots offline without requiring the live kill switch, and never passes the status path to the snapshot step', async () => {
     const { backupChildEnv } = (await import(script)) as { backupChildEnv: (env: Record<string, string>) => Record<string, string> };
     expect(backupChildEnv({ A: '1', BACKUP_STATUS_PATH: '/x', MINT_BOT_BACKUP_STATUS_PATH: '/y' })).toEqual({ A: '1' });
     const { directory, paths } = await workspace();
     try {
-      // The restore check needs the kill-switch file to exist; without it the check fails after the snapshot was made.
+      // Scheduled verification restores only to an isolated temporary file and never starts the application.
       const result = await runBackupJob({ ...paths, killSwitchPath: join(directory, 'no-such-kill-file') }, KEY);
-      expect(result).toEqual({ ok: false, code: 'BACKUP_RESTORE_CHECK_FAILED' });
-      expect((await readdir(paths.backupDir)).filter((name) => name.includes('.snapshot.enc'))).toEqual([]);
-      expect(JSON.parse(await readFile(paths.statusPath, 'utf8'))).toMatchObject({ status: 'failed', code: 'BACKUP_RESTORE_CHECK_FAILED' });
+      expect(result).toEqual({ ok: true });
+      expect((await readdir(paths.backupDir)).some((name) => name.endsWith('.snapshot.enc'))).toBe(true);
+      expect(JSON.parse(await readFile(paths.statusPath, 'utf8'))).toMatchObject({ status: 'ok', restoreVerified: true });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

@@ -78,7 +78,7 @@ async function main() {
   const snapshot = resolve(backupDir, made.file);
   const discard = async () => { await rm(snapshot, { force: true }); await rm(`${snapshot}.sha256`, { force: true }); };
   let restored;
-  try { restored = await script('restore-check.mjs', { RESTORE_SNAPSHOT: snapshot }); } catch (error) { await removeRestoreLeftovers(backupDir, made.file); await discard(); throw error; }
+  try { restored = await script('restore-check.mjs', { RESTORE_SNAPSHOT: snapshot, RESTORE_VERIFICATION_ONLY: 'true' }); } catch (error) { await removeRestoreLeftovers(backupDir, made.file); await discard(); throw error; }
   await removeRestoreLeftovers(backupDir, made.file);
   if (restored.status !== 'ok') { await discard(); throw new Error('BACKUP_RESTORE_CHECK_FAILED'); }
   const removed = await prune(backupDir);

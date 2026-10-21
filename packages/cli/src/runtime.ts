@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
 import { openDatabase } from '@mint-bot/database';
-import { readTurnkeySecretConfig, readTurnkeyWalletMap, turnkeyPolicyRef, TurnkeySigner, type WalletInfo } from '@mint-bot/engine';
+import { readTurnkeySecretConfig, TurnkeySigner, type WalletInfo } from '@mint-bot/engine';
 import type { Address } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 
@@ -63,14 +63,17 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
   const turnkeyConfig = useTurnkey ? await readTurnkeySecretConfig(secretRoot) : undefined;
-  const turnkeyMap = turnkeyConfig ? await readTurnkeyWalletMap(turnkeyConfig.walletMapPath) : undefined;
-  if (turnkeyConfig && !turnkeyMap?.policyId) throw new Error('TURNKEY_POLICY_REQUIRED');
-  const turnkeyOptions: Partial<Omit<MintEngineAdapterOptions, 'getState'>> = turnkeyConfig && turnkeyMap ? {
+  let turnkeyPolicyReference: string | undefined;
+  if (turnkeyConfig) {
+    const signer = await TurnkeySigner.fromSecrets('mainnet', secretRoot);
+    try { turnkeyPolicyReference = signer.policyReference(); } finally { signer.zeroize(); }
+  }
+  const turnkeyOptions: Partial<Omit<MintEngineAdapterOptions, 'getState'>> = turnkeyConfig && turnkeyPolicyReference ? {
     walletFile: resolve(projectRoot, 'Rets', 'wallets', 'turnkey-wallet-map.json'),
     walletList: () => configuredWallets(projectRoot, resolveWalletPath(projectRoot)),
     signerFactory: () => TurnkeySigner.fromSecrets('mainnet', secretRoot),
     passphraseProvider: async () => '',
-     policyRef: turnkeyPolicyRef(turnkeyMap.policyId, turnkeyMap.policyDigest),
+    policyRef: turnkeyPolicyReference,
   } : {};
   const configuredAdapterOptions = turnkeyConfig
     ? { ...adapterOptions, ...turnkeyOptions }

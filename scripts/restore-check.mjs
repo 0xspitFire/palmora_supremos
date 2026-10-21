@@ -8,10 +8,11 @@ const Database = require('better-sqlite3');
 
 const snapshot = resolve(process.env.RESTORE_SNAPSHOT ?? '');
 const checksumFile = `${snapshot}.sha256`;
-if (!process.env.RESTORE_SNAPSHOT || !process.env.KILL_SWITCH_PATH) throw new Error('RESTORE_SNAPSHOT and KILL_SWITCH_PATH are required');
+const verificationOnly = process.env.RESTORE_VERIFICATION_ONLY === 'true';
+if (!process.env.RESTORE_SNAPSHOT || (!verificationOnly && !process.env.KILL_SWITCH_PATH)) throw new Error('RESTORE_SNAPSHOT and KILL_SWITCH_PATH are required');
 if (!process.env.BACKUP_ENCRYPTION_KEY) throw new Error('BACKUP_ENCRYPTION_KEY_REQUIRED');
 await access(snapshot, constants.R_OK);
-await access(process.env.KILL_SWITCH_PATH, constants.F_OK);
+if (!verificationOnly) await access(process.env.KILL_SWITCH_PATH, constants.F_OK);
 const actual = createHash('sha256').update(await readFile(snapshot)).digest('hex');
 const expected = (await readFile(checksumFile, 'utf8')).trim().split(/\s+/)[0];
 if (actual !== expected) throw new Error('Backup checksum mismatch');
@@ -39,4 +40,4 @@ try {
 } finally {
   await rm(restoredPath, { force: true });
 }
-console.log(JSON.stringify({ status: 'ok', checksum: actual, encrypted: true, killSwitch: 'engaged' }));
+console.log(JSON.stringify({ status: 'ok', checksum: actual, encrypted: true, killSwitch: verificationOnly ? 'not-required-for-offline-verification' : 'engaged' }));

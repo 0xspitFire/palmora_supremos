@@ -27,10 +27,15 @@ export interface TurnkeyImportClient {
   }): Promise<{
     privateKeyId: string;
     addresses: Array<{ format?: string; address?: string }>;
-    organizationId?: string;
-    userId?: string;
-    environment?: TurnkeyEnvironment;
+    activity: {
+      organizationId: string;
+      status: string;
+      type: string;
+      intent: { importPrivateKeyIntent?: { userId?: string } };
+      result: { importPrivateKeyResult?: { privateKeyId?: string; addresses?: Array<{ format?: string; address?: string }> } };
+    };
   }>;
+  getPrivateKeys(input: { organizationId: string }): Promise<{ privateKeys: unknown[] }>;
 }
 
 export interface TurnkeyPrivateKeyImport {
@@ -43,14 +48,26 @@ export function validateImportedTurnkeyKey(
   result: {
     privateKeyId: string;
     addresses: Array<{ format?: string; address?: string }>;
-    organizationId?: string;
-    userId?: string;
-    environment?: TurnkeyEnvironment;
+    activity: {
+      organizationId: string;
+      status: string;
+      type: string;
+      intent: { importPrivateKeyIntent?: { userId?: string } };
+      result: { importPrivateKeyResult?: { privateKeyId?: string; addresses?: Array<{ format?: string; address?: string }> } };
+    };
   },
   binding: TurnkeyImportBinding,
   expectedAddress: Address,
 ): TurnkeyWalletReference {
-  if (result.organizationId !== binding.organizationId || result.userId !== binding.userId || result.environment !== binding.environment) throw new Error('TURNKEY_IMPORTED_KEY_BINDING_INVALID');
+  const activityResult = result.activity.result.importPrivateKeyResult;
+  if (
+    result.activity.organizationId !== binding.organizationId
+    || result.activity.status !== 'ACTIVITY_STATUS_COMPLETED'
+    || result.activity.type !== 'ACTIVITY_TYPE_IMPORT_PRIVATE_KEY'
+    || result.activity.intent.importPrivateKeyIntent?.userId !== binding.userId
+    || activityResult?.privateKeyId !== result.privateKeyId
+    || JSON.stringify(activityResult.addresses ?? []) !== JSON.stringify(result.addresses)
+  ) throw new Error('TURNKEY_IMPORTED_KEY_BINDING_INVALID');
   const address = result.addresses.find((candidate) => candidate.format === 'ADDRESS_FORMAT_ETHEREUM')?.address
     ?? result.addresses.find((candidate) => candidate.address)?.address;
   if (!address || address.toLowerCase() !== expectedAddress.toLowerCase()) throw new Error('TURNKEY_IMPORTED_ADDRESS_MISMATCH');
@@ -88,5 +105,13 @@ export async function importPrivateKeyToTurnkey(
     addressFormats: ['ADDRESS_FORMAT_ETHEREUM'],
     generateAppProofs: true,
   });
-  return validateImportedTurnkeyKey(result, binding, input.address);
+  const reference = validateImportedTurnkeyKey(result, binding, input.address);
+  const inventory = await client.getPrivateKeys({ organizationId });
+  const persisted = inventory.privateKeys.find((key): key is { privateKeyId: string; curve: string; addresses: Array<{ format?: string; address?: string }>; exported: boolean } => Boolean(key) && typeof key === 'object' && (key as { privateKeyId?: unknown }).privateKeyId === reference.signWith && Array.isArray((key as { addresses?: unknown }).addresses));
+  const persistedAddress = persisted?.addresses.find((candidate) => candidate.format === 'ADDRESS_FORMAT_ETHEREUM')?.address
+    ?? persisted?.addresses.find((candidate) => candidate.address)?.address;
+  if (!persisted || persisted.curve !== 'CURVE_SECP256K1' || persisted.exported !== false || persistedAddress?.toLowerCase() !== input.address.toLowerCase()) {
+    throw new Error('TURNKEY_IMPORTED_KEY_INVENTORY_INVALID');
+  }
+  return reference;
 }

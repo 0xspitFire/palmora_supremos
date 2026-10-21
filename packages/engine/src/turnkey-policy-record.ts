@@ -1,0 +1,339 @@
+import {
+  createHash,
+  createPublicKey,
+  KeyObject,
+  sign as signBytes,
+  verify as verifyBytes,
+} from 'node:crypto';
+import type { Address } from 'viem';
+import { validateTurnkeyPolicyAst, type TurnkeyEnvironment, type TurnkeyPolicyAst } from './turnkey-policy.js';
+
+const RECORD_CONTEXT = 'mintbot.turnkey-policy-record/v1' as const;
+const SIGNATURE_CONTEXT = 'mintbot.turnkey-policy-record/signature/v1\0';
+
+export interface TurnkeyProviderTimestamp {
+  readonly seconds: string;
+  readonly nanos: string;
+}
+
+export interface TurnkeyProviderIdentityProjection {
+  readonly organizationId: string;
+  readonly organizationName: string;
+  readonly userId: string;
+  readonly username: string;
+}
+
+export interface TurnkeyProviderPolicyProjection {
+  readonly policyId: string;
+  readonly policyName: string;
+  readonly effect: 'EFFECT_ALLOW' | 'EFFECT_DENY';
+  readonly createdAt: TurnkeyProviderTimestamp;
+  readonly updatedAt: TurnkeyProviderTimestamp;
+  readonly notes: string;
+  readonly consensus: string;
+  readonly condition: string;
+  readonly time: string | null;
+}
+
+export interface TurnkeyProviderAddressProjection {
+  readonly format: string | null;
+  readonly address: string | null;
+}
+
+export interface TurnkeyProviderKeyProjection {
+  readonly privateKeyId: string;
+  readonly publicKey: string;
+  readonly privateKeyName: string;
+  readonly curve: string;
+  readonly addresses: readonly TurnkeyProviderAddressProjection[];
+  readonly privateKeyTags: readonly string[];
+  readonly createdAt: TurnkeyProviderTimestamp;
+  readonly updatedAt: TurnkeyProviderTimestamp | null;
+  readonly exported: boolean;
+  readonly imported: boolean;
+}
+
+export interface TurnkeyPolicyRecordWallet {
+  readonly index: number;
+  readonly address: Address;
+  readonly signWith: string;
+  readonly providerKey: TurnkeyProviderKeyProjection;
+}
+
+export interface TurnkeyCanonicalPolicyRecord {
+  readonly version: 1;
+  readonly context: typeof RECORD_CONTEXT;
+  readonly environment: TurnkeyEnvironment;
+  readonly providerIdentity: TurnkeyProviderIdentityProjection;
+  readonly providerPolicy: TurnkeyProviderPolicyProjection;
+  readonly enforcementPolicy: TurnkeyPolicyAst;
+  readonly wallets: readonly TurnkeyPolicyRecordWallet[];
+  readonly issuedAt: string;
+  readonly expiresAt: string;
+}
+
+export interface TurnkeySignedPolicyRecord {
+  readonly version: 1;
+  readonly algorithm: 'Ed25519';
+  readonly keyId: string;
+  readonly recordDigest: `sha256:${string}`;
+  readonly record: TurnkeyCanonicalPolicyRecord;
+  readonly signature: string;
+}
+
+export interface TurnkeyActualProviderState {
+  readonly whoami: unknown;
+  readonly policies: readonly unknown[];
+  readonly privateKeys: readonly unknown[];
+}
+
+type VerificationKey = KeyObject | string | Buffer;
+
+export function projectTurnkeyProviderIdentity(value: unknown): TurnkeyProviderIdentityProjection {
+  const item = exactRecord(value, ['organizationId', 'organizationName', 'userId', 'username'], 'TURNKEY_PROVIDER_IDENTITY_INVALID');
+  return {
+    organizationId: requiredString(item.organizationId, 'TURNKEY_PROVIDER_IDENTITY_INVALID'),
+    organizationName: stringValue(item.organizationName, 'TURNKEY_PROVIDER_IDENTITY_INVALID'),
+    userId: requiredString(item.userId, 'TURNKEY_PROVIDER_IDENTITY_INVALID'),
+    username: stringValue(item.username, 'TURNKEY_PROVIDER_IDENTITY_INVALID'),
+  };
+}
+
+export function projectTurnkeyProviderPolicy(value: unknown): TurnkeyProviderPolicyProjection {
+  const item = optionalExactRecord(value, ['policyId', 'policyName', 'effect', 'createdAt', 'updatedAt', 'notes', 'consensus', 'condition'], ['time'], 'TURNKEY_PROVIDER_POLICY_INVALID');
+  if (item.effect !== 'EFFECT_ALLOW' && item.effect !== 'EFFECT_DENY') throw new Error('TURNKEY_PROVIDER_POLICY_INVALID');
+  return {
+    policyId: requiredString(item.policyId, 'TURNKEY_PROVIDER_POLICY_INVALID'),
+    policyName: stringValue(item.policyName, 'TURNKEY_PROVIDER_POLICY_INVALID'),
+    effect: item.effect,
+    createdAt: providerTimestamp(item.createdAt),
+    updatedAt: providerTimestamp(item.updatedAt),
+    notes: stringValue(item.notes, 'TURNKEY_PROVIDER_POLICY_INVALID'),
+    consensus: stringValue(item.consensus, 'TURNKEY_PROVIDER_POLICY_INVALID'),
+    condition: stringValue(item.condition, 'TURNKEY_PROVIDER_POLICY_INVALID'),
+    time: item.time === undefined ? null : nullableString(item.time, 'TURNKEY_PROVIDER_POLICY_INVALID'),
+  };
+}
+
+export function projectTurnkeyProviderKey(value: unknown): TurnkeyProviderKeyProjection {
+  const item = exactRecord(value, ['privateKeyId', 'publicKey', 'privateKeyName', 'curve', 'addresses', 'privateKeyTags', 'createdAt', 'updatedAt', 'exported', 'imported'], 'TURNKEY_PROVIDER_KEY_INVALID');
+  if (!Array.isArray(item.addresses) || !Array.isArray(item.privateKeyTags) || typeof item.exported !== 'boolean' || typeof item.imported !== 'boolean') throw new Error('TURNKEY_PROVIDER_KEY_INVALID');
+  const addresses = item.addresses.map((address) => {
+    const candidate = optionalExactRecord(address, [], ['format', 'address'], 'TURNKEY_PROVIDER_KEY_INVALID');
+    return {
+      format: candidate.format === undefined ? null : nullableString(candidate.format, 'TURNKEY_PROVIDER_KEY_INVALID'),
+      address: candidate.address === undefined ? null : nullableString(candidate.address, 'TURNKEY_PROVIDER_KEY_INVALID')?.toLowerCase() ?? null,
+    };
+  }).sort((left, right) => stableStringify(left).localeCompare(stableStringify(right)));
+  const tags = item.privateKeyTags.map((tag) => requiredString(tag, 'TURNKEY_PROVIDER_KEY_INVALID')).sort();
+  if (new Set(tags).size !== tags.length) throw new Error('TURNKEY_PROVIDER_KEY_INVALID');
+  const publicKey = requiredString(item.publicKey, 'TURNKEY_PROVIDER_KEY_INVALID').replace(/^0x/i, '').toLowerCase();
+  if (!/^(?:[0-9a-f]{2})+$/.test(publicKey)) throw new Error('TURNKEY_PROVIDER_KEY_INVALID');
+  return {
+    privateKeyId: requiredString(item.privateKeyId, 'TURNKEY_PROVIDER_KEY_INVALID'),
+    publicKey,
+    privateKeyName: requiredString(item.privateKeyName, 'TURNKEY_PROVIDER_KEY_INVALID'),
+    curve: requiredString(item.curve, 'TURNKEY_PROVIDER_KEY_INVALID'),
+    addresses,
+    privateKeyTags: tags,
+    createdAt: providerTimestamp(item.createdAt),
+    updatedAt: item.updatedAt === null ? null : providerTimestamp(item.updatedAt),
+    exported: item.exported,
+    imported: item.imported,
+  };
+}
+
+export function createTurnkeyPolicyRecord(input: {
+  environment: TurnkeyEnvironment;
+  providerIdentity: unknown;
+  providerPolicy: unknown;
+  enforcementPolicy: unknown;
+  walletReferences: readonly { index: number; address: Address; signWith: string }[];
+  providerKeys: readonly unknown[];
+  issuedAt: string;
+  expiresAt: string;
+}): TurnkeyCanonicalPolicyRecord {
+  const keys = input.providerKeys.map(projectTurnkeyProviderKey);
+  const byId = new Map(keys.map((key) => [key.privateKeyId, key]));
+  if (byId.size !== keys.length) throw new Error('TURNKEY_PROVIDER_KEY_DUPLICATE');
+  const wallets = input.walletReferences.map((wallet, index) => {
+    if (wallet.index !== index) throw new Error('TURNKEY_POLICY_RECORD_WALLET_INDEX_INVALID');
+    const providerKey = byId.get(wallet.signWith);
+    if (!providerKey) throw new Error('TURNKEY_PROVIDER_KEY_NOT_FOUND');
+    return { index, address: wallet.address, signWith: wallet.signWith, providerKey };
+  });
+  return validateTurnkeyCanonicalPolicyRecord({
+    version: 1,
+    context: RECORD_CONTEXT,
+    environment: input.environment,
+    providerIdentity: projectTurnkeyProviderIdentity(input.providerIdentity),
+    providerPolicy: projectTurnkeyProviderPolicy(input.providerPolicy),
+    enforcementPolicy: input.enforcementPolicy,
+    wallets,
+    issuedAt: input.issuedAt,
+    expiresAt: input.expiresAt,
+  });
+}
+
+export function validateTurnkeyCanonicalPolicyRecord(value: unknown): TurnkeyCanonicalPolicyRecord {
+  const item = exactRecord(value, ['version', 'context', 'environment', 'providerIdentity', 'providerPolicy', 'enforcementPolicy', 'wallets', 'issuedAt', 'expiresAt'], 'TURNKEY_POLICY_RECORD_INVALID');
+  if (item.version !== 1 || item.context !== RECORD_CONTEXT || (item.environment !== 'production' && item.environment !== 'testnet') || !Array.isArray(item.wallets) || item.wallets.length === 0) throw new Error('TURNKEY_POLICY_RECORD_INVALID');
+  const providerIdentity = projectTurnkeyProviderIdentity(item.providerIdentity);
+  const providerPolicy = projectTurnkeyProviderPolicy(item.providerPolicy);
+  const enforcementPolicy = validateTurnkeyPolicyAst(item.enforcementPolicy);
+  const issuedAt = canonicalIso(item.issuedAt, 'TURNKEY_POLICY_RECORD_INVALID');
+  const expiresAt = canonicalIso(item.expiresAt, 'TURNKEY_POLICY_RECORD_INVALID');
+  if (Date.parse(issuedAt) >= Date.parse(expiresAt)) throw new Error('TURNKEY_POLICY_RECORD_INVALID');
+  const wallets = item.wallets.map((wallet, index) => {
+    const candidate = exactRecord(wallet, ['index', 'address', 'signWith', 'providerKey'], 'TURNKEY_POLICY_RECORD_INVALID');
+    const address = requiredString(candidate.address, 'TURNKEY_POLICY_RECORD_INVALID').toLowerCase();
+    const signWith = requiredString(candidate.signWith, 'TURNKEY_POLICY_RECORD_INVALID');
+    if (candidate.index !== index || !/^0x[0-9a-f]{40}$/.test(address)) throw new Error('TURNKEY_POLICY_RECORD_INVALID');
+    const providerKey = projectTurnkeyProviderKey(candidate.providerKey);
+    const ethereumAddresses = providerKey.addresses.filter((entry) => entry.format === 'ADDRESS_FORMAT_ETHEREUM').map((entry) => entry.address);
+    if (providerKey.privateKeyId !== signWith || providerKey.curve !== 'CURVE_SECP256K1' || providerKey.exported || !ethereumAddresses.includes(address)) throw new Error('TURNKEY_POLICY_RECORD_KEY_BINDING_INVALID');
+    return { index, address: address as Address, signWith, providerKey };
+  });
+  if (new Set(wallets.map((wallet) => wallet.address)).size !== wallets.length || new Set(wallets.map((wallet) => wallet.signWith)).size !== wallets.length) throw new Error('TURNKEY_POLICY_RECORD_WALLET_DUPLICATE');
+  if (
+    providerPolicy.effect !== 'EFFECT_ALLOW'
+    || providerPolicy.condition.length === 0
+    || providerPolicy.policyId !== enforcementPolicy.scope.policyId
+    || providerIdentity.organizationId !== enforcementPolicy.scope.organizationId
+    || providerIdentity.userId !== enforcementPolicy.scope.userId
+    || item.environment !== enforcementPolicy.scope.environment
+    || stableStringify(wallets.map((wallet) => wallet.signWith).sort()) !== stableStringify([...enforcementPolicy.scope.keyIds].sort())
+    || stableStringify(wallets.map((wallet) => wallet.address).sort()) !== stableStringify([...enforcementPolicy.transaction.from].map((address) => address.toLowerCase()).sort())
+  ) throw new Error('TURNKEY_POLICY_RECORD_BINDING_INVALID');
+  return { version: 1, context: RECORD_CONTEXT, environment: item.environment, providerIdentity, providerPolicy, enforcementPolicy, wallets, issuedAt, expiresAt };
+}
+
+export function canonicalTurnkeyPolicyRecordJson(value: unknown): string {
+  return stableStringify(validateTurnkeyCanonicalPolicyRecord(value));
+}
+
+export function turnkeyPolicyRecordDigest(value: unknown): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(signaturePayload(value)).digest('hex')}`;
+}
+
+export function turnkeyPolicyApproverKeyId(publicKey: VerificationKey): string {
+  const key = asPublicKey(publicKey);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('TURNKEY_POLICY_APPROVER_KEY_INVALID');
+  const digest = createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('hex');
+  return `ed25519:${digest}`;
+}
+
+export function signTurnkeyPolicyRecord(record: unknown, privateKey: VerificationKey): TurnkeySignedPolicyRecord {
+  const validated = validateTurnkeyCanonicalPolicyRecord(record);
+  const publicKey = derivePublicKey(privateKey);
+  if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('TURNKEY_POLICY_APPROVER_KEY_INVALID');
+  return {
+    version: 1,
+    algorithm: 'Ed25519',
+    keyId: turnkeyPolicyApproverKeyId(publicKey),
+    recordDigest: turnkeyPolicyRecordDigest(validated),
+    record: validated,
+    signature: signBytes(null, signaturePayload(validated), privateKey).toString('base64url'),
+  };
+}
+
+export function verifyTurnkeySignedPolicyRecord(value: unknown, pinnedPublicKey: VerificationKey, now = new Date()): TurnkeyCanonicalPolicyRecord {
+  if (pinnedPublicKey instanceof KeyObject && pinnedPublicKey.type !== 'public') throw new Error('TURNKEY_POLICY_APPROVER_KEY_INVALID');
+  const verifier = asPublicKey(pinnedPublicKey);
+  const envelope = exactRecord(value, ['version', 'algorithm', 'keyId', 'recordDigest', 'record', 'signature'], 'TURNKEY_POLICY_SIGNATURE_INVALID');
+  if (envelope.version !== 1 || envelope.algorithm !== 'Ed25519' || envelope.keyId !== turnkeyPolicyApproverKeyId(verifier) || typeof envelope.signature !== 'string') throw new Error('TURNKEY_POLICY_SIGNATURE_INVALID');
+  const record = validateTurnkeyCanonicalPolicyRecord(envelope.record);
+  if (envelope.recordDigest !== turnkeyPolicyRecordDigest(record)) throw new Error('TURNKEY_POLICY_RECORD_DIGEST_MISMATCH');
+  let signature: Buffer;
+  try { signature = Buffer.from(envelope.signature, 'base64url'); } catch { throw new Error('TURNKEY_POLICY_SIGNATURE_INVALID'); }
+  if (signature.length !== 64 || !verifyBytes(null, signaturePayload(record), verifier, signature)) throw new Error('TURNKEY_POLICY_SIGNATURE_INVALID');
+  const instant = now.getTime();
+  if (!Number.isFinite(instant) || instant < Date.parse(record.issuedAt) || instant >= Date.parse(record.expiresAt)) throw new Error('TURNKEY_POLICY_RECORD_NOT_CURRENT');
+  return record;
+}
+
+export function validateTurnkeyActualProviderState(recordValue: unknown, state: TurnkeyActualProviderState): void {
+  const record = validateTurnkeyCanonicalPolicyRecord(recordValue);
+  if (stableStringify(projectTurnkeyProviderIdentity(state.whoami)) !== stableStringify(record.providerIdentity)) throw new Error('TURNKEY_PROVIDER_IDENTITY_DRIFT');
+  const policies = state.policies.map(projectTurnkeyProviderPolicy);
+  const matches = policies.filter((policy) => policy.policyId === record.providerPolicy.policyId);
+  if (matches.length !== 1 || stableStringify(matches[0]) !== stableStringify(record.providerPolicy)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
+  const keys = state.privateKeys.map(projectTurnkeyProviderKey);
+  const byId = new Map(keys.map((key) => [key.privateKeyId, key]));
+  if (byId.size !== keys.length) throw new Error('TURNKEY_PROVIDER_KEY_DUPLICATE');
+  for (const wallet of record.wallets) {
+    const actual = byId.get(wallet.signWith);
+    if (!actual || stableStringify(actual) !== stableStringify(wallet.providerKey)) throw new Error('TURNKEY_PROVIDER_KEY_DRIFT');
+  }
+}
+
+function signaturePayload(value: unknown): Buffer {
+  return Buffer.from(`${SIGNATURE_CONTEXT}${canonicalTurnkeyPolicyRecordJson(value)}`, 'utf8');
+}
+
+function asPublicKey(value: VerificationKey): KeyObject {
+  if ((typeof value === 'string' || Buffer.isBuffer(value)) && /PRIVATE KEY/.test(value.toString())) throw new Error('TURNKEY_POLICY_APPROVER_KEY_INVALID');
+  const key = value instanceof KeyObject && value.type === 'public' ? value : createPublicKey(value);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('TURNKEY_POLICY_APPROVER_KEY_INVALID');
+  return key;
+}
+
+function derivePublicKey(value: VerificationKey): KeyObject {
+  const key = value instanceof KeyObject && value.type === 'public' ? value : createPublicKey(value);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('TURNKEY_POLICY_APPROVER_KEY_INVALID');
+  return key;
+}
+
+function providerTimestamp(value: unknown): TurnkeyProviderTimestamp {
+  const item = exactRecord(value, ['seconds', 'nanos'], 'TURNKEY_PROVIDER_TIMESTAMP_INVALID');
+  const seconds = requiredIntegerString(item.seconds, 'TURNKEY_PROVIDER_TIMESTAMP_INVALID');
+  const nanos = requiredIntegerString(item.nanos, 'TURNKEY_PROVIDER_TIMESTAMP_INVALID');
+  if (BigInt(nanos) < 0n || BigInt(nanos) > 999_999_999n) throw new Error('TURNKEY_PROVIDER_TIMESTAMP_INVALID');
+  return { seconds, nanos };
+}
+
+function exactRecord(value: unknown, keys: readonly string[], code: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || stableStringify(Object.keys(value as object).sort()) !== stableStringify([...keys].sort())) throw new Error(code);
+  return value as Record<string, unknown>;
+}
+
+function optionalExactRecord(value: unknown, required: readonly string[], optional: readonly string[], code: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(code);
+  const keys = Object.keys(value as object);
+  if (required.some((key) => !keys.includes(key)) || keys.some((key) => !required.includes(key) && !optional.includes(key))) throw new Error(code);
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, code: string): string {
+  if (typeof value !== 'string' || value.length === 0 || /[\r\n]/.test(value)) throw new Error(code);
+  return value;
+}
+
+function stringValue(value: unknown, code: string): string {
+  if (typeof value !== 'string' || /[\r\n]/.test(value)) throw new Error(code);
+  return value;
+}
+
+function nullableString(value: unknown, code: string): string | null {
+  if (value === null) return null;
+  return stringValue(value, code);
+}
+
+function requiredIntegerString(value: unknown, code: string): string {
+  if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)$/.test(value)) throw new Error(code);
+  return value;
+}
+
+function canonicalIso(value: unknown, code: string): string {
+  if (typeof value !== 'string') throw new Error(code);
+  const time = Date.parse(value);
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new Error(code);
+  return value;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`).join(',')}}`;
+}
