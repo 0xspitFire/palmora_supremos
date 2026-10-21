@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -27,6 +27,66 @@ async function workspace() {
 }
 
 describe('scheduled backup job', () => {
+  it('keeps systemd credentials in files under a separate backup identity', async () => {
+    const [wrapper, unit, mainUnit, backupJob] = await Promise.all([
+      readFile(join(root, 'scripts', 'backup-service.mjs'), 'utf8'),
+      readFile(join(root, 'ops', 'systemd', 'mint-bot-backup.service'), 'utf8'),
+      readFile(join(root, 'ops', 'systemd', 'mint-bot.service'), 'utf8'),
+      readFile(join(root, 'scripts', 'backup-job.mjs'), 'utf8'),
+    ]);
+    expect(unit).toContain('User=mintbot-backup');
+    expect(unit).not.toContain('SupplementaryGroups=mintbot');
+    expect(unit).toContain('Group=mintbot-status');
+    expect(mainUnit).toContain('SupplementaryGroups=mintbot-status');
+    expect(mainUnit).toContain('ReadOnlyPaths=/var/lib/mint-bot/backup-status');
+    expect(unit).toContain('ReadOnlyPaths=/var/lib/mint-bot');
+    expect(unit).toContain('ReadWritePaths=/var/lib/mint-bot/backups /var/lib/mint-bot/backup-status');
+    expect(unit).toContain('UMask=0027');
+    expect(backupJob).toContain('mode: 0o640');
+    expect(unit).toContain('LoadCredential=backup-encryption-key:');
+    expect(wrapper).toContain('BACKUP_ENCRYPTION_KEY_FILE');
+    expect(wrapper).toContain('R2_ACCESS_KEY_ID_FILE');
+    expect(wrapper).toContain('delete childEnvironment.BACKUP_ENCRYPTION_KEY');
+    expect(wrapper).not.toMatch(/BACKUP_ENCRYPTION_KEY:\s*backupKey|R2_ACCESS_KEY_ID:\s*accessKeyId|R2_SECRET_ACCESS_KEY:\s*secretAccessKey/);
+  });
+
+  it('builds a complete R2 configuration only and verifies uploaded bytes with a GET', async () => {
+    const { r2ConfigFromEnv, uploadR2File } = (await import(join(root, 'scripts', 'r2-upload.mjs'))) as {
+      r2ConfigFromEnv: (env: Record<string, string>) => { bucket: string; accessKeyId: string; secretAccessKey: string; prefix: string; endpoint: string } | undefined;
+      uploadR2File: (config: unknown, path: string, objectName: string, options: { client: { send(command: { constructor: { name: string }; input: Record<string, unknown> }): Promise<Record<string, unknown>> } }) => Promise<{ objectKey: string; sha256: string; size: number }>;
+    };
+    expect(r2ConfigFromEnv({})).toBeUndefined();
+    expect(() => r2ConfigFromEnv({ MINT_BOT_OFFHOST_BACKUP_REQUIRED: 'true' })).toThrow('R2_CONFIGURATION_INCOMPLETE');
+    expect(() => r2ConfigFromEnv({ R2_ACCOUNT_ID: 'a'.repeat(32), R2_BUCKET_NAME: 'backup', R2_ACCESS_KEY_ID: 'id', R2_SECRET_ACCESS_KEY: 'secret', MINT_BOT_HOST_ID: '../escape' })).toThrow('R2_CONFIGURATION_INVALID');
+    const config = r2ConfigFromEnv({ R2_ACCOUNT_ID: 'a'.repeat(32), R2_BUCKET_NAME: 'backup', R2_ACCESS_KEY_ID: 'id', R2_SECRET_ACCESS_KEY: 'secret', R2_OBJECT_PREFIX: 'mintbot/production', MINT_BOT_HOST_ID: 'host-1' });
+    expect(config).toBeDefined();
+    expect(config?.endpoint).toBe(`https://${'a'.repeat(32)}.r2.cloudflarestorage.com`);
+    expect(r2ConfigFromEnv({ R2_ACCOUNT_ID: 'a'.repeat(32), R2_BUCKET_NAME: 'backup', R2_ACCESS_KEY_ID: 'id', R2_SECRET_ACCESS_KEY: 'secret', MINT_BOT_HOST_ID: 'host-1', R2_JURISDICTION: 'automatic' })?.endpoint).toBe(`https://${'a'.repeat(32)}.r2.cloudflarestorage.com`);
+    const directory = await mkdtemp(join(tmpdir(), 'mint-r2-'));
+    try {
+      const file = join(directory, 'snapshot.enc');
+      await writeFile(file, 'encrypted bytes');
+      const calls: string[] = [];
+      let hash = '';
+      const client = { async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+        calls.push(command.constructor.name);
+        if (command.constructor.name === 'PutObjectCommand') {
+          hash = (command.input.Metadata as { sha256: string }).sha256;
+          return {};
+        }
+        return { Metadata: { sha256: hash }, Body: { transformToByteArray: async () => new TextEncoder().encode('encrypted bytes') } };
+      } };
+      const uploaded = await uploadR2File(config, file, 'snapshot.enc', { client });
+      expect(uploaded).toMatchObject({ objectKey: 'mintbot/production/host-1/snapshot.enc', size: 15 });
+      expect(calls).toEqual(['PutObjectCommand', 'GetObjectCommand']);
+      const corruptClient = { async send(command: { constructor: { name: string } }) {
+        if (command.constructor.name === 'PutObjectCommand') return {};
+        return { Metadata: { sha256: uploaded.sha256 }, Body: { transformToByteArray: async () => new TextEncoder().encode('corrupt bytes') } };
+      } };
+      await expect(uploadR2File(config, file, 'snapshot.enc', { client: corruptClient })).rejects.toThrow('R2_UPLOAD_VERIFICATION_FAILED');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('makes an encrypted snapshot, proves it restores, and writes an ok status without the key', async () => {
     const { directory, paths } = await workspace();
     try {
@@ -35,6 +95,7 @@ describe('scheduled backup job', () => {
       expect(files.some((name) => name.endsWith('.snapshot.enc'))).toBe(true);
       expect(files.some((name) => name.endsWith('.snapshot.enc.sha256'))).toBe(true);
       const status = JSON.parse(await readFile(paths.statusPath, 'utf8')) as Record<string, unknown>;
+      expect((await stat(paths.statusPath)).mode & 0o777).toBe(0o640);
       expect(status).toMatchObject({ status: 'ok', encrypted: true, restoreVerified: true, retentionDays: 30 });
       expect(JSON.stringify(status)).not.toContain(KEY);
       expect(JSON.stringify(status)).not.toContain(directory);
@@ -215,7 +276,7 @@ describe('service wiring', () => {
     const source = await readFile(join(root, 'packages', 'cli', 'src', 'orchestrator-service.ts'), 'utf8');
     const start = source.indexOf("get('BACKUP_ENCRYPTION_KEY')");
     expect(start).toBeGreaterThan(0);
-    const block = source.slice(start, start + 900);
+    const block = source.slice(start, start + 1_600);
     expect(block.indexOf('if (backupKey)')).toBeGreaterThan(-1);
     expect(block.indexOf('registerSecret(backupKey)')).toBeLessThan(block.indexOf('startBackupScheduler('));
     expect(source).toContain('backups?.stop();');

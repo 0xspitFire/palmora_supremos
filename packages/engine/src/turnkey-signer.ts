@@ -66,6 +66,7 @@ export interface TurnkeySignerClient {
     generateAppProofs?: boolean;
   }): Promise<{ signedTransaction: string; activity: TurnkeySigningActivity }>;
   getWhoami(input?: { organizationId?: string }): Promise<unknown>;
+  getOrganizationConfigs(input: { organizationId: string }): Promise<unknown>;
   getPolicies(input: { organizationId: string }): Promise<{ policies: unknown[] }>;
   getPrivateKeys(input: { organizationId: string }): Promise<{ privateKeys: unknown[] }>;
 }
@@ -498,12 +499,13 @@ export class TurnkeySigner implements Signer {
     this.assertPolicyCurrent();
     const client = this.client;
     if (!client) throw new Error('TURNKEY_SIGNER_ZEROIZED');
-    const [whoami, policies, keyResponse] = await Promise.all([
+    const [whoami, organization, policies, keyResponse] = await Promise.all([
       client.getWhoami({ organizationId: this.organizationId }),
+      client.getOrganizationConfigs({ organizationId: this.organizationId }),
       client.getPolicies({ organizationId: this.organizationId }),
       client.getPrivateKeys({ organizationId: this.organizationId }),
     ]);
-    validateTurnkeyActualProviderState(this.policyRecord, { whoami, policies: policies.policies, privateKeys: keyResponse.privateKeys });
+    validateTurnkeyActualProviderState(this.policyRecord, { whoami, organization, policies: policies.policies, privateKeys: keyResponse.privateKeys });
     return {
       status: 'ok',
       provider: 'turnkey',

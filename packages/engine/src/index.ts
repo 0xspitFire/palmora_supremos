@@ -108,6 +108,7 @@ export {
   signTurnkeyPolicyRecord,
   turnkeyPolicyApproverKeyId,
   turnkeyPolicyRecordDigest,
+  turnkeyProviderPolicyExpressions,
   validateTurnkeyActualProviderState,
   validateTurnkeyCanonicalPolicyRecord,
   verifyTurnkeySignedPolicyRecord,

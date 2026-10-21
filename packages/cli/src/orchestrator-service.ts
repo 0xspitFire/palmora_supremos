@@ -103,6 +103,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     logger,
     alerts,
     backupStatusPath: config.backupStatusPath,
+    backupMaxAgeMs: environment.MINT_BOT_OFFHOST_BACKUP_REQUIRED === 'true' ? 8 * 60 * 60_000 : undefined,
+    requireOffHostBackup: environment.MINT_BOT_OFFHOST_BACKUP_REQUIRED === 'true',
   });
   await orchestrator.start();
   let intelligence: { stop(): void } | undefined;
@@ -119,15 +121,33 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   }
   // Scheduled encrypted backups, only when the owner has put BACKUP_ENCRYPTION_KEY in the secret store.
   let backups: { stop(): void } | undefined;
-  if (config.secretStorePath) {
-    const backupKey = (await loadHostSecretStore(config.secretStorePath)).get('BACKUP_ENCRYPTION_KEY');
+  const backupScheduler = environment.MINT_BOT_BACKUP_SCHEDULER ?? 'internal';
+  if (backupScheduler !== 'internal' && backupScheduler !== 'systemd') throw new Error('BACKUP_SCHEDULER_INVALID');
+  if (environment.MINT_BOT_OFFHOST_BACKUP_REQUIRED === 'true' && backupScheduler !== 'systemd') throw new Error('OFFHOST_BACKUP_REQUIRES_SYSTEMD_SCHEDULER');
+  if (config.secretStorePath && backupScheduler === 'internal') {
+    const backupSecrets = await loadHostSecretStore(config.secretStorePath);
+    const backupKey = backupSecrets.get('BACKUP_ENCRYPTION_KEY');
     if (backupKey) {
       logger.registerSecret(backupKey);
+      const r2AccessKeyId = backupSecrets.get('R2_ACCESS_KEY_ID');
+      const r2SecretAccessKey = backupSecrets.get('R2_SECRET_ACCESS_KEY');
+      logger.registerSecret(r2AccessKeyId ?? '');
+      logger.registerSecret(r2SecretAccessKey ?? '');
       const paths = { script: join(config.projectRoot, 'scripts', 'backup-job.mjs'), storePath: config.statePath, backupDir: config.backupDir, statusPath: config.backupStatusPath, killSwitchPath: config.killSwitchPath };
-      backups = startBackupScheduler({ run: () => runBackupJob(paths, backupKey), statusPath: config.backupStatusPath, logger });
+      const offhost = {
+        required: environment.MINT_BOT_OFFHOST_BACKUP_REQUIRED === 'true',
+        accountId: environment.R2_ACCOUNT_ID,
+        bucketName: environment.R2_BUCKET_NAME,
+        objectPrefix: environment.R2_OBJECT_PREFIX,
+        hostId: environment.MINT_BOT_HOST_ID,
+        jurisdiction: environment.R2_JURISDICTION,
+        accessKeyId: r2AccessKeyId,
+        secretAccessKey: r2SecretAccessKey,
+      };
+      backups = startBackupScheduler({ run: () => runBackupJob(paths, backupKey, offhost), statusPath: config.backupStatusPath, logger });
       logger.info({ event: 'backup_scheduler_started' }, 'scheduled backups on');
     } else logger.info({ event: 'backup_scheduler_off' }, 'scheduled backups off: no backup key in the secret store');
-  }
+  } else if (backupScheduler === 'systemd') logger.info({ event: 'backup_scheduler_external' }, 'scheduled backups owned by systemd timer');
   const dashboard = createDashboard(runtime.store);
   const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics, readModel: dashboard.readModel, dashboard: (url) => dashboard.render(url) });
   await http.start();

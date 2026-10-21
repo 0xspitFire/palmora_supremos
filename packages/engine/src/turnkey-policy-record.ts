@@ -83,8 +83,50 @@ export interface TurnkeySignedPolicyRecord {
 
 export interface TurnkeyActualProviderState {
   readonly whoami: unknown;
+  readonly organization: unknown;
   readonly policies: readonly unknown[];
   readonly privateKeys: readonly unknown[];
+}
+
+function assertNonRootRuntimeUser(organizationValue: unknown, identity: TurnkeyProviderIdentityProjection): void {
+  if (!organizationValue || typeof organizationValue !== 'object' || Array.isArray(organizationValue)) throw new Error('TURNKEY_PROVIDER_ORGANIZATION_INVALID');
+  const configs = (organizationValue as { configs?: unknown }).configs;
+  if (!configs || typeof configs !== 'object' || Array.isArray(configs)) throw new Error('TURNKEY_PROVIDER_ORGANIZATION_INVALID');
+  const quorumValue = (configs as { quorum?: unknown }).quorum;
+  if (!quorumValue || typeof quorumValue !== 'object' || Array.isArray(quorumValue)) throw new Error('TURNKEY_PROVIDER_ORGANIZATION_INVALID');
+  const quorum = quorumValue as { threshold?: unknown; userIds?: unknown };
+  if (!Number.isSafeInteger(quorum.threshold) || Number(quorum.threshold) < 1 || !Array.isArray(quorum.userIds) || quorum.userIds.length === 0 || !quorum.userIds.every((id) => typeof id === 'string' && id.length > 0)) throw new Error('TURNKEY_PROVIDER_ORGANIZATION_INVALID');
+  if (quorum.userIds.includes(identity.userId)) throw new Error('TURNKEY_PROVIDER_RUNTIME_USER_MUST_BE_NON_ROOT');
+}
+
+/**
+ * The provider policy is the custody boundary.  Keep this projection deliberately
+ * boring and exact: the owner-signed local AST is not allowed to describe a
+ * narrower transaction than Turnkey itself will authorize.
+ */
+export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consensus: string; condition: string } {
+  const policy = validateTurnkeyPolicyAst(policyValue);
+  const quote = (value: string): string => {
+    if (!/^[A-Za-z0-9_:.\/-]+$/.test(value)) throw new Error('TURNKEY_PROVIDER_POLICY_EXPRESSION_INVALID');
+    return `'${value}'`;
+  };
+  const list = (values: readonly string[]): string => `[${[...values].sort().map(quote).join(', ')}]`;
+  const tx = policy.transaction;
+  return {
+    consensus: `approvers.any(user, user.id == ${quote(policy.scope.userId)})`,
+    condition: [
+      "activity.type == 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2'",
+      `private_key.id in ${list(policy.scope.keyIds)}`,
+      `eth.tx.chain_id == ${tx.chainId}`,
+      `eth.tx.from in ${list(tx.from.map((address) => address.toLowerCase()))}`,
+      `eth.tx.to == ${quote(tx.to.toLowerCase())}`,
+      `eth.tx.value == ${tx.valueWei}`,
+      `eth.tx.data == ${quote(tx.data.toLowerCase())}`,
+      `eth.tx.gas <= ${tx.gasLimitMax}`,
+      `eth.tx.max_fee_per_gas <= ${tx.maxFeePerGasMax}`,
+      `eth.tx.max_priority_fee_per_gas <= ${tx.maxPriorityFeePerGasMax}`,
+    ].join(' && '),
+  };
 }
 
 type VerificationKey = KeyObject | string | Buffer;
@@ -181,6 +223,7 @@ export function validateTurnkeyCanonicalPolicyRecord(value: unknown): TurnkeyCan
   const providerIdentity = projectTurnkeyProviderIdentity(item.providerIdentity);
   const providerPolicy = projectTurnkeyProviderPolicy(item.providerPolicy);
   const enforcementPolicy = validateTurnkeyPolicyAst(item.enforcementPolicy);
+  const expectedProviderExpressions = turnkeyProviderPolicyExpressions(enforcementPolicy);
   const issuedAt = canonicalIso(item.issuedAt, 'TURNKEY_POLICY_RECORD_INVALID');
   const expiresAt = canonicalIso(item.expiresAt, 'TURNKEY_POLICY_RECORD_INVALID');
   if (Date.parse(issuedAt) >= Date.parse(expiresAt)) throw new Error('TURNKEY_POLICY_RECORD_INVALID');
@@ -197,7 +240,9 @@ export function validateTurnkeyCanonicalPolicyRecord(value: unknown): TurnkeyCan
   if (new Set(wallets.map((wallet) => wallet.address)).size !== wallets.length || new Set(wallets.map((wallet) => wallet.signWith)).size !== wallets.length) throw new Error('TURNKEY_POLICY_RECORD_WALLET_DUPLICATE');
   if (
     providerPolicy.effect !== 'EFFECT_ALLOW'
-    || providerPolicy.condition.length === 0
+    || providerPolicy.condition !== expectedProviderExpressions.condition
+    || providerPolicy.consensus !== expectedProviderExpressions.consensus
+    || providerPolicy.time !== null
     || providerPolicy.policyId !== enforcementPolicy.scope.policyId
     || providerIdentity.organizationId !== enforcementPolicy.scope.organizationId
     || providerIdentity.userId !== enforcementPolicy.scope.userId
@@ -256,6 +301,8 @@ export function validateTurnkeyActualProviderState(recordValue: unknown, state: 
   const record = validateTurnkeyCanonicalPolicyRecord(recordValue);
   if (stableStringify(projectTurnkeyProviderIdentity(state.whoami)) !== stableStringify(record.providerIdentity)) throw new Error('TURNKEY_PROVIDER_IDENTITY_DRIFT');
   const policies = state.policies.map(projectTurnkeyProviderPolicy);
+  assertNonRootRuntimeUser(state.organization, record.providerIdentity);
+  if (policies.length !== 1) throw new Error('TURNKEY_PROVIDER_POLICY_INVENTORY_NOT_ISOLATED');
   const matches = policies.filter((policy) => policy.policyId === record.providerPolicy.policyId);
   if (matches.length !== 1 || stableStringify(matches[0]) !== stableStringify(record.providerPolicy)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
   const keys = state.privateKeys.map(projectTurnkeyProviderKey);

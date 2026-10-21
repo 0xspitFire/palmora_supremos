@@ -7,6 +7,7 @@ After=network-online.target
 Type=simple
 User=mintbot
 Group=mintbot
+SupplementaryGroups=mintbot-status
 WorkingDirectory=/opt/mint-bot/current
 EnvironmentFile=/etc/mint-bot/mint-bot.env
 ExecStartPre=/usr/bin/test -f /var/lib/mint-bot/killswitch
@@ -20,6 +21,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/mint-bot /var/log/mint-bot
+# The orchestrator may consume backup readiness but cannot replace or forge it,
+# even though the wider state tree is writable for its own database and jobs.
+ReadOnlyPaths=/var/lib/mint-bot/backup-status
 UMask=0077
 LimitCORE=0
 CapabilityBoundingSet=

@@ -4,20 +4,25 @@ After=mint-bot.service
 
 [Service]
 Type=oneshot
-User=mintbot
-Group=mintbot
+User=mintbot-backup
+Group=mintbot-status
 WorkingDirectory=/opt/mint-bot/current
 EnvironmentFile=/etc/mint-bot/mint-bot.env
-# This unit intentionally has no checked-in secret loader. The host secret
-# manager must inject BACKUP_ENCRYPTION_KEY for this invocation. Without it the
-# restore-verifying job fails closed. Never store the key in mint-bot.env.
-ExecStart=/usr/bin/node /opt/mint-bot/current/scripts/backup-job.mjs
+# The host provisions these owner-only source files. systemd copies them into
+# a private per-service credential directory; no secret belongs in mint-bot.env.
+LoadCredential=backup-encryption-key:/etc/mint-bot/secrets/backup-encryption-key
+LoadCredential=r2-access-key-id:/etc/mint-bot/secrets/r2-access-key-id
+LoadCredential=r2-secret-access-key:/etc/mint-bot/secrets/r2-secret-access-key
+ExecStart=/usr/bin/node /opt/mint-bot/current/scripts/backup-service.mjs
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/mint-bot /var/log/mint-bot
-UMask=0077
+ReadOnlyPaths=/var/lib/mint-bot
+ReadWritePaths=/var/lib/mint-bot/backups /var/lib/mint-bot/backup-status
+# Status is 0640 for the read-only mintbot-status handoff. Snapshot and
+# checksum files are explicitly created 0600 and remain backup-user-only.
+UMask=0027
 LimitCORE=0
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
