@@ -22,6 +22,8 @@ import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { startIntelligence } from './intelligence-service.js';
 import { runBackupJob, startBackupScheduler } from './backup-scheduler.js';
 import { createMonitorPing, validMonitorUrl } from './monitor-ping.js';
+import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './fleet-watch-service.js';
+import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 
 export interface RunningOrchestratorService {
@@ -119,6 +121,21 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
+  // D-059: the independent on-chain wallet watcher, only when the owner enables it. Fails the start on a bad setting.
+  let fleetWatcher: { stop(): void } | undefined;
+  const watchConfig = parseFleetWatchEnv(environment);
+  if (watchConfig) {
+    if (!config.secretStorePath) throw new Error('WATCHER_RPC_SECRET_MISSING');
+    const watchSecrets = await loadHostSecretStore(config.secretStorePath);
+    fleetWatcher = startFleetWatcher({
+      store: runtime.store,
+      config: watchConfig,
+      alerts,
+      kill: async (reason) => { await engageKillSwitchFile(config.killSwitchPath, reason); await runtime.coordinator.kill(reason); },
+      rpcUrl: (chainId) => watchSecrets.get(watcherRpcSecretName(chainId)),
+      logger,
+    });
+  }
   // Scheduled encrypted backups, only when the owner has put BACKUP_ENCRYPTION_KEY in the secret store.
   let backups: { stop(): void } | undefined;
   const backupScheduler = environment.MINT_BOT_BACKUP_SCHEDULER ?? 'internal';
@@ -160,6 +177,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     stopped = true;
     metrics.set('mintbot_process_up', 0);
     intelligence?.stop();
+    fleetWatcher?.stop();
     backups?.stop();
     await orchestrator.stop();
     await http.stop();

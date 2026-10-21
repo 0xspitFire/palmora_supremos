@@ -140,6 +140,41 @@ describe('turnkey-compensating-controls (D-058, D-059)', () => {
     });
   });
 
+  describe('funded-run requirements (D-059 item 3)', () => {
+    const fleetOf = (wallets: Array<{ address: string; balanceWei: string }>, cfgOver: Partial<CompensatingAssuranceConfig>) => {
+      const digest = computeWalletSetDigest(wallets.map((wallet) => wallet.address));
+      return refusal(
+        evidence({ walletSetDigest: digest, balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets }, rehearsal: { recordedAt: iso(-DAY), policyRecordDigest: RECORD, walletSetDigest: digest, lockfileDigest: LOCK, broadcastAttempted: false } }),
+        config({ expected: { recordDigest: RECORD, walletSetDigest: digest, lockfileDigest: LOCK }, ...cfgOver }),
+      );
+    };
+    const bounded = { 1: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n, runEnvelopeMaxWei: 1_000_000_000_000_000n, runEnvelopeFleetMaxWei: 2_500_000_000_000_000n } };
+    const many = (count: number, balanceWei: string) => Array.from({ length: count }, (_, index) => ({ address: `0x${String(index + 1).repeat(40)}`, balanceWei }));
+    const envelopes = (wallets: Array<{ address: string }>, value: string) => Object.fromEntries(wallets.map((wallet) => [wallet.address.toLowerCase(), value]));
+
+    it('refuses to arm until the requested funding has arrived, and accepts exactly the requirement', () => {
+      const minimumBalanceWei = { [W1]: '300000000000000' };
+      expect(fleetOf([{ address: W1, balanceWei: '299999999999999' }], { minimumBalanceWei })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_FUNDING_NOT_ARRIVED');
+      expect(fleetOf([{ address: W1, balanceWei: '300000000000000' }], { minimumBalanceWei })).toBe('ACCEPTED');
+      expect(fleetOf([{ address: W1, balanceWei: '300000000000000' }], { minimumBalanceWei: { [W1]: 'abc' } })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_INVALID_MINIMUM');
+    });
+
+    it('bounds the whole fleet while funded, and without a fleet bound the idle fleet ceiling cannot be raised', () => {
+      const four = many(4, '600000000000000');
+      expect(fleetOf(four, { ceilings: bounded, runEnvelopeWei: envelopes(four, '600000000000000') })).toBe('ACCEPTED');
+      const five = many(5, '600000000000000');
+      expect(fleetOf(five, { ceilings: bounded, runEnvelopeWei: envelopes(five, '600000000000000') })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_FLEET_ABOVE_LIMIT');
+      const noFleetBound = { 1: { ...bounded[1], runEnvelopeFleetMaxWei: undefined } };
+      expect(fleetOf(four, { ceilings: noFleetBound as never, runEnvelopeWei: envelopes(four, '600000000000000') })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_FLEET_ABOVE_LIMIT');
+    });
+
+    it('a hard envelope bound below the idle ceiling never lowers the idle ceiling', () => {
+      const low = { 1: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n, runEnvelopeMaxWei: 1n } };
+      expect(fleetOf([{ address: W1, balanceWei: '400000000000000' }], { ceilings: low, runEnvelopeWei: { [W1]: '900000000000000' } })).toBe('ACCEPTED');
+      expect(fleetOf([{ address: W1, balanceWei: '400000000000001' }], { ceilings: low, runEnvelopeWei: { [W1]: '900000000000000' } })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+    });
+  });
+
   describe('policy record (control 2)', () => {
     it('refuses an expired, mismatched or not-yet-issued record', () => {
       expect(refusal(evidence({ policyRecord: { digest: RECORD, issuedAt: iso(-2 * DAY), expiresAt: iso(-MIN) } }))).toBe('COMPENSATING_CONTROL_POLICY_RECORD_EXPIRED');

@@ -9,7 +9,7 @@ import { killEngagedCard, runProblemCard, spendCapCard } from './system-messages
 export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder';
 export type AlertPriority = 'immediate' | 'grouped';
 /** Phase 2 intelligence alerts (T-004, P2-06). Outbound only; never a permission or execution proof. */
-export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status' | 'quantity_reduced' | 'health';
+export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status' | 'quantity_reduced' | 'health' | 'funding_request' | 'excess_balance' | 'fleet_watch';
 export interface IntelligenceAlertInput {
   kind: IntelligenceAlertKind;
   /** Stable dedupe identity: the same identity is never alerted twice. */
