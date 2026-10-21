@@ -64,7 +64,7 @@ describe('compensating controls evidence assembly (D-058, D-059)', () => {
     expect(engaged).toEqual([]);
     await expect(probeOrEngageKillSwitch(async () => { throw new Error('TURNKEY_POLICY_DRIFT'); }, async (reason) => { engaged.push(reason); })).rejects.toThrow('TURNKEY_PROVIDER_DRIFT_KILL_SWITCH_ENGAGED');
     expect(engaged).toHaveLength(1);
-    expect(engaged[0]).toContain('TURNKEY_POLICY_DRIFT');
+    expect(engaged[0]).toBe('provider-probe-failed'); // a fixed code: provider error text never reaches the kill-switch file
     // even when engaging itself fails, the caller still gets the failure and no success evidence
     await expect(probeOrEngageKillSwitch(async () => { throw new Error('x'); }, async () => { throw new Error('disk'); })).rejects.toThrow('TURNKEY_PROVIDER_DRIFT_KILL_SWITCH_ENGAGED');
     await expect(probeOrEngageKillSwitch(async () => ({ status: 'bad' as never, policyRecordDigest: RECORD }), async (reason) => { engaged.push(reason); })).rejects.toThrow('TURNKEY_PROVIDER_DRIFT_KILL_SWITCH_ENGAGED');

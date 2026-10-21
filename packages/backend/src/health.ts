@@ -2,12 +2,12 @@ import type { BackendStore } from './store.js';
 import type { OperationalReadiness } from './types.js';
 import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from './policy.js';
 import { validRobinhoodEnablement } from './robinhood-enablement.js';
-import { assertLiveOperationalReadiness } from './custody.js';
+import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
 import type { CompensatingAssuranceConfig } from './compensating-controls.js';
 
 export interface HealthReport { live: true; ready: boolean; state: 'Ready' | 'NotReady' | 'Killed'; blockingReasons: string[]; policy: { robinhoodFreePerWalletCapWei: string; robinhoodFreeActivePeriodCapWei: string; robinhoodPaidMintsEnabled: boolean; }; operational?: OperationalReadiness; checkedAt: string; }
 export class HealthService {
-  constructor(private readonly store: BackendStore, private readonly now: () => Date = () => new Date(), private readonly compensatingAssurance?: CompensatingAssuranceConfig) {}
+  constructor(private readonly store: BackendStore, private readonly now: () => Date = () => new Date(), private readonly compensatingAssurance?: CompensatingAssuranceConfig, private readonly expectedCustodyPolicy?: CustodyPolicyBinding) {}
   check(): HealthReport {
     const state = this.store.snapshot(); const capabilities = this.store.capabilities(); const reasons = [...state.runtime.blockingReasons];
     if (!capabilities.durable) reasons.push('DURABLE_STORE_REQUIRED');
@@ -28,7 +28,7 @@ export class HealthService {
       if (operational.chainVerification !== 'verified') reasons.push('CHAIN_VERIFICATION_REQUIRED');
       if (operational.expiresAt <= this.now().toISOString()) reasons.push('RUNTIME_PROBE_STALE');
       if (!operational.lastReconciliationAt || operational.lastReconciliationAt > this.now().toISOString()) reasons.push('RECONCILIATION_REQUIRED');
-      try { assertLiveOperationalReadiness(operational, this.now(), undefined, undefined, this.compensatingAssurance ? { config: this.compensatingAssurance, ...(operational.custody?.compensatingControls ? { chainId: operational.custody.compensatingControls.chainId } : {}) } : undefined); } catch (error) { reasons.push(error instanceof Error ? error.message : 'CUSTODY_READINESS_REQUIRED'); }
+      try { assertLiveOperationalReadiness(operational, this.now(), this.expectedCustodyPolicy, undefined, this.compensatingAssurance ? { config: this.compensatingAssurance, ...(operational.custody?.compensatingControls ? { chainId: operational.custody.compensatingControls.chainId } : {}) } : undefined); } catch (error) { reasons.push(error instanceof Error ? error.message : 'CUSTODY_READINESS_REQUIRED'); }
     }
     if (state.runs.some(run => ['Armed', 'Active'].includes(run.state) && state.reconciliations.filter(item => item.runId === run.id).at(-1)?.result === 'unknown')) reasons.push('UNRESOLVED_EXECUTIONS');
     if (state.chainEvidence.some(item => item.status === 'accepted' && item.expiresAt <= this.now().toISOString())) reasons.push('STALE_CHAIN_EVIDENCE');

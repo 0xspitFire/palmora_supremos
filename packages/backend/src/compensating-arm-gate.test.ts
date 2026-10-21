@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BackendApplication } from './application.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { ETHEREUM, WALLET_ONE, campaign, close, fixture, noopEngine } from './canonical-fixtures.js';
-import { COMPENSATING_ASSURANCE_KIND, type CompensatingAssuranceConfig, type CompensatingControlsEvidence } from './compensating-controls.js';
+import { COMPENSATING_ASSURANCE_KIND, computeWalletSetDigest, type CompensatingAssuranceConfig, type CompensatingControlsEvidence } from './compensating-controls.js';
 import type { OperationalReadiness } from './types.js';
 
 /**
@@ -16,7 +16,7 @@ const iso = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toI
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
 const RECORD = `sha256:${'a'.repeat(64)}`;
-const WALLET_SET = `sha256:${'b'.repeat(64)}`;
+const WALLET_SET = computeWalletSetDigest([WALLET_ONE]);
 const LOCK = `sha256:${'c'.repeat(64)}`;
 
 const controls = (): CompensatingControlsEvidence => ({
@@ -40,6 +40,7 @@ const operational = (evidence: CompensatingControlsEvidence): OperationalReadine
   custody: { provider: 'turnkey', providerIdentity: 'turnkey-org', policyReference: 'turnkey:policy-1', policyDigest: `0x${'ab'.repeat(32)}`, policyStatus: 'approved', healthStatus: 'healthy', attestationStatus: 'unknown', evidenceId: 'evidence-1', observedAt: iso(-MIN), expiresAt: '2099-01-01T00:00:00.000Z', assuranceKind: COMPENSATING_ASSURANCE_KIND, compensatingControls: evidence },
 } as OperationalReadiness);
 
+const expectedCustodyPolicy = { provider: 'turnkey' as const, providerIdentity: 'turnkey-org', policyReference: 'turnkey:policy-1', policyDigest: `0x${'ab'.repeat(32)}` };
 const assurance: CompensatingAssuranceConfig = {
   ceilings: { [ETHEREUM]: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n } },
   expected: { recordDigest: RECORD, walletSetDigest: WALLET_SET, lockfileDigest: LOCK },
@@ -59,23 +60,27 @@ async function armWith(evidence: CompensatingControlsEvidence, options: Construc
 
 describe('compensating controls at the live arm gate', () => {
   it('is refused when the service has not accepted the compensated kind', async () => {
-    expect(await armWith(controls(), {})).toBe('CUSTODY_COMPENSATING_ASSURANCE_NOT_ACCEPTED');
+    expect(await armWith(controls(), { expectedCustodyPolicy })).toBe('CUSTODY_COMPENSATING_ASSURANCE_NOT_ACCEPTED');
+  });
+
+  it('is refused when the service gives no expected custody policy to bind it to', async () => {
+    expect(await armWith(controls(), { compensatingAssurance: assurance })).toBe('CUSTODY_EXPECTED_POLICY_REQUIRED');
   });
 
   it('with every control current, arming moves past custody to the next wall (per-wallet simulation records)', async () => {
-    expect(await armWith(controls(), { compensatingAssurance: assurance })).toBe('PER_WALLET_SIMULATION_REQUIRED');
+    expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy })).toBe('PER_WALLET_SIMULATION_REQUIRED');
   });
 
   it('one missing control stops arming and names it', async () => {
     const withoutRehearsal = controls();
     delete withoutRehearsal.rehearsal;
-    expect(await armWith(withoutRehearsal, { compensatingAssurance: assurance })).toBe('COMPENSATING_CONTROL_REHEARSAL_MISSING');
+    expect(await armWith(withoutRehearsal, { compensatingAssurance: assurance, expectedCustodyPolicy })).toBe('COMPENSATING_CONTROL_REHEARSAL_MISSING');
     const overFunded = controls();
     overFunded.balances = { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [{ address: WALLET_ONE, balanceWei: '400000000000001' }] };
-    expect(await armWith(overFunded, { compensatingAssurance: assurance })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+    expect(await armWith(overFunded, { compensatingAssurance: assurance, expectedCustodyPolicy })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
   });
 
   it('a chain without a configured ceiling cannot arm', async () => {
-    expect(await armWith(controls(), { compensatingAssurance: { ...assurance, ceilings: {} } })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_NO_BALANCE_CEILING_FOR_CHAIN');
+    expect(await armWith(controls(), { compensatingAssurance: { ...assurance, ceilings: {} }, expectedCustodyPolicy })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_NO_BALANCE_CEILING_FOR_CHAIN');
   });
 });

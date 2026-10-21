@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { assertCustodyReadiness, type CustodyReadiness } from './custody.js';
 import {
   COMPENSATING_ASSURANCE_KIND,
+  computeWalletSetDigest,
   COMPENSATING_CONTROL_IDS,
   TRUST_CENTER_REVIEW_GRACE_MS,
   TRUST_CENTER_REVIEW_MAX_AGE_MS,
@@ -17,10 +18,10 @@ const iso = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toI
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
 const RECORD = `sha256:${'a'.repeat(64)}`;
-const WALLET_SET = `sha256:${'b'.repeat(64)}`;
 const LOCK = `sha256:${'c'.repeat(64)}`;
 const W1 = '0x1111111111111111111111111111111111111111';
 const W2 = '0x2222222222222222222222222222222222222222';
+const WALLET_SET = computeWalletSetDigest([W1, W2]);
 
 const config = (over: Partial<CompensatingAssuranceConfig> = {}): CompensatingAssuranceConfig => ({
   ceilings: { 1: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n } },
@@ -81,40 +82,61 @@ describe('turnkey-compensating-controls (D-058, D-059)', () => {
   });
 
   describe('balances (control 1)', () => {
+    /** Builds evidence and configuration for exactly this fleet, so the signed wallet set matches what was observed. */
+    const fleet = (wallets: Array<{ address: string; balanceWei: string }>, cfgOver: Partial<CompensatingAssuranceConfig> = {}, observedAt = iso(-MIN), expiresAt = iso(9 * MIN)) => {
+      let digest: string;
+      try { digest = computeWalletSetDigest(wallets.map((wallet) => wallet.address)); } catch { digest = computeWalletSetDigest([W1]); }
+      return refusal(
+        evidence({ walletSetDigest: digest, balances: { observedAt, expiresAt, wallets }, rehearsal: { recordedAt: iso(-DAY), policyRecordDigest: RECORD, walletSetDigest: digest, lockfileDigest: LOCK, broadcastAttempted: false } }),
+        config({ expected: { recordDigest: RECORD, walletSetDigest: digest, lockfileDigest: LOCK }, ...cfgOver }),
+      );
+    };
+    const one = (balanceWei: string) => [{ address: W1, balanceWei }];
+
     it('refuses a chain with no configured ceiling', () => {
       expect(refusal(evidence({ chainId: 8453 }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_NO_BALANCE_CEILING_FOR_CHAIN');
       expect(refusal(evidence(), config({ ceilings: { 1: { walletMaxWei: 0n, fleetMaxWei: 0n } } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_NO_BALANCE_CEILING_FOR_CHAIN');
     });
 
     it('refuses a wallet above the idle ceiling and a fleet above the fleet ceiling', () => {
-      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [{ address: W1, balanceWei: '400000000000001' }] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
-      const wallets = Array.from({ length: 6 }, (_, index) => ({ address: `0x${String(index + 1).repeat(40)}`, balanceWei: '400000000000000' }));
-      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_FLEET_ABOVE_LIMIT');
+      expect(fleet(one('400000000000001'))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+      const six = Array.from({ length: 6 }, (_, index) => ({ address: `0x${String(index + 1).repeat(40)}`, balanceWei: '400000000000000' }));
+      expect(fleet(six)).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_FLEET_ABOVE_LIMIT');
     });
 
     it('allows exactly the ceiling', () => {
-      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [{ address: W1, balanceWei: '400000000000000' }] } }))).toBe('ACCEPTED');
+      expect(fleet(one('400000000000000'))).toBe('ACCEPTED');
+    });
+
+    it('refuses balances that do not cover exactly the signed wallet set (a subset cannot understate the fleet)', () => {
+      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: one('0') } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_SET_MISMATCH');
+      const extra = [{ address: W1, balanceWei: '0' }, { address: W2, balanceWei: '0' }, { address: '0x3333333333333333333333333333333333333333', balanceWei: '0' }];
+      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: extra } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_SET_MISMATCH');
     });
 
     it('refuses stale, future, expired or malformed observations', () => {
-      expect(refusal(evidence({ balances: { observedAt: iso(-11 * MIN), expiresAt: iso(9 * MIN), wallets: [{ address: W1, balanceWei: '0' }] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_STALE');
-      expect(refusal(evidence({ balances: { observedAt: iso(MIN), expiresAt: iso(9 * MIN), wallets: [{ address: W1, balanceWei: '0' }] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_STALE');
-      expect(refusal(evidence({ balances: { observedAt: iso(-2 * MIN), expiresAt: iso(-MIN), wallets: [{ address: W1, balanceWei: '0' }] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_STALE');
-      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [{ address: W1, balanceWei: '-1' }] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_INVALID_BALANCE');
-      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [{ address: 'nope', balanceWei: '0' }] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_INVALID_WALLET');
+      expect(fleet(one('0'), {}, iso(-11 * MIN))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_STALE');
+      expect(fleet(one('0'), {}, iso(MIN))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_STALE');
+      expect(fleet(one('0'), {}, iso(-2 * MIN), iso(-MIN))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_STALE');
+      expect(fleet(one('-1'))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_INVALID_BALANCE');
+      expect(fleet([{ address: 'nope', balanceWei: '0' }])).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_INVALID_WALLET');
       expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_NO_WALLETS_OBSERVED');
-      expect(refusal(evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [{ address: W1, balanceWei: '0' }, { address: W1.toUpperCase().replace('0X', '0x'), balanceWei: '0' }] } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_DUPLICATE_WALLET');
+      expect(fleet([{ address: W1, balanceWei: '0' }, { address: W1.toUpperCase().replace('0X', '0x'), balanceWei: '0' }])).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_DUPLICATE_WALLET');
     });
 
-    it('lets a funded run hold its own envelope above the idle ceiling but never above it, and never carries excess into the envelope', () => {
-      const high = (balance: string) => evidence({ balances: { observedAt: iso(-MIN), expiresAt: iso(9 * MIN), wallets: [{ address: W1, balanceWei: balance }] } });
-      const envelope = config({ runEnvelopeWei: { [W1]: '900000000000000' } });
-      expect(refusal(high('900000000000000'), envelope)).toBe('ACCEPTED');
-      expect(refusal(high('900000000000001'), envelope)).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
-      expect(refusal(high('900000000000000'), config())).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
-      // an envelope smaller than the idle ceiling never lowers the idle ceiling and an unrelated wallet gets no envelope
-      expect(refusal(high('400000000000000'), config({ runEnvelopeWei: { [W1]: '1' } }))).toBe('ACCEPTED');
-      expect(refusal(high('900000000000000'), config({ runEnvelopeWei: { [W2]: '900000000000000' } }))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+    it('lets a funded run hold its own envelope above the idle ceiling but never above the chain bound, and never lowers the idle ceiling', () => {
+      const bounded = { 1: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n, runEnvelopeMaxWei: 1_000_000_000_000_000n } };
+      const withEnvelope = { ceilings: bounded, runEnvelopeWei: { [W1]: '900000000000000' } };
+      expect(fleet(one('900000000000000'), withEnvelope)).toBe('ACCEPTED');
+      expect(fleet(one('900000000000001'), withEnvelope)).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+      expect(fleet(one('900000000000000'))).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+      // an envelope request above the chain's hard bound is clipped to the bound
+      expect(fleet(one('1000000000000000'), { ceilings: bounded, runEnvelopeWei: { [W1]: '5000000000000000' } })).toBe('ACCEPTED');
+      expect(fleet(one('1000000000000001'), { ceilings: bounded, runEnvelopeWei: { [W1]: '5000000000000000' } })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+      // without a configured hard bound an envelope cannot raise the idle ceiling at all
+      expect(fleet(one('400000000000001'), { runEnvelopeWei: { [W1]: '900000000000000' } })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
+      expect(fleet(one('400000000000000'), { ceilings: bounded, runEnvelopeWei: { [W1]: '1' } })).toBe('ACCEPTED');
+      expect(fleet(one('900000000000000'), { ceilings: bounded, runEnvelopeWei: { [W2]: '900000000000000' } })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_WALLET_ABOVE_LIMIT');
     });
   });
 
@@ -191,8 +213,9 @@ describe('turnkey-compensating-controls (D-058, D-059)', () => {
       compensatingControls: evidence(),
       ...over,
     });
-    const check = (value: CustodyReadiness, ctx?: Parameters<typeof assertCustodyReadiness>[4]): string => {
-      try { assertCustodyReadiness(value, NOW, undefined, undefined, ctx); } catch (error) { return (error as Error).message; }
+    const binding = { provider: 'turnkey' as const, providerIdentity: 'turnkey-org', policyReference: 'turnkey:policy-1', policyDigest: `0x${'1'.repeat(64)}` };
+    const check = (value: CustodyReadiness, ctx?: Parameters<typeof assertCustodyReadiness>[4], expected: typeof binding | null = binding): string => {
+      try { assertCustodyReadiness(value, NOW, expected ?? undefined, undefined, ctx); } catch (error) { return (error as Error).message; }
       return 'ACCEPTED';
     };
     const accepted = { config: config(), chainId: 1, wallets: [W1, W2] };
@@ -200,6 +223,15 @@ describe('turnkey-compensating-controls (D-058, D-059)', () => {
     it('is refused unless the service explicitly accepts the compensated kind', () => {
       expect(check(custody())).toBe('CUSTODY_COMPENSATING_ASSURANCE_NOT_ACCEPTED');
       expect(check(custody(), accepted)).toBe('ACCEPTED');
+    });
+
+    it('requires the expected policy binding for the compensated kind, and still enforces it', () => {
+      expect(check(custody(), accepted, null)).toBe('CUSTODY_EXPECTED_POLICY_REQUIRED');
+      expect(check(custody(), accepted, { ...binding, policyDigest: `0x${'2'.repeat(64)}` })).toBe('CUSTODY_POLICY_MISMATCH');
+    });
+
+    it('refuses an empty armed wallet list (nothing would be checked)', () => {
+      expect(check(custody(), { ...accepted, wallets: [] })).toBe('COMPENSATING_CONTROL_WALLETS_REQUIRED');
     });
 
     it('is never accepted as TVC verified, or for another provider, or under an unknown kind', () => {

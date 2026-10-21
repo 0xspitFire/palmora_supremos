@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   COMPENSATING_CONTROL_IDS,
+  computeWalletSetDigest,
   evaluateCompensatingControls,
   type CompensatingAssuranceConfig,
   type CompensatingControlsEvidence,
@@ -13,20 +14,12 @@ import {
  * D-058 / D-059 evidence assembly for `turnkey-compensating-controls`. Everything here is read-only except
  * `engageKillSwitchFile`, which only ever makes the system safer. Nothing here signs, broadcasts, funds or enables anything.
  */
-const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 
 export const sha256Hex = (data: string | Uint8Array): string => createHash('sha256').update(data).digest('hex');
 
-/** Digest of the exact wallet set: sorted lowercase addresses joined by newlines. */
-export function walletSetDigest(addresses: readonly string[]): string {
-  const normalized = [...new Set(addresses.map((address) => {
-    if (!ADDRESS.test(address)) throw new Error('COMPENSATING_WALLET_ADDRESS_INVALID');
-    return address.toLowerCase();
-  }))].sort();
-  if (normalized.length === 0) throw new Error('COMPENSATING_WALLET_SET_EMPTY');
-  return `sha256:${sha256Hex(normalized.join('\n'))}`;
-}
+/** Digest of the exact wallet set (same function the arm gate uses). */
+export const walletSetDigest = computeWalletSetDigest;
 
 /** Digest of the dependency lockfile at the project root, so an SDK or provider-library change invalidates the rehearsal. */
 export async function lockfileDigest(projectRoot: string): Promise<string> {
@@ -102,7 +95,9 @@ export async function probeOrEngageKillSwitch(
     if (report.status !== 'ok') throw new Error('TURNKEY_PROBE_NOT_OK');
     return { observedAt: now().toISOString(), status: 'ok', policyRecordDigest: report.policyRecordDigest };
   } catch (error) {
-    await engage(`provider-probe-failed:${error instanceof Error ? error.message.slice(0, 80) : 'unknown'}`).catch(() => undefined);
+    // A fixed reason code only: provider error text is never written to the kill-switch file.
+    void error;
+    await engage('provider-probe-failed').catch(() => undefined);
     throw new Error('TURNKEY_PROVIDER_DRIFT_KILL_SWITCH_ENGAGED');
   }
 }

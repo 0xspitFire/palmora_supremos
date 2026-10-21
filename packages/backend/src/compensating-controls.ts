@@ -8,6 +8,8 @@
  *
  * Wei amounts travel as decimal strings so the evidence survives JSON persistence.
  */
+import { createHash } from 'node:crypto';
+
 export const COMPENSATING_ASSURANCE_KIND = 'turnkey-compensating-controls' as const;
 
 export const COMPENSATING_CONTROL_IDS = [
@@ -27,7 +29,22 @@ export const COMPENSATING_OBSERVATION_MAX_AGE_MS = 10 * 60 * 1000;
 export const TRUST_CENTER_REVIEW_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 export const TRUST_CENTER_REVIEW_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
-export interface BalanceCeiling { walletMaxWei: bigint; fleetMaxWei: bigint }
+export interface BalanceCeiling {
+  walletMaxWei: bigint;
+  fleetMaxWei: bigint;
+  /** Hard upper bound for any per-wallet run envelope (D-059 item 3). Absent means no envelope may raise the idle ceiling. */
+  runEnvelopeMaxWei?: bigint;
+}
+
+/** Digest of the exact wallet set: sorted lowercase unique addresses joined by newlines. */
+export function computeWalletSetDigest(addresses: readonly string[]): string {
+  const normalized = [...new Set(addresses.map((address) => {
+    if (!ADDRESS.test(address)) throw new Error('COMPENSATING_WALLET_ADDRESS_INVALID');
+    return address.toLowerCase();
+  }))].sort();
+  if (normalized.length === 0) throw new Error('COMPENSATING_WALLET_SET_EMPTY');
+  return `sha256:${createHash('sha256').update(normalized.join('\n')).digest('hex')}`;
+}
 /** Per chain id, in that chain's native unit. A chain with no entry cannot arm. */
 export type BalanceCeilings = Readonly<Record<number, BalanceCeiling>>;
 
@@ -82,6 +99,14 @@ function bigintOf(value: unknown): bigint | undefined {
   return typeof value === 'string' && DECIMAL.test(value) ? BigInt(value) : undefined;
 }
 
+/** A run envelope can raise one wallet above the idle ceiling, but never above the chain's own hard envelope bound. */
+function walletLimitFor(config: CompensatingAssuranceConfig, ceiling: BalanceCeiling, address: string): bigint {
+  const envelope = bigintOf(config.runEnvelopeWei?.[address]);
+  if (envelope === undefined || envelope <= ceiling.walletMaxWei) return ceiling.walletMaxWei;
+  const bound = ceiling.runEnvelopeMaxWei ?? ceiling.walletMaxWei;
+  return envelope < bound ? envelope : bound;
+}
+
 function checkBalances(evidence: CompensatingControlsEvidence, config: CompensatingAssuranceConfig, now: number): string | undefined {
   const ceiling = config.ceilings[evidence.chainId];
   if (!ceiling || ceiling.walletMaxWei <= 0n || ceiling.fleetMaxWei <= 0n) return 'NO_BALANCE_CEILING_FOR_CHAIN';
@@ -101,18 +126,16 @@ function checkBalances(evidence: CompensatingControlsEvidence, config: Compensat
     seen.add(address);
     const balance = bigintOf(wallet.balanceWei);
     if (balance === undefined) return 'INVALID_BALANCE';
-    const envelope = bigintOf(config.runEnvelopeWei?.[address]);
-    const walletLimit = envelope !== undefined && envelope > ceiling.walletMaxWei ? envelope : ceiling.walletMaxWei;
+    const walletLimit = walletLimitFor(config, ceiling, address);
     if (balance > walletLimit) return 'WALLET_ABOVE_LIMIT';
     fleet += balance;
   }
+  // The balances must cover exactly the owner-signed wallet set, so a subset cannot understate the fleet total.
+  if (computeWalletSetDigest([...seen]) !== config.expected.walletSetDigest.toLowerCase()) return 'WALLET_SET_MISMATCH';
   let fleetLimit = ceiling.fleetMaxWei;
   if (config.runEnvelopeWei) {
     let envelopeTotal = 0n;
-    for (const address of seen) {
-      const envelope = bigintOf(config.runEnvelopeWei[address]);
-      envelopeTotal += envelope !== undefined && envelope > ceiling.walletMaxWei ? envelope : ceiling.walletMaxWei;
-    }
+    for (const address of seen) envelopeTotal += walletLimitFor(config, ceiling, address);
     if (envelopeTotal > fleetLimit) fleetLimit = envelopeTotal;
   }
   if (fleet > fleetLimit) return 'FLEET_ABOVE_LIMIT';
@@ -211,6 +234,7 @@ export function assertCompensatingControls(evidence: CompensatingControlsEvidenc
   if (typeof evidence.chainId !== 'number' || !Number.isInteger(evidence.chainId)) throw new Error('COMPENSATING_CONTROL_CHAIN_REQUIRED');
   if (context.chainId !== undefined && evidence.chainId !== context.chainId) throw new Error('COMPENSATING_CONTROL_CHAIN_MISMATCH');
   if (context.wallets) {
+    if (context.wallets.length === 0) throw new Error('COMPENSATING_CONTROL_WALLETS_REQUIRED');
     const observed = new Set((evidence.balances?.wallets ?? []).map((wallet) => String(wallet?.address).toLowerCase()));
     if (context.wallets.some((wallet) => !observed.has(wallet.toLowerCase()))) throw new Error('COMPENSATING_CONTROL_WALLET_NOT_COVERED');
   }
