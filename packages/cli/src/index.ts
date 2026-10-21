@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createPublicKey, randomBytes } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
+import { type Address, type Hex, encodeFunctionData, http, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, isSecureTurnkeyFileAccess, readTurnkeySecretConfig, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
@@ -15,7 +15,8 @@ import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
-import { resolveChainByNameFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
+import { resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
+import { buildCompensatingEvidence, createTrustCenterRecord, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, parseTrustCenterRecord, probeOrEngageKillSwitch, walletSetDigest } from './compensating-controls-cli.js';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
@@ -519,6 +520,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           organizationId: health.organizationId,
           policyId: health.policyId,
           policyRecordDigest: digest,
+          walletSetDigest: walletSetDigest(record.wallets.map((entry) => entry.address)),
+          lockfileDigest: await lockfileDigest(runtimeRoot),
           walletAddress: wallet.address,
           activityId: result.evidence.activityId,
           activityFingerprint: result.evidence.activityFingerprint,
@@ -529,6 +532,66 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const output = turnkeySecretPath(args.evidenceOutput, 'turnkey-signing-rehearsal.json');
         await writeTurnkeyJson(output, evidence);
         process.stdout.write(`${JSON.stringify({ ok: true, output, ...evidence })}\n`);
+      } catch (error) { printError(error); } finally { signer?.zeroize(); }
+    })
+  .command('trust-center-record', 'Record the quarterly Turnkey Trust Center review (names, dates and SHA-256 digests only; D-058 control 6)', (args) => args
+    .option('document', { type: 'string', array: true, demandOption: true, description: 'NAME::YYYY-MM-DD::path-to-the-downloaded-document (repeat for each document)' })
+    .option('reviewed-at', { type: 'string', description: 'ISO time of the review; default now' })
+    .option('output', { type: 'string' }), async (args) => {
+      try {
+        const documents = [];
+        for (const entry of args.document as string[]) {
+          const parts = entry.split('::');
+          if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) throw new Error('TRUST_CENTER_DOCUMENT_ARGUMENT_INVALID');
+          documents.push({ name: parts[0], date: parts[1], bytes: new Uint8Array(await readFile(resolve(parts[2]))) });
+        }
+        const record = createTrustCenterRecord({ reviewedAt: args.reviewedAt ?? new Date().toISOString(), documents });
+        const output = turnkeySecretPath(args.output, 'turnkey-trust-center-review.json');
+        await writeTurnkeyJson(output, record);
+        process.stdout.write(`${JSON.stringify({ ok: true, output, reviewedAt: record.reviewedAt, documents: record.documents.map((document) => ({ name: document.name, date: document.date, sha256: document.sha256 })) })}\n`);
+      } catch (error) { printError(error); }
+    })
+  .command('compensating-controls-status', 'Check all seven D-058 controls now (read-only; a failed provider check engages the kill switch)', (args) => args
+    .option('chain-id', { type: 'number', demandOption: true, choices: [1, 8453, 4663] })
+    .option('wallet-ceiling-wei', { type: 'string', default: '400000000000000' })
+    .option('fleet-ceiling-wei', { type: 'string', default: '2000000000000000' })
+    .option('rehearsal', { type: 'string' })
+    .option('trust-center', { type: 'string' }), async (args) => {
+      let signer: TurnkeySigner | undefined;
+      try {
+        if (!/^\d{1,30}$/.test(args.walletCeilingWei) || !/^\d{1,30}$/.test(args.fleetCeilingWei)) throw new Error('BALANCE_CEILING_INVALID');
+        const secretRoot = configuredSecretRoot(runtimeRoot);
+        const config = await readTurnkeySecretConfig(secretRoot);
+        const signed = JSON.parse(await readTurnkeyRuntimeText(config.policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown;
+        const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+        const record = verifyTurnkeySignedPolicyRecord(signed, publicKey);
+        const digest = turnkeyPolicyRecordDigest(record);
+        signer = await TurnkeySigner.fromSecrets('mainnet', secretRoot);
+        const killPath = resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE);
+        const probe = await probeOrEngageKillSwitch(async () => { const health = await signer!.probe(); return { status: health.status, policyRecordDigest: health.policyRecordDigest }; }, (reason) => engageKillSwitchFile(killPath, reason));
+        const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
+        const endpoint = chain.rpcEndpoints[0];
+        if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
+        const client = createPublicClient({ transport: http(endpoint) });
+        const addresses = record.wallets.map((entry) => entry.address);
+        const balances = [];
+        for (const address of addresses) balances.push({ address, balanceWei: await client.getBalance({ address: address as Address }) });
+        const rehearsal = await readFile(turnkeySecretPath(args.rehearsal, 'turnkey-signing-rehearsal.json'), 'utf8').then((text) => parseRehearsalEvidence(JSON.parse(text))).catch(() => undefined);
+        const trustCenter = await readFile(turnkeySecretPath(args.trustCenter, 'turnkey-trust-center-review.json'), 'utf8').then((text) => parseTrustCenterRecord(JSON.parse(text))).catch(() => undefined);
+        const now = new Date();
+        const evidence = buildCompensatingEvidence({
+          chainId: args.chainId,
+          record: { digest, issuedAt: record.issuedAt, expiresAt: record.expiresAt, wallets: addresses },
+          lockfileDigest: await lockfileDigest(runtimeRoot),
+          probe,
+          balances,
+          ...(rehearsal ? { rehearsal } : {}),
+          ...(trustCenter ? { trustCenter } : {}),
+          now,
+        });
+        const status = evaluateStatus(evidence, { ceilings: { [args.chainId]: { walletMaxWei: BigInt(args.walletCeilingWei), fleetMaxWei: BigInt(args.fleetCeilingWei) } }, expected: { recordDigest: digest, walletSetDigest: walletSetDigest(addresses), lockfileDigest: evidence.lockfileDigest } }, now);
+        process.stdout.write(`${status.text}\n`);
+        if (!status.valid) process.exitCode = 1;
       } catch (error) { printError(error); } finally { signer?.zeroize(); }
     })
   .command('approve', 'Persist explicit campaign approval', (args) => args

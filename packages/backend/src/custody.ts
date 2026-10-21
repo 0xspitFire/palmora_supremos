@@ -1,4 +1,5 @@
 import type { OperationalReadiness } from './types.js';
+import { COMPENSATING_ASSURANCE_KIND, assertCompensatingControls, type CompensatingAssuranceContext, type CompensatingControlsEvidence } from './compensating-controls.js';
 
 export type ApprovedCustodyProvider = 'turnkey' | 'kms';
 export type CustodyProvider = ApprovedCustodyProvider | 'local' | 'local-personal-live' | 'custom';
@@ -24,6 +25,9 @@ export interface CustodyReadiness {
   confirmedBy?: string;
   /** Required for attended Base custody so Ethereum evidence cannot be replayed cross-chain. */
   chainId?: 1 | 8453;
+  /** D-058/D-059. Absent means the legacy TVC attestation path. The compensated profile is a different kind and is never TVC verified. */
+  assuranceKind?: typeof COMPENSATING_ASSURANCE_KIND;
+  compensatingControls?: CompensatingControlsEvidence;
 }
 
 /** Where a live run is happening, so a `local-personal-live` record can be judged against it (D-043). */
@@ -82,6 +86,7 @@ export function assertCustodyReadiness(
   now = new Date(),
   expected?: CustodyPolicyBinding,
   personalLive?: PersonalLiveContext,
+  compensating?: CompensatingAssuranceContext,
 ): void {
   if (!evidence) throw new Error('CUSTODY_EVIDENCE_REQUIRED');
   if (evidence.provider === 'local-personal-live') { assertPersonalLiveLocalCustody(evidence, now, expected, personalLive); return; }
@@ -93,7 +98,15 @@ export function assertCustodyReadiness(
   if (!DIGEST.test(evidence.policyDigest)) throw new Error('CUSTODY_POLICY_DIGEST_REQUIRED');
   if (evidence.policyStatus !== 'approved') throw new Error('CUSTODY_POLICY_NOT_APPROVED');
   if (evidence.healthStatus !== 'healthy') throw new Error('CUSTODY_HEALTH_NOT_READY');
-  if (evidence.attestationStatus !== 'verified') throw new Error('CUSTODY_ATTESTATION_REQUIRED');
+  if (evidence.assuranceKind === COMPENSATING_ASSURANCE_KIND) {
+    // D-058/D-059: a different assurance kind. It must be explicitly accepted by the caller, may only describe Turnkey custody,
+    // never claims TVC verification, and needs every one of the seven controls to be current.
+    if (evidence.provider !== 'turnkey') throw new Error('CUSTODY_COMPENSATING_ASSURANCE_PROVIDER_MISMATCH');
+    if (evidence.attestationStatus === 'verified') throw new Error('CUSTODY_COMPENSATED_MUST_NOT_CLAIM_TVC');
+    assertCompensatingControls(evidence.compensatingControls, compensating, now);
+  } else if (evidence.assuranceKind !== undefined) {
+    throw new Error('CUSTODY_ASSURANCE_KIND_UNKNOWN');
+  } else if (evidence.attestationStatus !== 'verified') throw new Error('CUSTODY_ATTESTATION_REQUIRED');
   assertReference(evidence.evidenceId, 'CUSTODY_EVIDENCE_ID_REQUIRED');
   if (!validTimestamp(evidence.observedAt) || !validTimestamp(evidence.expiresAt)) throw new Error('CUSTODY_EVIDENCE_TIME_INVALID');
   const observed = Date.parse(evidence.observedAt);
@@ -110,10 +123,11 @@ export function assertLiveOperationalReadiness(
   now = new Date(),
   expected?: CustodyPolicyBinding,
   personalLive?: PersonalLiveContext,
+  compensating?: CompensatingAssuranceContext,
 ): void {
   if (!operational) throw new Error('RUNTIME_READINESS_REQUIRED');
   if (operational.signerReady !== true) throw new Error('SIGNER_NOT_READY');
-  assertCustodyReadiness(operational.custody, now, expected, personalLive);
+  assertCustodyReadiness(operational.custody, now, expected, personalLive, compensating);
   if (operational.killSwitchEngaged) throw new Error('KILL_SWITCH_ENGAGED');
   if (!operational.notificationReady) throw new Error('NOTIFICATION_NOT_READY');
   if (operational.chainVerification !== 'verified') throw new Error('CHAIN_VERIFICATION_REQUIRED');
