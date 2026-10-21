@@ -286,6 +286,22 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
 }
 
 /**
+ * Lifecycle persistence records both the signed transaction and every provider
+ * response. A signed and an accepted attempt can therefore describe the same
+ * canonical transaction. Reconciliation observes that transaction once and
+ * prefers the provider-facing attempt as the receipt linkage.
+ */
+export function uniqueSubmittedAttempts(attempts: readonly AttemptRecord[]): AttemptRecord[] {
+  const unique = new Map<string, AttemptRecord>();
+  for (const attempt of attempts) {
+    const key = `${attempt.executionId}:${attempt.nonce ?? 'unknown'}:${attempt.hash?.toLowerCase() ?? attempt.id}`;
+    const existing = unique.get(key);
+    if (!existing || (existing.state === 'Signed' && attempt.state !== 'Signed')) unique.set(key, attempt);
+  }
+  return [...unique.values()];
+}
+
+/**
  * Pre-sign guard (T-010, D-019): the transaction the engine is about to sign must match what was
  * admitted. Its value must equal the admitted price × quantity, and value plus worst-case gas must fit
  * inside the durable reservation. A price change or fee rise after admission refuses signing
@@ -420,7 +436,7 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
         const updatedAttempts: AttemptRecord[] = [];
         const receipts: ReceiptRecord[] = [];
         let weakest: 'soft' | 'posted' | 'final' = 'final';
-        for (const attempt of attempts) {
+        for (const attempt of uniqueSubmittedAttempts(attempts)) {
           if (!attempt.hash || attempt.nonce === undefined) continue;
           try {
             const hash = attempt.hash as Hash;
