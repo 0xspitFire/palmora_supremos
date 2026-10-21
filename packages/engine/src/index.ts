@@ -77,8 +77,8 @@ export {
 // Signer
 export { LocalEncryptedSigner, generateAndEncryptWallets, importAndEncryptWallets, zeroizePrivateKeyArray } from './signer.js';
 export type { WalletImportRecord } from './signer.js';
-export { TurnkeySigner, createTurnkeyClient, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyWalletMap } from './turnkey-signer.js';
-export type { TurnkeyClient, TurnkeyHealthReport, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
+export { TurnkeySigner, createTurnkeyClient, isSecureTurnkeyFileAccess, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyWalletMap } from './turnkey-signer.js';
+export type { TurnkeyClient, TurnkeyHealthReport, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeySigningActivity, TurnkeySigningEvidence, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
 export {
   canonicalPolicyDigest,
   canonicalPolicyJson,
@@ -99,6 +99,30 @@ export type {
   TurnkeyPolicyTransaction,
   TurnkeyProviderBinding,
 } from './turnkey-policy.js';
+export {
+  canonicalTurnkeyPolicyRecordJson,
+  createTurnkeyPolicyRecord,
+  projectTurnkeyProviderIdentity,
+  projectTurnkeyProviderKey,
+  projectTurnkeyProviderPolicy,
+  signTurnkeyPolicyRecord,
+  turnkeyPolicyApproverKeyId,
+  turnkeyPolicyRecordDigest,
+  validateTurnkeyActualProviderState,
+  validateTurnkeyCanonicalPolicyRecord,
+  verifyTurnkeySignedPolicyRecord,
+} from './turnkey-policy-record.js';
+export type {
+  TurnkeyActualProviderState,
+  TurnkeyCanonicalPolicyRecord,
+  TurnkeyPolicyRecordWallet,
+  TurnkeyProviderAddressProjection,
+  TurnkeyProviderIdentityProjection,
+  TurnkeyProviderKeyProjection,
+  TurnkeyProviderPolicyProjection,
+  TurnkeyProviderTimestamp,
+  TurnkeySignedPolicyRecord,
+} from './turnkey-policy-record.js';
 export { importPrivateKeyToTurnkey, validateImportedTurnkeyKey } from './turnkey-import.js';
 export type { TurnkeyImportBinding, TurnkeyImportClient, TurnkeyPrivateKeyImport } from './turnkey-import.js';
 

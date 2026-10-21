@@ -1,8 +1,8 @@
 [Unit]
-Description=Run MintBot encrypted SQLite backup daily
+Description=Run MintBot encrypted SQLite backup every six hours
 
 [Timer]
-OnCalendar=*-*-* 03:15:00 UTC
+OnCalendar=*-*-* 00,06,12,18:15:00 UTC
 Persistent=true
 RandomizedDelaySec=15m
 Unit=mint-bot-backup.service

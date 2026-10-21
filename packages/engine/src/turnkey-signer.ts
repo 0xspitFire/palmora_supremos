@@ -14,16 +14,20 @@ import { Turnkey } from '@turnkey/sdk-server';
 import type { SecretScope } from './secrets.js';
 import type { Signer, TransactionIntent, WalletInfo } from './types.js';
 import {
+  turnkeyPolicyRecordDigest,
+  validateTurnkeyActualProviderState,
+  validateTurnkeyCanonicalPolicyRecord,
+  verifyTurnkeySignedPolicyRecord,
+  type TurnkeyCanonicalPolicyRecord,
+} from './turnkey-policy-record.js';
+import {
   canonicalPolicyDigest,
   normalizeAccessList,
   normalizeHexBytes,
   turnkeyPolicyRef,
-  validateKeyInventory,
   validatePolicyBinding,
   validateTransactionIntent,
-  validateTurnkeyPolicyAst,
   type TurnkeyEnvironment,
-  type TurnkeyKeyInventory,
   type TurnkeyPolicyAst,
   type TurnkeyProviderBinding,
 } from './turnkey-policy.js';
@@ -35,13 +39,8 @@ export interface TurnkeyWalletReference {
 }
 
 export interface TurnkeyWalletMap {
-  version: 1;
-  organizationId: string;
-  userId: string;
-  environment: TurnkeyEnvironment;
-  policyId: string;
-  policyDigest: Hex;
-  policy: TurnkeyPolicyAst;
+  version: 2;
+  policyRecordDigest: `sha256:${string}`;
   wallets: TurnkeyWalletReference[];
 }
 
@@ -52,6 +51,8 @@ export interface TurnkeySecretConfig {
   apiPrivateKey: string;
   userId: string;
   walletMapPath: string;
+  policyRecordPath: string;
+  policyApproverPublicKeyPath: string;
   appName?: string;
   attestationPath?: string;
   attestationActivityId?: string;
@@ -63,10 +64,27 @@ export interface TurnkeySignerClient {
     unsignedTransaction: string;
     type: 'TRANSACTION_TYPE_ETHEREUM';
     generateAppProofs?: boolean;
-  }): Promise<{ signedTransaction: string }>;
-  getWhoami(input?: { organizationId?: string }): Promise<{ organizationId: string; userId?: string; environment?: TurnkeyEnvironment }>;
-  getPolicies?(input: { organizationId: string }): Promise<{ policies: Array<{ policyId: string; effect?: string; condition?: string; digest?: Hex; ast?: unknown; providerBinding?: TurnkeyProviderBinding }> }>;
-  getPrivateKeys?(input: { organizationId: string }): Promise<{ organizationId?: string; userId?: string; environment?: TurnkeyEnvironment; privateKeys: Array<{ privateKeyId: string; addresses: Array<{ format?: string; address?: string }>; organizationId?: string; userId?: string; environment?: TurnkeyEnvironment }> }>;
+  }): Promise<{ signedTransaction: string; activity: TurnkeySigningActivity }>;
+  getWhoami(input?: { organizationId?: string }): Promise<unknown>;
+  getPolicies(input: { organizationId: string }): Promise<{ policies: unknown[] }>;
+  getPrivateKeys(input: { organizationId: string }): Promise<{ privateKeys: unknown[] }>;
+}
+
+export interface TurnkeySigningActivity {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly status: string;
+  readonly type: string;
+  readonly fingerprint: string;
+  readonly appProofs?: readonly unknown[];
+  readonly intent: { readonly signTransactionIntentV2?: { readonly signWith?: string; readonly unsignedTransaction?: string; readonly type?: string } };
+  readonly result: { readonly signTransactionResult?: { readonly signedTransaction?: string } };
+}
+
+export interface TurnkeySigningEvidence {
+  readonly activityId: string;
+  readonly activityFingerprint: string;
+  readonly appProofCount: number;
 }
 
 export interface TurnkeyClient extends TurnkeySignerClient {
@@ -86,6 +104,13 @@ export interface TurnkeyClient extends TurnkeySignerClient {
   }): Promise<{
     privateKeyId: string;
     addresses: Array<{ format?: string; address?: string }>;
+    activity: {
+      organizationId: string;
+      status: string;
+      type: string;
+      intent: { importPrivateKeyIntent?: { userId?: string } };
+      result: { importPrivateKeyResult?: { privateKeyId?: string; addresses?: Array<{ format?: string; address?: string }> } };
+    };
   }>;
   getActivities(input: {
     organizationId: string;
@@ -100,10 +125,7 @@ export interface TurnkeySignerOptions {
   environment: TurnkeyEnvironment;
   userId: string;
   wallets: readonly TurnkeyWalletReference[];
-  policyId: string;
-  policyDigest: Hex;
-  policy: TurnkeyPolicyAst;
-  providerBinding?: TurnkeyProviderBinding;
+  policyRecord: TurnkeyCanonicalPolicyRecord;
   client: TurnkeySignerClient;
   generateAppProofs?: boolean;
 }
@@ -115,8 +137,7 @@ export interface TurnkeyHealthReport {
   walletCount: number;
   policyId: string;
   policyDigest: Hex;
-  policy: TurnkeyPolicyAst;
-  providerBinding: TurnkeyProviderBinding;
+  policyRecordDigest: `sha256:${string}`;
 }
 
 export function createTurnkeyClient(
@@ -148,7 +169,9 @@ async function readOwnerOnlyFile(path: string, errorCode: string): Promise<strin
     await assertNoSymlinkParents(path, errorCode);
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const file = await handle.stat();
-    if (!file.isFile() || (file.mode & 0o077) !== 0) throw new Error(errorCode);
+    const runtimeUid = typeof process.geteuid === 'function' ? process.geteuid() : process.getuid?.();
+    const runtimeGroups = typeof process.getgroups === 'function' ? process.getgroups() : [];
+    if (!file.isFile() || runtimeUid === undefined || !isSecureTurnkeyFileAccess(file, runtimeUid, runtimeGroups)) throw new Error(errorCode);
     return await handle.readFile('utf8');
   } catch (error) {
     if (error instanceof Error && error.message === errorCode) throw error;
@@ -156,6 +179,16 @@ async function readOwnerOnlyFile(path: string, errorCode: string): Promise<strin
   } finally {
     if (handle) await handle.close().catch(() => undefined);
   }
+}
+
+/** Local owner-only files and production root-owned/group-readable files are accepted; writable group/world modes are rejected. */
+export function isSecureTurnkeyFileAccess(file: { mode: number; uid: number; gid: number }, runtimeUid: number, runtimeGroups: readonly number[]): boolean {
+  const permissions = file.mode & 0o777;
+  if (file.uid === runtimeUid) return (permissions & 0o077) === 0 && (permissions & 0o400) !== 0;
+  return file.uid === 0
+    && runtimeGroups.includes(file.gid)
+    && (permissions & 0o037) === 0
+    && (permissions & 0o040) !== 0;
 }
 
 async function assertNoSymlinkParents(path: string, errorCode: string): Promise<void> {
@@ -198,11 +231,15 @@ export async function readTurnkeySecretConfig(root = 'Rets', scope: SecretScope 
   const userId = values.get('TURNKEY_USER_ID');
   const walletMapReference = values.get('TURNKEY_WALLET_MAP_PATH');
   const walletMapPath = walletMapReference ? expandPath(walletMapReference) : undefined;
+  const policyRecordReference = values.get('TURNKEY_POLICY_RECORD_PATH');
+  const policyRecordPath = expandPath(policyRecordReference ?? resolve(secretRoot, 'turnkey-policy-record.json'));
+  const approverKeyReference = values.get('TURNKEY_POLICY_APPROVER_PUBLIC_KEY_PATH');
+  const policyApproverPublicKeyPath = expandPath(approverKeyReference ?? resolve(secretRoot, 'turnkey-policy-approver.pub'));
   const attestationReference = values.get('TURNKEY_ATTESTATION_PATH');
   const attestationPath = attestationReference ? expandPath(attestationReference) : undefined;
   const attestationActivityId = values.get('TURNKEY_ATTESTATION_ACTIVITY_ID');
   if (!organizationId || !apiPublicKey || !apiPrivateKey || !userId || !walletMapPath) throw new Error('TURNKEY_SECRET_REQUIRED');
-  if (!pathWithin(secretRoot, walletMapPath) || (attestationPath && !pathWithin(secretRoot, attestationPath))) throw new Error('TURNKEY_SECRET_PATH_INVALID');
+  if (!pathWithin(secretRoot, walletMapPath) || !pathWithin(secretRoot, policyRecordPath) || !pathWithin(secretRoot, policyApproverPublicKeyPath) || (attestationPath && !pathWithin(secretRoot, attestationPath))) throw new Error('TURNKEY_SECRET_PATH_INVALID');
   return {
     organizationId,
     environment: scope === 'mainnet' ? 'production' : 'testnet',
@@ -210,6 +247,8 @@ export async function readTurnkeySecretConfig(root = 'Rets', scope: SecretScope 
     apiPrivateKey,
     userId,
     walletMapPath,
+    policyRecordPath,
+    policyApproverPublicKeyPath,
     ...(values.get('TURNKEY_APP_NAME') ? { appName: values.get('TURNKEY_APP_NAME') } : {}),
     ...(attestationPath ? { attestationPath } : {}),
     ...(attestationActivityId ? { attestationActivityId } : {}),
@@ -228,15 +267,11 @@ export function validateTurnkeyWalletMap(value: unknown): TurnkeyWalletMap {
   if (!value || typeof value !== 'object') throw new Error('TURNKEY_WALLET_MAP_INVALID');
   const candidate = value as Partial<TurnkeyWalletMap>;
   if (
-    candidate.version !== 1
+    candidate.version !== 2
     || !Array.isArray(candidate.wallets)
     || candidate.wallets.length === 0
-    || typeof candidate.organizationId !== 'string'
-    || typeof candidate.userId !== 'string'
-    || (candidate.environment !== 'production' && candidate.environment !== 'testnet')
-    || typeof candidate.policyId !== 'string'
-    || !/^0x[0-9a-fA-F]{64}$/.test(candidate.policyDigest ?? '')
-    || !candidate.policy
+    || !/^sha256:[0-9a-f]{64}$/.test(candidate.policyRecordDigest ?? '')
+    || JSON.stringify(Object.keys(candidate).sort()) !== JSON.stringify(['policyRecordDigest', 'version', 'wallets'])
   ) {
     throw new Error('TURNKEY_WALLET_MAP_INVALID');
   }
@@ -261,24 +296,9 @@ export function validateTurnkeyWalletMap(value: unknown): TurnkeyWalletMap {
     addresses.add(address);
     signWith.add(wallet.signWith);
   }
-  const policy = validateTurnkeyPolicyAst(candidate.policy);
-  const provider: TurnkeyProviderBinding = {
-    provider: 'turnkey',
-    environment: candidate.environment,
-    organizationId: candidate.organizationId,
-    userId: candidate.userId,
-    policyId: candidate.policyId,
-    policyDigest: candidate.policyDigest as Hex,
-  };
-  validatePolicyBinding(policy, provider, wallets);
   return {
-    version: 1,
-    organizationId: candidate.organizationId,
-    userId: candidate.userId,
-    environment: candidate.environment,
-    policyId: candidate.policyId,
-    policyDigest: candidate.policyDigest as Hex,
-    policy,
+    version: 2,
+    policyRecordDigest: candidate.policyRecordDigest as `sha256:${string}`,
     wallets,
   };
 }
@@ -296,12 +316,13 @@ export async function readTurnkeyWalletMap(path: string): Promise<TurnkeyWalletM
 export class TurnkeySigner implements Signer {
   private client: TurnkeySignerClient | undefined;
   private readonly organizationId: string;
-  private readonly environment: TurnkeyEnvironment;
-  private readonly userId: string;
   private readonly policyId: string;
   private readonly policyDigest: Hex;
   private readonly policy: TurnkeyPolicyAst;
-  private readonly providerBinding: TurnkeyProviderBinding;
+  private readonly policyRecord: TurnkeyCanonicalPolicyRecord;
+  private readonly policyRecordDigest: `sha256:${string}`;
+  private readonly policyNotBefore: number;
+  private readonly policyExpiresAt: number;
   private readonly wallets: TurnkeyWalletReference[];
   private readonly generateAppProofs: boolean;
 
@@ -309,51 +330,46 @@ export class TurnkeySigner implements Signer {
     if (!options.organizationId) throw new Error('TURNKEY_ORGANIZATION_REQUIRED');
     if (!options.userId || (options.environment !== 'production' && options.environment !== 'testnet')) throw new Error('TURNKEY_PROVIDER_BINDING_REQUIRED');
     if (options.wallets.length === 0) throw new Error('TURNKEY_WALLET_MAP_EMPTY');
-    if (!options.policyId || !/^0x[0-9a-fA-F]{64}$/.test(options.policyDigest)) throw new Error('TURNKEY_POLICY_DIGEST_REQUIRED');
-    const providerBinding = options.providerBinding ?? {
-      provider: 'turnkey' as const,
+    const record = validateTurnkeyCanonicalPolicyRecord(options.policyRecord);
+    const policy = record.enforcementPolicy;
+    const providerBinding: TurnkeyProviderBinding = {
+      provider: 'turnkey',
       environment: options.environment,
       organizationId: options.organizationId,
       userId: options.userId,
-      policyId: options.policyId,
-      policyDigest: options.policyDigest,
+      policyId: policy.scope.policyId,
+      policyDigest: canonicalPolicyDigest(policy),
     };
-    if (providerBinding.provider !== 'turnkey' || providerBinding.organizationId !== options.organizationId || providerBinding.userId !== options.userId || providerBinding.environment !== options.environment || providerBinding.policyId !== options.policyId || providerBinding.policyDigest.toLowerCase() !== options.policyDigest.toLowerCase()) throw new Error('TURNKEY_PROVIDER_BINDING_REQUIRED');
-    const policy = validatePolicyBinding(options.policy, providerBinding, options.wallets);
-    if (canonicalPolicyDigest(policy).toLowerCase() !== options.policyDigest.toLowerCase()) throw new Error('TURNKEY_POLICY_DIGEST_MISMATCH');
+    if (record.environment !== options.environment || record.providerIdentity.organizationId !== options.organizationId || record.providerIdentity.userId !== options.userId) throw new Error('TURNKEY_PROVIDER_BINDING_REQUIRED');
+    validatePolicyBinding(policy, providerBinding, options.wallets);
+    if (JSON.stringify(record.wallets.map(({ index, address, signWith }) => ({ index, address, signWith }))) !== JSON.stringify(options.wallets.map(({ index, address, signWith }) => ({ index, address: address.toLowerCase(), signWith })))) throw new Error('TURNKEY_POLICY_RECORD_WALLET_MAP_MISMATCH');
     this.organizationId = options.organizationId;
-    this.environment = options.environment;
-    this.userId = options.userId;
-    this.policyId = options.policyId;
-    this.policyDigest = options.policyDigest;
+    this.policyId = policy.scope.policyId;
+    this.policyDigest = canonicalPolicyDigest(policy);
     this.policy = policy;
-    this.providerBinding = providerBinding;
+    this.policyRecord = record;
+    this.policyRecordDigest = turnkeyPolicyRecordDigest(record);
+    this.policyNotBefore = Date.parse(record.issuedAt);
+    this.policyExpiresAt = Date.parse(record.expiresAt);
     this.wallets = options.wallets.map((wallet) => ({ ...wallet }));
     this.client = options.client;
     this.generateAppProofs = options.generateAppProofs ?? true;
   }
 
   public static async fromSecrets(scope: SecretScope = 'mainnet', root = 'Rets'): Promise<TurnkeySigner> {
-    const { organizationId, apiPublicKey, apiPrivateKey, userId, environment, walletMapPath: mapPath } = await readTurnkeySecretConfig(root, scope);
+    const { organizationId, apiPublicKey, apiPrivateKey, userId, environment, walletMapPath: mapPath, policyRecordPath, policyApproverPublicKeyPath } = await readTurnkeySecretConfig(root, scope);
     const map = await readTurnkeyWalletMap(mapPath);
-    if (map.organizationId !== organizationId || map.userId !== userId || map.environment !== environment) throw new Error('TURNKEY_PROVIDER_BINDING_MISMATCH');
-    if (!map.policyId || !map.policyDigest || !map.policy) throw new Error('TURNKEY_POLICY_REQUIRED');
+    let signedRecord: unknown;
+    try { signedRecord = JSON.parse(await readOwnerOnlyFile(policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_RECORD_INVALID'); }
+    const approverPublicKey = await readOwnerOnlyFile(policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+    const record = verifyTurnkeySignedPolicyRecord(signedRecord, approverPublicKey);
+    if (turnkeyPolicyRecordDigest(record) !== map.policyRecordDigest) throw new Error('TURNKEY_POLICY_RECORD_DIGEST_MISMATCH');
     return new TurnkeySigner({
       organizationId,
       environment,
       userId,
       wallets: map.wallets,
-      policyId: map.policyId,
-      policyDigest: map.policyDigest,
-      policy: map.policy,
-      providerBinding: {
-        provider: 'turnkey',
-        environment,
-        organizationId,
-        userId,
-        policyId: map.policyId,
-        policyDigest: map.policyDigest,
-      },
+      policyRecord: record,
       client: createTurnkeyClient(organizationId, apiPublicKey, apiPrivateKey),
     });
   }
@@ -363,7 +379,18 @@ export class TurnkeySigner implements Signer {
     return this.wallets.map(({ index, address }) => ({ index, address }));
   }
 
+  /** Public policy reference already authenticated by the signed local record. */
+  public policyReference(): string {
+    if (!this.client) throw new Error('TURNKEY_SIGNER_ZEROIZED');
+    return turnkeyPolicyRef(this.policyId, this.policyDigest);
+  }
+
   public async signTransaction(walletIndex: number, intent: TransactionIntent): Promise<Hex> {
+    return (await this.signTransactionWithEvidence(walletIndex, intent)).signedTransaction;
+  }
+
+  public async signTransactionWithEvidence(walletIndex: number, intent: TransactionIntent): Promise<{ signedTransaction: Hex; evidence: TurnkeySigningEvidence }> {
+    this.assertPolicyCurrent();
     const client = this.client;
     const wallet = this.wallets.find((candidate) => candidate.index === walletIndex);
     if (!client) throw new Error('TURNKEY_SIGNER_ZEROIZED');
@@ -386,7 +413,7 @@ export class TurnkeySigner implements Signer {
       accessList: intent.accessList,
     });
 
-    let response: { signedTransaction: string };
+    let response: { signedTransaction: string; activity: TurnkeySigningActivity };
     try {
       response = await client.signTransaction({
         signWith: wallet.signWith,
@@ -403,6 +430,21 @@ export class TurnkeySigner implements Signer {
     if (!signedTransaction || !/^0x[0-9a-f]+$/i.test(signedTransaction)) {
       throw new Error('TURNKEY_SIGNED_TRANSACTION_INVALID');
     }
+    const activityIntent = response.activity?.intent?.signTransactionIntentV2;
+    const activitySigned = response.activity?.result?.signTransactionResult?.signedTransaction;
+    const normalizedActivitySigned = typeof activitySigned === 'string' && activitySigned.startsWith('0x') ? activitySigned : typeof activitySigned === 'string' ? `0x${activitySigned}` : undefined;
+    if (
+      response.activity?.organizationId !== this.organizationId
+      || response.activity?.status !== 'ACTIVITY_STATUS_COMPLETED'
+      || response.activity?.type !== 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2'
+      || !response.activity.id
+      || !response.activity.fingerprint
+      || activityIntent?.signWith !== wallet.signWith
+      || activityIntent?.unsignedTransaction !== unsignedTransaction
+      || activityIntent?.type !== 'TRANSACTION_TYPE_ETHEREUM'
+      || normalizedActivitySigned?.toLowerCase() !== signedTransaction.toLowerCase()
+      || (response.activity.appProofs !== undefined && !Array.isArray(response.activity.appProofs))
+    ) throw new Error('TURNKEY_SIGNING_ACTIVITY_INVALID');
 
     let signed;
     try {
@@ -430,9 +472,9 @@ export class TurnkeySigner implements Signer {
         && sameAddress(signed.to, intent.to)
         && (signed.value ?? 0n) === intent.value
         && normalizeData(signed.data) === normalizeData(intent.data)
-        && signed.gas === intent.gasLimit
-        && signed.maxFeePerGas === intent.maxFeePerGas
-        && signed.maxPriorityFeePerGas === intent.maxPriorityFeePerGas;
+        && (signed.gas ?? 0n) === intent.gasLimit
+        && (signed.maxFeePerGas ?? 0n) === intent.maxFeePerGas
+        && (signed.maxPriorityFeePerGas ?? 0n) === intent.maxPriorityFeePerGas;
     } catch {
       transactionFieldsMatch = false;
     }
@@ -442,39 +484,26 @@ export class TurnkeySigner implements Signer {
       || !sameAddress(recoveredAddress, wallet.address)
     ) throw new Error('TURNKEY_SIGNED_TRANSACTION_BOUNDARY_INVALID');
 
-    return signedTransaction as Hex;
+    return {
+      signedTransaction: signedTransaction as Hex,
+      evidence: {
+        activityId: response.activity.id,
+        activityFingerprint: response.activity.fingerprint,
+        appProofCount: response.activity.appProofs?.length ?? 0,
+      },
+    };
   }
 
   public async probe(): Promise<TurnkeyHealthReport> {
+    this.assertPolicyCurrent();
     const client = this.client;
     if (!client) throw new Error('TURNKEY_SIGNER_ZEROIZED');
-    if (!this.policyId || !client.getPolicies) throw new Error('TURNKEY_POLICY_CLIENT_REQUIRED');
-    const whoami = await client.getWhoami({ organizationId: this.organizationId });
-    if (whoami.organizationId !== this.organizationId || whoami.userId !== this.userId || whoami.environment !== this.environment) throw new Error('TURNKEY_PROVIDER_BINDING_MISMATCH');
-    const policies = await client.getPolicies({ organizationId: this.organizationId });
-    const policy = policies.policies.find((candidate) => candidate.policyId === this.policyId);
-    if (!policy) throw new Error('TURNKEY_POLICY_NOT_FOUND');
-    if (policy.effect !== 'EFFECT_ALLOW' || !policy.ast || !policy.digest || !policy.providerBinding) throw new Error('TURNKEY_POLICY_NOT_FOUND');
-    if (policy.digest.toLowerCase() !== this.policyDigest.toLowerCase()) throw new Error('TURNKEY_POLICY_DIGEST_MISMATCH');
-    if (policy.condition && /(?:\b(?:or|any|all|wildcard|regex)\b|\|\|)/i.test(policy.condition)) throw new Error('TURNKEY_POLICY_SEMANTICS_INVALID');
-    if (policy.providerBinding.provider !== this.providerBinding.provider || policy.providerBinding.environment !== this.providerBinding.environment || policy.providerBinding.organizationId !== this.providerBinding.organizationId || policy.providerBinding.userId !== this.providerBinding.userId || policy.providerBinding.policyId !== this.providerBinding.policyId || policy.providerBinding.policyDigest.toLowerCase() !== this.providerBinding.policyDigest.toLowerCase()) throw new Error('TURNKEY_POLICY_PROVIDER_BINDING_INVALID');
-    const providerPolicy = validateTurnkeyPolicyAst(policy.ast);
-    if (canonicalPolicyDigest(providerPolicy).toLowerCase() !== this.policyDigest.toLowerCase()) throw new Error('TURNKEY_POLICY_DIGEST_MISMATCH');
-    validatePolicyBinding(providerPolicy, this.providerBinding, this.wallets);
-    if (!client.getPrivateKeys) throw new Error('TURNKEY_KEY_METADATA_CLIENT_REQUIRED');
-    const keyResponse = await client.getPrivateKeys({ organizationId: this.organizationId });
-    if (keyResponse.organizationId !== this.organizationId || keyResponse.userId !== this.userId || keyResponse.environment !== this.environment) throw new Error('TURNKEY_KEY_INVENTORY_BINDING_INVALID');
-    const inventory: TurnkeyKeyInventory = {
-      organizationId: keyResponse.organizationId,
-      userId: keyResponse.userId,
-      environment: keyResponse.environment,
-      privateKeys: keyResponse.privateKeys.map((key) => {
-        const address = key.addresses.find((candidate) => candidate.format === 'ADDRESS_FORMAT_ETHEREUM')?.address ?? key.addresses.find((candidate) => candidate.address)?.address;
-        if (!address || !key.organizationId || !key.userId || !key.environment) throw new Error('TURNKEY_KEY_INVENTORY_BINDING_INVALID');
-        return { privateKeyId: key.privateKeyId, organizationId: key.organizationId, userId: key.userId, environment: key.environment, address: address as Address };
-      }),
-    };
-    validateKeyInventory(inventory, this.providerBinding, this.wallets);
+    const [whoami, policies, keyResponse] = await Promise.all([
+      client.getWhoami({ organizationId: this.organizationId }),
+      client.getPolicies({ organizationId: this.organizationId }),
+      client.getPrivateKeys({ organizationId: this.organizationId }),
+    ]);
+    validateTurnkeyActualProviderState(this.policyRecord, { whoami, policies: policies.policies, privateKeys: keyResponse.privateKeys });
     return {
       status: 'ok',
       provider: 'turnkey',
@@ -482,13 +511,16 @@ export class TurnkeySigner implements Signer {
       walletCount: this.wallets.length,
       policyId: this.policyId,
       policyDigest: this.policyDigest,
-      policy: this.policy,
-      providerBinding: this.providerBinding,
+      policyRecordDigest: this.policyRecordDigest,
     };
   }
 
   public zeroize(): void {
     this.client = undefined;
     this.wallets.splice(0, this.wallets.length);
+  }
+
+  private assertPolicyCurrent(now = Date.now()): void {
+    if (!Number.isFinite(now) || now < this.policyNotBefore || now >= this.policyExpiresAt) throw new Error('TURNKEY_POLICY_RECORD_NOT_CURRENT');
   }
 }

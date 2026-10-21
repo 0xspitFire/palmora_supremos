@@ -8,13 +8,25 @@ User=mintbot
 Group=mintbot
 WorkingDirectory=/opt/mint-bot/current
 EnvironmentFile=/etc/mint-bot/mint-bot.env
-# The host secret manager must add BACKUP_ENCRYPTION_KEY to the process
-# environment for this unit invocation only. It is not stored in this file.
-ExecStart=/usr/bin/node /opt/mint-bot/current/scripts/backup.mjs
+# This unit intentionally has no checked-in secret loader. The host secret
+# manager must inject BACKUP_ENCRYPTION_KEY for this invocation. Without it the
+# restore-verifying job fails closed. Never store the key in mint-bot.env.
+ExecStart=/usr/bin/node /opt/mint-bot/current/scripts/backup-job.mjs
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/mint-bot /var/log/mint-bot
 UMask=0077
+LimitCORE=0
 CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native

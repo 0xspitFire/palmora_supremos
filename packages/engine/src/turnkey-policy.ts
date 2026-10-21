@@ -1,5 +1,5 @@
 import { keccak256, toBytes, type Address, type Hex } from 'viem';
-import type { TransactionIntent } from './types.js';
+import type { SupportedChainId, TransactionIntent } from './types.js';
 
 export type TurnkeyEnvironment = 'production' | 'testnet';
 
@@ -22,7 +22,7 @@ export interface TurnkeyPolicyScope {
 }
 
 export interface TurnkeyPolicyTransaction {
-  readonly chainId: 1;
+  readonly chainId: SupportedChainId;
   readonly from: readonly Address[];
   readonly to: Address;
   readonly valueWei: string;
@@ -88,7 +88,7 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
   if (scope.provider !== 'turnkey' || !isEnvironment(scope.environment) || !nonEmpty(scope.organizationId) || !nonEmpty(scope.userId) || !nonEmpty(scope.policyId) || !stringArray(scope.keyIds)) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
   const keyIds = uniqueStrings(scope.keyIds);
   if (!keyIds || keyIds.length === 0) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
-  if (tx.chainId !== 1 || !Array.isArray(tx.from) || tx.from.length === 0 || !isAddress(tx.to) || typeof tx.valueWei !== 'string' || typeof tx.data !== 'string' || typeof tx.gasLimitMax !== 'string' || typeof tx.maxFeePerGasMax !== 'string' || typeof tx.maxPriorityFeePerGasMax !== 'string' || !Array.isArray(tx.accessList)) throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
+  if (!isSupportedChainId(tx.chainId) || !Array.isArray(tx.from) || tx.from.length === 0 || !isAddress(tx.to) || typeof tx.valueWei !== 'string' || typeof tx.data !== 'string' || typeof tx.gasLimitMax !== 'string' || typeof tx.maxFeePerGasMax !== 'string' || typeof tx.maxPriorityFeePerGasMax !== 'string' || !Array.isArray(tx.accessList)) throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
   const from = tx.from.map((address) => {
     if (!isAddress(address)) throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
     return address.toLowerCase() as Address;
@@ -108,7 +108,7 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
       keyIds: [...keyIds].sort(),
     },
     transaction: {
-      chainId: 1,
+      chainId: tx.chainId,
       from: [...new Set(from)].sort() as Address[],
       to: tx.to.toLowerCase() as Address,
       valueWei: tx.valueWei,
@@ -185,6 +185,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isEnvironment(value: unknown): value is TurnkeyEnvironment { return value === 'production' || value === 'testnet'; }
+function isSupportedChainId(value: unknown): value is SupportedChainId { return value === 1 || value === 8453 || value === 4663; }
 function nonEmpty(value: unknown): value is string { return typeof value === 'string' && value.length > 0 && !/[\s\r\n]/.test(value); }
 function stringArray(value: unknown): value is string[] { return Array.isArray(value) && value.every(nonEmpty); }
 function uniqueStrings(value: readonly string[]): readonly string[] | null { return new Set(value).size === value.length ? value : null; }
