@@ -101,6 +101,11 @@ describe('live-run command wiring', () => {
     expect(body.indexOf('previewLiveRun(')).toBeLessThan(body.indexOf('if (args.confirm === undefined)'));
     expect(body.indexOf('if (args.confirm === undefined)')).toBeLessThan(body.indexOf('assertLiveRunAllowed('));
     expect(body.indexOf('assertLiveRunAllowed(')).toBeLessThan(body.indexOf('acceptPersonalLiveLocalCustody: true'));
+    expect(body).toContain('LocalEncryptedSigner.fromFile(file, passphrase)');
+    expect(body.indexOf('LocalEncryptedSigner.fromFile(file, passphrase)')).toBeGreaterThan(body.indexOf('withHiddenPassphrase('));
+    expect(body).toContain("passphraseProvider: async () => ''");
+    expect(body).toContain('signer?.zeroize()');
+    expect(body).toContain('signer.zeroize()');
     expect(body.indexOf("type: 'quantity_plan'")).toBeLessThan(body.indexOf("command('run'"));
     expect(body).toContain('{ startCoordinator: false }');
     expect(body).toContain('{ acceptPersonalLiveLocalCustody: true, startCoordinator: false }');
