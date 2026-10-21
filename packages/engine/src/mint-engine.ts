@@ -1062,6 +1062,7 @@ export class MintEngine {
               walletIndex,
             );
         let recoveryState: WalletMintResult['reconciliationState'];
+        let recoveryPersistenceError: string | undefined;
         if (submittedHash && executionId && builtNonce !== undefined) {
           let nonceConsumedByDifferentHash = false;
           if (!(err instanceof ReceiptReorgedError)) {
@@ -1080,20 +1081,28 @@ export class MintEngine {
               nonceConsumedByDifferentHash,
             });
           recoveryState = unresolved.state;
-          await this.persistReconciliation({
-            executionId,
-            transactionAttemptId: submissionAttemptId ?? attemptIds.at(-1),
-            txHash: submittedHash,
-            fromAddress: walletAddress,
-            nonce: builtNonce,
-            state: unresolved.state,
-            source: error.type === MintErrorType.AMBIGUOUS_SUBMISSION ? 'broadcast' : 'receipt-watcher',
-            details: {
-              reason: redactProviderError(error.message),
-              errorType: error.type,
-              ...(err instanceof ReceiptReorgedError ? { blockNumber: err.blockNumber.toString() } : {}),
-            },
-          });
+          try {
+            await this.persistReconciliation({
+              executionId,
+              transactionAttemptId: submissionAttemptId ?? attemptIds.at(-1),
+              txHash: submittedHash,
+              fromAddress: walletAddress,
+              nonce: builtNonce,
+              state: unresolved.state,
+              source: error.type === MintErrorType.AMBIGUOUS_SUBMISSION ? 'broadcast' : 'receipt-watcher',
+              details: {
+                reason: redactProviderError(error.message),
+                errorType: error.type,
+                ...(err instanceof ReceiptReorgedError ? { blockNumber: err.blockNumber.toString() } : {}),
+              },
+            });
+          } catch (persistenceError) {
+            // The signed/broadcast lifecycle facts are already durable. Keep
+            // their canonical identity in the engine result so the coordinator
+            // can reconcile them instead of replacing the useful result with
+            // an identity-free Promise.allSettled fallback.
+            recoveryPersistenceError = redactProviderError(persistenceError instanceof Error ? persistenceError.message : String(persistenceError));
+          }
         }
 
         walletLog.error({ event: 'wallet_error', errorType: error.type, error: error.message },
@@ -1119,7 +1128,7 @@ export class MintEngine {
                   ? { lifecycleState: 'dropped' as const, reconciliationState: 'dropped' as const }
                   : { lifecycleState: 'submitted' as const, reconciliationState: recoveryState ?? 'ambiguous' as const }
             : {}),
-          error: error.message,
+          error: recoveryPersistenceError ? `${error.message}; recovery persistence failed: ${recoveryPersistenceError}` : error.message,
           simulation: simulations.get(walletIndex),
           durationMs: this.now().getTime() - startTime,
         };

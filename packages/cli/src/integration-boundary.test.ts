@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { createCliRuntime } from './runtime.js';
-import { createCanonicalLifecycleStore, mapResult, paidRunMintValueCapEth } from './engine-adapter.js';
+import { createCanonicalLifecycleStore, mapResult, paidRunMintValueCapEth, uniqueSubmittedAttempts } from './engine-adapter.js';
 import type { MintJobResult } from '@mint-bot/engine';
 import type { Campaign } from '@mint-bot/backend';
 
@@ -33,6 +33,19 @@ describe('CLI integration boundary', () => {
     expect(source).not.toContain('new MintEngine');
     expect(source).not.toContain('unavailableEngine');
     expect(source).toContain('EXPLICIT_APPROVE_ARM_RUN_REQUIRED');
+  });
+
+  it('reconciles one canonical transaction when signed and accepted lifecycle attempts share a hash', () => {
+    const common = { executionId: 'execution-1', runId: 'run-1', wallet: '0x1111111111111111111111111111111111111111', nonce: 0, hash: `0x${'a'.repeat(64)}`, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() } as const;
+    const attempts = uniqueSubmittedAttempts([
+      { ...common, id: 'execution-1:attempt:0:accepted', state: 'Submitted' },
+      { ...common, id: 'execution-1:attempt:signed', state: 'Signed' },
+      { ...common, id: 'execution-1:attempt:1:accepted', state: 'Submitted' },
+      { ...common, id: 'execution-1:attempt:2:accepted', state: 'Submitted', hash: `0x${'b'.repeat(64)}` },
+    ]);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.id).toBe('execution-1:attempt:0:accepted');
+    expect(attempts[1]?.id).toBe('execution-1:attempt:2:accepted');
   });
 
   it('creates a durable SQLite backend runtime', async () => {
