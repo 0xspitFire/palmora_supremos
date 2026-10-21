@@ -111,9 +111,9 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
               continue;
             }
             const componentReceipt = receipt as typeof receipt & {
-              l1Fee?: bigint;
-              l1DataFee?: bigint;
-              operatorFee?: bigint;
+              l1Fee?: bigint | string;
+              l1DataFee?: bigint | string;
+              operatorFee?: bigint | string;
               operatorFeeScalar?: bigint | number;
               operatorFeeConstant?: bigint;
               priorityFeeComponentWei?: bigint;
@@ -128,14 +128,16 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
                 || fallbackReceipt.status !== receipt.status
                 || fallbackReceipt.gasUsed !== receipt.gasUsed
                 || fallbackReceipt.effectiveGasPrice !== receipt.effectiveGasPrice) throw new Error('BASE_PROVIDER_RECEIPT_DISAGREEMENT');
-              const fallbackFields = fallbackReceipt as typeof fallbackReceipt & { l1Fee?: bigint; l1DataFee?: bigint; operatorFee?: bigint };
-              const [primaryOperatorFee, fallbackOperatorFee] = await Promise.all([
-                componentReceipt.operatorFee ?? readBaseOperatorFee(this.client, receipt.gasUsed, receipt.blockNumber),
-                fallbackFields.operatorFee ?? readBaseOperatorFee(fallbackClient, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber),
+              const fallbackFields = fallbackReceipt as typeof fallbackReceipt & { l1Fee?: bigint | string; l1DataFee?: bigint | string; operatorFee?: bigint | string };
+              const [primaryOracleOperatorFee, fallbackOracleOperatorFee] = await Promise.all([
+                componentReceipt.operatorFee === undefined ? readBaseOperatorFee(this.client, receipt.gasUsed, receipt.blockNumber) : undefined,
+                fallbackFields.operatorFee === undefined ? readBaseOperatorFee(fallbackClient, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber) : undefined,
               ]);
-              if ((componentReceipt.l1DataFee ?? componentReceipt.l1Fee) !== (fallbackFields.l1DataFee ?? fallbackFields.l1Fee)
-                || primaryOperatorFee !== fallbackOperatorFee) throw new Error('BASE_PROVIDER_FEE_DISAGREEMENT');
-              baseFees = baseReceiptFees(componentReceipt, receipt.gasUsed, primaryOperatorFee);
+              const primaryFees = baseReceiptFees(componentReceipt, receipt.gasUsed, primaryOracleOperatorFee);
+              const fallbackFees = baseReceiptFees(fallbackFields, fallbackReceipt.gasUsed, fallbackOracleOperatorFee);
+              if (primaryFees.l1DataFeeWei !== fallbackFees.l1DataFeeWei
+                || primaryFees.operatorFeeWei !== fallbackFees.operatorFeeWei) throw new Error('BASE_PROVIDER_FEE_DISAGREEMENT');
+              baseFees = primaryFees;
             }
             return {
               txHash,
@@ -146,7 +148,9 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
               effectiveGasPrice: receipt.effectiveGasPrice,
               ...(baseFees ? { l1DataFeeWei: baseFees.l1DataFeeWei, operatorFeeWei: baseFees.operatorFeeWei } : componentReceipt.l1DataFee === undefined && componentReceipt.l1Fee === undefined
                 ? {}
-                : { l1DataFeeWei: componentReceipt.l1DataFee ?? componentReceipt.l1Fee }),
+                : typeof (componentReceipt.l1DataFee ?? componentReceipt.l1Fee) === 'bigint'
+                  ? { l1DataFeeWei: (componentReceipt.l1DataFee ?? componentReceipt.l1Fee) as bigint }
+                  : {}),
               ...(componentReceipt.priorityFeeComponentWei === undefined
                 ? {}
                 : { priorityFeeComponentWei: componentReceipt.priorityFeeComponentWei }),

@@ -448,14 +448,15 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
             ]);
             if (primaryFinality.stage !== fallbackFinality.stage || primaryFinality.canonical !== fallbackFinality.canonical) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on finality' };
             if (primaryFinality.canonical !== true) return { result: primaryFinality.canonical === false ? 'reorged' : 'unknown', attempts: [], receipts: [], reason: primaryFinality.reason };
-            const fields = primaryReceipt as typeof primaryReceipt & { l1Fee?: bigint; l1DataFee?: bigint; operatorFee?: bigint; operatorFeeScalar?: bigint | number; operatorFeeConstant?: bigint };
-            const fallbackFields = fallbackReceipt as typeof fallbackReceipt & { l1Fee?: bigint; l1DataFee?: bigint; operatorFee?: bigint };
-            const [primaryOperatorFee, fallbackOperatorFee] = await Promise.all([
-              fields.operatorFee ?? readBaseOperatorFee(client, primaryReceipt.gasUsed, primaryReceipt.blockNumber),
-              fallbackFields.operatorFee ?? readBaseOperatorFee(fallback, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber),
+            const fields = primaryReceipt as typeof primaryReceipt & { l1Fee?: bigint | string; l1DataFee?: bigint | string; operatorFee?: bigint | string; operatorFeeScalar?: bigint | number; operatorFeeConstant?: bigint };
+            const fallbackFields = fallbackReceipt as typeof fallbackReceipt & { l1Fee?: bigint | string; l1DataFee?: bigint | string; operatorFee?: bigint | string };
+            const [primaryOracleOperatorFee, fallbackOracleOperatorFee] = await Promise.all([
+              fields.operatorFee === undefined ? readBaseOperatorFee(client, primaryReceipt.gasUsed, primaryReceipt.blockNumber) : undefined,
+              fallbackFields.operatorFee === undefined ? readBaseOperatorFee(fallback, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber) : undefined,
             ]);
-            if (primaryOperatorFee !== fallbackOperatorFee || (fields.l1DataFee ?? fields.l1Fee) !== (fallbackFields.l1DataFee ?? fallbackFields.l1Fee)) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on fee components' };
-            const fees = baseReceiptFees(fields, primaryReceipt.gasUsed, primaryOperatorFee);
+            const fees = baseReceiptFees(fields, primaryReceipt.gasUsed, primaryOracleOperatorFee);
+            const fallbackFees = baseReceiptFees(fallbackFields, fallbackReceipt.gasUsed, fallbackOracleOperatorFee);
+            if (fees.operatorFeeWei !== fallbackFees.operatorFeeWei || fees.l1DataFeeWei !== fallbackFees.l1DataFeeWei) return { result: 'unknown', attempts: [], receipts: [], reason: 'Base providers disagree on fee components' };
             const stage = primaryFinality.stage;
             if (stage !== 'soft' && stage !== 'posted' && stage !== 'ethereum_final') return { result: 'unknown', attempts: [], receipts: [], reason: 'Base observer returned an invalid finality stage' };
             weakest = stage === 'soft' ? 'soft' : stage === 'posted' && weakest === 'final' ? 'posted' : weakest;

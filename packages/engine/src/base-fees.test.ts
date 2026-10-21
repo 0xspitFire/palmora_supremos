@@ -14,11 +14,25 @@ describe('Base fee accounting', () => {
   it('uses explicit receipt components or an operator fee observed from the oracle at the receipt block', () => {
     expect(baseReceiptFees({ l1Fee: 11n, operatorFee: 3n }, 20n)).toEqual({ l1DataFeeWei: 11n, operatorFeeWei: 3n });
     expect(baseReceiptFees({ l1DataFee: 11n, operatorFeeScalar: 1_000_000n, operatorFeeConstant: 3n }, 20n, 23n)).toEqual({ l1DataFeeWei: 11n, operatorFeeWei: 23n });
+    expect(baseReceiptFees({ l1Fee: '0x1fea905d', operatorFee: '0x0' }, 20n)).toEqual({ l1DataFeeWei: 535_466_077n, operatorFeeWei: 0n });
+    expect(baseReceiptFees({ l1Fee: '0xb', l1DataFee: 11n, operatorFee: 3n }, 20n)).toEqual({ l1DataFeeWei: 11n, operatorFeeWei: 3n });
   });
 
   it('fails closed when either receipt component cannot be proven', () => {
     expect(() => baseReceiptFees({ operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_REQUIRED');
     expect(() => baseReceiptFees({ l1Fee: 1n }, 20n)).toThrow('BASE_RECEIPT_OPERATOR_FEE_REQUIRED');
+    expect(() => baseReceiptFees({ l1Fee: '-1', operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_MALFORMED');
+    expect(() => baseReceiptFees({ l1Fee: 1n, operatorFee: '1' }, 20n)).toThrow('BASE_RECEIPT_OPERATOR_FEE_MALFORMED');
+    expect(() => baseReceiptFees({ l1Fee: '0x01', operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_MALFORMED');
+    expect(() => baseReceiptFees({ l1Fee: `0x1${'0'.repeat(64)}`, operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_MALFORMED');
+    expect(() => baseReceiptFees({ l1Fee: 1n << 256n, operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_MALFORMED');
+    expect(() => baseReceiptFees({ l1Fee: 1n, l1DataFee: '0x2', operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_MALFORMED');
+  });
+
+  it('accepts the maximum uint256 fee quantity and rejects larger operator fees', () => {
+    const max = (1n << 256n) - 1n;
+    expect(baseReceiptFees({ l1Fee: `0x${'f'.repeat(64)}`, operatorFee: max }, 20n)).toEqual({ l1DataFeeWei: max, operatorFeeWei: max });
+    expect(() => baseReceiptFees({ l1Fee: 0n, operatorFee: 1n << 256n }, 20n)).toThrow('BASE_RECEIPT_OPERATOR_FEE_MALFORMED');
   });
 
   it('quotes the exact unsigned shape through Base predeploys', async () => {
