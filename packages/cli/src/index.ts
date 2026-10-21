@@ -16,7 +16,7 @@ import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
 import { resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
-import { fundingRequestEvent, planCampaignFunding, renderFundingPlan } from './fleet-funding-cli.js';
+import { acceptPhrase, fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
 import { buildCompensatingEvidence, createTrustCenterRecord, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, parseTrustCenterRecord, probeOrEngageKillSwitch, walletSetDigest } from './compensating-controls-cli.js';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
@@ -617,10 +617,10 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         if (args.request) {
           const event = fundingRequestEvent(plan, campaign.id, new Date());
           await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, type: event.type, at: event.at, data: event.data }); });
-          process.stdout.write('Request recorded. The running service will message you on Telegram. When the funds arrive, arm the run as usual; the arm step checks the balances itself.\n');
+          process.stdout.write('Request recorded. The running service will message you on Telegram. When the funds arrive, check the balances yourself before arming: the arm step does not enforce this yet.\n');
         } else if (!plan.ready && plan.blockers.length === 0) process.stdout.write('Add --request to have the service message you this plan.\n');
         if (plan.blockers.length > 0) process.exitCode = 1;
-      } catch (error) { printError(error); }
+      } catch (error) { printError(new Error(redactAddresses(error instanceof Error ? error.message : 'UNKNOWN_ERROR'))); }
     })
   .command('fleet-watch-accept', 'After investigating a watcher finding, accept a wallet\'s current on-chain state as its new baseline', (args) => args
     .option('chain-id', { type: 'number', demandOption: true, choices: [1, 8453, 4663] })
@@ -635,7 +635,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const client = createPublicClient({ transport: http(endpoint) });
         const blockNumber = await client.getBlockNumber();
         const [nonce, balanceWei] = await Promise.all([client.getTransactionCount({ address: address as Address, blockNumber }), client.getBalance({ address: address as Address, blockNumber })]);
-        const phrase = `ACCEPT-WALLET-STATE ${address.slice(-6)} nonce-${nonce}`;
+        const phrase = acceptPhrase(address, nonce, balanceWei);
         process.stdout.write(`The wallet ${address} on chain ${args.chainId} now has ${nonce} sent transactions and ${formatEther(balanceWei)} ETH.\n`);
         if (args.confirm !== phrase) {
           process.stdout.write(`Only accept this after you have looked up the wallet's history and understand every transaction. To accept, run this command again with: --confirm "${phrase}"\n`);
@@ -644,7 +644,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, type: 'fleet_watch_accept', at: new Date().toISOString(), data: { chainId: args.chainId, address, nonce, balanceWei: balanceWei.toString() } }); });
         process.stdout.write('Accepted. The running watcher adopts it on its next check. This does not release the kill switch; do that separately once you are sure.\n');
-      } catch (error) { printError(error); }
+      } catch (error) { printError(new Error(redactAddresses(error instanceof Error ? error.message : 'UNKNOWN_ERROR'))); }
     })
   .command('approve', 'Persist explicit campaign approval', (args) => args
     .option('campaign-id', { type: 'string', demandOption: true })

@@ -15,9 +15,18 @@ const env = (over: Record<string, string | undefined> = {}): NodeJS.ProcessEnv =
 class Store extends DurableStore { override capabilities() { return { durable: true, atomicAcrossProcesses: true }; } }
 
 describe('fleet watcher configuration (D-059)', () => {
-  it('is off unless explicitly enabled', () => {
+  it('is off only when left unset, empty or false, and any other value stops the start instead of silently disabling it', () => {
     expect(parseFleetWatchEnv({})).toBeUndefined();
-    expect(parseFleetWatchEnv(env({ MINT_BOT_WATCHER_ENABLED: 'yes' }))).toBeUndefined();
+    expect(parseFleetWatchEnv(env({ MINT_BOT_WATCHER_ENABLED: '' }))).toBeUndefined();
+    expect(parseFleetWatchEnv(env({ MINT_BOT_WATCHER_ENABLED: 'false' }))).toBeUndefined();
+    for (const typo of ['True', '1', 'yes', 'TRUE', 'on']) expect(() => parseFleetWatchEnv(env({ MINT_BOT_WATCHER_ENABLED: typo }))).toThrow('FLEET_WATCH_ENABLED_INVALID');
+  });
+
+  it('reads the check intervals within 30 seconds to one hour and refuses anything else', () => {
+    const config = parseFleetWatchEnv(env({ MINT_BOT_WATCHER_ACTIVE_INTERVAL_MS: '60000', MINT_BOT_WATCHER_IDLE_INTERVAL_MS: '900000' }))!;
+    expect(config).toMatchObject({ activeIntervalMs: 60_000, idleIntervalMs: 900_000 });
+    expect(parseFleetWatchEnv(env())!.idleIntervalMs).toBeUndefined();
+    for (const bad of ['29999', '3600001', 'abc', '-5', '1.5']) expect(() => parseFleetWatchEnv(env({ MINT_BOT_WATCHER_IDLE_INTERVAL_MS: bad }))).toThrow('FLEET_WATCH_INTERVAL_INVALID');
   });
 
   it('reads the fleet, normalises addresses and uses the D-059 idle ceilings for every integrated chain', () => {
@@ -93,6 +102,17 @@ describe('startFleetWatcher', () => {
     const before = kills.length;
     await vi.advanceTimersByTimeAsync(20 * 60_000);
     expect(kills.length).toBe(before);
+  });
+
+  it('tells the owner when the watcher keeps failing to run, instead of only logging it', async () => {
+    const config = parseFleetWatchEnv(env())!;
+    const alerts: string[] = [];
+    const broken = { getBlockNumber: async () => { throw new Error('rpc'); }, getTransactionCount: async () => 0, getBalance: async () => 0n };
+    const running = startFleetWatcher({ store: new Store(), config, alerts: { intelligence: async (input) => { alerts.push(input.dedupe); return true; } }, kill: async () => undefined, rpcUrl: () => 'http://unused', clients: new Map([[1, broken]]), intervalMs: 30_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(40 * 60_000);
+    running.stop();
+    expect(alerts.some((dedupe) => dedupe.includes('watcher_blind'))).toBe(true);
   });
 
   it('maps the watcher messages onto the intelligence alert channel with their dedupe identity', async () => {

@@ -47,4 +47,19 @@ describe('owner messages for funding, left-over balance and the watcher (D-059)'
     expect(fleetWatchCard({ finding: 'rise_above_limit', chainId: 1, wallet: W1, at: AT }).severity).toBe('attention');
     expect(fleetWatchCard({ finding: 'watcher_blind', chainId: 1, at: AT }).steps.join(' ')).toContain('Do not start a run');
   });
+
+  it('never says signing has stopped when the kill switch could not be engaged: it says the opposite and puts the manual step first', () => {
+    const card = fleetWatchCard({ finding: 'unknown_activity', chainId: 1, wallet: W1, killFailed: true, at: AT });
+    expect(card.lines.map((line) => line.value).join(' ')).toContain('could NOT engage the kill switch');
+    expect(card.steps[0]).toContain('Engage the kill switch yourself now');
+    expect(card.steps).not.toContain('Do not release the kill switch.');
+    expect(card.summary).toContain('could not be engaged');
+  });
+
+  it('accepting or rejecting a wallet state is always reported, and a rejection says to treat it as a security problem', () => {
+    expect(fleetWatchCard({ finding: 'baseline_accepted', chainId: 1, wallet: W1, at: AT }).steps[0]).toContain('did not accept this state yourself');
+    const rejected = fleetWatchCard({ finding: 'accept_rejected', chainId: 1, wallet: W1, at: AT });
+    expect(rejected.severity).toBe('attention');
+    expect(rejected.steps.join(' ')).toContain('security problem');
+  });
 });

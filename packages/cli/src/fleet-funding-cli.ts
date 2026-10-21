@@ -6,6 +6,16 @@ import { formatEth, planRunFunding, type BalanceCeilings, type Campaign, type Fu
  * sends a funding transfer. This file only plans, words and records the request; the running service turns the recorded request
  * into the Telegram message, and the arm gate checks that the funds arrived.
  */
+/** Network errors can quote the provider address, which is a secret. Any web address in an error is hidden before it is printed. */
+export function redactAddresses(message: string): string {
+  return message.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<address hidden>');
+}
+
+/** The phrase to type to accept a wallet's state. It names the wallet, its transaction count AND its balance, so it cannot be reused for another state. */
+export function acceptPhrase(address: string, nonce: number, balanceWei: bigint): string {
+  return `ACCEPT-WALLET-STATE ${address.toLowerCase().slice(-6)} nonce-${nonce} wei-${balanceWei}`;
+}
+
 export function requiredPerWallet(campaign: Pick<Campaign, 'mintPriceWei' | 'quantity' | 'feePolicy'>): bigint {
   const fee = campaign.feePolicy.totalFeeBudgetWei;
   if (fee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');

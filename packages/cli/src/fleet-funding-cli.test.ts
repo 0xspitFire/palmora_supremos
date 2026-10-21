@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_IDLE_BALANCE_CEILINGS } from '@mint-bot/backend';
-import { fundingRequestEvent, planCampaignFunding, renderFundingPlan, requiredPerWallet } from './fleet-funding-cli.js';
+import { acceptPhrase, fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan, requiredPerWallet } from './fleet-funding-cli.js';
 
 const W1 = '0x1111111111111111111111111111111111111111';
 const W2 = '0x2222222222222222222222222222222222222222';
@@ -44,5 +44,19 @@ describe('funding request for one run (D-059 item 5, option 1)', () => {
     const ready = planCampaignFunding({ campaign: campaign(), balances: [{ address: W1, balanceWei: 400_000_000_000_000n }], ceilings: DEFAULT_IDLE_BALANCE_CEILINGS });
     expect(ready.ready).toBe(true);
     expect(() => fundingRequestEvent(ready, 'camp1', new Date())).toThrow('FUNDING_NOT_NEEDED');
+  });
+
+  it('binds the accept phrase to the wallet, its transaction count and its balance, so it cannot be reused for another state', () => {
+    const phrase = acceptPhrase(W1, 7, 250_000_000_000_000n);
+    expect(phrase).toBe('ACCEPT-WALLET-STATE 111111 nonce-7 wei-250000000000000');
+    expect(acceptPhrase(W1, 8, 250_000_000_000_000n)).not.toBe(phrase);
+    expect(acceptPhrase(W1, 7, 250_000_000_000_001n)).not.toBe(phrase);
+    expect(acceptPhrase(W2, 7, 250_000_000_000_000n)).not.toBe(phrase);
+  });
+
+  it('hides any web address in an error before it is printed, because a network error can quote the secret provider address', () => {
+    expect(redactAddresses('HTTP request failed. URL: https://eth-mainnet.example.com/v2/SECRETKEY Version: viem')).toBe('HTTP request failed. URL: <address hidden> Version: viem');
+    expect(redactAddresses('plain message')).toBe('plain message');
+    expect(redactAddresses('wss://node.example/abc and http://127.0.0.1:8545/')).toBe('<address hidden> and <address hidden>');
   });
 });

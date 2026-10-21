@@ -65,7 +65,7 @@ export function excessBalanceCard(input: { chainId: number; treasury: string; re
   });
 }
 
-export type FleetWatchFinding = 'unknown_activity' | 'unexplained_fall' | 'rise_above_limit' | 'rpc_inconsistent' | 'watcher_blind';
+export type FleetWatchFinding = 'unknown_activity' | 'unexplained_fall' | 'rise_above_limit' | 'rpc_inconsistent' | 'watcher_blind' | 'baseline_accepted' | 'accept_rejected';
 
 const WATCH_WORDS: Readonly<Record<FleetWatchFinding, { title: string; severity: 'critical' | 'attention'; what: string; means: string; steps: string[] }>> = {
   unknown_activity: {
@@ -99,14 +99,32 @@ const WATCH_WORDS: Readonly<Record<FleetWatchFinding, { title: string; severity:
   watcher_blind: {
     title: 'WALLET WATCHER CANNOT SEE THE CHAIN',
     severity: 'attention',
-    what: 'the wallet watcher could not read the network for several checks in a row.',
-    means: 'unexpected wallet activity would not be noticed until it can read again.',
+    what: 'the wallet watcher could not read a wallet\'s network state correctly for several checks in a row.',
+    means: 'unexpected wallet activity would not be noticed until it can read again. The watcher is not covering this wallet right now.',
     steps: ['Check the network provider status and the host connection.', 'Do not start a run until this message clears.'],
+  },
+  baseline_accepted: {
+    title: 'WALLET STATE ACCEPTED',
+    severity: 'attention',
+    what: 'a wallet\'s current on-chain state was accepted as its new baseline.',
+    means: 'the watcher now compares future activity against this state. The kill switch was not changed.',
+    steps: ['If you did not accept this state yourself, treat it as a security problem and keep the kill switch engaged.'],
+  },
+  accept_rejected: {
+    title: 'WALLET STATE ACCEPT REJECTED',
+    severity: 'attention',
+    what: 'a request to accept a wallet\'s state was ignored because it did not match the chain (dated in the future, or ahead of the wallet\'s real transaction count).',
+    means: 'the watcher kept its previous baseline. This should not happen with the normal command.',
+    steps: ['If you did not run the accept command, treat it as a security problem and keep the kill switch engaged.', 'Otherwise run the accept command again.'],
   },
 };
 
-export function fleetWatchCard(input: { finding: FleetWatchFinding; chainId: number; wallet?: string; detail?: string; at: Date | string }): SystemCard {
-  const words = WATCH_WORDS[input.finding];
+export function fleetWatchCard(input: { finding: FleetWatchFinding; chainId: number; wallet?: string; detail?: string; killFailed?: boolean; at: Date | string }): SystemCard {
+  const base = WATCH_WORDS[input.finding];
+  // When the automatic kill could not be engaged, never say that signing has stopped: say the opposite and put the manual step first.
+  const words = input.killFailed && (input.finding === 'unknown_activity' || input.finding === 'unexplained_fall')
+    ? { ...base, means: 'the bot could NOT engage the kill switch by itself, so signing may still be possible. The wallet keys may be compromised.', steps: ['Engage the kill switch yourself now from the terminal, before anything else.', ...base.steps.filter((step) => step !== 'Do not release the kill switch.')] }
+    : base;
   return buildSystemCard({
     title: words.title,
     severity: words.severity,
@@ -120,6 +138,6 @@ export function fleetWatchCard(input: { finding: FleetWatchFinding; chainId: num
     steps: words.steps,
     eventAt: input.at,
     eventLabel: 'the check',
-    summary: `${words.title.toLowerCase()}.`,
+    summary: input.killFailed ? `${words.title.toLowerCase()}; the kill switch could not be engaged.` : `${words.title.toLowerCase()}.`,
   });
 }

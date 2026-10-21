@@ -171,16 +171,37 @@ describe('FleetWatcher (D-059 item 6)', () => {
     expect(result.findings).toEqual([{ wallet: W1, chainId: 1, kind: 'unknown_activity' }]);
   });
 
-  it('reports when it cannot read the chain several times in a row, once, and never counts blindness as safe', async () => {
+  it('reports a wallet it cannot read several times in a row, once a day per wallet, and never counts blindness as safe', async () => {
     const { watcher, sent, kills, advance, fail } = setup();
     await watcher.tick();
     fail(true);
     for (let index = 0; index < WATCH_BLIND_AFTER_FAILURES + 2; index += 1) { advance(WATCH_IDLE_INTERVAL_MS); const result = await watcher.tick(); expect(result.failed).toBe(2); }
-    expect(sent.filter((item) => item.dedupe.startsWith('fleet_watch:blind'))).toHaveLength(1);
+    const blind = sent.filter((item) => item.dedupe.startsWith('fleet_watch:watcher_blind'));
+    expect(blind).toHaveLength(2); // one per wallet, not repeated on later failures the same day
     expect(kills).toEqual([]);
     fail(false);
     advance(WATCH_IDLE_INTERVAL_MS);
     expect((await watcher.tick()).checked).toBe(2);
+  });
+
+  it('reports a single wallet that keeps failing even while the others read fine', async () => {
+    const { reads, sent, store } = setup();
+    let clock = new Date(T0);
+    const watcher = new FleetWatcher({
+      store,
+      targets: [{ chainId: 1, address: W1 }, { chainId: 1, address: W2 }],
+      ceilings: CEILINGS,
+      treasury: TREASURY,
+      read: async (target) => { if (target.address === W2) throw new Error('rpc'); return reads.get(target.address)!; },
+      alerts: { send: async (input) => { sent.push({ kind: input.kind, dedupe: input.dedupe, priority: input.priority, text: input.text }); return true; } },
+      kill: async () => undefined,
+      now: () => clock,
+    });
+    for (let index = 0; index < WATCH_BLIND_AFTER_FAILURES; index += 1) { await watcher.tick(true); clock = new Date(clock.getTime() + WATCH_IDLE_INTERVAL_MS); }
+    const blind = sent.filter((item) => item.dedupe.includes('watcher_blind'));
+    expect(blind).toHaveLength(1);
+    expect(blind[0]!.dedupe).toContain(W2);
+    expect(watcher.isHealthy(clock)).toBe(false); // a partial check never counts as a healthy watcher
   });
 
   it('reminds about left-over balance after 24 idle hours, repeats daily, and stays quiet while a run is active', async () => {
@@ -211,6 +232,7 @@ describe('FleetWatcher (D-059 item 6)', () => {
     await record({ requestId: 'req1', chainId: 1, items: [{ wallet: W1, topUpWei: '500000000000000' }] });
     await record({ requestId: 'req2', chainId: 8453, items: [{ wallet: W1, topUpWei: '1' }] }); // chain not watched
     await record({ requestId: 'req3', chainId: 1, items: [{ wallet: 'nope', topUpWei: '1' }] }); // malformed
+    await record({ requestId: 'req4', chainId: 1, items: [{ wallet: '0x9999999999999999999999999999999999999999', topUpWei: '1000000000000' }] }); // not a watched wallet: a forged request cannot name its own address
     await watcher.tick();
     advance(WATCH_IDLE_INTERVAL_MS);
     await watcher.tick(); // a second pass must not send it again
@@ -218,9 +240,9 @@ describe('FleetWatcher (D-059 item 6)', () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({ dedupe: 'funding_request:req1', priority: 'immediate' });
     expect(requests[0]!.text).toContain('Funding needed: 0.0005 ETH');
-    // a request older than a day is no longer delivered
+    // a request older than a week is no longer delivered
     const later = setup();
-    await later.store.transaction((state: BackendState) => { state.events.push({ id: 'evt_old', type: 'fleet_funding_requested', at: new Date(T0.getTime() - 25 * HOUR).toISOString(), data: { requestId: 'old', chainId: 1, items: [{ wallet: W1, topUpWei: '1000000000000' }] } } as never); });
+    await later.store.transaction((state: BackendState) => { state.events.push({ id: 'evt_old', type: 'fleet_funding_requested', at: new Date(T0.getTime() - 8 * 24 * HOUR).toISOString(), data: { requestId: 'old', chainId: 1, items: [{ wallet: W1, topUpWei: '1000000000000' }] } } as never); });
     await later.watcher.tick();
     expect(later.sent.filter((item) => item.kind === 'funding_request')).toHaveLength(0);
   });
@@ -231,5 +253,245 @@ describe('FleetWatcher (D-059 item 6)', () => {
     expect(() => new FleetWatcher({ ...base, targets: [] } as never)).toThrow('FLEET_WATCH_TARGETS_REQUIRED');
     expect(() => new FleetWatcher({ ...base, targets: [{ chainId: 1, address: 'nope' }] } as never)).toThrow('FLEET_WATCH_ADDRESS_INVALID');
     expect(() => new FleetWatcher({ ...base, targets: [{ chainId: 1, address: W1 }], treasury: 'nope' } as never)).toThrow('FLEET_WATCH_TREASURY_INVALID');
+  });
+});
+
+describe('FleetWatcher review fixes (T-044)', () => {
+  function build(options: { kill?: (reason: string) => Promise<void>; send?: (input: { kind: string; dedupe: string; priority: string; text: string }) => Promise<boolean>; reads?: Map<string, WalletReading>; onRead?: (target: string) => Promise<void> | void } = {}) {
+    const store = new Store();
+    const reads = options.reads ?? new Map<string, WalletReading>([[W1, { nonce: 5, balanceWei: 300_000_000_000_000n }], [W2, { nonce: 2, balanceWei: 0n }]]);
+    const sent: Array<{ kind: string; dedupe: string; priority: string; text: string }> = [];
+    const kills: string[] = [];
+    let clock = new Date(T0);
+    let readCount = 0;
+    const watcher = new FleetWatcher({
+      store,
+      targets: [{ chainId: 1, address: W1 }, { chainId: 1, address: W2 }],
+      ceilings: CEILINGS,
+      treasury: TREASURY,
+      read: async (target) => { readCount += 1; await options.onRead?.(target.address); return reads.get(target.address)!; },
+      alerts: { send: async (input) => { if (sent.some((item) => item.dedupe === input.dedupe)) return false; if (options.send) await options.send(input); /* a delivery that throws records nothing, like the real sink failing before it stores the alert */ sent.push({ kind: input.kind, dedupe: input.dedupe, priority: input.priority, text: input.text }); return true; } },
+      kill: options.kill ?? (async (reason) => { kills.push(reason); }),
+      now: () => clock,
+    });
+    return { store, reads, sent, kills, watcher, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, readCount: () => readCount };
+  }
+
+  it('tells the owner plainly when the kill switch could not be engaged, and tries again at the next check', async () => {
+    let fail = true;
+    const attempts: string[] = [];
+    const { watcher, reads, sent, advance } = build({ kill: async (reason) => { attempts.push(reason); if (fail) throw new Error('disk'); } });
+    await watcher.tick();
+    advance(WATCH_IDLE_INTERVAL_MS);
+    reads.set(W1, { nonce: 9, balanceWei: 300_000_000_000_000n });
+    const result = await watcher.tick();
+    expect(result).toMatchObject({ killed: false, killFailed: true });
+    const alert = sent.find((item) => item.kind === 'fleet_watch');
+    expect(alert!.text).toContain('the kill switch could not be engaged');
+    expect(alert!.dedupe).toContain('kill-failed');
+    fail = false;
+    advance(WATCH_IDLE_INTERVAL_MS);
+    expect(await watcher.tick()).toMatchObject({ killed: true, killFailed: false });
+    expect(attempts).toHaveLength(2);
+  });
+
+  it('confirms with a second read and then kills when the finding is real', async () => {
+    const { watcher, reads, kills, advance, readCount } = build();
+    await watcher.tick();
+    advance(WATCH_IDLE_INTERVAL_MS);
+    reads.set(W1, { nonce: 6, balanceWei: 300_000_000_000_000n });
+    const before = readCount();
+    const result = await watcher.tick();
+    expect(result.killed).toBe(true);
+    expect(readCount() - before).toBe(3); // two wallets plus the confirming second read
+    expect(kills).toHaveLength(1);
+  });
+
+  it('turns an anomaly that disappears on the second read into an inconsistent-answer note, with no kill', async () => {
+    const reads = new Map<string, WalletReading>([[W1, { nonce: 5, balanceWei: 300_000_000_000_000n }], [W2, { nonce: 2, balanceWei: 0n }]]);
+    let w1Reads = 0;
+    const { watcher, sent, kills, advance } = build({ reads, onRead: (address) => { if (address === W1) { w1Reads += 1; if (w1Reads === 3) reads.set(W1, { nonce: 5, balanceWei: 300_000_000_000_000n }); } } });
+    await watcher.tick(); // w1Reads = 1
+    advance(WATCH_IDLE_INTERVAL_MS);
+    reads.set(W1, { nonce: 6, balanceWei: 300_000_000_000_000n });
+    const result = await watcher.tick(); // second W1 read of this check is w1Reads = 3 and shows the true state
+    expect(result.killed).toBe(false);
+    expect(result.findings).toEqual([{ wallet: W1, chainId: 1, kind: 'rpc_inconsistent' }]);
+    expect(kills).toEqual([]);
+    expect(sent.some((item) => item.dedupe.includes('rpc_inconsistent'))).toBe(true);
+  });
+
+  it('does not kill a live run when MintBot records its own transaction while the reads are in flight', async () => {
+    const { watcher, reads, kills, advance, store } = build({
+      onRead: async () => undefined,
+    });
+    await watcher.tick();
+    advance(WATCH_IDLE_INTERVAL_MS);
+    reads.set(W1, { nonce: 6, balanceWei: 100_000_000_000_000n });
+    // the engine records the attempt and the reservation after the check started but before the records are looked at
+    const original = reads.get.bind(reads);
+    let recorded = false;
+    reads.get = ((key: string) => {
+      if (!recorded && key === W2) {
+        recorded = true;
+        void store.transaction((state: BackendState) => {
+          state.intents.push({ id: 'i', runId: 'r', campaignSnapshot: { chainId: 1 } } as never);
+          state.runs.push({ id: 'r', state: 'Active' } as never);
+          state.attempts.push({ id: 'a', executionId: 'e', runId: 'r', wallet: W1, nonce: 5, state: 'Submitted', createdAt: T0.toISOString(), updatedAt: T0.toISOString() } as never);
+          state.reservations.push({ id: 'res', runId: 'r', campaignId: 'c', chainId: 1, wallet: W1, amountWei: 250_000_000_000_000n, accountingDate: '2026-10-22', status: 'reserved', createdAt: T0.toISOString(), updatedAt: T0.toISOString() });
+        });
+      }
+      return original(key);
+    }) as never;
+    const result = await watcher.tick();
+    expect(result.killed).toBe(false);
+    expect(kills).toEqual([]);
+  });
+
+  it('counts an attempt whose run has no recorded intent for every chain, so it never causes a false kill', async () => {
+    const { watcher, reads, kills, advance, store } = build();
+    await watcher.tick();
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await store.transaction((state: BackendState) => { state.attempts.push({ id: 'a', executionId: 'e', runId: 'ghost', wallet: W1, nonce: 5, state: 'Submitted', createdAt: T0.toISOString(), updatedAt: T0.toISOString() } as never); });
+    reads.set(W1, { nonce: 6, balanceWei: 300_000_000_000_000n });
+    expect((await watcher.tick()).killed).toBe(false);
+    expect(kills).toEqual([]);
+  });
+
+  it('writes the finding record once per distinct state, not on every check', async () => {
+    const { watcher, reads, advance, store } = build();
+    await watcher.tick();
+    reads.set(W1, { nonce: 6, balanceWei: 300_000_000_000_000n });
+    for (let index = 0; index < 4; index += 1) { advance(WATCH_IDLE_INTERVAL_MS); await watcher.tick(); }
+    expect(store.snapshot().events.filter((event) => event.type === 'fleet_watch_finding')).toHaveLength(1);
+  });
+
+  it('lets the same unresolved finding alert again the next day, but not within the day', async () => {
+    const { watcher, reads, sent, advance } = build();
+    await watcher.tick();
+    reads.set(W1, { nonce: 6, balanceWei: 300_000_000_000_000n });
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await watcher.tick();
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await watcher.tick();
+    expect(sent.filter((item) => item.dedupe.includes('unknown_activity'))).toHaveLength(1);
+    advance(24 * HOUR);
+    await watcher.tick();
+    expect(sent.filter((item) => item.dedupe.includes('unknown_activity'))).toHaveLength(2);
+  });
+
+  it('escalates a provider that keeps reporting a lower transaction count to an immediate alert, still without a kill', async () => {
+    const { watcher, reads, sent, kills, advance } = build();
+    await watcher.tick();
+    reads.set(W1, { nonce: 3, balanceWei: 300_000_000_000_000n });
+    for (let index = 0; index < WATCH_BLIND_AFTER_FAILURES; index += 1) { advance(WATCH_IDLE_INTERVAL_MS); await watcher.tick(); }
+    const blind = sent.filter((item) => item.dedupe.includes('watcher_blind'));
+    expect(blind).toHaveLength(1);
+    expect(blind[0]!.priority).toBe('immediate');
+    expect(kills).toEqual([]);
+  });
+
+  describe('accepting a wallet state recorded by the owner command', () => {
+    const accept = (store: Store, at: Date, nonce: number, address = W1) => store.transaction((state: BackendState) => { state.events.push({ id: `evt_${state.events.length}`, type: 'fleet_watch_accept', at: at.toISOString(), data: { chainId: 1, address, nonce, balanceWei: '300000000000000' } } as never); });
+
+    it('is reported to the owner when adopted', async () => {
+      const { watcher, reads, sent, advance, store } = build();
+      await watcher.tick();
+      reads.set(W1, { nonce: 7, balanceWei: 300_000_000_000_000n });
+      advance(WATCH_IDLE_INTERVAL_MS);
+      await watcher.tick();
+      await accept(store, new Date(T0.getTime() + WATCH_IDLE_INTERVAL_MS + MIN), 7);
+      advance(WATCH_IDLE_INTERVAL_MS);
+      await watcher.tick();
+      expect(sent.some((item) => item.dedupe.includes('baseline_accepted'))).toBe(true);
+    });
+
+    it('is rejected when it claims a transaction count above the chain, and the watcher keeps its baseline and keeps killing', async () => {
+      const { watcher, reads, sent, kills, advance, store } = build();
+      await watcher.tick();
+      reads.set(W1, { nonce: 7, balanceWei: 300_000_000_000_000n });
+      advance(WATCH_IDLE_INTERVAL_MS);
+      await watcher.tick();
+      await accept(store, new Date(T0.getTime() + WATCH_IDLE_INTERVAL_MS + MIN), 99);
+      advance(WATCH_IDLE_INTERVAL_MS);
+      const result = await watcher.tick();
+      expect(sent.some((item) => item.dedupe.includes('accept_rejected'))).toBe(true);
+      expect(result.findings).toEqual([{ wallet: W1, chainId: 1, kind: 'unknown_activity' }]);
+      expect(kills.length).toBeGreaterThan(0);
+    });
+
+    it('is rejected when it is dated in the future, and does not block later real accepts', async () => {
+      const { watcher, reads, sent, advance, store } = build();
+      await watcher.tick();
+      reads.set(W1, { nonce: 7, balanceWei: 300_000_000_000_000n });
+      advance(WATCH_IDLE_INTERVAL_MS);
+      await watcher.tick();
+      await accept(store, new Date(T0.getTime() + 400 * 24 * HOUR), 7);
+      advance(WATCH_IDLE_INTERVAL_MS);
+      await watcher.tick();
+      expect(sent.some((item) => item.dedupe.includes('accept_rejected'))).toBe(true);
+      await accept(store, new Date(T0.getTime() + 2 * WATCH_IDLE_INTERVAL_MS + MIN), 7);
+      advance(WATCH_IDLE_INTERVAL_MS);
+      expect((await watcher.tick()).killed).toBe(false);
+      expect(sent.some((item) => item.dedupe.includes('baseline_accepted'))).toBe(true);
+    });
+  });
+
+  it('does not call a normal funding a surprise: a rise the owner was asked for raises no alert', async () => {
+    const { watcher, reads, sent, advance, store } = build();
+    await watcher.tick();
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await store.transaction((state: BackendState) => { state.events.push({ id: 'evt_req', type: 'fleet_funding_requested', at: new Date(T0.getTime() + WATCH_IDLE_INTERVAL_MS - MIN).toISOString(), data: { requestId: 'r1', chainId: 1, items: [{ wallet: W2, topUpWei: '700000000000000' }] } } as never); });
+    reads.set(W2, { nonce: 2, balanceWei: 700_000_000_000_000n });
+    await watcher.tick();
+    expect(sent.some((item) => item.dedupe.includes('rise_above_limit'))).toBe(false);
+  });
+
+  it('keeps the reminder due when its delivery failed, so it is retried instead of waiting another day', async () => {
+    let failing = true;
+    const reads = new Map<string, WalletReading>([[W1, { nonce: 5, balanceWei: 700_000_000_000_000n }], [W2, { nonce: 2, balanceWei: 0n }]]);
+    const { watcher, sent, advance } = build({ reads, send: async (input) => { if (input.kind === 'excess_balance' && failing) throw new Error('telegram down'); return true; } });
+    await watcher.tick();
+    advance(25 * HOUR);
+    await watcher.tick();
+    failing = false;
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await watcher.tick();
+    // the failed attempt recorded nothing, and ten minutes later (not a day later) the reminder went out
+    expect(sent.filter((item) => item.kind === 'excess_balance')).toHaveLength(1);
+  });
+
+  it('reminds each wallet that needs it, even when two wallets come due on different days', async () => {
+    const reads = new Map<string, WalletReading>([[W1, { nonce: 5, balanceWei: 700_000_000_000_000n }], [W2, { nonce: 2, balanceWei: 0n }]]);
+    const { watcher, sent, advance } = build({ reads });
+    await watcher.tick();
+    advance(25 * HOUR);
+    await watcher.tick();
+    reads.set(W2, { nonce: 2, balanceWei: 800_000_000_000_000n });
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await watcher.tick();
+    advance(25 * HOUR);
+    await watcher.tick();
+    const reminders = sent.filter((item) => item.kind === 'excess_balance');
+    expect(reminders.some((item) => item.dedupe.includes(W2))).toBe(true);
+  });
+
+  it('says which wallets it watches and whether it is alive, for the arm gate', async () => {
+    const { watcher, advance } = build();
+    expect(watcher.covers(1, [W1, W2])).toBe(true);
+    expect(watcher.covers(1, [W1, '0x9999999999999999999999999999999999999999'])).toBe(false);
+    expect(watcher.covers(8453, [W1])).toBe(false);
+    expect(watcher.covers(1, [])).toBe(false);
+    expect(watcher.isHealthy()).toBe(false); // never checked yet
+    await watcher.tick();
+    expect(watcher.isHealthy()).toBe(true);
+    advance(31 * MIN);
+    expect(watcher.isHealthy()).toBe(false); // quiet for more than three idle intervals
+  });
+
+  it('reports a watcher that the service itself sees failing', async () => {
+    const { watcher, sent } = build();
+    await watcher.reportBlind();
+    expect(sent.some((item) => item.dedupe.includes('watcher_blind') && item.dedupe.includes('service'))).toBe(true);
   });
 });

@@ -23,11 +23,24 @@ export interface FleetWatchConfig {
   targets: WatchTarget[];
   treasury: string;
   ceilings: BalanceCeilings;
+  activeIntervalMs?: number;
+  idleIntervalMs?: number;
+}
+
+function intervalFrom(value: string | undefined): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (!/^\d{1,9}$/.test(value)) throw new Error('FLEET_WATCH_INTERVAL_INVALID');
+  const ms = Number(value);
+  if (ms < 30_000 || ms > 3_600_000) throw new Error('FLEET_WATCH_INTERVAL_INVALID');
+  return ms;
 }
 
 /** Returns undefined when the watcher is not enabled. Throws a plain code when it is enabled but misconfigured. */
 export function parseFleetWatchEnv(environment: NodeJS.ProcessEnv): FleetWatchConfig | undefined {
-  if (environment.MINT_BOT_WATCHER_ENABLED !== 'true') return undefined;
+  const flag = environment.MINT_BOT_WATCHER_ENABLED;
+  // Only an exact "true" turns it on and only unset, empty or "false" leave it off: a typo such as "True" or "1" stops the start instead of silently disabling the watcher.
+  if (flag === undefined || flag === '' || flag === 'false') return undefined;
+  if (flag !== 'true') throw new Error('FLEET_WATCH_ENABLED_INVALID');
   let parsed: unknown;
   try { parsed = JSON.parse(environment.MINT_BOT_WATCH_FLEET ?? ''); } catch { throw new Error('FLEET_WATCH_FLEET_INVALID'); }
   if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('FLEET_WATCH_FLEET_INVALID');
@@ -46,7 +59,9 @@ export function parseFleetWatchEnv(environment: NodeJS.ProcessEnv): FleetWatchCo
   const treasury = environment.MINT_BOT_TREASURY_ADDRESS ?? '';
   if (!ADDRESS.test(treasury)) throw new Error('FLEET_WATCH_TREASURY_INVALID');
   for (const target of targets) if (!DEFAULT_IDLE_BALANCE_CEILINGS[target.chainId]) throw new Error('FLEET_WATCH_NO_CEILING_FOR_CHAIN');
-  return { targets, treasury, ceilings: DEFAULT_IDLE_BALANCE_CEILINGS };
+  const activeIntervalMs = intervalFrom(environment.MINT_BOT_WATCHER_ACTIVE_INTERVAL_MS);
+  const idleIntervalMs = intervalFrom(environment.MINT_BOT_WATCHER_IDLE_INTERVAL_MS);
+  return { targets, treasury, ceilings: DEFAULT_IDLE_BALANCE_CEILINGS, ...(activeIntervalMs !== undefined ? { activeIntervalMs } : {}), ...(idleIntervalMs !== undefined ? { idleIntervalMs } : {}) };
 }
 
 export const watcherRpcSecretName = (chainId: number): string => `WATCHER_RPC_${chainId}`;
@@ -104,16 +119,23 @@ export function startFleetWatcher(options: StartFleetWatcherOptions): { stop(): 
     read: createChainReader(clients),
     alerts: alertSinkFor(options.alerts),
     kill: options.kill,
+    ...(options.config.activeIntervalMs !== undefined ? { activeIntervalMs: options.config.activeIntervalMs } : {}),
+    ...(options.config.idleIntervalMs !== undefined ? { idleIntervalMs: options.config.idleIntervalMs } : {}),
   });
   let busy = false;
+  let thrown = 0;
   const tick = async (): Promise<void> => {
     if (busy) return;
     busy = true;
     try {
       const result = await watcher.tick();
+      thrown = 0;
       if (result.ran && (result.findings.length > 0 || result.failed > 0)) options.logger?.warn({ event: 'fleet_watch', checked: result.checked, failed: result.failed, findings: result.findings.map((finding) => finding.kind), killed: result.killed }, 'fleet watcher findings');
     } catch (error) {
       options.logger?.warn({ event: 'fleet_watch_error', error: error instanceof Error ? error.message : 'unknown' }, 'fleet watcher check failed');
+      // A check that keeps failing is a watcher that is not watching: tell the owner (once a day), do not just log it.
+      thrown += 1;
+      if (thrown >= 3) await watcher.reportBlind().catch(() => undefined);
     } finally { busy = false; }
   };
   const timer = setInterval(() => { void tick(); }, options.intervalMs ?? 30_000);

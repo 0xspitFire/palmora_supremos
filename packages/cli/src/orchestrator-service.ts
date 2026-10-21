@@ -131,7 +131,11 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       store: runtime.store,
       config: watchConfig,
       alerts,
-      kill: async (reason) => { await engageKillSwitchFile(config.killSwitchPath, reason); await runtime.coordinator.kill(reason); },
+      // Both are attempted on their own: the kill file and the coordinator. Only if neither could be engaged is the failure reported.
+      kill: async (reason) => {
+        const outcomes = await Promise.allSettled([engageKillSwitchFile(config.killSwitchPath, reason), runtime.coordinator.kill(reason)]);
+        if (outcomes.every((outcome) => outcome.status === 'rejected')) throw new Error('KILL_SWITCH_NOT_ENGAGED');
+      },
       rpcUrl: (chainId) => watchSecrets.get(watcherRpcSecretName(chainId)),
       logger,
     });
