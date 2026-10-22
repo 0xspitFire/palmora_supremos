@@ -244,8 +244,10 @@ if [ "$SELFTEST" -eq 1 ]; then
       MOVE_OUT="$(systemd-run --quiet --wait --pipe "${UNIT_SETTINGS[@]}" /usr/bin/mv /var/lib/mint-bot/backup-status /var/lib/mint-bot/backup-status.moved 2>&1)"; MOVE_RC=$?
       if [ "$MOVE_RC" -eq 0 ]; then
         bad "under the service's own settings, mintbot could MOVE the backup-status folder"; [ -d /var/lib/mint-bot/backup-status.moved ] && mv /var/lib/mint-bot/backup-status.moved /var/lib/mint-bot/backup-status
-      elif grep -qiE 'read-only|resource busy' <<<"$MOVE_OUT" && [ -d /var/lib/mint-bot/backup-status ]; then ok "under the service's own settings, mintbot cannot replace the backup-status folder (refused; it is a read-only mount point)"
+      elif grep -qiE 'read-only|resource busy' <<<"$MOVE_OUT" && [ -d /var/lib/mint-bot/backup-status ]; then ok "under the service's own settings, mintbot cannot replace the backup-status folder (the move was refused because it is a mount point)"
       else warn "the move was refused but not for the expected reason, so this check proves nothing: $MOVE_OUT"; fi
+    MOUNT_OPTIONS="$(systemd-run --quiet --wait --pipe "${UNIT_SETTINGS[@]}" /usr/bin/findmnt -no OPTIONS /var/lib/mint-bot/backup-status 2>&1 | tail -n 1)"
+    if grep -qE '(^|,)ro(,|$)' <<<"$MOUNT_OPTIONS"; then ok "inside the service the backup-status folder is mounted read-only ($MOUNT_OPTIONS)"; else warn "could not confirm the read-only mount of the backup-status folder from inside the service (saw: ${MOUNT_OPTIONS:-nothing})"; fi
     else warn "the control write under the service's settings failed, so the replace-the-status-folder check was NOT run"; fi
   else warn "systemd-run is not usable here, so the replace-the-status-folder check was NOT run"; fi
 fi

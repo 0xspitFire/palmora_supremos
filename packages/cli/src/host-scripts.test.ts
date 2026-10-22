@@ -149,6 +149,8 @@ describe('production host scripts (T-045)', () => {
     expect(provision).toContain('stop the MintBot service first');
     expect(verify).toContain("grep -qiE 'read-only|resource busy'");
     expect(verify).toContain('[ -d /var/lib/mint-bot/backup-status ]'); // the folder must still be there
+    expect(verify).toContain('findmnt -no OPTIONS /var/lib/mint-bot/backup-status'); // proves the mount is read-only, not just a mount point
+    expect(verify).toContain('mounted read-only');
     expect(verify).toContain('this check proves nothing');
   });
 
