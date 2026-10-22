@@ -30,14 +30,26 @@ describe('release scripts (T-047)', () => {
     expect(build).toContain('--target build');
     expect(build).toMatch(/STOP: the source has a file that looks like a secret/);
     expect(build).toMatch(/STOP: the built release has a file that looks like a secret/);
-    for (const pattern of ["'*.env'", "'*.key'", "'*.pem'", "'*keystore*.json'", "'*wallet*.json'"]) expect(build).toContain(pattern);
+    for (const pattern of ["'*.env'", "'.env*'", "'.npmrc'", "'*.key'", "'*.pem'", "'*keystore*.json'", "'*wallet*.json'"]) expect(build).toContain(pattern);
     // it checks the result is complete before packing and records how it was built
     for (const required of ['packages/cli/dist/orchestrator-service.js', 'scripts/backup-service.mjs', 'scripts/r2-upload.mjs']) expect(build).toContain(required);
     expect(build).toContain('method=%s');
   });
 
+  it('the builder pins what the lockfile cannot: the pnpm program, every native file, the commit, and the offline build has no network and a read-only store', () => {
+    expect(build).toContain('^{commit}');
+    expect(build).toContain('PNPM_CJS_SHA256=');
+    expect(build).toContain('native-binaries.sha256');
+    expect(build).toContain('do not match $NATIVE_PINS');
+    expect(build).toContain('--network none');
+    expect(build).toContain('/pnpm/store:ro');
+    expect(build).toContain('--hard-dereference');
+    const pins = readFileSync(join(hostDir, 'native-binaries.sha256'), 'utf8');
+    expect(pins).toMatch(/^[0-9a-f]{64} {2}better_sqlite3\.node$/m);
+  });
+
   it('the installer checks the SHA-256, looks inside the archive before unpacking, and refuses paths outside release/ and parent-folder paths', () => {
-    expect(install).toContain('sha256sum "$TARBALL"');
+    expect(install).toContain('sha256sum "$COPY"'); // hashes its private copy, so the file cannot change after the check
     expect(install).toContain('[[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]]');
     expect(install).toContain('the archive has files outside the release folder');
     expect(install).toContain('the archive has a parent-folder path');
@@ -54,6 +66,9 @@ describe('release scripts (T-047)', () => {
 
   it('the installer proves the release starts as the unprivileged account before making it current', () => {
     expect(install).toContain('smoke_test');
+    expect(install).toContain('systemd-run');
+    expect(install).toContain('PrivateNetwork=yes');
+    expect(install).toContain('MINT_BOT_ALLOW_UNSANDBOXED_SMOKE');
     expect(install).toContain('runuser -u mintbot');
     expect(install).toContain('openDatabase');
     expect(install.indexOf('smoke_test "$STAGE/release"')).toBeLessThan(install.indexOf('link_current "$TARGET"'));
@@ -66,8 +81,8 @@ describe('release scripts (T-047)', () => {
     expect(install).not.toMatch(/\/etc\/mint-bot\/(Rets|secrets)/);
     // the only removal is of its own temporary staging folder
     const removals = install.split('\n').filter((line) => /\brm\s+-rf?\b/.test(line));
-    expect(removals).toHaveLength(1);
-    expect(removals[0]).toContain('"$STAGE"');
+    expect(removals.length).toBeGreaterThanOrEqual(1);
+    for (const line of removals) expect(line).toContain('"$STAGE"');
   });
 
   it('refuses to install or roll back while the service is running, and to roll back to a release that does not start', () => {
@@ -78,6 +93,8 @@ describe('release scripts (T-047)', () => {
 
   it('makes the current release switch atomic and records history', () => {
     expect(install).toContain('mv -Tf "$CURRENT.new" "$CURRENT"');
+    expect(install).toContain('flock -n 9');
+    expect(install).toContain('not an ordinary file, folder or link');
     expect(install).toContain('.history');
     expect(install).toContain('.previous');
   });

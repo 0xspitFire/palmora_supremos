@@ -6,15 +6,17 @@
 #   sudo bash install-release.sh --list                      show installed releases and which one is current
 #
 # A release is unpacked into /opt/mint-bot/releases/<commit>, owned by root and changeable by nobody else, proven to start
-# (the programs load and the database library opens a scratch database, run as the unprivileged account), and only then
-# linked as /opt/mint-bot/current. Nothing is ever deleted here: old releases stay so a rollback is always possible. The
-# service is not started, the kill switch is not touched, and no secret is read. A rollback never touches data.
+# (the programs load and the database library opens a scratch database) inside a sandbox with no network and no access to the
+# state, log or secret folders, and only then linked as /opt/mint-bot/current. Nothing is ever deleted here except the
+# installer's own temporary folder: old releases stay so a rollback is always possible. The service is not started, the kill
+# switch is not touched, and no secret is read. A rollback never touches data.
 set -euo pipefail
 
 RELEASES=/opt/mint-bot/releases
 CURRENT=/opt/mint-bot/current
 PREVIOUS_FILE="$RELEASES/.previous"
 HISTORY_FILE="$RELEASES/.history"
+MAX_UNPACKED_BYTES=$((2 * 1024 * 1024 * 1024))
 
 say()  { printf '\n== %s\n' "$*"; }
 note() { printf '   %s\n' "$*"; }
@@ -40,18 +42,48 @@ link_current() { # release dir
   mv -Tf "$CURRENT.new" "$CURRENT"
 }
 
-record() { # old new
-  [ -z "$1" ] || printf '%s\n' "$1" > "$PREVIOUS_FILE"
-  printf '%s %s -> %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-none}" "$2" >> "$HISTORY_FILE"
-  chmod 0644 "$PREVIOUS_FILE" "$HISTORY_FILE" 2>/dev/null || true
+write_file_atomically() { # path content
+  local tmp="$1.tmp.$$"
+  printf '%s\n' "$2" > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$1"
 }
 
-# A release must start for real: the programs load and the database library works, as the unprivileged service account.
+record() { # old new
+  [ -z "$1" ] || write_file_atomically "$PREVIOUS_FILE" "$1"
+  printf '%s %s -> %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-none}" "$2" >> "$HISTORY_FILE"
+  chmod 0644 "$HISTORY_FILE" 2>/dev/null || true
+}
+
+# Runs a command from a release folder as the unprivileged account in a sandbox: no network, no access to the state, log or secret
+# folders, read-only system, private temporary folder, no new privileges. The release's own code runs here BEFORE it is trusted, so
+# it must not be able to reach the kill switch or any secret. (Tests in a container without systemd may set
+# MINT_BOT_ALLOW_UNSANDBOXED_SMOKE=1; that is never used on the real host.)
+smoke_run() { # dir command...
+  local dir="$1"; shift
+  if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemd-run --quiet --wait --pipe --collect --working-directory="$dir" -p User=mintbot -p PrivateNetwork=yes -p NoNewPrivileges=yes \
+      -p PrivateTmp=yes -p ProtectHome=yes -p ProtectSystem=strict -p LimitCORE=0 \
+      -p "InaccessiblePaths=-/etc/mint-bot -/var/lib/mint-bot -/var/log/mint-bot -/root" \
+      /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent "$@"
+  elif [ "${MINT_BOT_ALLOW_UNSANDBOXED_SMOKE:-}" = 1 ]; then
+    echo "   WARNING: testing the release WITHOUT the sandbox (container tests only)" >&2
+    ( cd "$dir" && runuser -u mintbot -- env -i PATH=/usr/bin:/bin HOME=/nonexistent "$@" )
+  else
+    echo "systemd-run is not available, so the release cannot be tested safely." >&2
+    return 1
+  fi
+}
+
+# A release must start for real: the programs load, the database library opens a scratch database, and the backup service's
+# cloud-storage library resolves.
 smoke_test() { # dir
   local dir="$1"
-  runuser -u mintbot -- env -i PATH=/usr/bin:/bin HOME=/nonexistent sh -c "cd '$dir' && /usr/bin/node packages/cli/dist/index.js --help >/dev/null 2>&1" || return 1
-  runuser -u mintbot -- env -i PATH=/usr/bin:/bin HOME=/nonexistent sh -c "cd '$dir' && /usr/bin/node --input-type=module -e \"import('./packages/database/dist/index.js').then((m) => { const db = m.openDatabase(':memory:'); db.close(); })\"" >/dev/null 2>&1 || return 1
-  runuser -u mintbot -- env -i PATH=/usr/bin:/bin HOME=/nonexistent sh -c "cd '$dir' && /usr/bin/node --check scripts/backup-service.mjs && /usr/bin/node --check packages/cli/dist/orchestrator-service.js" >/dev/null 2>&1
+  smoke_run "$dir" /usr/bin/node packages/cli/dist/index.js --help >/dev/null 2>&1 || return 1
+  smoke_run "$dir" /usr/bin/node --input-type=module -e "import('./packages/database/dist/index.js').then((m) => { const db = m.openDatabase(':memory:'); db.close(); })" >/dev/null 2>&1 || return 1
+  smoke_run "$dir/scripts" /usr/bin/node --input-type=module -e "await import('@aws-sdk/client-s3')" >/dev/null 2>&1 || return 1
+  smoke_run "$dir" /usr/bin/node --check scripts/backup-service.mjs >/dev/null 2>&1 || return 1
+  smoke_run "$dir" /usr/bin/node --check packages/cli/dist/orchestrator-service.js >/dev/null 2>&1
 }
 
 case "${1:-}" in
@@ -61,18 +93,21 @@ case "${1:-}" in
       [ -d "$dir" ] || continue
       name="$(basename "$dir")"
       mark=""; [ "$(current_target)" = "${dir%/}" ] && mark="   <- current"
-      printf '   %s  %s%s\n' "$name" "$(grep -m1 '^built_at=' "$dir/RELEASE" 2>/dev/null | cut -d= -f2-)" "$mark"
+      printf '   %s  %s%s\n' "$name" "$(grep -m1 '^built_at=' "$dir/RELEASE" 2>/dev/null | cut -d= -f2- || true)" "$mark"
     done
     echo "Previous: $(cat "$PREVIOUS_FILE" 2>/dev/null || echo none)"
     exit 0
     ;;
   --rollback)
+    exec 9>"$RELEASES/.lock"; flock -n 9 || stop "another install or rollback is running."
     service_running && stop "stop the MintBot service first (systemctl stop mint-bot.service), then roll back."
+    [ -f /var/lib/mint-bot/killswitch ] || stop "the kill switch file is missing; a rollback never runs with the kill switch released."
     [ -f "$PREVIOUS_FILE" ] || stop "there is no previous release recorded."
     PREV="$(cat "$PREVIOUS_FILE")"
     valid_release_dir "$PREV" || stop "the recorded previous release ($PREV) is not a valid release folder."
     NOW="$(current_target)"
     [ "$NOW" != "$PREV" ] || stop "the previous release is already current."
+    [ -z "$(find "$PREV" \( ! -user root -o -perm /022 \) ! -type l -print -quit)" ] || stop "the previous release ($PREV) has a file that is not root-only writable."
     smoke_test "$PREV" || stop "the previous release does not start: $PREV. Nothing was changed."
     link_current "$PREV"
     record "$NOW" "$PREV"
@@ -86,31 +121,42 @@ esac
 TARBALL="$1"; EXPECTED="${2:-}"
 [ -f "$TARBALL" ] && [ ! -L "$TARBALL" ] || stop "$TARBALL is not a file."
 [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || stop "give the 64-character SHA-256 that build-release.sh printed."
+exec 9>"$RELEASES/.lock"; flock -n 9 || stop "another install or rollback is running."
 service_running && stop "stop the MintBot service first (systemctl stop mint-bot.service), then install."
 [ -f /var/lib/mint-bot/killswitch ] || stop "the kill switch file is missing; installing a release never runs with the kill switch released."
 
-say "1/5 Checking the file"
-ACTUAL="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
-[ "$ACTUAL" = "$EXPECTED" ] || stop "the file's SHA-256 is $ACTUAL, not the expected $EXPECTED. Nothing was installed."
-note "checksum matches"
-# Look inside before unpacking anything: only a 'release/' tree, no absolute or parent paths, no links that leave it.
-LISTING="$(tar -tzf "$TARBALL")" || stop "the file is not a readable release archive."
-if grep -vE '^release(/|$)' <<<"$LISTING" | grep -q .; then stop "the archive has files outside the release folder."; fi
-if grep -qE '(^|/)\.\.(/|$)' <<<"$LISTING"; then stop "the archive has a parent-folder path."; fi
-
-say "2/5 Unpacking (owned by root)"
 STAGE="$(mktemp -d "$RELEASES/.incoming.XXXXXX")"
 chmod 0755 "$STAGE"   # mktemp makes it root-only; the unprivileged account must be able to reach the release to prove it starts
 trap 'rm -rf "$STAGE"' EXIT
-tar -xzf "$TARBALL" -C "$STAGE" --no-same-owner --no-same-permissions
+
+say "1/5 Checking the file"
+# Work from a private copy, so the file cannot be swapped between the checksum and the unpacking.
+COPY="$STAGE/release.tar.gz"
+install -m 0600 -o root -g root "$TARBALL" "$COPY"
+ACTUAL="$(sha256sum "$COPY" | cut -d' ' -f1)"
+[ "$ACTUAL" = "$EXPECTED" ] || stop "the file's SHA-256 is $ACTUAL, not the expected $EXPECTED. Nothing was installed."
+note "checksum matches"
+# Look inside before unpacking anything: only a 'release/' tree, no absolute or parent paths, only ordinary files, folders and
+# links (no hard links, devices or pipes), and a sane total size.
+LISTING="$(tar -tzf "$COPY")" || stop "the file is not a readable release archive."
+if grep -vE '^release(/|$)' <<<"$LISTING" | grep -q .; then stop "the archive has files outside the release folder."; fi
+if grep -qE '(^|/)\.\.(/|$)' <<<"$LISTING"; then stop "the archive has a parent-folder path."; fi
+VERBOSE="$(tar -tvzf "$COPY")" || stop "the file is not a readable release archive."
+if cut -c1 <<<"$VERBOSE" | grep -vE '^[-dl]$' | grep -q .; then stop "the archive has an entry that is not an ordinary file, folder or link (a hard link, device or pipe, for example)."; fi
+UNPACKED_BYTES="$(awk '$1 ~ /^-/ { total += $3 } END { print total + 0 }' <<<"$VERBOSE")"
+[ "$UNPACKED_BYTES" -le "$MAX_UNPACKED_BYTES" ] || stop "the release would unpack to $UNPACKED_BYTES bytes, above the $MAX_UNPACKED_BYTES limit."
+
+say "2/5 Unpacking (owned by root)"
+tar -xzf "$COPY" -C "$STAGE" --no-same-owner --no-same-permissions
 [ -d "$STAGE/release" ] || stop "the archive did not contain a release folder."
 COMMIT="$(grep -m1 '^commit=' "$STAGE/release/RELEASE" 2>/dev/null | cut -d= -f2- || true)"
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || stop "the release has no valid commit marker."
 chown -R root:root "$STAGE/release"
 chmod -R u=rwX,go=rX "$STAGE/release"
 chmod 0755 "$STAGE/release"
-# Nothing in the tree may be changeable by anyone but root, set-id, or a link pointing out of it.
+# Nothing in the tree may be changeable by anyone but root, set-id, or anything other than an ordinary file, folder or link.
 [ -z "$(find "$STAGE/release" \( ! -user root -o -perm /022 -o -perm /6000 \) ! -type l -print -quit)" ] || stop "the unpacked release has a file that is not root-only writable, or is set-id."
+[ -z "$(find "$STAGE/release" ! -type f ! -type d ! -type l -print -quit)" ] || stop "the unpacked release has an entry that is not an ordinary file, folder or link."
 # A link is fine if, followed to the end, it stays inside the release (a link whose target was pruned away is harmless);
 # one that leaves the release, loops, or cannot be resolved is refused.
 BAD_LINK=""
@@ -121,18 +167,21 @@ done < <(find "$STAGE/release" -type l -print0)
 [ -z "$BAD_LINK" ] || stop "the release has a link that points outside itself: $BAD_LINK"
 note "unpacked: commit $COMMIT"
 
-say "3/5 Proving it starts (as the unprivileged account)"
-smoke_test "$STAGE/release" || stop "the release does not start (programs or database library failed to load). Nothing was installed."
-note "programs load and the database library opens a scratch database"
+say "3/5 Proving it starts (as the unprivileged account, in a sandbox)"
+smoke_test "$STAGE/release" || stop "the release does not start (programs or libraries failed to load). Nothing was installed."
+note "programs load, the database library opens a scratch database, and the cloud-storage library resolves"
 
 say "4/5 Putting it in place"
 TARGET="$RELEASES/$COMMIT"
+DIGEST_FILE="$RELEASES/.sha256-$COMMIT"
 if [ -e "$TARGET" ]; then
   [ -d "$TARGET" ] && [ ! -L "$TARGET" ] || stop "$TARGET exists and is not a plain folder."
-  cmp -s "$STAGE/release/RELEASE" "$TARGET/RELEASE" || note "a release for this commit is already installed (built at a different time); keeping the installed one"
-  note "release $COMMIT is already installed"
+  # The folder name comes from the file's own marker, so tie it to the exact file that was installed.
+  [ "$(cat "$DIGEST_FILE" 2>/dev/null || true)" = "$EXPECTED" ] || stop "a different build of commit $COMMIT is already installed ($TARGET). Nothing was changed. Ask for help before replacing it."
+  note "release $COMMIT is already installed (the same file)"
 else
-  mv "$STAGE/release" "$TARGET"
+  mv -T "$STAGE/release" "$TARGET"
+  write_file_atomically "$DIGEST_FILE" "$EXPECTED"
   note "installed $TARGET"
 fi
 valid_release_dir "$TARGET" || stop "$TARGET is not a valid release folder."
