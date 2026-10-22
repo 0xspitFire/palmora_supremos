@@ -46,7 +46,11 @@ const assurance: CompensatingAssuranceConfig = {
   expected: { recordDigest: RECORD, walletSetDigest: WALLET_SET, lockfileDigest: LOCK },
 };
 
-async function armWith(evidence: CompensatingControlsEvidence, options: ConstructorParameters<typeof ExecutionCoordinator>[2]): Promise<string> {
+// The compensated profile cannot be configured without the wallet watcher (T-044 security re-review D1), so tests that are not about the
+// watcher give it a healthy one that covers every wallet.
+const HEALTHY_WATCH = { covers: () => true, isHealthy: () => true };
+async function armWith(evidence: CompensatingControlsEvidence, givenOptions: ConstructorParameters<typeof ExecutionCoordinator>[2]): Promise<string> {
+  const options = givenOptions?.compensatingAssurance !== undefined && !givenOptions.walletWatch ? { ...givenOptions, walletWatch: HEALTHY_WATCH } : givenOptions;
   const value = await fixture(ETHEREUM, false, true, '2099-01-01T00:00:00.000Z', true, undefined, () => FIXTURE_NOW);
   try {
     const created = await campaign(value, ETHEREUM);
@@ -92,16 +96,26 @@ describe('compensating controls at the live arm gate', () => {
       expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy, walletWatch: watch(true, false) })).toBe('FLEET_WATCH_NOT_HEALTHY');
     });
 
-    it('passes when the watcher covers the wallets and is alive, and changes nothing when no watcher is configured', async () => {
+    it('passes when the watcher covers the wallets and is alive', async () => {
       expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy, walletWatch: watch(true, true) })).toBe('PER_WALLET_SIMULATION_REQUIRED');
-      expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy })).toBe('PER_WALLET_SIMULATION_REQUIRED');
+    });
+
+    it('fails closed at construction: compensating assurance without a wallet watcher cannot be configured (static or per-run)', () => {
+      expect(() => new ExecutionCoordinator({} as never, noopEngine, { compensatingAssurance: assurance, expectedCustodyPolicy })).toThrow('COMPENSATING_ASSURANCE_REQUIRES_WALLET_WATCH');
+      expect(() => new ExecutionCoordinator({} as never, noopEngine, { compensatingAssurance: () => assurance, expectedCustodyPolicy })).toThrow('COMPENSATING_ASSURANCE_REQUIRES_WALLET_WATCH');
     });
   });
 
   describe('per-run funding at the arm gate (D-059 item 3)', () => {
+    it('a per-run provider that leaves out the funding envelope or the minimum balance is refused, not treated as "no funding needed"', async () => {
+      expect(await armWith(controls(), { compensatingAssurance: () => assurance, expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
+      expect(await armWith(controls(), { compensatingAssurance: () => ({ ...assurance, runEnvelopeWei: { [WALLET_ONE]: '400000000000000' } }), expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
+      expect(await armWith(controls(), { compensatingAssurance: () => ({ ...assurance, minimumBalanceWei: { [WALLET_ONE]: '300000000000000' } }), expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
+    });
+
     it('a run-specific provider can demand funds: the run cannot arm until the requested minimum has arrived', async () => {
       const seen: Array<{ chainId: number; wallets: readonly string[] }> = [];
-      const needing = (minimum: string) => (run: { chainId: number; wallets: readonly string[] }): CompensatingAssuranceConfig => { seen.push(run); return { ...assurance, minimumBalanceWei: { [WALLET_ONE]: minimum } }; };
+      const needing = (minimum: string) => (run: { chainId: number; wallets: readonly string[] }): CompensatingAssuranceConfig => { seen.push(run); return { ...assurance, runEnvelopeWei: { [WALLET_ONE]: '400000000000000' }, minimumBalanceWei: { [WALLET_ONE]: minimum } }; };
       expect(await armWith(controls(), { compensatingAssurance: needing('300000000000001'), expectedCustodyPolicy })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_FUNDING_NOT_ARRIVED');
       expect(await armWith(controls(), { compensatingAssurance: needing('300000000000000'), expectedCustodyPolicy })).toBe('PER_WALLET_SIMULATION_REQUIRED');
       expect(seen[0]).toMatchObject({ chainId: ETHEREUM, wallets: [WALLET_ONE] });

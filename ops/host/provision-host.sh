@@ -211,6 +211,11 @@ MINT_BOT_HOST_ID=REPLACE-WITH-STABLE-HOST-ID
 # R2_BUCKET_NAME=
 # R2_OBJECT_PREFIX=
 # R2_JURISDICTION=
+# Independent on-chain wallet watcher (D-059 item 6, D-060 item 4). Public addresses only; the per-chain RPC addresses are secrets
+# named WATCHER_RPC_1, WATCHER_RPC_8453 and WATCHER_RPC_4663 in the application secret store, never here.
+# MINT_BOT_WATCHER_ENABLED=true
+# MINT_BOT_TREASURY_ADDRESS=
+# MINT_BOT_WATCH_FLEET=[{"chainId":1,"addresses":["0x..."]},{"chainId":8453,"addresses":["0x..."]},{"chainId":4663,"addresses":["0x..."]}]
 EOF
     chown root:root "$SETTINGS_FILE"; chmod 0644 "$SETTINGS_FILE"
   fi

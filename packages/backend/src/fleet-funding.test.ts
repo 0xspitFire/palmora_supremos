@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EXCESS_REMINDER_AFTER_MS, FUNDING_ROUNDING_MARGIN_WEI, describeTopUps, planRunFunding, roundUpToDisplay, stepExcessTracker } from './fleet-funding.js';
+import { DEFAULT_IDLE_BALANCE_CEILINGS, EXCESS_REMINDER_AFTER_MS, FUNDING_ROUNDING_MARGIN_WEI, describeTopUps, planRunFunding, roundUpToDisplay, stepExcessTracker } from './fleet-funding.js';
 import type { BalanceCeiling } from './compensating-controls.js';
 
 const W1 = '0x1111111111111111111111111111111111111111';
@@ -126,5 +126,42 @@ describe('left-over balance reminder (D-059 item 3)', () => {
   it('uses 24 hours and ignores bad addresses', () => {
     expect(EXCESS_REMINDER_AFTER_MS).toBe(24 * HOUR);
     expect(stepExcessTracker({ ...base, previous: {}, observations: [{ address: 'nope', balanceWei: 10n ** 18n, nonce: 1 }], now: NOW }).next).toEqual({});
+  });
+});
+
+describe('D-060 run-time funding limits (balance limits only)', () => {
+  const wallet = (index: number, requiredWei: bigint, balanceWei = 0n) => ({ address: `0x${String(index).repeat(40)}`, balanceWei, requiredWei });
+
+  it('are 0.0041 per wallet and 0.0085 for the fleet on Ethereum, Base and Robinhood, beside the 0.0004 / 0.002 idle limits', () => {
+    for (const chainId of [1, 8453, 4663]) {
+      expect(DEFAULT_IDLE_BALANCE_CEILINGS[chainId]).toEqual({ walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n, runEnvelopeMaxWei: 4_100_000_000_000_000n, runEnvelopeFleetMaxWei: 8_500_000_000_000_000n });
+    }
+  });
+
+  it('fails closed for a chain with no ceiling', () => {
+    expect(planRunFunding({ chainId: 10, ceiling: DEFAULT_IDLE_BALANCE_CEILINGS[10], wallets: [wallet(1, 100_000_000_000_000n)] }).blockers).toEqual(['NO_BALANCE_CEILING_FOR_CHAIN']);
+  });
+
+  it('funds one paid mint (0.0037 price + 0.00037 fee allowance) and two paid wallets, but not a wallet above 0.0041 or a fleet above 0.0085', () => {
+    const ceiling = DEFAULT_IDLE_BALANCE_CEILINGS[1];
+    const paid = 4_070_000_000_000_000n;
+    const one = planRunFunding({ chainId: 1, ceiling, wallets: [wallet(1, paid)] });
+    expect(one.blockers).toEqual([]);
+    expect(BigInt(one.items[0]?.envelopeWei ?? '0')).toBeLessThanOrEqual(4_100_000_000_000_000n);
+    expect(planRunFunding({ chainId: 1, ceiling, wallets: [wallet(1, paid), wallet(2, paid)] }).blockers).toEqual([]);
+    expect(planRunFunding({ chainId: 1, ceiling, wallets: [wallet(1, 4_100_000_000_000_001n)] }).blockers).toEqual([`RUN_ENVELOPE_ABOVE_CHAIN_BOUND:${'0x' + '1'.repeat(40)}`]);
+    expect(planRunFunding({ chainId: 1, ceiling, wallets: [wallet(1, paid), wallet(2, paid), wallet(3, paid)] }).blockers).toEqual(['RUN_ENVELOPE_ABOVE_FLEET_BOUND']);
+  });
+
+  it('funds the proven six-wallet free Ethereum run (0.0004 reserved per wallet, 0.0024 for the fleet) that the idle fleet limit alone would block', () => {
+    const six = Array.from({ length: 6 }, (_, index) => wallet(index + 1, 400_000_000_000_000n));
+    expect(planRunFunding({ chainId: 1, ceiling: DEFAULT_IDLE_BALANCE_CEILINGS[1], wallets: six }).blockers).toEqual([]);
+    expect(planRunFunding({ chainId: 1, ceiling: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n }, wallets: six }).blockers).toEqual(['RUN_ENVELOPE_ABOVE_FLEET_BOUND']);
+  });
+
+  it('are balance fields only: the ceiling carries no spend limit, so funding can never raise a cap', () => {
+    for (const ceiling of Object.values(DEFAULT_IDLE_BALANCE_CEILINGS)) {
+      expect(Object.keys(ceiling).sort()).toEqual(['fleetMaxWei', 'runEnvelopeFleetMaxWei', 'runEnvelopeMaxWei', 'walletMaxWei']);
+    }
   });
 });

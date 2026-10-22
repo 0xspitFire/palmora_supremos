@@ -81,7 +81,7 @@ export type { OpsHealthEnvironment, OpsHealthValidation } from './ops-health-har
 export { PHASE2_DEFAULTS } from './phase2-defaults.js';
 export type { ImmediateAlertType } from './phase2-defaults.js';
 export { assertCustodyReadiness, assertLiveOperationalReadiness } from './custody.js';
-export { DEFAULT_IDLE_BALANCE_CEILINGS, EXCESS_REMINDER_AFTER_MS, FUNDING_ROUNDING_MARGIN_WEI, describeTopUps, planRunFunding, roundUpToDisplay, stepExcessTracker } from './fleet-funding.js';
+export { DEFAULT_IDLE_BALANCE_CEILINGS, EXCESS_REMINDER_AFTER_MS, IDLE_FLEET_MAX_WEI, IDLE_WALLET_MAX_WEI, RUN_ENVELOPE_FLEET_MAX_WEI, RUN_ENVELOPE_WALLET_MAX_WEI, FUNDING_ROUNDING_MARGIN_WEI, describeTopUps, planRunFunding, roundUpToDisplay, stepExcessTracker } from './fleet-funding.js';
 export type { ExcessObservation, ExcessReminder, ExcessState, ExcessStates, FundingPlan, FundingPlanItem, FundingWalletInput } from './fleet-funding.js';
 export { excessBalanceCard, fleetWatchCard, fundingRequestCard } from './fleet-messages.js';
 export type { FleetWatchFinding } from './fleet-messages.js';

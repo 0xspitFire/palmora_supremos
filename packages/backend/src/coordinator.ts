@@ -28,12 +28,18 @@ export class ExecutionCoordinator {
     private readonly engine: EngineAdapter,
     private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding; /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: { chainId: number; wallets: readonly string[] }) => CompensatingAssuranceConfig); /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void> } } = {},
   ) {
+    // T-044 security re-review (D1): the compensated profile counts on the watcher to see what the other checks cannot, so
+    // configuring one without the other is a start-up error, not a silently weaker arm gate.
+    if (options.compensatingAssurance !== undefined && !options.walletWatch) throw new Error('COMPENSATING_ASSURANCE_REQUIRES_WALLET_WATCH');
     this.ledger = new SpendLedger(store);
     this.evidence = new EvidenceService(store);
   }
 
   private assuranceContext(chainId: number, wallets: readonly string[]): { config: CompensatingAssuranceConfig; chainId: number; wallets: readonly string[] } | undefined {
     const config = resolveAssurance(this.options.compensatingAssurance, { chainId, wallets });
+    // A per-run function must supply the funding envelope and the minimum balance for this run; without them the funding
+    // arrival (D-059 item 3, D-060) would silently not be enforced.
+    if (config && typeof this.options.compensatingAssurance === 'function' && (!config.runEnvelopeWei || !config.minimumBalanceWei)) throw new Error('COMPENSATING_ASSURANCE_FUNDING_MISSING');
     return config ? { config, chainId, wallets } : undefined;
   }
 
