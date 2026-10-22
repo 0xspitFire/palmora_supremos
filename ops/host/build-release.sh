@@ -46,7 +46,9 @@ secret_names() { # folder-or-file ... : prints up to five matches
 for path in "$WORK/src/packages" "$WORK/src/scripts" "$WORK/src/package.json" "$WORK/src/pnpm-lock.yaml"; do
   [ -e "$path" ] || { echo "STOP: the source is missing $path" >&2; exit 1; }
 done
-SUSPECT="$(secret_names "$WORK/src")"
+# What ships (packages, scripts) plus the root-level files. Tracked test fixtures and CI settings elsewhere never enter the release.
+ROOT_HITS="$(find "$WORK/src" -maxdepth 1 -type f \( -iname '.env*' -o -iname '.npmrc' -o -iname '*.key' -o -iname '*.pem' \) -print | head -5 || true)"
+SUSPECT="$(secret_names "$WORK/src/packages" "$WORK/src/scripts")${ROOT_HITS:+$'\n'$ROOT_HITS}"
 [ -z "$SUSPECT" ] || { echo "STOP: the source has a file that looks like a secret:"; echo "$SUSPECT"; exit 1; }
 
 if [ -n "${MINT_BOT_OFFLINE_STORE:-}" ]; then
