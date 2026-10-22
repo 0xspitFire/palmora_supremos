@@ -28,7 +28,15 @@ id mintbot >/dev/null 2>&1 || stop "the mintbot account does not exist; run prov
 
 current_target() { [ -L "$CURRENT" ] && readlink "$CURRENT" || true; }
 
-service_running() { systemctl is-active --quiet mint-bot.service || systemctl is-active --quiet mint-bot-backup.service; }
+# Anything but inactive/failed (including activating and deactivating) counts as running.
+service_running() {
+  local unit state
+  for unit in mint-bot.service mint-bot-backup.service; do
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    case "$state" in inactive|failed|unknown|"") ;; *) return 0 ;; esac
+  done
+  return 1
+}
 
 # Only ever an ordinary folder directly under $RELEASES, named by the commit.
 valid_release_dir() { # path
@@ -139,10 +147,11 @@ note "checksum matches"
 # Look inside before unpacking anything: only a 'release/' tree, no absolute or parent paths, only ordinary files, folders and
 # links (no hard links, devices or pipes), and a sane total size.
 LISTING="$(tar -tzf "$COPY")" || stop "the file is not a readable release archive."
-if grep -vE '^release(/|$)' <<<"$LISTING" | grep -q .; then stop "the archive has files outside the release folder."; fi
+# (counts, not pipes: under pipefail a closed pipe on a huge listing must not let a refusal pass)
+[ "$(grep -cvE '^release(/|$)' <<<"$LISTING" || true)" = 0 ] || stop "the archive has files outside the release folder."
 if grep -qE '(^|/)\.\.(/|$)' <<<"$LISTING"; then stop "the archive has a parent-folder path."; fi
 VERBOSE="$(tar -tvzf "$COPY")" || stop "the file is not a readable release archive."
-if cut -c1 <<<"$VERBOSE" | grep -vE '^[-dl]$' | grep -q .; then stop "the archive has an entry that is not an ordinary file, folder or link (a hard link, device or pipe, for example)."; fi
+if [ "$(cut -c1 <<<"$VERBOSE" | grep -cvE '^[-dl]$' || true)" != 0 ]; then stop "the archive has an entry that is not an ordinary file, folder or link (a hard link, device or pipe, for example)."; fi
 UNPACKED_BYTES="$(awk '$1 ~ /^-/ { total += $3 } END { print total + 0 }' <<<"$VERBOSE")"
 [ "$UNPACKED_BYTES" -le "$MAX_UNPACKED_BYTES" ] || stop "the release would unpack to $UNPACKED_BYTES bytes, above the $MAX_UNPACKED_BYTES limit."
 
@@ -151,6 +160,8 @@ tar -xzf "$COPY" -C "$STAGE" --no-same-owner --no-same-permissions
 [ -d "$STAGE/release" ] || stop "the archive did not contain a release folder."
 COMMIT="$(grep -m1 '^commit=' "$STAGE/release/RELEASE" 2>/dev/null | cut -d= -f2- || true)"
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || stop "the release has no valid commit marker."
+# Judged before the permissions are normalised, so a set-id or group/world-writable file is refused, not silently fixed.
+[ -z "$(find "$STAGE/release" \( -perm /6000 -o -perm /022 \) ! -type l -print -quit)" ] || stop "the archive has a file that is set-id or writable by group or others."
 chown -R root:root "$STAGE/release"
 chmod -R u=rwX,go=rX "$STAGE/release"
 chmod 0755 "$STAGE/release"

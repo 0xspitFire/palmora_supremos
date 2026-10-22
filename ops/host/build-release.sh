@@ -33,7 +33,7 @@ git -C "$REPO" log --oneline -1 "$COMMIT"
 
 WORK="$(mktemp -d)"
 CID=""
-cleanup() { [ -z "$CID" ] || docker rm -f "$CID" >/dev/null 2>&1; rm -rf "$WORK"; }
+cleanup() { [ -z "$CID" ] || docker rm -f "$CID" >/dev/null 2>&1 || true; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 mkdir -p "$WORK/src" "$WORK/out/release"
@@ -46,7 +46,7 @@ secret_names() { # folder-or-file ... : prints up to five matches
 for path in "$WORK/src/packages" "$WORK/src/scripts" "$WORK/src/package.json" "$WORK/src/pnpm-lock.yaml"; do
   [ -e "$path" ] || { echo "STOP: the source is missing $path" >&2; exit 1; }
 done
-SUSPECT="$(secret_names "$WORK/src/packages" "$WORK/src/scripts" "$WORK/src/package.json" "$WORK/src/pnpm-lock.yaml")"
+SUSPECT="$(secret_names "$WORK/src")"
 [ -z "$SUSPECT" ] || { echo "STOP: the source has a file that looks like a secret:"; echo "$SUSPECT"; exit 1; }
 
 if [ -n "${MINT_BOT_OFFLINE_STORE:-}" ]; then
