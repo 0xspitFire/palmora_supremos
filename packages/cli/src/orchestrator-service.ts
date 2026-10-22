@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
 import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -207,4 +208,15 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(join(process.cwd(), 'packages/cli/dist/orchestrator-service.js'))) void main();
+/**
+ * True when this file is the program being run. Both sides are resolved through links: the host unit starts the service through the
+ * /opt/mint-bot/current link while the working folder reports the real release folder, so a plain path comparison never matched
+ * and the service exited at once with success.
+ */
+export function isServiceEntrypoint(argv1: string | undefined, cwd: string): boolean {
+  if (!argv1) return false;
+  const real = (path: string): string => { try { return realpathSync(path); } catch { return resolve(path); } };
+  return real(argv1) === real(join(cwd, 'packages/cli/dist/orchestrator-service.js'));
+}
+
+if (isServiceEntrypoint(process.argv[1], process.cwd())) void main();
