@@ -34,6 +34,8 @@ export interface BalanceCeiling {
   fleetMaxWei: bigint;
   /** Hard upper bound for any per-wallet run envelope (D-059 item 3). Absent means no envelope may raise the idle ceiling. */
   runEnvelopeMaxWei?: bigint;
+  /** Hard upper bound for the whole fleet while a run is funded. Absent means the idle fleet ceiling cannot be raised. */
+  runEnvelopeFleetMaxWei?: bigint;
 }
 
 /** Digest of the exact wallet set: sorted lowercase unique addresses joined by newlines. */
@@ -76,6 +78,11 @@ export interface CompensatingAssuranceConfig {
    * Absent means the idle ceilings apply (D-059 item 2). The funding envelope itself is built by a later task.
    */
   runEnvelopeWei?: Readonly<Record<string, string>>;
+  /**
+   * What each wallet must already hold for the run being armed (lowercase address, wei). A wallet below its minimum means the
+   * funding the owner was asked for has not arrived, so the run cannot arm (D-059 item 3).
+   */
+  minimumBalanceWei?: Readonly<Record<string, string>>;
 }
 
 /** What a caller knows about the run being armed or executed. The chain and the wallets come from the campaign, never from the evidence. */
@@ -103,7 +110,7 @@ function bigintOf(value: unknown): bigint | undefined {
 function walletLimitFor(config: CompensatingAssuranceConfig, ceiling: BalanceCeiling, address: string): bigint {
   const envelope = bigintOf(config.runEnvelopeWei?.[address]);
   if (envelope === undefined || envelope <= ceiling.walletMaxWei) return ceiling.walletMaxWei;
-  const bound = ceiling.runEnvelopeMaxWei ?? ceiling.walletMaxWei;
+  const bound = ceiling.runEnvelopeMaxWei !== undefined && ceiling.runEnvelopeMaxWei > ceiling.walletMaxWei ? ceiling.runEnvelopeMaxWei : ceiling.walletMaxWei;
   return envelope < bound ? envelope : bound;
 }
 
@@ -128,6 +135,9 @@ function checkBalances(evidence: CompensatingControlsEvidence, config: Compensat
     if (balance === undefined) return 'INVALID_BALANCE';
     const walletLimit = walletLimitFor(config, ceiling, address);
     if (balance > walletLimit) return 'WALLET_ABOVE_LIMIT';
+    const minimum = bigintOf(config.minimumBalanceWei?.[address]);
+    if (config.minimumBalanceWei?.[address] !== undefined && minimum === undefined) return 'INVALID_MINIMUM';
+    if (minimum !== undefined && balance < minimum) return 'FUNDING_NOT_ARRIVED';
     fleet += balance;
   }
   // The balances must cover exactly the owner-signed wallet set, so a subset cannot understate the fleet total.
@@ -136,7 +146,9 @@ function checkBalances(evidence: CompensatingControlsEvidence, config: Compensat
   if (config.runEnvelopeWei) {
     let envelopeTotal = 0n;
     for (const address of seen) envelopeTotal += walletLimitFor(config, ceiling, address);
-    if (envelopeTotal > fleetLimit) fleetLimit = envelopeTotal;
+    const fleetBound = ceiling.runEnvelopeFleetMaxWei !== undefined && ceiling.runEnvelopeFleetMaxWei > ceiling.fleetMaxWei ? ceiling.runEnvelopeFleetMaxWei : ceiling.fleetMaxWei;
+    const raised = envelopeTotal < fleetBound ? envelopeTotal : fleetBound;
+    if (raised > fleetLimit) fleetLimit = raised;
   }
   if (fleet > fleetLimit) return 'FLEET_ABOVE_LIMIT';
   return undefined;

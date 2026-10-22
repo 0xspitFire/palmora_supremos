@@ -9,6 +9,9 @@ import { assertBaseLiveAllowed } from './base-enablement.js';
 import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
 import type { CompensatingAssuranceConfig } from './compensating-controls.js';
 
+const resolveAssurance = (option: CoordinatorAssuranceOption, run: { chainId: number; wallets: readonly string[] }): CompensatingAssuranceConfig | undefined => (option === undefined ? undefined : typeof option === 'function' ? option(run) : option);
+type CoordinatorAssuranceOption = CompensatingAssuranceConfig | ((run: { chainId: number; wallets: readonly string[] }) => CompensatingAssuranceConfig) | undefined;
+
 export function receiptAuthorizesSettlement(chainId: 1 | 8453 | 4663, receipt: Pick<ReceiptRecord, 'state' | 'finalityStage' | 'robinhoodFinality'>): boolean {
   if (receipt.state !== 'Confirmed' && receipt.state !== 'Failed') return false;
   if (chainId === 1) return true;
@@ -23,10 +26,23 @@ export class ExecutionCoordinator {
   constructor(
     private readonly store: BackendStore,
     private readonly engine: EngineAdapter,
-    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding; /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig; alerts?: { cap(reason: string, runId?: string): Promise<void> } } = {},
+    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding; /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: { chainId: number; wallets: readonly string[] }) => CompensatingAssuranceConfig); /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void> } } = {},
   ) {
     this.ledger = new SpendLedger(store);
     this.evidence = new EvidenceService(store);
+  }
+
+  private assuranceContext(chainId: number, wallets: readonly string[]): { config: CompensatingAssuranceConfig; chainId: number; wallets: readonly string[] } | undefined {
+    const config = resolveAssurance(this.options.compensatingAssurance, { chainId, wallets });
+    return config ? { config, chainId, wallets } : undefined;
+  }
+
+  /** D-059 item 6: an unwatched wallet, or a watcher that has gone quiet, cannot be armed or executed. Absent option = no change in behaviour. */
+  private assertWalletWatch(chainId: number, wallets: readonly string[]): void {
+    const watch = this.options.walletWatch;
+    if (!watch) return;
+    if (!watch.covers(chainId, wallets)) throw new Error('FLEET_WATCH_NOT_COVERING_WALLETS');
+    if (!watch.isHealthy(new Date())) throw new Error('FLEET_WATCH_NOT_HEALTHY');
   }
 
   private assertLiveStoreReady(): void { const capabilities = this.store.capabilities(); if (!capabilities.durable) throw new Error('DURABLE_STORE_REQUIRED'); if (!capabilities.atomicAcrossProcesses) throw new Error('ATOMIC_STORE_REQUIRED'); }
@@ -63,7 +79,8 @@ export class ExecutionCoordinator {
       if (!initial.runtime.dependencies.engine || !initial.runtime.dependencies.chain || !initial.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
       this.assertLiveStoreReady();
       if (!initial.runtime.operational?.secretStoreReference || !initial.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
-      assertLiveOperationalReadiness(initial.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.options.compensatingAssurance ? { config: this.options.compensatingAssurance, chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined);
+      assertLiveOperationalReadiness(initial.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.assuranceContext(campaign.chainId, input.wallets ?? []));
+      this.assertWalletWatch(campaign.chainId, input.wallets ?? []);
       simulationIds = this.evidence.assertLiveEvidence(canonicalInput);
       if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
       if (!campaign.chainVerification.evidenceId || !campaign.chainVerification.checkedAt || campaign.chainVerification.sourceBlock === undefined) throw new Error('CHAIN_VERIFICATION_EVIDENCE_REQUIRED');
@@ -115,7 +132,8 @@ export class ExecutionCoordinator {
     if (!current.runtime.dependencies.engine || !current.runtime.dependencies.chain || !current.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
     this.assertLiveStoreReady();
     if (!current.runtime.operational?.secretStoreReference || !current.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
-    assertLiveOperationalReadiness(current.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined, this.options.compensatingAssurance ? { config: this.options.compensatingAssurance, chainId: campaign.chainId, wallets: intent.wallets } : undefined);
+    assertLiveOperationalReadiness(current.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined, this.assuranceContext(campaign.chainId, intent.wallets));
+    this.assertWalletWatch(campaign.chainId, intent.wallets);
     this.evidence.assertLiveEvidence({ campaign, wallets: intent.wallets, simulationIds: intent.simulationIds, evidenceAt: intent.evidenceAt });
     if (wallets.length !== intent.wallets.length || wallets.some(wallet => !intent.wallets.some(armed => armed.toLowerCase() === wallet.toLowerCase()))) throw new Error('EXECUTION_FLEET_MISMATCH');
     if (campaign.chainId === 4663) {

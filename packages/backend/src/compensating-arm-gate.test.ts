@@ -83,4 +83,28 @@ describe('compensating controls at the live arm gate', () => {
   it('a chain without a configured ceiling cannot arm', async () => {
     expect(await armWith(controls(), { compensatingAssurance: { ...assurance, ceilings: {} }, expectedCustodyPolicy })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_NO_BALANCE_CEILING_FOR_CHAIN');
   });
+
+  describe('independent wallet watcher at the arm gate (D-059 item 6)', () => {
+    const watch = (covers: boolean, healthy: boolean) => ({ covers: () => covers, isHealthy: () => healthy });
+
+    it('refuses to arm a wallet the watcher does not cover, or when the watcher has gone quiet', async () => {
+      expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy, walletWatch: watch(false, true) })).toBe('FLEET_WATCH_NOT_COVERING_WALLETS');
+      expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy, walletWatch: watch(true, false) })).toBe('FLEET_WATCH_NOT_HEALTHY');
+    });
+
+    it('passes when the watcher covers the wallets and is alive, and changes nothing when no watcher is configured', async () => {
+      expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy, walletWatch: watch(true, true) })).toBe('PER_WALLET_SIMULATION_REQUIRED');
+      expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy })).toBe('PER_WALLET_SIMULATION_REQUIRED');
+    });
+  });
+
+  describe('per-run funding at the arm gate (D-059 item 3)', () => {
+    it('a run-specific provider can demand funds: the run cannot arm until the requested minimum has arrived', async () => {
+      const seen: Array<{ chainId: number; wallets: readonly string[] }> = [];
+      const needing = (minimum: string) => (run: { chainId: number; wallets: readonly string[] }): CompensatingAssuranceConfig => { seen.push(run); return { ...assurance, minimumBalanceWei: { [WALLET_ONE]: minimum } }; };
+      expect(await armWith(controls(), { compensatingAssurance: needing('300000000000001'), expectedCustodyPolicy })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_FUNDING_NOT_ARRIVED');
+      expect(await armWith(controls(), { compensatingAssurance: needing('300000000000000'), expectedCustodyPolicy })).toBe('PER_WALLET_SIMULATION_REQUIRED');
+      expect(seen[0]).toMatchObject({ chainId: ETHEREUM, wallets: [WALLET_ONE] });
+    });
+  });
 });
