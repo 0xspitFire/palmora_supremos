@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -81,5 +81,15 @@ describe('R2 restore drill (T-048)', () => {
     await expect(runRestoreDrill({ fileName: file, environment: env(dir), client: fakeClient(dir, []), workParent: work })).rejects.toThrow();
     await expect(runRestoreDrill({ fileName: '../etc/passwd', environment: env(dir), client: fakeClient(dir, []), workParent: work })).rejects.toThrow('BACKUP_FILE_NAME_INVALID');
     expect(readdirSync(work)).toEqual([]);
+  });
+});
+
+describe('started through a link (the host runs scripts via /opt/mint-bot/current)', () => {
+  it('the drill still runs its main code: it prints a JSON failure for a missing file name instead of exiting silently', () => {
+    const base = mkdtempSync(join(tmpdir(), 'mintbot-drill-link-'));
+    symlinkSync(root, join(base, 'current'));
+    const result = spawnSync(process.execPath, [join(base, 'current', 'scripts', 'r2-restore-drill.mjs')], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', R2_ACCOUNT_ID: 'a'.repeat(32), R2_BUCKET_NAME: 'test-bucket', MINT_BOT_HOST_ID: 'host-a', R2_ACCESS_KEY_ID: 'id', R2_SECRET_ACCESS_KEY: 'secret' } });
+    expect(JSON.parse(result.stdout.trim())).toEqual({ status: 'failed', code: 'BACKUP_FILE_NAME_INVALID' });
+    expect(result.status).toBe(1);
   });
 });

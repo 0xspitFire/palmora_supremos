@@ -8,6 +8,7 @@
 // Environment: the same R2_* names the backup job uses (R2_ACCESS_KEY_ID_FILE, R2_SECRET_ACCESS_KEY_FILE, MINT_BOT_HOST_ID, ...)
 // and BACKUP_ENCRYPTION_KEY_FILE. Output: one JSON line with the timings (RTO) and the age of the backup (RPO).
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -67,7 +68,7 @@ export async function runRestoreDrill({ fileName, environment = process.env, cli
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url).pathname)) {
   try {
     // Under systemd the secrets arrive as private credential files, exactly as for the backup job.
     const directory = process.env.CREDENTIALS_DIRECTORY;
