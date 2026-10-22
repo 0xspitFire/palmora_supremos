@@ -80,7 +80,14 @@ if node_ok; then note "node v$NODE_VERSION is installed and owned by root"; else
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
     TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"
-    curl -fsSL --max-time 300 -o "$TMP/$TARBALL" "https://nodejs.org/dist/v${NODE_VERSION}/$TARBALL"
+    if [ -n "${MINT_BOT_NODE_TARBALL:-}" ]; then
+      # A copy you downloaded yourself (for example when the connection is unreliable). It must still match the pinned checksum.
+      [ -f "$MINT_BOT_NODE_TARBALL" ] || { echo "STOP: MINT_BOT_NODE_TARBALL ($MINT_BOT_NODE_TARBALL) is not a file." >&2; exit 1; }
+      cp "$MINT_BOT_NODE_TARBALL" "$TMP/$TARBALL"
+    else
+      curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 600 -o "$TMP/$TARBALL" "https://nodejs.org/dist/v${NODE_VERSION}/$TARBALL" \
+        || { echo "STOP: could not download Node from nodejs.org. Try again, or download $TARBALL elsewhere and run with MINT_BOT_NODE_TARBALL=/path/to/it." >&2; exit 1; }
+    fi
     ACTUAL="$(sha256sum "$TMP/$TARBALL" | cut -d' ' -f1)"
     [ "$ACTUAL" = "$NODE_SHA256" ] || { echo "STOP: the Node download ($ACTUAL) does not match the pinned checksum ($NODE_SHA256). Nothing was installed." >&2; exit 1; }
     note "checksum matches the pinned value: $ACTUAL"

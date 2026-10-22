@@ -1,0 +1,4 @@
+# Pinned SHA-256 of every native (compiled) file that may appear in a release: <sha256>  <file name>.
+# better_sqlite3.node (better-sqlite3 11.10.0, Node 20 / ABI 115, linux x64) matched the official GitHub release asset
+# better-sqlite3-v11.10.0-node-v115-linux-x64.tar.gz when pinned on 2026-10-22.
+e8f767df39a9a934b3705d0fffc401a12932bf94d650aae2d27733311f7ff842  better_sqlite3.node
