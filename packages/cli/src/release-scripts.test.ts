@@ -105,3 +105,14 @@ describe('release scripts (T-047)', () => {
     expect(provision).toContain('--retry 5');
   });
 });
+
+describe('service unit restart limit', () => {
+  it('keeps StartLimitIntervalSec and StartLimitBurst in [Unit], where systemd honours them', () => {
+    const unit = readFileSync(join(hostDir, '..', 'systemd', 'mint-bot.service'), 'utf8');
+    const unitSection = unit.split('[Service]')[0] ?? '';
+    const serviceSection = unit.split('[Service]')[1] ?? '';
+    expect(unitSection).toContain('StartLimitIntervalSec=5min');
+    expect(unitSection).toContain('StartLimitBurst=5');
+    expect(serviceSection).not.toMatch(/StartLimit/);
+  });
+});
