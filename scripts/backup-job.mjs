@@ -5,6 +5,7 @@
 // BACKUP_ENCRYPTION_KEY, BACKUP_RETENTION_DAYS (must be 30). The key is passed on to the two existing scripts and is
 // never written anywhere. On any failure the status file says "failed" with a short code only (no path, no key).
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -103,7 +104,7 @@ async function main() {
   console.log(JSON.stringify({ status: 'ok', file: made.file, restoreVerified: true, removedOld: removed.length, offHost: Boolean(offHost), remoteVerified: Boolean(offHost) }));
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url).pathname)) {
   main().catch(async (error) => {
     const code = error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'BACKUP_FAILED';
     try { await writeStatus({ status: 'failed', operation: 'backup', code }); } catch { /* the exit code still reports it */ }
