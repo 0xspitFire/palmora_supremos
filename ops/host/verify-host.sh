@@ -146,6 +146,7 @@ want mint-bot.service LimitCORE 0
 want mint-bot.service CapabilityBoundingSet ""
 want mint-bot.service Restart on-failure
 want mint-bot.service StartLimitBurst 5
+want mint-bot.service StartLimitIntervalUSec 5min
 want_has mint-bot.service ReadOnlyPaths /var/lib/mint-bot/backup-status
 want mint-bot.service UMask 0077
 want_has mint-bot.service ExecStartPre "/usr/bin/test -f /var/lib/mint-bot/killswitch"

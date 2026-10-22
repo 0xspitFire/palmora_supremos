@@ -2,6 +2,9 @@
 Description=MintBot supervised orchestrator (dry-run by default)
 Wants=network-online.target
 After=network-online.target
+# Restart limit: five failed starts within five minutes stop the restarts. systemd only honours these two settings in the Unit section.
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -14,8 +17,6 @@ ExecStartPre=/usr/bin/test -f /var/lib/mint-bot/killswitch
 ExecStart=/usr/bin/node /opt/mint-bot/current/packages/cli/dist/orchestrator-service.js
 Restart=on-failure
 RestartSec=10s
-StartLimitIntervalSec=5min
-StartLimitBurst=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
