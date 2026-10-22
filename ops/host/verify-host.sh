@@ -100,7 +100,7 @@ expect_dir /var/lib/mint-bot mintbot:mintbot 0750
 expect_dir /var/lib/mint-bot/db mintbot:mintbot 0750
 expect_dir /var/lib/mint-bot/backups mintbot-backup:mintbot-backup 0700
 expect_dir /var/lib/mint-bot/backup-status mintbot-backup:mintbot-status 0750
-expect_dir /var/log/mint-bot mintbot:mintbot 0750
+expect_dir /var/log/mint-bot mintbot:mintbot 0700
 if [ -L /opt/mint-bot/current ]; then ok "/opt/mint-bot/current -> $(readlink /opt/mint-bot/current)"; else warn "/opt/mint-bot/current is not set yet (no release installed)"; fi
 echo "Access list on /var/lib/mint-bot:"; getfacl -p /var/lib/mint-bot 2>/dev/null | sed 's/^/   /'
 echo "Access list on /var/lib/mint-bot/db:"; getfacl -p /var/lib/mint-bot/db 2>/dev/null | sed 's/^/   /'

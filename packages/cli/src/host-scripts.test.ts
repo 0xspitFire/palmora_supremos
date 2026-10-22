@@ -66,7 +66,7 @@ describe('production host scripts (T-045)', () => {
       'ensure_dir /var/lib/mint-bot/db mintbot:mintbot 0750',
       'ensure_dir /var/lib/mint-bot/backups mintbot-backup:mintbot-backup 0700',
       'ensure_dir /var/lib/mint-bot/backup-status mintbot-backup:mintbot-status 0750',
-      'ensure_dir /var/log/mint-bot mintbot:mintbot 0750',
+      'ensure_dir /var/log/mint-bot mintbot:mintbot 0700',
     ]) expect(provision).toContain(line);
     for (const line of [
       'expect_dir /etc/mint-bot/secrets root:root 0700',
