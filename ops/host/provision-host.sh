@@ -5,7 +5,7 @@
 #   sudo bash provision-host.sh --check    only report what would change; changes nothing
 #
 # It prepares the machine: packages, time, swap, the service accounts and groups, the folders with their owners and modes,
-# the narrow read permission that lets the backup account read the database, and the two systemd service files.
+# the narrow read permission that lets the backup account read the database, and the three systemd unit files.
 # It does NOT install the application code, does NOT create or read any secret, does NOT start the service and does NOT
 # release the kill switch. Afterwards run verify-host.sh and keep its report as evidence.
 set -euo pipefail
@@ -17,7 +17,13 @@ case "${1:-}" in
   *) echo "Usage: sudo bash provision-host.sh [--check]" >&2; exit 2 ;;
 esac
 
-NODE_VERSION="${MINT_BOT_NODE_VERSION:-20.19.1}"
+# Node 20.19.1 for linux-x64. This SHA-256 is pinned here (it matched nodejs.org and an independent mirror when it was
+# recorded on 2026-10-22), so a changed download is refused even if the website itself were tampered with later.
+DEFAULT_NODE_VERSION="20.19.1"
+DEFAULT_NODE_SHA256="b6c4cedfc81fc544b9993bc8a3628b5c0aa7a169fbaa293460abc0418d0fabb6"
+NODE_VERSION="${MINT_BOT_NODE_VERSION:-$DEFAULT_NODE_VERSION}"
+if [ "$NODE_VERSION" = "$DEFAULT_NODE_VERSION" ]; then NODE_SHA256="$DEFAULT_NODE_SHA256"; else NODE_SHA256="${MINT_BOT_NODE_SHA256:-}"; fi
+[ -n "$NODE_SHA256" ] || { echo "STOP: a different Node version needs its checksum in MINT_BOT_NODE_SHA256 (from two independent sources)." >&2; exit 1; }
 SWAP_SIZE_MB="${MINT_BOT_SWAP_MB:-2048}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE_UNITS_DIR="${MINT_BOT_UNITS_DIR:-$HERE/../systemd}"
@@ -58,24 +64,32 @@ if [ ! -f /etc/apt/apt.conf.d/20auto-upgrades ] || ! grep -q 'Unattended-Upgrade
 else note "automatic security updates are on"; fi
 
 # --- 2. Node.js ---------------------------------------------------------------------------------------------------------
-say "2/8 Node.js $NODE_VERSION (official build from nodejs.org, checksum verified)"
-CURRENT_NODE="$(/usr/bin/node --version 2>/dev/null || true)"
-if [ "$CURRENT_NODE" = "v$NODE_VERSION" ]; then note "node $CURRENT_NODE is already at /usr/bin/node"; else
-  note "found: ${CURRENT_NODE:-no node}; installing v$NODE_VERSION"
-  if [ "$MODE" = check ]; then note "would download node-v$NODE_VERSION-linux-x64.tar.xz, verify its SHA-256 against nodejs.org's list and link /usr/bin/node"; CHANGES=$((CHANGES + 1)); else
+say "2/8 Node.js $NODE_VERSION (official build, checksum pinned in this script)"
+NODE_DIR="/opt/node/node-v${NODE_VERSION}-linux-x64"
+node_ok() {
+  [ "$(/usr/bin/node --version 2>/dev/null || true)" = "v$NODE_VERSION" ] || return 1
+  # The program both service accounts run must belong to root, wherever the link points.
+  local real; real="$(readlink -f /usr/bin/node)"
+  [ -f "$real" ] && [ "$(stat -c '%U' "$real")" = root ] && [ -z "$(find "$(dirname "$real")" ! -user root -print -quit 2>/dev/null)" ]
+}
+if node_ok; then note "node v$NODE_VERSION is installed and owned by root"; else
+  note "installing v$NODE_VERSION (found: $(/usr/bin/node --version 2>/dev/null || echo none))"
+  if [ "$MODE" = check ]; then note "would download node-v$NODE_VERSION-linux-x64.tar.xz, require SHA-256 $NODE_SHA256, unpack as root and link /usr/bin/node"; CHANGES=$((CHANGES + 1)); else
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
     TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"
     curl -fsSL --max-time 300 -o "$TMP/$TARBALL" "https://nodejs.org/dist/v${NODE_VERSION}/$TARBALL"
-    curl -fsSL --max-time 60 -o "$TMP/SHASUMS256.txt" "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
-    EXPECTED="$(grep " $TARBALL\$" "$TMP/SHASUMS256.txt" | cut -d' ' -f1)"
     ACTUAL="$(sha256sum "$TMP/$TARBALL" | cut -d' ' -f1)"
-    [ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ] || { echo "STOP: the download does not match nodejs.org's checksum." >&2; exit 1; }
-    note "checksum verified: $ACTUAL"
-    mkdir -p /opt/node
-    tar -xJf "$TMP/$TARBALL" -C /opt/node
-    ln -sfn "/opt/node/node-v${NODE_VERSION}-linux-x64/bin/node" /usr/bin/node
-    note "installed $(/usr/bin/node --version)"
+    [ "$ACTUAL" = "$NODE_SHA256" ] || { echo "STOP: the Node download ($ACTUAL) does not match the pinned checksum ($NODE_SHA256). Nothing was installed." >&2; exit 1; }
+    note "checksum matches the pinned value: $ACTUAL"
+    install -d -o root -g root -m 0755 /opt/node
+    rm -rf "$NODE_DIR"
+    tar -xJf "$TMP/$TARBALL" -C /opt/node --no-same-owner --no-same-permissions
+    chown -R root:root "$NODE_DIR"
+    [ -z "$(find "$NODE_DIR" ! -user root -print -quit)" ] || { echo "STOP: the unpacked Node tree is not entirely owned by root." >&2; exit 1; }
+    ln -sfn "$NODE_DIR/bin/node" /usr/bin/node
+    node_ok || { echo "STOP: node did not install correctly." >&2; exit 1; }
+    note "installed $(/usr/bin/node --version), owned by root"
   fi
 fi
 
@@ -83,14 +97,17 @@ fi
 say "3/8 Swap file (${SWAP_SIZE_MB} MB safety cushion for updates)"
 if [ "$(swapon --show --noheadings | wc -l)" -gt 0 ]; then note "swap is already on"; else
   if [ "$MODE" = check ]; then note "would create /swapfile (${SWAP_SIZE_MB} MB), enable it and keep it across restarts"; CHANGES=$((CHANGES + 1)); else
-    [ -e /swapfile ] || { fallocate -l "${SWAP_SIZE_MB}M" /swapfile; chmod 600 /swapfile; mkswap /swapfile >/dev/null; }
+    CHANGES=$((CHANGES + 1))
+    if [ ! -e /swapfile ]; then install -m 0600 -o root -g root /dev/null /swapfile; fallocate -l "${SWAP_SIZE_MB}M" /swapfile; mkswap /swapfile >/dev/null; fi
+    [ ! -L /swapfile ] && [ "$(stat -c '%U:%G %a' /swapfile)" = "root:root 600" ] || { echo "STOP: /swapfile is a link or has the wrong owner or mode." >&2; exit 1; }
     swapon /swapfile
     grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
   fi
 fi
 if [ ! -f /etc/sysctl.d/99-mint-bot.conf ]; then
   if [ "$MODE" = check ]; then note "would set low swappiness"; CHANGES=$((CHANGES + 1)); else
-    printf 'vm.swappiness=10\n' > /etc/sysctl.d/99-mint-bot.conf; sysctl -q -p /etc/sysctl.d/99-mint-bot.conf
+    CHANGES=$((CHANGES + 1))
+    printf 'vm.swappiness=10\n' > /etc/sysctl.d/99-mint-bot.conf; sysctl -q -p /etc/sysctl.d/99-mint-bot.conf || true
   fi
 fi
 
@@ -125,35 +142,42 @@ note "mintbot, mintbot-backup and mintbot-status are in place"
 # --- 5. Folders and permissions -----------------------------------------------------------------------------------------
 say "5/8 Folders, owners and modes"
 ensure_dir() { # path owner:group mode
+  # A link in place of a folder could redirect root's changes somewhere else: stop instead of following it.
+  [ ! -L "$1" ] || { echo "STOP: $1 is a symbolic link, not a folder." >&2; exit 1; }
   if [ ! -d "$1" ]; then act install -d -o "${2%%:*}" -g "${2##*:}" -m "$3" "$1"; else
-    [ "$(stat -c '%U:%G %a' "$1")" = "${2} ${3#0}" ] || act bash -c "chown '$2' '$1' && chmod '$3' '$1'"
+    [ "$(stat -c '%U:%G %a' "$1")" = "${2} ${3#0}" ] || act bash -c "chown -h '$2' '$1' && chmod '$3' '$1'"
   fi
 }
 ensure_dir /opt/mint-bot root:root 0755
 ensure_dir /opt/mint-bot/releases root:root 0755
 ensure_dir /etc/mint-bot root:root 0755
-# Non-secret settings only. Backup credentials live in /etc/mint-bot/secrets (read by systemd, never by the application).
+# Backup credentials (root-only files, handed to the backup service by systemd; the application never sees them).
 ensure_dir /etc/mint-bot/secrets root:root 0700
 # The host secret store (Telegram, provider addresses, monitor address). The application's loader insists on a folder
 # named Rets and on a file only its owner can read; /etc is read-only to the service, so it cannot change the file.
 ensure_dir /etc/mint-bot/Rets root:mintbot 0750
 ensure_dir /var/lib/mint-bot mintbot:mintbot 0750
+# The database lives alone in its own folder, so the backup account's read permission can never reach any other file.
+ensure_dir /var/lib/mint-bot/db mintbot:mintbot 0750
 ensure_dir /var/lib/mint-bot/backups mintbot-backup:mintbot-backup 0700
 ensure_dir /var/lib/mint-bot/backup-status mintbot-backup:mintbot-status 0750
 ensure_dir /var/log/mint-bot mintbot:mintbot 0750
+if [ -L /var/lib/mint-bot/killswitch ]; then echo "STOP: the kill switch path is a symbolic link." >&2; exit 1; fi
 if [ ! -f /var/lib/mint-bot/killswitch ]; then
   act install -o mintbot -g mintbot -m 0600 /dev/null /var/lib/mint-bot/killswitch
   note "kill switch ENGAGED (the service refuses to start without this file; releasing it is a deliberate, separate step)"
 else note "kill switch file present (engaged)"; fi
 
-# Settings for the unit: paths and switches only, no secret. The owner adds the wallet addresses and other options later.
-ENV_FILE=/etc/mint-bot/mint-bot.env
-if [ ! -f "$ENV_FILE" ]; then
-  if [ "$MODE" = check ]; then note "would write $ENV_FILE"; CHANGES=$((CHANGES + 1)); else
-    cat > "$ENV_FILE" <<'EOF'
+# Settings for the units: paths and switches only, no secret. The owner adds the wallet addresses and other options later.
+# The application reads the MINT_BOT_* names and the backup job reads STORE_PATH, BACKUP_DIR and BACKUP_STATUS_PATH, so both are set.
+SETTINGS_FILE=/etc/mint-bot/mint-bot.env
+if [ ! -f "$SETTINGS_FILE" ]; then
+  if [ "$MODE" = check ]; then note "would write $SETTINGS_FILE"; CHANGES=$((CHANGES + 1)); else
+    CHANGES=$((CHANGES + 1))
+    cat > "$SETTINGS_FILE" <<'EOF'
 # MintBot production settings (not secret). Credentials never go in this file.
 MINT_BOT_SERVICE_MODE=dry-run
-MINT_BOT_STATE_PATH=/var/lib/mint-bot/mintbot.sqlite
+MINT_BOT_STATE_PATH=/var/lib/mint-bot/db/mintbot.sqlite
 MINT_BOT_BACKUP_DIR=/var/lib/mint-bot/backups
 MINT_BOT_BACKUP_STATUS_PATH=/var/lib/mint-bot/backup-status/status.json
 MINT_BOT_LOG_PATH=/var/log/mint-bot/orchestrator.log
@@ -165,39 +189,57 @@ MINT_BOT_HEALTH_PORT=8780
 MINT_BOT_BIND_HOST=127.0.0.1
 MINT_BOT_BACKUP_SCHEDULER=systemd
 SECRET_STORE_PATH=/etc/mint-bot/Rets/MINT_BOT_SECRETS.env
+# The backup job reads these names:
+STORE_PATH=/var/lib/mint-bot/db/mintbot.sqlite
+BACKUP_DIR=/var/lib/mint-bot/backups
+BACKUP_STATUS_PATH=/var/lib/mint-bot/backup-status/status.json
+# Fill in before the service runs (none of these is secret):
 MINT_BOT_HOST_ID=REPLACE-WITH-STABLE-HOST-ID
+# Off-host backups to Cloudflare R2, once the bucket exists. The two credentials are NOT here; they are root-only files.
+# MINT_BOT_OFFHOST_BACKUP_REQUIRED=true
+# R2_ACCOUNT_ID=
+# R2_BUCKET_NAME=
+# R2_OBJECT_PREFIX=
+# R2_JURISDICTION=
 EOF
-    chown root:root "$ENV_FILE"; chmod 0644 "$ENV_FILE"
+    chown root:root "$SETTINGS_FILE"; chmod 0644 "$SETTINGS_FILE"
   fi
-else note "$ENV_FILE already exists (left as it is)"; fi
+else note "$SETTINGS_FILE already exists (left as it is)"; fi
 
 # --- 6. Backup account may read the database, nothing else ---------------------------------------------------------------
 say "6/8 Narrow read permission for the backup account"
-ACL_TEXT="$(getfacl -p /var/lib/mint-bot 2>/dev/null || true)"
-if grep -qx 'user:mintbot-backup:--x' <<<"$ACL_TEXT" && grep -qx 'default:user:mintbot-backup:r--' <<<"$ACL_TEXT"; then
-  note "mintbot-backup: already allowed to pass through /var/lib/mint-bot and read new database files"
+# Pass-through only on the state folder; read access only inside the database folder, to files created there from now on.
+STATE_ACL="$(getfacl -p /var/lib/mint-bot 2>/dev/null || true)"
+DB_ACL="$(getfacl -p /var/lib/mint-bot/db 2>/dev/null || true)"
+if grep -qx 'user:mintbot-backup:--x' <<<"$STATE_ACL" && ! grep -q '^default:' <<<"$STATE_ACL" \
+   && grep -qx 'user:mintbot-backup:--x' <<<"$DB_ACL" && grep -qx 'default:user:mintbot-backup:r--' <<<"$DB_ACL"; then
+  note "mintbot-backup: already allowed to pass through /var/lib/mint-bot and read new files in /var/lib/mint-bot/db only"
 elif [ "$MODE" = check ]; then
-  note "would let mintbot-backup pass through /var/lib/mint-bot and read the database files created there (read only)"; CHANGES=$((CHANGES + 1))
+  note "would let mintbot-backup pass through /var/lib/mint-bot and read the files created in /var/lib/mint-bot/db (read only)"; CHANGES=$((CHANGES + 1))
 else
   CHANGES=$((CHANGES + 1))
-  # Applied after the folders above exist, so the backup and status folders do not inherit it.
+  setfacl -k /var/lib/mint-bot                              # no inherited rule on the state folder itself
   setfacl -m u:mintbot-backup:--x /var/lib/mint-bot
-  setfacl -d -m u:mintbot-backup:r-- /var/lib/mint-bot
-  note "mintbot-backup: traverse /var/lib/mint-bot, read new database files; it owns only backups/ and backup-status/"
+  setfacl -m u:mintbot-backup:--x /var/lib/mint-bot/db
+  setfacl -d -m u:mintbot-backup:r-- /var/lib/mint-bot/db
+  note "mintbot-backup: pass through /var/lib/mint-bot; read files created in /var/lib/mint-bot/db; it owns only backups/ and backup-status/"
 fi
-# Database files that already exist (a restored copy, for example) get the same read permission.
+# Database files that already exist in that folder (a restored copy, for example) get the same read permission,
+# but only ordinary files owned by mintbot with a single name: never a link that could point at some other file.
 if [ "$MODE" = apply ]; then
-  for file in /var/lib/mint-bot/mintbot.sqlite /var/lib/mint-bot/mintbot.sqlite-wal /var/lib/mint-bot/mintbot.sqlite-shm; do
-    [ ! -e "$file" ] || setfacl -m u:mintbot-backup:r-- "$file"
+  for file in /var/lib/mint-bot/db/mintbot.sqlite /var/lib/mint-bot/db/mintbot.sqlite-wal /var/lib/mint-bot/db/mintbot.sqlite-shm; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    if [ -f "$file" ] && [ ! -L "$file" ] && [ "$(stat -c '%U %h' "$file")" = "mintbot 1" ]; then setfacl -m u:mintbot-backup:r-- "$file"; else echo "STOP: $file is not a plain file owned by mintbot." >&2; exit 1; fi
   done
 fi
 
 # --- 7. Service files ---------------------------------------------------------------------------------------------------
-say "7/8 systemd service files (installed, not started)"
+say "7/8 systemd unit files (installed, not started)"
 for unit in mint-bot.service mint-bot-backup.service mint-bot-backup.timer; do
   SOURCE="$RELEASE_UNITS_DIR/$unit"
   [ -f "$SOURCE" ] || { echo "STOP: $SOURCE not found. Run this script from the repository's ops/host folder, or set MINT_BOT_UNITS_DIR." >&2; exit 1; }
   if ! cmp -s "$SOURCE" "/etc/systemd/system/$unit" 2>/dev/null; then act install -o root -g root -m 0644 "$SOURCE" "/etc/systemd/system/$unit"; else note "$unit is up to date"; fi
+  [ ! -d "/etc/systemd/system/$unit.d" ] || { echo "STOP: /etc/systemd/system/$unit.d exists. A drop-in could change the reviewed hardening; remove it." >&2; exit 1; }
 done
 [ "$MODE" = check ] || systemctl daemon-reload
 
@@ -209,8 +251,8 @@ cat <<'EOF'
 Next steps (not done by this script):
   1. Put the application release in /opt/mint-bot/releases/<commit> and point /opt/mint-bot/current at it.
   2. Put the secrets in place (the owner does this; never paste them into chat):
-       /etc/mint-bot/Rets/MINT_BOT_SECRETS.env  owner mintbot, mode 0600
-       /etc/mint-bot/secrets/backup-encryption-key, r2-access-key-id, r2-secret-access-key  owner root, mode 0600
+       /etc/mint-bot/Rets/MINT_BOT_SECRETS.env  owner mintbot:mintbot, mode 0600
+       /etc/mint-bot/secrets/backup-encryption-key, r2-access-key-id, r2-secret-access-key  owner root:root, mode 0600
   3. Replace MINT_BOT_HOST_ID in /etc/mint-bot/mint-bot.env.
   4. Run: sudo bash verify-host.sh --acl-selftest   and keep the report.
 The service is not started and the kill switch is engaged.
