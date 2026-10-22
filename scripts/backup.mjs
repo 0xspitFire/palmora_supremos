@@ -1,4 +1,4 @@
-import { access, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, constants, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -27,13 +27,49 @@ const destinationMetadata = await lstat(destinationRoot);
 if (!destinationMetadata.isDirectory() || destinationMetadata.isSymbolicLink()) throw new Error('BACKUP_DIR_MUST_BE_REGULAR_DIRECTORY');
 const temporary = resolve(destinationRoot, `.${basename(source)}.${process.pid}.snapshot.tmp`);
 const target = resolve(destinationRoot, `${basename(source)}.${new Date().toISOString().replaceAll(':', '-')}.snapshot.enc`);
-const database = new Database(source, { readonly: true, fileMustExist: true });
+async function exists(path) {
+  try { await lstat(path); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+}
+const identity = (metadata) => `${metadata.size}:${metadata.mtimeMs}:${metadata.ino}`;
+/**
+ * Normally the database is opened read-only in place. A cleanly stopped service leaves no -wal/-shm files, and the backup account
+ * (which may not write the database folder) cannot open a WAL database in that state. A running service always keeps both side
+ * files, so when neither exists nobody has the database open: copy the file into the backup account's own folder, prove the source
+ * did not change while copying and no side file appeared, and snapshot the copy. Any side file means "busy or unrecovered": refuse.
+ */
+async function openForBackup() {
+  let direct;
+  try {
+    direct = new Database(source, { readonly: true, fileMustExist: true });
+    // The open itself succeeds; the refusal only shows at the first query.
+    direct.pragma('journal_mode', { simple: true });
+    return { database: direct, copy: undefined };
+  } catch (error) {
+    direct?.close();
+    if (error?.code !== 'SQLITE_READONLY_DIRECTORY' && error?.code !== 'SQLITE_CANTOPEN') throw error;
+  }
+  if ((await exists(`${source}-wal`)) || (await exists(`${source}-shm`))) throw new Error('SQLITE_SOURCE_BUSY_OR_UNRECOVERED');
+  const copy = resolve(destinationRoot, `.${basename(source)}.${process.pid}.quiet-copy.tmp`);
+  try {
+    const before = await lstat(source);
+    await copyFile(source, copy, constants.COPYFILE_EXCL);
+    await chmod(copy, 0o600);
+    const after = await lstat(source);
+    if (identity(before) !== identity(after) || (await exists(`${source}-wal`)) || (await exists(`${source}-shm`))) throw new Error('SQLITE_SOURCE_CHANGED_DURING_COPY');
+    return { database: new Database(copy, { fileMustExist: true }), copy };
+  } catch (error) {
+    await rm(copy, { force: true });
+    throw error;
+  }
+}
+const { database, copy: quietCopy } = await openForBackup();
 try {
   if (database.pragma('journal_mode', { simple: true }) !== 'wal') throw new Error('SQLITE_WAL_REQUIRED');
   if (database.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('SQLITE_INTEGRITY_CHECK_FAILED');
   await database.backup(temporary);
 } finally {
   database.close();
+  if (quietCopy) await Promise.all([quietCopy, `${quietCopy}-wal`, `${quietCopy}-shm`].map((path) => rm(path, { force: true })));
 }
 try {
   await access(temporary);
