@@ -114,4 +114,4 @@ echo "Release built: $OUT ($(du -h "$OUT" | cut -f1))"
 echo "SHA-256: $(sha256sum "$OUT" | cut -d' ' -f1)"
 echo
 echo "Next: upload it to the server (gear icon, Upload file), check the SHA-256 there, then run:"
-echo "  sudo bash ~/mintbot-ops/ops/host/install-release.sh ~/mintbot-release-$SHORT.tar.gz <the SHA-256 above>"
+echo "  sudo bash ~/install-release.sh ~/mintbot-release-$SHORT.tar.gz <the SHA-256 above>"
