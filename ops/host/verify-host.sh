@@ -182,7 +182,15 @@ if grep -q 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/n
 
 if [ "$PROBE" -eq 1 ]; then
   section "6. Outbound HTTPS (a reply of any kind proves the route; no credential is sent)"
-  for target in https://api.telegram.org https://api.turnkey.com https://hc-ping.com https://cloudflarestorage.com https://nodejs.org; do
+  # The R2 address is the one the backup job will really use, built from the non-secret settings (not a bare domain, which never answers).
+  R2_TARGET=""
+  R2_ACCOUNT="$(grep -E '^R2_ACCOUNT_ID=' "$SETTINGS_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
+  R2_JURISDICTION="$(grep -E '^R2_JURISDICTION=' "$SETTINGS_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
+  if grep -Eq '^[a-f0-9]{32}$' <<<"$R2_ACCOUNT"; then
+    case "$R2_JURISDICTION" in ""|automatic) R2_TARGET="https://$R2_ACCOUNT.r2.cloudflarestorage.com" ;; eu|us|fedramp) R2_TARGET="https://$R2_ACCOUNT.$R2_JURISDICTION.r2.cloudflarestorage.com" ;; esac
+  fi
+  [ -n "$R2_TARGET" ] || warn "the R2 settings are not filled in, so the route to R2 was NOT checked"
+  for target in https://api.telegram.org https://api.turnkey.com https://hc-ping.com https://nodejs.org $R2_TARGET; do
     code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "$target" 2>/dev/null || true)"
     if [ -n "$code" ] && [ "$code" != 000 ]; then ok "reached $target (HTTP $code)"; else bad "could not reach $target"; fi
   done
@@ -236,7 +244,7 @@ if [ "$SELFTEST" -eq 1 ]; then
       MOVE_OUT="$(systemd-run --quiet --wait --pipe "${UNIT_SETTINGS[@]}" /usr/bin/mv /var/lib/mint-bot/backup-status /var/lib/mint-bot/backup-status.moved 2>&1)"; MOVE_RC=$?
       if [ "$MOVE_RC" -eq 0 ]; then
         bad "under the service's own settings, mintbot could MOVE the backup-status folder"; [ -d /var/lib/mint-bot/backup-status.moved ] && mv /var/lib/mint-bot/backup-status.moved /var/lib/mint-bot/backup-status
-      elif grep -qi 'read-only' <<<"$MOVE_OUT"; then ok "under the service's own settings, mintbot cannot replace the backup-status folder (refused: read-only)"
+      elif grep -qiE 'read-only|resource busy' <<<"$MOVE_OUT" && [ -d /var/lib/mint-bot/backup-status ]; then ok "under the service's own settings, mintbot cannot replace the backup-status folder (refused; it is a read-only mount point)"
       else warn "the move was refused but not for the expected reason, so this check proves nothing: $MOVE_OUT"; fi
     else warn "the control write under the service's settings failed, so the replace-the-status-folder check was NOT run"; fi
   else warn "systemd-run is not usable here, so the replace-the-status-folder check was NOT run"; fi

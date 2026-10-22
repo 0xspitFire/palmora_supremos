@@ -147,13 +147,21 @@ describe('production host scripts (T-045)', () => {
 
   it('refuses to provision while the service is running, and the move check must be refused for a read-only reason to count', () => {
     expect(provision).toContain('stop the MintBot service first');
-    expect(verify).toContain("grep -qi 'read-only'");
+    expect(verify).toContain("grep -qiE 'read-only|resource busy'");
+    expect(verify).toContain('[ -d /var/lib/mint-bot/backup-status ]'); // the folder must still be there
     expect(verify).toContain('this check proves nothing');
   });
 
   it('asserts the backup account access rules even without the self-test, and no extended rule on the backups and status folders', () => {
     expect(verify).toContain("grep -qx 'user:mintbot-backup:--x' <<<\"$DB_ACL\"");
     expect(verify).toContain('has an extended access rule');
+  });
+
+  it('probes the real R2 address built from the settings, never a bare domain', () => {
+    expect(verify).not.toContain('https://cloudflarestorage.com');
+    expect(verify).toContain('.r2.cloudflarestorage.com');
+    expect(verify).toContain('eu|us|fedramp');
+    expect(verify).toContain('the route to R2 was NOT checked');
   });
 
   it('installs exactly the checked-in unit files, and the units still match the paths the scripts create', () => {
