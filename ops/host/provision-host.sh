@@ -41,6 +41,8 @@ act() {
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] || { echo "STOP: this script is written for Ubuntu (found ${ID:-unknown})." >&2; exit 1; }
 [ "$(uname -m)" = x86_64 ] || { echo "STOP: expected an x86-64 machine (found $(uname -m))." >&2; exit 1; }
+# Provisioning follows paths inside folders the service can write, so it never runs while the service is running.
+if [ "$MODE" = apply ] && { systemctl is-active --quiet mint-bot.service || systemctl is-active --quiet mint-bot-backup.service; }; then echo "STOP: stop the MintBot service first (systemctl stop mint-bot.service), then run this again." >&2; exit 1; fi
 echo "MintBot host provisioning, mode: $MODE, Ubuntu ${VERSION_ID:-?}"
 
 # --- 1. Packages, security updates, time -------------------------------------------------------------------------------
@@ -69,8 +71,8 @@ NODE_DIR="/opt/node/node-v${NODE_VERSION}-linux-x64"
 node_ok() {
   [ "$(/usr/bin/node --version 2>/dev/null || true)" = "v$NODE_VERSION" ] || return 1
   # The program both service accounts run must belong to root, wherever the link points.
-  local real; real="$(readlink -f /usr/bin/node)"
-  [ -f "$real" ] && [ "$(stat -c '%U' "$real")" = root ] && [ -z "$(find "$(dirname "$real")" ! -user root -print -quit 2>/dev/null)" ]
+  local real tree; real="$(readlink -f /usr/bin/node)"; tree="$(dirname "$(dirname "$real")")"
+  [ -f "$real" ] && [ "$(stat -c '%U' "$real")" = root ] && [ -z "$(find "$tree" \( ! -user root -o -perm /022 \) ! -type l -print -quit 2>/dev/null)" ]
 }
 if node_ok; then note "node v$NODE_VERSION is installed and owned by root"; else
   note "installing v$NODE_VERSION (found: $(/usr/bin/node --version 2>/dev/null || echo none))"

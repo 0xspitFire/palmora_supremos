@@ -29,6 +29,7 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 REPORT="/root/mintbot-host-evidence-$STAMP.txt"
 SETTINGS_FILE=/etc/mint-bot/mint-bot.env
 SELFTEST_DB=/var/lib/mint-bot/db/.selftest.sqlite
+HOLDER_OUT=""
 HOLDER=""
 
 PASS=0; FAIL=0; WARN=0
@@ -56,6 +57,7 @@ setting() { systemctl show "$1" -p "$2" --value 2>/dev/null; }
 
 cleanup() {
   [ -z "$HOLDER" ] || kill "$HOLDER" 2>/dev/null
+  [ -z "$HOLDER_OUT" ] || rm -f "$HOLDER_OUT"
   if id mintbot >/dev/null 2>&1; then as mintbot rm -f "$SELFTEST_DB" "$SELFTEST_DB-wal" "$SELFTEST_DB-shm" "$SELFTEST_DB-journal" 2>/dev/null; fi
 }
 trap cleanup EXIT
@@ -65,7 +67,11 @@ trap cleanup EXIT
 echo "MintBot host evidence report"
 echo "Time (UTC): $STAMP"
 echo "Host: $(hostname)   Kernel: $(uname -r)   OS: $(. /etc/os-release; echo "${PRETTY_NAME:-unknown}")"
-echo "Node: $(/usr/bin/node --version 2>/dev/null || echo 'not installed') (owner of the program: $(stat -c '%U' "$(readlink -f /usr/bin/node 2>/dev/null)" 2>/dev/null || echo unknown))"
+echo "Node: $(/usr/bin/node --version 2>/dev/null || echo 'not installed')"
+
+NODE_REAL="$(readlink -f /usr/bin/node 2>/dev/null)"
+NODE_TREE="$(dirname "$(dirname "$NODE_REAL")")"
+if [ -f "$NODE_REAL" ] && [ -z "$(find "$NODE_TREE" \( ! -user root -o -perm /022 \) ! -type l -print -quit 2>/dev/null)" ]; then ok "Node program tree ($NODE_TREE) belongs to root and nobody else can change it"; else bad "Node program tree ($NODE_TREE) has a file not owned by root or writable by others"; fi
 
 section "1. Identities"
 for account in mintbot mintbot-backup; do
@@ -99,6 +105,11 @@ if [ -L /opt/mint-bot/current ]; then ok "/opt/mint-bot/current -> $(readlink /o
 echo "Access list on /var/lib/mint-bot:"; getfacl -p /var/lib/mint-bot 2>/dev/null | sed 's/^/   /'
 echo "Access list on /var/lib/mint-bot/db:"; getfacl -p /var/lib/mint-bot/db 2>/dev/null | sed 's/^/   /'
 STATE_ACL="$(getfacl -p /var/lib/mint-bot 2>/dev/null)"
+DB_ACL="$(getfacl -p /var/lib/mint-bot/db 2>/dev/null)"
+if grep -qx 'user:mintbot-backup:--x' <<<"$DB_ACL" && grep -qx 'default:user:mintbot-backup:r--' <<<"$DB_ACL"; then ok "database folder: backup account may pass through and read new files (read only)"; else bad "database folder is missing the backup account's pass-through or inherited read rule"; fi
+for plain in /var/lib/mint-bot/backups /var/lib/mint-bot/backup-status; do
+  if getfacl -p "$plain" 2>/dev/null | grep -Eq '^(user|group|default):[^:]'; then bad "$plain has an extended access rule (it must have none)"; else ok "$plain has no extended access rule"; fi
+done
 if grep -q '^default:' <<<"$STATE_ACL"; then bad "/var/lib/mint-bot has an inherited access rule (it must exist only on the db folder)"; else ok "no inherited access rule on /var/lib/mint-bot (jobs, restart counter and kill switch stay private to mintbot)"; fi
 # Each secret file against its OWN expected owner: a backup key owned by the application would defeat the separation.
 expect_file /etc/mint-bot/Rets/MINT_BOT_SECRETS.env mintbot:mintbot 0600 "application secret store"
@@ -120,9 +131,13 @@ for unit in mint-bot.service mint-bot-backup.service mint-bot-backup.timer; do
     if [ -d "/etc/systemd/system/$unit.d" ] || [ -n "$(setting "$unit" DropInPaths)" ]; then bad "$unit has a drop-in override"; else ok "$unit has no drop-in override"; fi
   else bad "$unit is not installed"; fi
 done
-want() { # unit property expected-substring
+want() { # unit property expected-exact-value
   local value; value="$(setting "$1" "$2")"
-  if [ "$value" = "$3" ] || { [ -n "$3" ] && grep -qF -- "$3" <<<"$value"; }; then ok "$1 effective $2 = ${value:-<empty>}"; else bad "$1 effective $2 is '${value:-<empty>}', expected '$3'"; fi
+  if [ "$value" = "$3" ]; then ok "$1 effective $2 = ${value:-<empty>}"; else bad "$1 effective $2 is '${value:-<empty>}', expected '$3'"; fi
+}
+want_has() { # unit property expected-substring (for lists and commands)
+  local value; value="$(setting "$1" "$2")"
+  if grep -qF -- "$3" <<<"$value"; then ok "$1 effective $2 includes $3"; else bad "$1 effective $2 is '${value:-<empty>}', expected it to include '$3'"; fi
 }
 want mint-bot.service User mintbot
 want mint-bot.service NoNewPrivileges yes
@@ -131,10 +146,12 @@ want mint-bot.service LimitCORE 0
 want mint-bot.service CapabilityBoundingSet ""
 want mint-bot.service Restart on-failure
 want mint-bot.service StartLimitBurst 5
-want mint-bot.service ReadOnlyPaths /var/lib/mint-bot/backup-status
-want mint-bot.service ExecStartPre "/usr/bin/test -f /var/lib/mint-bot/killswitch"
+want_has mint-bot.service ReadOnlyPaths /var/lib/mint-bot/backup-status
+want mint-bot.service UMask 0077
+want_has mint-bot.service ExecStartPre "/usr/bin/test -f /var/lib/mint-bot/killswitch"
 want mint-bot-backup.service User mintbot-backup
-want mint-bot-backup.service ReadOnlyPaths /var/lib/mint-bot
+want_has mint-bot-backup.service ReadOnlyPaths /var/lib/mint-bot
+want mint-bot-backup.service UMask 0027
 if [ -n "$(setting mint-bot-backup.service LoadCredential)" ]; then ok "backup credentials are loaded by systemd, not through the environment"; else bad "backup service has no LoadCredential"; fi
 echo "mint-bot.service: enabled=$(systemctl is-enabled mint-bot.service 2>/dev/null || true) active=$(systemctl is-active mint-bot.service 2>/dev/null || true)"
 echo "mint-bot-backup.timer: enabled=$(systemctl is-enabled mint-bot-backup.timer 2>/dev/null || true) active=$(systemctl is-active mint-bot-backup.timer 2>/dev/null || true)"
@@ -216,9 +233,11 @@ if [ "$SELFTEST" -eq 1 ]; then
     if systemd-run --quiet --wait --pipe "${UNIT_SETTINGS[@]}" /usr/bin/touch /var/lib/mint-bot/.selftest-systemd >/dev/null 2>&1; then
       ok "control: under the service's own settings, mintbot can write elsewhere in its state folder"
       as mintbot rm -f /var/lib/mint-bot/.selftest-systemd
-      if systemd-run --quiet --wait --pipe "${UNIT_SETTINGS[@]}" /usr/bin/mv /var/lib/mint-bot/backup-status /var/lib/mint-bot/backup-status.moved >/dev/null 2>&1; then
+      MOVE_OUT="$(systemd-run --quiet --wait --pipe "${UNIT_SETTINGS[@]}" /usr/bin/mv /var/lib/mint-bot/backup-status /var/lib/mint-bot/backup-status.moved 2>&1)"; MOVE_RC=$?
+      if [ "$MOVE_RC" -eq 0 ]; then
         bad "under the service's own settings, mintbot could MOVE the backup-status folder"; [ -d /var/lib/mint-bot/backup-status.moved ] && mv /var/lib/mint-bot/backup-status.moved /var/lib/mint-bot/backup-status
-      else ok "under the service's own settings, mintbot cannot replace the backup-status folder"; fi
+      elif grep -qi 'read-only' <<<"$MOVE_OUT"; then ok "under the service's own settings, mintbot cannot replace the backup-status folder (refused: read-only)"
+      else warn "the move was refused but not for the expected reason, so this check proves nothing: $MOVE_OUT"; fi
     else warn "the control write under the service's settings failed, so the replace-the-status-folder check was NOT run"; fi
   else warn "systemd-run is not usable here, so the replace-the-status-folder check was NOT run"; fi
 fi

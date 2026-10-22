@@ -126,7 +126,7 @@ describe('production host scripts (T-045)', () => {
     expect(verify).toContain('systemctl show');
     expect(verify).toContain('has a drop-in override');
     expect(verify).toContain('differs from the checked-in file');
-    for (const setting of ['want mint-bot.service NoNewPrivileges yes', 'want mint-bot.service ProtectSystem strict', 'want mint-bot.service LimitCORE 0', 'want mint-bot.service CapabilityBoundingSet ""', 'want mint-bot.service ReadOnlyPaths /var/lib/mint-bot/backup-status']) expect(verify).toContain(setting);
+    for (const setting of ['want mint-bot.service NoNewPrivileges yes', 'want mint-bot.service ProtectSystem strict', 'want mint-bot.service LimitCORE 0', 'want mint-bot.service CapabilityBoundingSet ""', 'want_has mint-bot.service ReadOnlyPaths /var/lib/mint-bot/backup-status']) expect(verify).toContain(setting);
   });
 
   it('the evidence report fails when it cannot list ports, and checks loopback, the kill switch and the status-folder protection under the service settings', () => {
@@ -134,6 +134,26 @@ describe('production host scripts (T-045)', () => {
     expect(verify).toContain('127.0.0.1:8780');
     expect(verify).toContain('killswitch');
     expect(verify).toContain('-p ReadOnlyPaths=/var/lib/mint-bot/backup-status');
+  });
+
+  it('matches single-value unit settings exactly, asserts the umask the state folder privacy relies on, and checks the whole Node tree', () => {
+    expect(verify).toContain('want() { # unit property expected-exact-value');
+    expect(verify).toContain('want mint-bot.service UMask 0077');
+    expect(verify).toContain('want mint-bot-backup.service UMask 0027');
+    expect(verify).toContain('Node program tree');
+    expect(provision).toContain('-perm /022');
+    expect(verify).toContain('-perm /022');
+  });
+
+  it('refuses to provision while the service is running, and the move check must be refused for a read-only reason to count', () => {
+    expect(provision).toContain('stop the MintBot service first');
+    expect(verify).toContain("grep -qi 'read-only'");
+    expect(verify).toContain('this check proves nothing');
+  });
+
+  it('asserts the backup account access rules even without the self-test, and no extended rule on the backups and status folders', () => {
+    expect(verify).toContain("grep -qx 'user:mintbot-backup:--x' <<<\"$DB_ACL\"");
+    expect(verify).toContain('has an extended access rule');
   });
 
   it('installs exactly the checked-in unit files, and the units still match the paths the scripts create', () => {
