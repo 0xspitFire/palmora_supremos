@@ -37,9 +37,9 @@ export class ExecutionCoordinator {
 
   private assuranceContext(chainId: number, wallets: readonly string[]): { config: CompensatingAssuranceConfig; chainId: number; wallets: readonly string[] } | undefined {
     const config = resolveAssurance(this.options.compensatingAssurance, { chainId, wallets });
-    // A per-run function must supply the funding envelope and the minimum balance for this run; without them the funding
+    // A per-run function must supply the funding envelope and the minimum balance for EVERY wallet in this run; without them the funding
     // arrival (D-059 item 3, D-060) would silently not be enforced.
-    if (config && typeof this.options.compensatingAssurance === 'function' && (!config.runEnvelopeWei || !config.minimumBalanceWei)) throw new Error('COMPENSATING_ASSURANCE_FUNDING_MISSING');
+    if (config && typeof this.options.compensatingAssurance === 'function' && !wallets.every(wallet => config.runEnvelopeWei?.[wallet.toLowerCase()] !== undefined && config.minimumBalanceWei?.[wallet.toLowerCase()] !== undefined)) throw new Error('COMPENSATING_ASSURANCE_FUNDING_MISSING');
     return config ? { config, chainId, wallets } : undefined;
   }
 

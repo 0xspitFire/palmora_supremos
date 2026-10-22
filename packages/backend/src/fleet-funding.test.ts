@@ -165,3 +165,19 @@ describe('D-060 run-time funding limits (balance limits only)', () => {
     }
   });
 });
+
+describe('D-060 exact boundaries', () => {
+  const wallet = (index: number, requiredWei: bigint) => ({ address: `0x${String(index).repeat(40)}`, balanceWei: 0n, requiredWei });
+  it('a wallet needing exactly 0.0041 is allowed and one wei more is refused', () => {
+    const ceiling = DEFAULT_IDLE_BALANCE_CEILINGS[1];
+    expect(planRunFunding({ chainId: 1, ceiling, wallets: [wallet(1, 4_100_000_000_000_000n)] }).blockers).toEqual([]);
+    expect(planRunFunding({ chainId: 1, ceiling, wallets: [wallet(1, 4_100_000_000_000_001n)] }).blockers).toEqual([`RUN_ENVELOPE_ABOVE_CHAIN_BOUND:${'0x' + '1'.repeat(40)}`]);
+  });
+  it('a fleet whose envelopes add up to exactly 0.0085 is allowed and one wei more is refused', () => {
+    // envelopes: 4.1e15 (the wallet bound) + (required + 1e12 rounding margin) + 0.4e15 (a small run still gets the idle ceiling)
+    const ceiling = DEFAULT_IDLE_BALANCE_CEILINGS[8453];
+    const small = wallet(3, 300_000_000_000_000n);
+    expect(planRunFunding({ chainId: 8453, ceiling, wallets: [wallet(1, 4_100_000_000_000_000n), wallet(2, 3_999_000_000_000_000n), small] }).blockers).toEqual([]);
+    expect(planRunFunding({ chainId: 8453, ceiling, wallets: [wallet(1, 4_100_000_000_000_000n), wallet(2, 3_999_000_000_000_001n), small] }).blockers).toEqual(['RUN_ENVELOPE_ABOVE_FLEET_BOUND']);
+  });
+});

@@ -111,6 +111,9 @@ describe('compensating controls at the live arm gate', () => {
       expect(await armWith(controls(), { compensatingAssurance: () => assurance, expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
       expect(await armWith(controls(), { compensatingAssurance: () => ({ ...assurance, runEnvelopeWei: { [WALLET_ONE]: '400000000000000' } }), expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
       expect(await armWith(controls(), { compensatingAssurance: () => ({ ...assurance, minimumBalanceWei: { [WALLET_ONE]: '300000000000000' } }), expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
+      // empty maps, or a map that leaves out the armed wallet, are refused as well
+      expect(await armWith(controls(), { compensatingAssurance: () => ({ ...assurance, runEnvelopeWei: {}, minimumBalanceWei: {} }), expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
+      expect(await armWith(controls(), { compensatingAssurance: () => ({ ...assurance, runEnvelopeWei: { '0x0000000000000000000000000000000000000abc': '400000000000000' }, minimumBalanceWei: { '0x0000000000000000000000000000000000000abc': '300000000000000' } }), expectedCustodyPolicy })).toBe('COMPENSATING_ASSURANCE_FUNDING_MISSING');
     });
 
     it('a run-specific provider can demand funds: the run cannot arm until the requested minimum has arrived', async () => {
