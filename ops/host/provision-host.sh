@@ -170,7 +170,8 @@ ensure_dir /var/lib/mint-bot mintbot:mintbot 0750
 ensure_dir /var/lib/mint-bot/db mintbot:mintbot 0750
 ensure_dir /var/lib/mint-bot/backups mintbot-backup:mintbot-backup 0700
 ensure_dir /var/lib/mint-bot/backup-status mintbot-backup:mintbot-status 0750
-ensure_dir /var/log/mint-bot mintbot:mintbot 0750
+# 0700: the application re-tightens its log folder to owner-only at start (observability.ts), so provisioning matches it.
+ensure_dir /var/log/mint-bot mintbot:mintbot 0700
 if [ -L /var/lib/mint-bot/killswitch ]; then echo "STOP: the kill switch path is a symbolic link." >&2; exit 1; fi
 if [ ! -f /var/lib/mint-bot/killswitch ]; then
   act install -o mintbot -g mintbot -m 0600 /dev/null /var/lib/mint-bot/killswitch
