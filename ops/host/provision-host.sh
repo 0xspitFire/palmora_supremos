@@ -216,6 +216,8 @@ MINT_BOT_HOST_ID=REPLACE-WITH-STABLE-HOST-ID
 # MINT_BOT_WATCHER_ENABLED=true
 # MINT_BOT_TREASURY_ADDRESS=
 # MINT_BOT_WATCH_FLEET=[{"chainId":1,"addresses":["0x..."]},{"chainId":8453,"addresses":["0x..."]},{"chainId":4663,"addresses":["0x..."]}]
+# Live (host) mode only, T-051: SHA-256 of the pinned approval PUBLIC key file (the private key never leaves the owner's PC).
+# MINT_BOT_APPROVER_KEY_SHA256=
 EOF
     chown root:root "$SETTINGS_FILE"; chmod 0644 "$SETTINGS_FILE"
   fi

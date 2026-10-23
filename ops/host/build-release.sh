@@ -72,7 +72,7 @@ if [ -n "${MINT_BOT_OFFLINE_STORE:-}" ]; then
       pnpm build
       pnpm prune --prod
       pnpm install --offline --prod --frozen-lockfile'
-  for item in package.json pnpm-workspace.yaml node_modules packages scripts; do cp -a "$WORK/src/$item" "$WORK/out/release/$item"; done
+  for item in package.json pnpm-workspace.yaml pnpm-lock.yaml node_modules packages scripts; do cp -a "$WORK/src/$item" "$WORK/out/release/$item"; done
   BUILD_NOTE="built-offline-from-local-store"
 else
   IMAGE="mintbot-release-build:$SHORT"
@@ -83,7 +83,7 @@ else
 fi
 
 # The Dockerfile build stage compiles and keeps production dependencies; prove the result is complete before packing it.
-for required in packages/cli/dist/orchestrator-service.js packages/cli/dist/index.js scripts/backup-service.mjs scripts/backup-job.mjs scripts/r2-upload.mjs node_modules package.json; do
+for required in packages/cli/dist/orchestrator-service.js packages/cli/dist/index.js scripts/backup-service.mjs scripts/backup-job.mjs scripts/r2-upload.mjs node_modules package.json pnpm-lock.yaml; do
   [ -e "$WORK/out/release/$required" ] || { echo "STOP: the build is missing $required" >&2; exit 1; }
 done
 SUSPECT="$(secret_names "$WORK/out/release")"
