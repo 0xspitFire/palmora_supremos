@@ -96,7 +96,7 @@ describe('Robinhood rows can be stored once the owner has switched free executio
       proven.revokeRobinhood({ id: 'rev-rows', confirmationDigest: 'd'.repeat(64) });
       const later = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
       await later.open();
-      await expect(later.admitExecution(prepared.input)).rejects.toThrow(/ROBINHOOD_EXECUTION_DISABLED|IDEMPOTENCY|RUN_/);
+      await expect(later.admitExecution(prepared.input)).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
       later.close();
     } finally { store.close(); proven.close(); await close(value); }
   });

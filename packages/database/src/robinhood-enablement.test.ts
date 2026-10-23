@@ -202,6 +202,9 @@ describe('revocation (D-062): the owner ends an enablement; nothing else does', 
     expect(() => t.db.prepare("UPDATE chain_enablement_revocation SET revoked_at = ? WHERE id = 'r3'").run(day(9))).toThrow(/immutable/);
     expect(() => t.db.prepare("DELETE FROM chain_enablement_revocation WHERE id = 'r3'").run()).toThrow(/immutable/);
     t.enable('rh-2', day(1));
+    // the owner's phrase named rh-1, but rh-2 is now the newest: refuse instead of revoking a record the owner did not name
+    expect(() => t.repository.revokeEnablement(4663, { id: 'r7', revokedAt: day(1.2), confirmationDigest: DIGEST, expectedEnablementId: 'rh-1' })).toThrow('REVOCATION_RECORD_CHANGED');
+    expect(t.profile().enabled).toBe(1);
     expect(() => t.db.prepare("INSERT INTO chain_enablement_revocation (id, chain_id, enablement_id, approved_by, revoked_at, confirmation_digest, created_at) VALUES ('r6', 4663, 'rh-1', 'owner-cli', ?, ?, ?)").run(day(1.5), DIGEST, T0)).toThrow(/newest enablement/);
   });
 

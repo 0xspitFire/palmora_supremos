@@ -36,7 +36,7 @@ export function baseRevokePhrase(recordId: string): string { return `REVOKE-BASE
 
 export interface BaseEnableStore {
   baseEnablement(): unknown;
-  revokeBase(input: { id: string; confirmationDigest: string }): { enablementId: string };
+  revokeBase(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string };
   enableBase(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<BaseEvidenceStep, true> & Partial<Record<BasePaidEvidenceStep, true>>; paidAllowed?: boolean; evidenceDigest: string; confirmationDigest: string; strategyVersion: string; feePolicyVersion: string; primaryEndpointReference: string; fallbackEndpointReference: string; custodyMode: 'local-personal-live' }): void;
 }
 
@@ -46,7 +46,7 @@ export function runBaseEnable(input: { action: 'status' | 'record' | 'revoke'; e
     if (!current) throw new Error('NOTHING_TO_REVOKE: Base is not enabled');
     const phrase = baseRevokePhrase(current.recordId);
     if (input.confirm !== phrase) return { state: 'ConfirmToRevoke', message: 'Revoking switches Base execution off at once. Runs already in flight are not undone; new ones are refused.', enabledSince: current.approvedAt, copyThisToRevoke: `base-enable revoke --confirm "${phrase}"` };
-    const revoked = input.store.revokeBase({ id: input.newId(), confirmationDigest: createHash('sha256').update(`${phrase}\n${current.recordId}`).digest('hex') });
+    const revoked = input.store.revokeBase({ id: input.newId(), confirmationDigest: createHash('sha256').update(`${phrase}\n${current.recordId}`).digest('hex'), expectedEnablementId: current.recordId });
     return { state: 'Revoked', message: 'Base execution is off. Record a new enablement to switch it on again.', revokedEnablement: revoked.enablementId };
   }
   if (input.evidenceText === undefined || input.evidenceFile === undefined) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');

@@ -187,7 +187,7 @@ describe('runRobinhoodEnable: the whole command with a stand-in store', () => {
     expect(first.revokes).toEqual([]);
     const done = runRobinhoodEnable({ action: 'revoke', confirm: revokePhrase('rh-perm'), now: NOW2, store: first.store as never, newId: () => 'rev-1' });
     expect(done).toMatchObject({ state: 'Revoked' });
-    expect(first.revokes).toEqual([{ id: 'rev-1', confirmationDigest: confirmationDigest(revokePhrase('rh-perm'), 'rh-perm') }]);
+    expect(first.revokes).toEqual([{ id: 'rev-1', confirmationDigest: confirmationDigest(revokePhrase('rh-perm'), 'rh-perm'), expectedEnablementId: 'rh-perm' }]);
     expect(revokePhrase('rh-perm')).not.toBe(revokePhrase('rh-other'));
     expect(() => runRobinhoodEnable({ action: 'revoke', confirm: revokePhrase('rh-perm'), now: NOW2, store: makeStore().store as never, newId: () => 'rev-1' })).toThrow('NOTHING_TO_REVOKE');
   });

@@ -82,6 +82,16 @@ describe('complete pre-sign reservation gate used by the adapter reserve step (T
     expect(preSignReservationGate({ ...base, input })).toBe(reservation);
   });
 
+  it('D-062: a Base or Robinhood enablement revoked after the run started stops the next signature; paid also needs a current paid enablement', () => {
+    expect(() => preSignReservationGate({ ...base, input, enablement: { current: false, paidAllowed: false } })).toThrow('CHAIN_ENABLEMENT_NOT_CURRENT');
+    expect(() => preSignReservationGate({ ...base, input, enablement: { current: false, paidAllowed: true } })).toThrow('CHAIN_ENABLEMENT_NOT_CURRENT');
+    expect(() => preSignReservationGate({ ...base, input, enablement: { current: true, paidAllowed: false } })).toThrow('PAID_ENABLEMENT_NOT_CURRENT');
+    expect(preSignReservationGate({ ...base, input, enablement: { current: true, paidAllowed: true } })).toBe(reservation);
+    expect(preSignReservationGate({ ...base, input: { ...input, valueWei: 0n }, campaign: { ...base.campaign, mintPriceWei: 0n }, enablement: { current: true, paidAllowed: false } })).toBe(reservation);
+    // the kill switch is still checked first
+    expect(() => preSignReservationGate({ ...base, killed: true, input, enablement: { current: false, paidAllowed: false } })).toThrow('KILLED');
+  });
+
   it('refuses in order: kill switch, missing or used reservation, identity, value, exposure', () => {
     expect(() => preSignReservationGate({ ...base, killed: true, input })).toThrow('KILLED');
     expect(() => preSignReservationGate({ ...base, byWallet: new Map(), input })).toThrow('DURABLE_RESERVATION_REQUIRED');

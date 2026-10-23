@@ -328,9 +328,16 @@ export function preSignReservationGate<R extends { status: string; amountWei: bi
   intentId: string;
   campaign: Pick<Campaign, 'id' | 'mintPriceWei' | 'quantity'>;
   input: { address: string; walletIndex: number; runId: string; campaignId: string; executionId: string; transactionIntentId: string; valueWei: bigint; maxGasCostWei: bigint; l1DataGasWei: bigint };
+  /**
+   * Base and Robinhood only (D-062): whether the owner's enablement is current RIGHT NOW, read from the stored record. A revocation
+   * after the run started therefore stops the very next signature, even though the engine still holds the grant it was given.
+   */
+  enablement?: { current: boolean; paidAllowed: boolean };
 }): R {
   const { killed, byWallet, runId, intentId, campaign, input } = args;
   if (killed) throw new Error('KILLED');
+  if (args.enablement && !args.enablement.current) throw new Error('CHAIN_ENABLEMENT_NOT_CURRENT');
+  if (args.enablement && input.valueWei > 0n && !args.enablement.paidAllowed) throw new Error('PAID_ENABLEMENT_NOT_CURRENT');
   const reservation = byWallet.get(input.address.toLowerCase());
   if (!reservation || reservation.status !== 'reserved') throw new Error('DURABLE_RESERVATION_REQUIRED');
   const expectedIdentity = canonicalExecutionIdentity(runId, intentId, input.walletIndex, input.address as Address);
@@ -375,7 +382,9 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
           // settlement that happened in between is seen before anything is signed.
           const current = options.getState();
           const freshByWallet = new Map(current.reservations.filter((candidate) => candidate.runId === runId && reservationIds.includes(candidate.id)).map((candidate) => [candidate.wallet.toLowerCase(), candidate]));
-          const reservation = preSignReservationGate({ killed: current.killed, byWallet: freshByWallet, runId, intentId, campaign, input });
+          const liveGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : campaign.chainId === 8453 ? baseGrantFrom(options.baseEnablement?.(), new Date()) : undefined;
+          const enablement = campaign.chainId === 4663 || campaign.chainId === 8453 ? { current: liveGrant !== undefined, paidAllowed: liveGrant?.paidAllowed === true } : undefined;
+          const reservation = preSignReservationGate({ killed: current.killed, byWallet: freshByWallet, runId, intentId, campaign, input, ...(enablement ? { enablement } : {}) });
           const settleTotal = async (components: ReservationSettlementComponents): Promise<void> => {
             if (options.settleComponents) {
               await options.settleComponents(reservation.id, components);

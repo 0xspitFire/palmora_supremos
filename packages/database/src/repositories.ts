@@ -560,11 +560,13 @@ export class DurableRepository {
    * Owner command only (D-062). Ends the newest enablement of a chain: writes the immutable revocation row and switches the chain
    * off, in one transaction. Refuses when there is nothing current to revoke.
    */
-  public revokeEnablement(chainId: 4663 | 8453, input: { id: string; revokedAt: string; confirmationDigest: string }): { enablementId: string } {
+  public revokeEnablement(chainId: 4663 | 8453, input: { id: string; revokedAt: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } {
     if (!/^[0-9a-f]{64}$/.test(input.confirmationDigest)) throw new Error('Revocation requires a confirmation digest');
     return this.immediate(() => {
       const latest = chainId === 4663 ? this.newestRobinhoodEnablementRow() : this.newestBaseEnablementRow();
       if (!latest || this.isRevoked(latest.id)) throw new Error('NOTHING_TO_REVOKE');
+      // The typed phrase named one record; if a newer one appeared meanwhile, refuse rather than revoke a record the owner did not name.
+      if (input.expectedEnablementId !== undefined && input.expectedEnablementId !== latest.id) throw new Error('REVOCATION_RECORD_CHANGED');
       this.db.prepare("INSERT INTO chain_enablement_revocation (id, chain_id, enablement_id, approved_by, revoked_at, confirmation_digest, created_at) VALUES (?, ?, ?, 'owner-cli', ?, ?, ?)").run(input.id, chainId, latest.id, input.revokedAt, input.confirmationDigest, input.revokedAt);
       const profile = this.db.prepare('SELECT id, execution_enabled FROM chain_profile WHERE chain_id = ?').get(chainId) as { id: string; execution_enabled: number } | undefined;
       if (profile && profile.execution_enabled === 1) {
