@@ -1,4 +1,4 @@
-import { toFunctionSelector, type Address, type Hash, type Hex, type PublicClient } from 'viem';
+import { decodeErrorResult, parseAbi, toFunctionSelector, type Address, type Hash, type Hex, type PublicClient } from 'viem';
 import { FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, RobinhoodFinalityObserver, SEADROP_MINT_TOPIC, SEADROP_V1_ADDRESS, SeaDropV1PublicStrategy, providerErrorDetail, type FinalityObservation, type RobinhoodFinalitySources } from '@mint-bot/engine';
 import { classifyMint } from './seadrop-survey.js';
 
@@ -190,8 +190,81 @@ export async function checkFees(client: PublicClient, options: { blocks?: number
 
 // ── E6: live dry run (simulation only) ───────────────────────────────────────────────────────────────
 
-export interface DryRunWallet { wallet: string; simulation: 'passed' | 'failed'; reason?: string; estimatedGas: string | null; estimatedCostEth: string | null; withinPerWalletCap: boolean | null; balanceEth: string | null; hasEnoughForGas: boolean | null }
-export interface DryRunReport { contract: string; verdict: 'ok' | 'blocked'; summary: string; drop: { priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null; quantity: number; wallets: DryRunWallet[] }
+export interface DryRunWallet { wallet: string; simulation: 'passed' | 'failed'; reason?: string; revertSelector?: string; estimatedGas: string | null; estimatedCostEth: string | null; withinPerWalletCap: boolean | null; balanceEth: string | null; hasEnoughForGas: boolean | null }
+export interface SupplyView { totalSupply: string; maxSupply: string; soldOut: boolean }
+export interface DryRunReport { contract: string; supply?: SupplyView | null; verdict: 'ok' | 'blocked'; summary: string; drop: { priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null; quantity: number; wallets: DryRunWallet[] }
+
+
+// ── Why a simulated mint reverted, in plain words ─────────────────────────────────────────────────────
+
+/** The errors SeaDrop and its NFT contracts are known to raise. Anything else is reported by its 4-byte selector, which is public. */
+const MINT_ERRORS = parseAbi([
+  'error NotActive(uint256 currentTimestamp, uint256 startTimestamp, uint256 endTimestamp)',
+  'error MintQuantityExceedsMaxMintedPerWallet(uint256 total, uint256 allowed)',
+  'error MintQuantityExceedsMaxSupply(uint256 total, uint256 maxSupply)',
+  'error MintQuantityCannotBeZero()',
+  'error IncorrectPayment(uint256 got, uint256 want)',
+  'error FeeRecipientNotAllowed()',
+  'error FeeRecipientCannotBeZeroAddress()',
+  'error OnlyINonFungibleSeaDropToken(address sender)',
+  'error OnlyAllowedSeaDrop()',
+  'error InvalidProof()',
+  'error NotAllowlisted()',
+  'error Error(string message)',
+  'error Panic(uint256 code)',
+]);
+
+/** Pulls the revert bytes out of a node/client error, however deeply the client wrapped them. */
+export function revertDataOf(error: unknown): Hex | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === 'object'; depth += 1) {
+    const record = current as { data?: unknown; cause?: unknown };
+    const direct = typeof record.data === 'string' ? record.data : typeof (record.data as { data?: unknown } | undefined)?.data === 'string' ? (record.data as { data: string }).data : undefined;
+    if (direct && /^0x[0-9a-fA-F]{8,}$/.test(direct)) return direct as Hex;
+    current = record.cause;
+  }
+  return undefined;
+}
+
+/** A plain-words reason for a failed simulation. Never includes more than the public 4-byte selector of unknown revert data. */
+export function explainRevert(error: unknown): { reason: string; selector?: string } {
+  const data = revertDataOf(error);
+  if (!data) return { reason: `The node reported a failure without any revert data (${providerErrorDetail(error)}). Check the contract's supply and the wallet's ETH on this chain.` };
+  const selector = data.slice(0, 10).toLowerCase();
+  try {
+    const decoded = decodeErrorResult({ abi: MINT_ERRORS, data });
+    const a = decoded.args as readonly unknown[] | undefined;
+    switch (decoded.errorName) {
+      case 'NotActive': return { reason: `The drop is not active at this moment (now ${String(a?.[0])}, opens ${String(a?.[1])}, closes ${String(a?.[2])}; seconds since 1970).`, selector };
+      case 'MintQuantityExceedsMaxMintedPerWallet': return { reason: `The per-wallet limit would be exceeded (would hold ${String(a?.[0])}, allowed ${String(a?.[1])}).`, selector };
+      case 'MintQuantityExceedsMaxSupply': return { reason: `The collection is sold out or would pass its maximum supply (would reach ${String(a?.[0])} of ${String(a?.[1])}).`, selector };
+      case 'MintQuantityCannotBeZero': return { reason: 'The quantity was zero.', selector };
+      case 'IncorrectPayment': return { reason: `The payment does not match the price (sent ${String(a?.[0])}, wanted ${String(a?.[1])}).`, selector };
+      case 'FeeRecipientNotAllowed': return { reason: 'The fee recipient used is not on the contract\'s allowed list.', selector };
+      case 'FeeRecipientCannotBeZeroAddress': return { reason: 'The fee recipient was the zero address.', selector };
+      case 'OnlyINonFungibleSeaDropToken': return { reason: 'The target contract is not a SeaDrop-compatible NFT contract.', selector };
+      case 'OnlyAllowedSeaDrop': return { reason: 'The NFT contract does not allow this SeaDrop address to mint.', selector };
+      case 'InvalidProof': case 'NotAllowlisted': return { reason: 'This wallet is not on the allowlist for this drop.', selector };
+      case 'Error': return { reason: `The contract refused with a message (${providerErrorDetail(new Error(String(a?.[0] ?? '')))}).`, selector };
+      case 'Panic': return { reason: `The contract hit an internal error (code ${String(a?.[0])}).`, selector };
+      default: return { reason: `The contract refused the mint with error ${String((decoded as { errorName: string }).errorName)}.`, selector };
+    }
+  } catch {
+    return { reason: `The contract refused the mint with an error this tool does not know (selector ${selector}). Look the selector up on a public signature database.`, selector };
+  }
+}
+
+/** Best effort: how many are minted against the maximum. Absent when the contract does not expose them. */
+export async function readSupply(client: PublicClient, contract: string): Promise<SupplyView | null> {
+  try {
+    const abi = parseAbi(['function totalSupply() view returns (uint256)', 'function maxSupply() view returns (uint256)']);
+    const [totalSupply, maxSupply] = await Promise.all([
+      client.readContract({ address: contract as Address, abi, functionName: 'totalSupply' }) as Promise<bigint>,
+      client.readContract({ address: contract as Address, abi, functionName: 'maxSupply' }) as Promise<bigint>,
+    ]);
+    return { totalSupply: totalSupply.toString(), maxSupply: maxSupply.toString(), soldOut: maxSupply > 0n && totalSupply >= maxSupply };
+  } catch { return null; }
+}
 
 /** Reads a Robinhood SeaDrop public drop and simulates the mint for each wallet with eth_call. Never signs or sends. */
 export async function dryRunDrop(client: PublicClient, contract: string, wallets: readonly string[], options: { quantity?: number; now?: Date } = {}): Promise<DryRunReport> {
@@ -209,6 +282,8 @@ export async function dryRunDrop(client: PublicClient, contract: string, wallets
   const dropView = { priceEth: ethString(drop.mintPrice), opensAt: startMs > 0 ? new Date(startMs).toISOString() : null, closesAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null, maxPerWallet: drop.maxTotalMintableByWallet, status } as const;
   if (drop.mintPrice > 0n) return { contract, verdict: 'blocked', summary: 'This drop is paid. Paid Robinhood mints are blocked (D-038), so it is not simulated.', drop: dropView, quantity, wallets: [] };
   if (status !== 'open') return { contract, verdict: 'blocked', summary: `This mint is ${status}, so a simulation would not be meaningful.`, drop: dropView, quantity, wallets: [] };
+  const supply = await readSupply(client, contract);
+  if (supply?.soldOut) return { contract, verdict: 'blocked', summary: `This collection is sold out (${supply.totalSupply} of ${supply.maxSupply} minted), so a mint would revert.`, drop: dropView, supply, quantity, wallets: [] };
   const gasPrice = await client.getGasPrice().catch(() => null);
   const results: DryRunWallet[] = [];
   for (const wallet of wallets) {
@@ -222,9 +297,10 @@ export async function dryRunDrop(client: PublicClient, contract: string, wallets
       const balance = await client.getBalance({ address: minter }).catch(() => null);
       results.push({ wallet, simulation: 'passed', estimatedGas: estimatedGas?.toString() ?? null, estimatedCostEth: cost === null ? null : ethString(cost), withinPerWalletCap: cost === null ? null : cost <= FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, balanceEth: balance === null ? null : ethString(balance), hasEnoughForGas: balance === null || cost === null ? null : balance >= cost });
     } catch (error) {
-      results.push({ wallet, simulation: 'failed', reason: providerErrorDetail(error), estimatedGas: null, estimatedCostEth: null, withinPerWalletCap: null, balanceEth: null, hasEnoughForGas: null });
+      const why = explainRevert(error);
+      results.push({ wallet, simulation: 'failed', reason: why.reason, ...(why.selector ? { revertSelector: why.selector } : {}), estimatedGas: null, estimatedCostEth: null, withinPerWalletCap: null, balanceEth: null, hasEnoughForGas: null });
     }
   }
   const passed = results.filter((item) => item.simulation === 'passed').length;
-  return { contract, verdict: passed > 0 ? 'ok' : 'blocked', summary: `${passed} of ${results.length} wallet(s) simulated a ${quantity}-NFT free mint successfully (simulation only; nothing was sent). ${results.filter((item) => item.hasEnoughForGas === false).length} of them hold too little ETH on Robinhood to pay for the gas.`, drop: dropView, quantity, wallets: results };
+  return { contract, supply, verdict: passed > 0 ? 'ok' : 'blocked', summary: `${passed} of ${results.length} wallet(s) simulated a ${quantity}-NFT free mint successfully (simulation only; nothing was sent). ${results.filter((item) => item.hasEnoughForGas === false).length} of them hold too little ETH on Robinhood to pay for the gas.`, drop: dropView, quantity, wallets: results };
 }
