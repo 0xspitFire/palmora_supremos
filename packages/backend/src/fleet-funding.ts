@@ -7,10 +7,27 @@ import type { BalanceCeiling, BalanceCeilings } from './compensating-controls.js
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
 /** D-059 item 2: 0.0004 per wallet and 0.002 for the fleet while no run is funded, in each chain's native unit. */
+export const IDLE_WALLET_MAX_WEI = 400_000_000_000_000n;
+export const IDLE_FLEET_MAX_WEI = 2_000_000_000_000_000n;
+/**
+ * D-060 item 2: while ONE run is funded a wallet may hold at most 0.0041 and the fleet at most 0.0085, in each chain's native unit
+ * (largest paid price 0.0037 + paid fee allowance 0.00037 + rounding; paid fleet daily limit 0.0082 + rounding). These are balance
+ * limits only (D-060 item 1): no spend limit, reservation (D-019) or rolling 24-hour rule (D-056) reads them. Raising them needs a
+ * new owner decision.
+ */
+export const RUN_ENVELOPE_WALLET_MAX_WEI = 4_100_000_000_000_000n;
+export const RUN_ENVELOPE_FLEET_MAX_WEI = 8_500_000_000_000_000n;
+const chainBalanceCeiling = (): BalanceCeiling => ({
+  walletMaxWei: IDLE_WALLET_MAX_WEI,
+  fleetMaxWei: IDLE_FLEET_MAX_WEI,
+  runEnvelopeMaxWei: RUN_ENVELOPE_WALLET_MAX_WEI,
+  runEnvelopeFleetMaxWei: RUN_ENVELOPE_FLEET_MAX_WEI,
+});
+/** Ethereum, Base and Robinhood. A chain not listed has no ceiling and cannot arm (fail closed). */
 export const DEFAULT_IDLE_BALANCE_CEILINGS: BalanceCeilings = {
-  1: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n },
-  8453: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n },
-  4663: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n },
+  1: chainBalanceCeiling(),
+  8453: chainBalanceCeiling(),
+  4663: chainBalanceCeiling(),
 };
 
 export const EXCESS_REMINDER_AFTER_MS = 24 * 60 * 60 * 1000;

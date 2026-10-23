@@ -19,8 +19,15 @@ describe('funding request for one run (D-059 item 5, option 1)', () => {
     expect(text).toContain('MintBot never sends funds');
   });
 
-  it('a run above the idle limit is blocked in plain words until the owner decides a higher run limit (none is configured)', () => {
+  it('a paid mint above the idle limit is funded for one run inside the D-060 run limit (0.0041 per wallet)', () => {
     const plan = planCampaignFunding({ campaign: campaign({ mintPriceWei: 3_700_000_000_000_000n, quantity: 1 }), balances: [{ address: W1, balanceWei: 0n }], ceilings: DEFAULT_IDLE_BALANCE_CEILINGS });
+    expect(plan.blockers).toEqual([]);
+    expect(BigInt(plan.items[0]?.envelopeWei ?? '0')).toBeLessThanOrEqual(4_100_000_000_000_000n);
+    expect(BigInt(plan.items[0]?.topUpWei ?? '0')).toBeGreaterThan(400_000_000_000_000n);
+  });
+
+  it('a run above the run limit is blocked in plain words until the owner decides a higher run limit', () => {
+    const plan = planCampaignFunding({ campaign: campaign({ mintPriceWei: 4_100_000_000_000_000n, quantity: 1 }), balances: [{ address: W1, balanceWei: 0n }], ceilings: DEFAULT_IDLE_BALANCE_CEILINGS });
     expect(plan.blockers[0]).toContain('RUN_ENVELOPE_ABOVE_CHAIN_BOUND');
     const text = renderFundingPlan(plan, TREASURY);
     expect(text).toContain('cannot be funded as asked');
