@@ -12,7 +12,7 @@ export const REQUIRED_CHECKS = {
   service_supervision: ['unit_identity', 'unit_hardening', 'restart_policy', 'restart_limit_exercised', 'rollback_recorded', 'loopback_health', 'logs_private', 'release_identity'],
   heap_core_dump: ['core_limit_unit', 'core_limit_process', 'core_pattern_recorded', 'no_coredumps', 'heap_limit_recorded', 'zeroization_limits_documented'],
   backup_restore: ['backup_status_ok', 'offhost_remote_verified', 'restore_drill_ok', 'restore_seconds_recorded', 'backup_schedule_active'],
-  recovery: ['restored_from_offhost', 'integrity_ok', 'schema_current', 'kill_switch_engaged', 'reconciliation_required_before_ready'],
+  recovery: ['restored_from_offhost', 'integrity_ok', 'schema_current', 'post_recovery_reconciliation', 'kill_switch_engaged'],
   rotation_revocation: ['fresh_wallet_inventory', 'funding_profile_bounded', 'old_references_excluded'],
 };
 
