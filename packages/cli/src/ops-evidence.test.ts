@@ -21,7 +21,7 @@ interface Lib {
   verifyAcceptance(acceptance: unknown, artifacts: Record<string, unknown>, identity: { currentCommit: string; hostId: string; now?: Date }): string[];
 }
 interface Collector {
-  collect(kind: string, io: unknown, env?: Record<string, string>, options?: { restoreDrill?: string }): Promise<{ artifact: { kind: string; environment: string; hostId: string; release: { commit: string }; checks: Check[]; references: Array<{ name: string }> }; failed: Check[]; problems: string[] }>;
+  collect(kind: string, io: unknown, env?: Record<string, string>, options?: { restoreDrill?: string; recoveryDrill?: string }): Promise<{ artifact: { kind: string; environment: string; hostId: string; release: { commit: string }; checks: Check[]; references: Array<{ name: string }> }; failed: Check[]; problems: string[] }>;
   hasRollback(entries: unknown): boolean;
   parseHistory(text: string): unknown;
 }
@@ -163,8 +163,20 @@ describe('collectors (fake host)', () => {
     expect(unmarked.problems).toContain('EVIDENCE_RELEASE_COMMIT');
   });
 
-  it('kinds without a collector yet (recovery, rotation) refuse rather than produce a placeholder', async () => {
-    await expect(collector.collect('recovery', fakeIo(), {})).rejects.toThrow('COLLECTOR_NOT_AVAILABLE:recovery');
+  it('recovery: passes with a recent passing drill output and the kill switch engaged; each gap fails by name', async () => {
+    const drill = (overrides: Record<string, unknown> = {}) => JSON.stringify({ status: 'ok', object: 'x.snapshot.enc', completedAt: new Date(NOW.getTime() - 3_600_000).toISOString(), checks: { restored_from_offhost: { pass: true, observed: 'restored' }, integrity_ok: { pass: true, observed: 'journal wal, integrity ok' }, schema_current: { pass: true, observed: 'schema 29 of 29' }, post_recovery_reconciliation: { pass: true, observed: 'state Ready' } }, ...overrides });
+    const withDrill = (text: string, exec: Responses = {}) => fakeIo({ files: { '/home/o/recovery.json': text }, exec: { 'test -f /var/lib/mint-bot/killswitch': '', ...exec } });
+    expect((await collector.collect('recovery', withDrill(drill()), {}, { recoveryDrill: '/home/o/recovery.json' })).problems).toEqual([]);
+    const killReleased = await collector.collect('recovery', withDrill(drill(), { 'test -f /var/lib/mint-bot/killswitch': { ok: false } }), {}, { recoveryDrill: '/home/o/recovery.json' });
+    expect(killReleased.failed.map((item) => item.name)).toEqual(['kill_switch_engaged']);
+    const stale = await collector.collect('recovery', withDrill(drill({ completedAt: new Date(NOW.getTime() - 25 * 3_600_000).toISOString() })), {}, { recoveryDrill: '/home/o/recovery.json' });
+    expect(stale.failed.map((item) => item.name)).toEqual(expect.arrayContaining(['restored_from_offhost', 'integrity_ok', 'schema_current', 'post_recovery_reconciliation']));
+    const oldSchema = await collector.collect('recovery', withDrill(drill({ status: 'failed', checks: { restored_from_offhost: { pass: true, observed: 'r' }, integrity_ok: { pass: true, observed: 'ok' }, schema_current: { pass: false, observed: 'schema 20 of 29' }, post_recovery_reconciliation: { pass: true, observed: 'Ready' } } })), {}, { recoveryDrill: '/home/o/recovery.json' });
+    expect(oldSchema.failed.map((item) => item.name)).toContain('schema_current');
+    expect((await collector.collect('recovery', withDrill(''), {}, {})).failed.map((item) => item.name)).toEqual(['restored_from_offhost', 'integrity_ok', 'schema_current', 'post_recovery_reconciliation']);
+  });
+
+  it('rotation and revocation has no collector yet and refuses rather than produce a placeholder', async () => {
     await expect(collector.collect('rotation_revocation', fakeIo(), {})).rejects.toThrow('COLLECTOR_NOT_AVAILABLE:rotation_revocation');
   });
 
