@@ -26,6 +26,7 @@ import { createMonitorPing, validMonitorUrl } from './monitor-ping.js';
 import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './fleet-watch-service.js';
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
+import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -60,11 +61,26 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   logger.info({ event: 'service_configured', config: summarizeServiceConfig(config) }, 'orchestrator service configured');
   if (config.requireStartupKillSwitch && !(await pathKillSwitchProbe(config.killSwitchPath))) throw new Error('STARTUP_KILL_SWITCH_REQUIRED');
 
+  // D-058/D-059 (T-042 requirements 1 to 4): in host mode the SERVICE decides whether a Turnkey-custodied run may arm. The wallet
+  // watcher starts later, so the coordinator is given a handle that counts nothing as watched until it exists (fail closed).
+  let watcherHandle: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean } | undefined;
+  let assuranceWiring: CoordinatorAssuranceWiring | undefined;
   const runtime = await createCliRuntime(config.projectRoot, undefined, config.statePath, {
     ...(config.mode === 'host' ? { secretRoot: configuredSecretRoot(config.projectRoot) } : {}),
     killSwitchFile: config.killSwitchPath,
     logFile: config.logPath,
-  }, { allowTurnkey: config.mode === 'host', startCoordinator: config.mode === 'host' });
+  }, {
+    allowTurnkey: config.mode === 'host',
+    startCoordinator: config.mode === 'host',
+    ...(config.mode === 'host' ? {
+      coordinatorAssurance: async (store) => {
+        assuranceWiring = await createServiceAssurance(store, { projectRoot: config.projectRoot, secretRoot: configuredSecretRoot(config.projectRoot), killSwitchPath: config.killSwitchPath, storePath: config.statePath, watcher: () => watcherHandle });
+        return assuranceWiring;
+      },
+    } : {}),
+  });
+  // The provider is checked once at start; a failure engages the kill switch before the service goes on.
+  if (assuranceWiring) await (assuranceWiring as CoordinatorAssuranceWiring).readiness.probeAtStart();
   if (config.mode === 'dry-run') {
     await runtime.store.transaction((state) => {
       state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED'])] };
@@ -125,10 +141,12 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   // D-059: the independent on-chain wallet watcher, only when the owner enables it. Fails the start on a bad setting.
   let fleetWatcher: { stop(): void } | undefined;
   const watchConfig = parseFleetWatchEnv(environment);
+  // Host mode runs live: the compensated profile counts on the watcher, so starting without it is a configuration error.
+  if (config.mode === 'host' && !watchConfig) throw new Error('HOST_MODE_REQUIRES_WALLET_WATCHER');
   if (watchConfig) {
     if (!config.secretStorePath) throw new Error('WATCHER_RPC_SECRET_MISSING');
     const watchSecrets = await loadHostSecretStore(config.secretStorePath);
-    fleetWatcher = startFleetWatcher({
+    const started = startFleetWatcher({
       store: runtime.store,
       config: watchConfig,
       alerts,
@@ -140,6 +158,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       rpcUrl: (chainId) => watchSecrets.get(watcherRpcSecretName(chainId)),
       logger,
     });
+    fleetWatcher = started;
+    watcherHandle = started.watcher;
   }
   // Scheduled encrypted backups, only when the owner has put BACKUP_ENCRYPTION_KEY in the secret store.
   let backups: { stop(): void } | undefined;

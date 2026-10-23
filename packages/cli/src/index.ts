@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createPublicKey, randomBytes } from 'node:crypto';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { type Address, type Hex, encodeFunctionData, formatEther, http, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, isSecureTurnkeyFileAccess, readTurnkeySecretConfig, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
+import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, readTurnkeySecretConfig, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
 import type { WalletImportRecord } from '@mint-bot/engine';
 import type { Signer, SignerFactory, TurnkeyWalletReference } from '@mint-bot/engine';
+import { assertNoSymlinkParents, readProtectedText } from './turnkey-files.js';
 import { configuredSecretRoot, configuredWalletPath, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
 import { DEFAULT_IDLE_BALANCE_CEILINGS, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
@@ -93,17 +93,6 @@ async function ensureParent(path: string): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true });
 }
 
-async function assertNoSymlinkParents(path: string, errorCode: string): Promise<void> {
-  let current = dirname(resolve(path));
-  while (true) {
-    const entry = await lstat(current).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? undefined : Promise.reject(error));
-    if (entry?.isSymbolicLink()) throw new Error(errorCode);
-    const parent = dirname(current);
-    if (parent === current) return;
-    current = parent;
-  }
-}
-
 async function publicWallets(path: string): Promise<string[]> {
   if (turnkeyCustodyEnabled()) return (await configuredWallets(runtimeRoot, path)).map((wallet) => wallet.address);
   const content = JSON.parse(await readFile(path, 'utf8')) as { wallets?: Array<{ address?: string }> };
@@ -162,27 +151,6 @@ async function readOwnerOnlyText(path: string, errorCode: string): Promise<strin
 
 async function readTurnkeyRuntimeText(path: string, errorCode: string): Promise<string> {
   return readProtectedText(path, errorCode, true);
-}
-
-async function readProtectedText(path: string, errorCode: string, allowRootGroupRead: boolean): Promise<string> {
-  let handle;
-  try {
-    await assertNoSymlinkParents(path, errorCode);
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const file = await handle.stat();
-    const runtimeUid = typeof process.geteuid === 'function' ? process.geteuid() : process.getuid?.();
-    const runtimeGroups = typeof process.getgroups === 'function' ? process.getgroups() : [];
-    const secure = allowRootGroupRead && runtimeUid !== undefined
-      ? isSecureTurnkeyFileAccess(file, runtimeUid, runtimeGroups)
-      : (file.mode & 0o077) === 0;
-    if (!file.isFile() || !secure) throw new Error(errorCode);
-    return await handle.readFile('utf8');
-  } catch (error) {
-    if (error instanceof Error && error.message === errorCode) throw error;
-    throw new Error(errorCode);
-  } finally {
-    if (handle) await handle.close().catch(() => undefined);
-  }
 }
 
 async function writeTurnkeyJson(path: string, value: unknown): Promise<void> {
