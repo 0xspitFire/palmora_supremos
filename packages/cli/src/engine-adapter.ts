@@ -8,6 +8,8 @@ import {
   readBaseOperatorFee,
   canonicalExecutionIdentity,
   resolveChainByNameFromSecrets,
+  failoverTransport,
+  splitBaseEndpoints,
   type EngineLifecycleStore,
   type MintJobConfig,
   type MintJobResult,
@@ -418,8 +420,10 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       const config = await resolveChainByNameFromSecrets(chainName(intent.campaignSnapshot.chainId), 'mainnet', options.secretRoot);
       const endpoint = config.rpcEndpoints[0];
       if (!endpoint) return { result: 'unknown', attempts: [], receipts: [], reason: 'chain endpoint unavailable' };
-      const client = createPublicClient({ transport: http(endpoint) });
-      if (intent.campaignSnapshot.chainId === 8453) {
+      // Reads fail over among the configured providers; on Base the second provider stays apart as the independent cross-check.
+      const isBase = intent.campaignSnapshot.chainId === 8453;
+      const client = createPublicClient({ transport: failoverTransport(isBase ? splitBaseEndpoints(config.rpcEndpoints).primary : config.rpcEndpoints) });
+      if (isBase) {
         const fallbackEndpoint = config.rpcEndpoints[1];
         if (!fallbackEndpoint) return { result: 'unknown', attempts: [], receipts: [], reason: 'independent Base fallback endpoint unavailable' };
         const fallback = createPublicClient({ transport: http(fallbackEndpoint) });

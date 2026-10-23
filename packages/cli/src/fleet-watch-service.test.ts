@@ -75,7 +75,7 @@ describe('startFleetWatcher', () => {
 
   it('fails to start without a provider address for a watched chain', () => {
     const config = parseFleetWatchEnv(env())!;
-    expect(() => startFleetWatcher({ store: new Store(), config, alerts: { intelligence: async () => true }, kill: async () => undefined, rpcUrl: () => undefined })).toThrow('WATCHER_RPC_SECRET_MISSING');
+    expect(() => startFleetWatcher({ store: new Store(), config, alerts: { intelligence: async () => true }, kill: async () => undefined, rpcUrls: () => [] })).toThrow('WATCHER_RPC_SECRET_MISSING');
   });
 
   it('checks on start, engages the kill switch and alerts on unknown activity, and stops cleanly', async () => {
@@ -88,7 +88,7 @@ describe('startFleetWatcher', () => {
       config,
       alerts: { intelligence: async (input) => { alerts.push({ kind: input.kind, priority: input.priority }); return true; } },
       kill: async (reason) => { kills.push(reason); },
-      rpcUrl: () => 'http://unused',
+      rpcUrls: () => ['http://unused'],
       clients: new Map([[1, client(state)]]),
       intervalMs: 30_000,
     });
@@ -108,7 +108,7 @@ describe('startFleetWatcher', () => {
     const config = parseFleetWatchEnv(env())!;
     const alerts: string[] = [];
     const broken = { getBlockNumber: async () => { throw new Error('rpc'); }, getTransactionCount: async () => 0, getBalance: async () => 0n };
-    const running = startFleetWatcher({ store: new Store(), config, alerts: { intelligence: async (input) => { alerts.push(input.dedupe); return true; } }, kill: async () => undefined, rpcUrl: () => 'http://unused', clients: new Map([[1, broken]]), intervalMs: 30_000 });
+    const running = startFleetWatcher({ store: new Store(), config, alerts: { intelligence: async (input) => { alerts.push(input.dedupe); return true; } }, kill: async () => undefined, rpcUrls: () => ['http://unused'], clients: new Map([[1, broken]]), intervalMs: 30_000 });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(40 * 60_000);
     running.stop();

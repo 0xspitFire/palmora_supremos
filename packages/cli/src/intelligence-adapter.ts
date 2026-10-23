@@ -1,6 +1,6 @@
-import { createPublicClient, http, type Address, type PublicClient } from 'viem';
+import { createPublicClient, type Address, type PublicClient } from 'viem';
 import { mainnet } from 'viem/chains';
-import { ChainFactsReader, SeaDropObserver, SeaDropV1PublicStrategy, simulateMint, type DropConfig } from '@mint-bot/engine';
+import { ChainFactsReader, SeaDropObserver, SeaDropV1PublicStrategy, failoverTransport, simulateMint, type DropConfig } from '@mint-bot/engine';
 import type { ChainScanOutcome, CollectionNameRead, DropSnapshot, IntelligenceChainPort, SimulationOutcome } from '@mint-bot/backend';
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -50,10 +50,17 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
 
   /** Builds the port from an RPC URL held only in memory; the URL is never logged or persisted. */
   public static fromRpcUrl(rpcUrl: string): EngineIntelligencePort {
-    let parsed: URL;
-    try { parsed = new URL(rpcUrl); } catch { throw new Error('INTELLIGENCE_RPC_URL_INVALID'); }
-    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('INTELLIGENCE_RPC_MUST_BE_HTTPS');
-    return new EngineIntelligencePort(createPublicClient({ chain: mainnet, transport: http(rpcUrl, { timeout: 15_000, retryCount: 1 }) }) as PublicClient);
+    return EngineIntelligencePort.fromRpcUrls([rpcUrl]);
+  }
+
+  /** The first address is used while it answers; a timeout or failure moves the read to the next one (failoverTransport). */
+  public static fromRpcUrls(rpcUrls: readonly string[]): EngineIntelligencePort {
+    for (const rpcUrl of rpcUrls) {
+      let parsed: URL;
+      try { parsed = new URL(rpcUrl); } catch { throw new Error('INTELLIGENCE_RPC_URL_INVALID'); }
+      if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('INTELLIGENCE_RPC_MUST_BE_HTTPS');
+    }
+    return new EngineIntelligencePort(createPublicClient({ chain: mainnet, transport: failoverTransport(rpcUrls) }) as PublicClient);
   }
 
   public async safeHead(): Promise<bigint | null> { return this.observer.safeHead(); }

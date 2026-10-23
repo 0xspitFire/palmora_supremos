@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { createPublicClient, http, type Address } from 'viem';
+import { createPublicClient, type Address } from 'viem';
 import { RuntimeReadinessService, type AssuranceRun, type CompensatingAssuranceConfig, type CanonicalStoreBridge, type CustodyPolicyBinding } from '@mint-bot/backend';
-import { TurnkeySigner, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
+import { TurnkeySigner, failoverTransport, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import { engageKillSwitchFile, lockfileDigest } from './compensating-controls-cli.js';
 import { createTurnkeyReadiness, type TurnkeyReadiness } from './turnkey-readiness.js';
 import { readProtectedText } from './turnkey-files.js';
@@ -63,9 +63,8 @@ export async function createServiceAssurance(store: CanonicalStoreBridge, inputs
     },
     readBalances: async (chainId, addresses) => {
       const chain = await resolveChainConfigFromSecrets(chainId as 1 | 8453 | 4663, 'mainnet', inputs.secretRoot);
-      const endpoint = chain.rpcEndpoints[0];
-      if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
-      const client = createPublicClient({ transport: http(endpoint, { timeout: 15_000, retryCount: 1 }) });
+      if (chain.rpcEndpoints.length === 0) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
+      const client = createPublicClient({ transport: failoverTransport(chain.rpcEndpoints) });
       return Promise.all(addresses.map(async (address) => ({ address, balanceWei: await client.getBalance({ address: address as Address }) })));
     },
     engageKillSwitch: (reason) => engageKillSwitchFile(inputs.killSwitchPath, reason),

@@ -2,7 +2,7 @@
 import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createPublicKey, randomBytes } from 'node:crypto';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { type Address, type Hex, encodeFunctionData, formatEther, http, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
+import { type Address, type Hex, encodeFunctionData, formatEther, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, readTurnkeySecretConfig, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
@@ -15,7 +15,7 @@ import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
-import { resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
+import { failoverTransport, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { acceptPhrase, fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
 import { buildCompensatingEvidence, createTrustCenterRecord, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, parseTrustCenterRecord, probeOrEngageKillSwitch, walletSetDigest } from './compensating-controls-cli.js';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
@@ -43,28 +43,31 @@ import { robinhoodTurnkeyPolicy } from './turnkey-policy-template.js';
 /** Read-only Ethereum port for CLI checks; the RPC value stays in memory and is never printed. */
 async function ethereumPort(): Promise<EngineIntelligencePort> {
   const config = await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
-  const endpoint = config.rpcEndpoints[0];
-  if (!endpoint) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
-  return EngineIntelligencePort.fromRpcUrl(endpoint);
+  if (config.rpcEndpoints.length === 0) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
+  return EngineIntelligencePort.fromRpcUrls(config.rpcEndpoints);
 }
 
 async function basePort(): Promise<EngineIntelligencePort> {
   const config = await resolveChainByNameFromSecrets('base', 'mainnet', configuredSecretRoot(runtimeRoot));
-  const endpoint = config.rpcEndpoints[0];
-  if (!endpoint) throw new Error('BASE_RPC_UNAVAILABLE');
-  return EngineIntelligencePort.fromRpcUrl(endpoint);
+  if (config.rpcEndpoints.length === 0) throw new Error('BASE_RPC_UNAVAILABLE');
+  return EngineIntelligencePort.fromRpcUrls(config.rpcEndpoints);
 }
 
 /** Wallets for read-only checks: explicit public addresses, never the keystore. */
 
 /** Read-only client for Robinhood Chain; defaults to the chain's published public RPC, so no secret is needed. */
-function robinhoodReadClient(rpcUrl: string | undefined) {
-  const url = rpcUrl ?? PUBLIC_ROBINHOOD_RPC;
-  let parsed: URL;
-  try { parsed = new URL(url); } catch { throw new Error('RPC_URL_INVALID'); }
-  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('RPC_MUST_BE_HTTPS');
+async function robinhoodReadClient(rpcUrl: string | undefined) {
+  // An explicit --rpc-url is used alone. Otherwise the configured Robinhood providers are tried in order, and the chain's published
+  // public RPC is the last resort, so a read moves on when a provider times out or fails.
+  const configured = rpcUrl ? [] : await resolveChainConfigFromSecrets(4663, 'mainnet', configuredSecretRoot(runtimeRoot)).then((chain) => [...chain.rpcEndpoints]).catch(() => [] as string[]);
+  const urls = rpcUrl ? [rpcUrl] : [...configured, PUBLIC_ROBINHOOD_RPC];
+  for (const url of urls) {
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new Error('RPC_URL_INVALID'); }
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('RPC_MUST_BE_HTTPS');
+  }
   const chain = defineChain({ id: 4663, name: 'robinhood', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } });
-  return createPublicClient({ chain, transport: httpTransport(url, { timeout: 20_000, retryCount: 1 }) });
+  return createPublicClient({ chain, transport: failoverTransport(urls, { timeoutMs: 20_000 }) });
 }
 
 function checkWallets(value: string | undefined): string[] {
@@ -542,7 +545,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
         const endpoint = chain.rpcEndpoints[0];
         if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
-        const client = createPublicClient({ transport: http(endpoint) });
+        const client = createPublicClient({ transport: failoverTransport(chain.rpcEndpoints) });
         const addresses = record.wallets.map((entry) => entry.address);
         const balances = [];
         for (const address of addresses) balances.push({ address, balanceWei: await client.getBalance({ address: address as Address }) });
@@ -578,7 +581,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const chain = await resolveChainConfigFromSecrets(campaign.chainId, 'mainnet', configuredSecretRoot(runtimeRoot));
         const endpoint = chain.rpcEndpoints[0];
         if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
-        const client = createPublicClient({ transport: http(endpoint) });
+        const client = createPublicClient({ transport: failoverTransport(chain.rpcEndpoints) });
         const balances = [];
         for (const address of addresses) balances.push({ address, balanceWei: await client.getBalance({ address: address as Address }) });
         const plan = planCampaignFunding({ campaign, balances, ceilings: DEFAULT_IDLE_BALANCE_CEILINGS });
@@ -601,7 +604,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', configuredSecretRoot(runtimeRoot));
         const endpoint = chain.rpcEndpoints[0];
         if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
-        const client = createPublicClient({ transport: http(endpoint) });
+        const client = createPublicClient({ transport: failoverTransport(chain.rpcEndpoints) });
         const blockNumber = await client.getBlockNumber();
         const [nonce, balanceWei] = await Promise.all([client.getTransactionCount({ address: address as Address, blockNumber }), client.getBalance({ address: address as Address, blockNumber })]);
         const phrase = acceptPhrase(address, nonce, balanceWei);
@@ -752,7 +755,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           const config = await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
           const endpoint = config.rpcEndpoints[0];
           if (endpoint && (endpoint.startsWith('https://') || /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])[:/]/.test(endpoint))) {
-            const client = createPublicClient({ chain: defineChain({ id: config.chainId, name: 'ethereum', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } }), transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 1 }) });
+            const client = createPublicClient({ chain: defineChain({ id: config.chainId, name: 'ethereum', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } }), transport: failoverTransport(config.rpcEndpoints.filter((url) => url.startsWith('https://') || /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])[:/]/.test(url))) });
             root = await client.readContract({ address: SEADROP_V1_ADDRESS as `0x${string}`, abi: parseAbi(['function getAllowListMerkleRoot(address nftContract) view returns (bytes32)']), functionName: 'getAllowListMerkleRoot', args: [args.contract as `0x${string}`] });
           }
         } catch { root = null; }
@@ -763,7 +766,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('minutes', { type: 'number', default: 20, describe: 'How long to watch (1 to 60)' })
     .option('samples', { type: 'number', default: 5, describe: 'Fresh transactions to follow (1 to 20)' })
     .option('rpc-url', { type: 'string', describe: 'Override the public Robinhood RPC' }), async (args) => {
-      try { process.stdout.write(`${json(await observeFinality(robinhoodReadClient(args.rpcUrl) as never, { minutes: args.minutes, samples: args.samples }))}\n`); }
+      try { process.stdout.write(`${json(await observeFinality((await robinhoodReadClient(args.rpcUrl)) as never, { minutes: args.minutes, samples: args.samples }))}\n`); }
       catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('robinhood-evidence-refresh', 'Owner-run: re-run the finality observation (E3) and write a NEW evidence file with only E3 updated; writes nothing unless finality is proven', (args) => args
@@ -776,7 +779,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const evidenceText = await readFile(resolve(args.from), 'utf8');
         const out = resolve(args.out);
         if (existsSync(out)) throw new Error('OUTPUT_FILE_EXISTS: choose a new file name; the old file is never overwritten');
-        const report = await observeFinality(robinhoodReadClient(args.rpcUrl) as never, { minutes: args.minutes, samples: args.samples });
+        const report = await observeFinality((await robinhoodReadClient(args.rpcUrl)) as never, { minutes: args.minutes, samples: args.samples });
         const refreshed = refreshFinalityEvidence({ evidenceText, report, today: new Date() });
         await writeFile(out, refreshed.text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         process.stdout.write(`${json({ state: 'Refreshed', out, e3: refreshed.reference, summary: report.summary, next: `Run: robinhood-enable status --evidence-file ${out}` })}\n`);
@@ -790,14 +793,14 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
       try {
         if (!Number.isFinite(args.seconds) || args.seconds < 5 || args.seconds > 300) throw new Error('SECONDS_OUT_OF_RANGE: use 5 to 300');
         const feed = readFeed(args.feedUrl ?? PUBLIC_ROBINHOOD_FEED, { seconds: args.seconds, maxMessages: 5_000 });
-        process.stdout.write(`${json(await checkFeed(robinhoodReadClient(args.rpcUrl) as never, feed, { maxTransactions: args.transactions }))}\n`);
+        process.stdout.write(`${json(await checkFeed((await robinhoodReadClient(args.rpcUrl)) as never, feed, { maxTransactions: args.transactions }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('check-fees', 'Read-only (Robinhood E5): what real recent free mints cost, against the approved caps', (args) => args
     .option('blocks', { type: 'number', default: 3000, describe: 'Recent blocks to look through (1 to 20000)' })
     .option('samples', { type: 'number', default: 40 })
     .option('rpc-url', { type: 'string' }), async (args) => {
-      try { process.stdout.write(`${json(await checkFees(robinhoodReadClient(args.rpcUrl) as never, { blocks: args.blocks, samples: args.samples }))}\n`); }
+      try { process.stdout.write(`${json(await checkFees((await robinhoodReadClient(args.rpcUrl)) as never, { blocks: args.blocks, samples: args.samples }))}\n`); }
       catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('simulate-robinhood', 'Read-only (Robinhood E6): simulate a free mint for your wallets; never signs or sends', (args) => args
@@ -805,7 +808,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
     .option('quantity', { type: 'number', default: 1 })
     .option('rpc-url', { type: 'string' }), async (args) => {
-      try { process.stdout.write(`${json(await dryRunDrop(robinhoodReadClient(args.rpcUrl) as never, args.contract, checkWallets(args.wallets), { quantity: args.quantity }))}\n`); }
+      try { process.stdout.write(`${json(await dryRunDrop((await robinhoodReadClient(args.rpcUrl)) as never, args.contract, checkWallets(args.wallets), { quantity: args.quantity }))}\n`); }
       catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('fee-policy <action>', 'Owner-run: show Ethereum\'s stored fee policy against the approved one, or replace it (needs a typed confirmation)', (args) => args
@@ -909,7 +912,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
         const endpoint = config.rpcEndpoints[0];
         if (!endpoint) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
-        const client = createPublicClient({ transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 1 }) });
+        const client = createPublicClient({ transport: failoverTransport(config.rpcEndpoints) });
         if ((await client.getChainId()) !== 1) throw new Error('RPC_CHAIN_MISMATCH: that RPC is not Ethereum');
         const block = await client.getBlock({ blockTag: 'latest' });
         const phrase = ethereumChainEvidencePhrase();
@@ -935,7 +938,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const results = report.wallets.map((row) => ({ wallet: row.wallet, success: row.verdict === 'ready' }));
         if (results.length !== wallets.length || results.some((item) => !item.success)) throw new Error(`SIMULATION_NOT_PASSED: ${report.summary}`);
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets(campaign.chainId === 8453 ? 'base' : 'ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
-        const client = createPublicClient({ transport: httpTransport(config.rpcEndpoints[0]!, { timeout: 15_000, retryCount: 1 }) });
+        const client = createPublicClient({ transport: failoverTransport(config.rpcEndpoints) });
         const block = await client.getBlock({ blockTag: 'latest' });
         const ids = await recordWalletSimulations(runtime.store, campaign, results, { blockNumber: block.number, blockHash: block.hash });
         process.stdout.write(`${json({ state: 'Recorded', message: `${ids.length} wallet(s) passed the test mint. The records are good for 30 minutes, so approve, arm and run soon.`, simulationIds: ids })}\n`);
@@ -965,7 +968,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets(args.chain, 'mainnet', configuredSecretRoot(runtimeRoot));
         const endpoint = config.rpcEndpoints[0];
         if (!endpoint) throw new Error(`${args.chain.toUpperCase()}_RPC_UNAVAILABLE`);
-        const client = createPublicClient({ transport: httpTransport(endpoint, { timeout: 15_000, retryCount: 1 }) });
+        const client = createPublicClient({ transport: failoverTransport(config.rpcEndpoints) });
         const secretStorePath = process.env.SECRET_STORE_PATH ?? join(configuredSecretRoot(runtimeRoot), 'MINT_BOT_SECRETS.env');
         const probes = createPersonalLiveProbes({
           client,
@@ -1067,7 +1070,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         try { parsed = new URL(endpoint); } catch { throw new Error('RPC_URL_INVALID'); }
         if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('RPC_MUST_BE_HTTPS');
         const chain = defineChain({ id: config.chainId, name: args.chain, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: ['http://127.0.0.1'] } } });
-        const client = createPublicClient({ chain, transport: httpTransport(endpoint, { timeout: 20_000, retryCount: 1 }) });
+        const client = createPublicClient({ chain, transport: failoverTransport(config.rpcEndpoints, { timeoutMs: 20_000 }) });
         // A wrong URL would be labelled with the chain name given, so check the endpoint really is that chain.
         const observedChainId = await client.getChainId();
         if (observedChainId !== config.chainId) throw new Error(`RPC_CHAIN_MISMATCH: that RPC is chain ${observedChainId}, not ${config.chainId} (${args.chain})`);
