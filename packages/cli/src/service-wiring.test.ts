@@ -55,6 +55,8 @@ describe('outside monitor liveness signal', () => {
     expect(service).toContain("get('HEALTHCHECK_PING_URL')");
     expect(service).toContain('logger.registerSecret(pingUrl)');
     expect(service).toContain('liveness?.stop();');
+  });
+});
 
 describe('RPC failover wiring (owner instruction 2026-10-23)', () => {
   const adapter = read('engine-adapter.ts');
