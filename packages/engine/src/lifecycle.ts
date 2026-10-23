@@ -33,7 +33,7 @@ function grantIsCurrent(grant: RobinhoodEnablementGrant | undefined, now: Date):
   return Number.isFinite(expires) && Number.isFinite(now.getTime()) && expires > now.getTime();
 }
 function baseGrantIsCurrent(grant: BaseEnablementGrant | undefined, now: Date): grant is BaseEnablementGrant {
-  if (typeof grant !== 'object' || grant === null || grant.freeAllowed !== true || grant.paidAllowed !== false || typeof grant.expiresAt !== 'string') return false;
+  if (typeof grant !== 'object' || grant === null || grant.freeAllowed !== true || typeof grant.paidAllowed !== 'boolean' || typeof grant.expiresAt !== 'string') return false;
   const expires = Date.parse(grant.expiresAt);
   return Number.isFinite(expires) && expires > now.getTime();
 }
@@ -64,7 +64,8 @@ export function assertDirectChainExecutionPolicy(
   baseGrant?: BaseEnablementGrant,
 ): void {
   if (chainId === 8453) {
-    if (mintValueWei !== undefined && mintValueWei > 0n) throw new LifecycleGateError('PAID_BASE_BLOCKED', 'admission', 'Paid Base execution is disabled until its separate rehearsal and owner record');
+    // D-062 item 3: paid Base only with a current owner grant that allows paid mints.
+    if (mintValueWei !== undefined && mintValueWei > 0n && !(baseGrantIsCurrent(baseGrant, now) && baseGrant.paidAllowed)) throw new LifecycleGateError('PAID_BASE_BLOCKED', 'admission', 'Paid Base execution needs the owner\'s paid enablement record');
     if (!dryRun && !baseGrantIsCurrent(baseGrant, now)) throw new LifecycleGateError('CHAIN_8453_EXECUTION_DISABLED', 'admission', 'Base live execution requires a current owner enablement record');
     return;
   }

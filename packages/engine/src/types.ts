@@ -539,7 +539,7 @@ export interface RobinhoodEnablementGrant {
   readonly expiresAt: string;
   readonly paidAllowed: boolean;
 }
-export interface BaseEnablementGrant { readonly expiresAt: string; readonly freeAllowed: true; readonly paidAllowed: false; }
+export interface BaseEnablementGrant { readonly expiresAt: string; readonly freeAllowed: true; readonly paidAllowed: boolean; }
 
 /** Full mint job configuration. */
 export interface MintJobConfig {
