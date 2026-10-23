@@ -151,7 +151,30 @@ async function backupRestore(io, options) {
   return { checks, references };
 }
 
+const KILL_SWITCH = '/var/lib/mint-bot/killswitch';
+
+/** Reads the recovery drill's output (r2-recovery-drill.mjs) and checks the live kill switch on this host. */
+async function recovery(io, options) {
+  const checks = [];
+  const references = [];
+  let drill;
+  let drillText = '';
+  if (options.recoveryDrill) drillText = await io.readText(options.recoveryDrill).catch(() => '');
+  try { drill = JSON.parse(drillText.trim().split('\n').filter((line) => line.startsWith('{')).at(-1) ?? ''); } catch { drill = undefined; }
+  if (drillText) references.push({ name: 'recovery-drill-output', sha256: sha256Hex(drillText) });
+  const age = drill ? io.now().getTime() - Date.parse(drill.completedAt) : Number.NaN;
+  const recent = age >= 0 && age <= 24 * 60 * 60 * 1000;
+  for (const name of ['restored_from_offhost', 'integrity_ok', 'schema_current', 'post_recovery_reconciliation']) {
+    const result = drill?.checks?.[name];
+    checks.push(check(name, Boolean(drill && drill.status === 'ok' && recent && result?.pass === true), String(result?.observed ?? ''), drill ? (recent ? `recovery drill reported: ${result?.observed ?? 'no result'}` : 'the recovery drill output is older than 24 hours; run it again') : 'no recovery drill output was given'));
+  }
+  const killFile = await io.exec('test', ['-f', KILL_SWITCH]);
+  checks.push(check('kill_switch_engaged', killFile.ok, 'the kill switch is engaged on this host during the recovery', 'the kill switch file is missing on this host'));
+  return { checks, references };
+}
+
 const COLLECTORS = {
+  recovery: (io, options) => recovery(io, options),
   service_supervision: async (io, _options, commit) => ({ checks: await serviceSupervision(io, commit), references: [] }),
   heap_core_dump: async (io) => ({ checks: await heapCore(io), references: [] }),
   backup_restore: (io, options) => backupRestore(io, options),
@@ -179,9 +202,9 @@ export const DEFAULT_PATHS = {
 async function main() {
   const [kind, ...rest] = process.argv.slice(2);
   const option = (name) => { const index = rest.indexOf(name); return index >= 0 ? rest[index + 1] : undefined; };
-  if (!kind || !Object.hasOwn(REQUIRED_CHECKS, kind)) { console.error(`Usage: node ops-evidence-collect.mjs <${Object.keys(REQUIRED_CHECKS).join('|')}> [--restore-drill FILE] [--out FILE]`); process.exitCode = 2; return; }
+  if (!kind || !Object.hasOwn(REQUIRED_CHECKS, kind)) { console.error(`Usage: node ops-evidence-collect.mjs <${Object.keys(REQUIRED_CHECKS).join('|')}> [--restore-drill FILE] [--recovery-drill FILE] [--out FILE]`); process.exitCode = 2; return; }
   if (typeof process.getuid === 'function' && process.getuid() !== 0) { console.error('Run this as root: sudo node scripts/ops-evidence-collect.mjs <kind>'); process.exitCode = 2; return; }
-  const { artifact, failed, problems } = await collect(kind, realIo(), process.env, { restoreDrill: option('--restore-drill') });
+  const { artifact, failed, problems } = await collect(kind, realIo(), process.env, { restoreDrill: option('--restore-drill'), recoveryDrill: option('--recovery-drill') });
   for (const item of artifact.checks) console.log(`${item.result === 'pass' ? 'PASS' : 'FAIL'}  ${item.name}: ${item.observed}`);
   if (failed.length > 0 || problems.length > 0) {
     console.log(`\nNot written: ${failed.length} check(s) failed${problems.length ? `; problems: ${problems.join(', ')}` : ''}. Fix what is listed and run it again.`);
