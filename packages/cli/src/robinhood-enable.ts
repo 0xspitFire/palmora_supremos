@@ -115,7 +115,7 @@ export interface EnableStore {
   ethereumLiveMintProven(): boolean;
   robinhoodEnablement(): unknown;
   enableRobinhood(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<EvidenceStep, true> & Partial<Record<PaidEvidenceStep, true>>; paidAllowed: boolean; confirmationDigest: string }): void;
-  revokeRobinhood(input: { id: string; confirmationDigest: string }): { enablementId: string };
+  revokeRobinhood(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string };
 }
 
 /**
@@ -129,7 +129,7 @@ export function runRobinhoodEnable(input: { action: 'status' | 'record' | 'revok
     if (!current) throw new Error('NOTHING_TO_REVOKE: Robinhood is not enabled');
     const phrase = revokePhrase(current.recordId);
     if (input.confirm !== phrase) return { state: 'ConfirmToRevoke', message: 'Revoking switches Robinhood execution off at once. Runs already in flight are not undone; new ones are refused.', enabledSince: current.approvedAt, copyThisToRevoke: `robinhood-enable revoke --confirm "${phrase}"` };
-    const revoked = store.revokeRobinhood({ id: input.newId(), confirmationDigest: confirmationDigest(phrase, current.recordId) });
+    const revoked = store.revokeRobinhood({ id: input.newId(), confirmationDigest: confirmationDigest(phrase, current.recordId), expectedEnablementId: current.recordId });
     return { state: 'Revoked', message: 'Robinhood execution is off. Record a new enablement to switch it on again.', revokedEnablement: revoked.enablementId };
   }
   if (input.evidenceText === undefined || input.evidenceFile === undefined) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
