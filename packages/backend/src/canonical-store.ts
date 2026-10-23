@@ -1303,6 +1303,14 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public disableExpiredBase(): boolean { this.ensureOpen(); return this.databaseStore.disableBaseIfNotEnabled(this.now()); }
 
+  /** Owner command only (D-062): ends the current Base or Robinhood enablement and switches that chain off, in one transaction. */
+  public revokeEnablement(chainId: 4663 | 8453, input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } {
+    this.ensureOpen();
+    return this.databaseStore.revokeEnablement(chainId, { id: input.id, revokedAt: this.now().toISOString(), confirmationDigest: input.confirmationDigest, ...(input.expectedEnablementId !== undefined ? { expectedEnablementId: input.expectedEnablementId } : {}) });
+  }
+  public revokeRobinhood(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } { return this.revokeEnablement(ROBINHOOD_CHAIN_ID, input); }
+  public revokeBase(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } { return this.revokeEnablement(BASE_CHAIN_ID, input); }
+
   /** Creates the Robinhood chain profile row when there is none (disabled and unverified, like Ethereum's). */
   public ensureRobinhoodChainProfile(): { id: string; created: boolean } {
     const existing = this.db.prepare('SELECT id FROM chain_profile WHERE chain_id = ?').get(ROBINHOOD_CHAIN_ID) as { id: string } | undefined;

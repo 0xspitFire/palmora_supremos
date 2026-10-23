@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { ENABLEMENT_DAYS, EVIDENCE_STEPS, PAID_EVIDENCE_STEPS, assertEnableAllowed, checkEvidenceFile, confirmationDigest, enablePhrase, runRobinhoodEnable } from './robinhood-enable.js';
+import { EVIDENCE_STEPS, PAID_EVIDENCE_STEPS, assertEnableAllowed, checkEvidenceFile, confirmationDigest, enablePhrase, revokePhrase, runRobinhoodEnable } from './robinhood-enable.js';
 import { robinhoodGrantFrom } from './engine-adapter.js';
 
 const NOW = new Date('2026-10-20T12:00:00.000Z');
@@ -60,8 +60,8 @@ describe('evidence file for switching Robinhood on', () => {
 
 describe('assertEnableAllowed: every condition must hold before anything is written', () => {
   const evidence = checkEvidenceFile(goodFile(), NOW);
-  const phrase = enablePhrase(evidence.fileDigest ?? '', ENABLEMENT_DAYS);
-  const facts = (overrides: Record<string, unknown> = {}) => ({ evidence, ethereumLiveMintProven: true, confirm: phrase, days: ENABLEMENT_DAYS, paid: false, ...overrides }) as never;
+  const phrase = enablePhrase(evidence.fileDigest ?? '');
+  const facts = (overrides: Record<string, unknown> = {}) => ({ evidence, ethereumLiveMintProven: true, confirm: phrase, paid: false, ...overrides }) as never;
 
   it('passes with a proven Ethereum mint, complete evidence and the exact phrase, and returns a digest that depends on the phrase and the file', () => {
     const allowed = assertEnableAllowed(facts());
@@ -71,16 +71,16 @@ describe('assertEnableAllowed: every condition must hold before anything is writ
     expect(allowed.evidence).toEqual({ E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true });
   });
 
-  it('fails closed: no Ethereum live mint, bad evidence, missing or wrong phrase, bad days', () => {
+  it('fails closed: no Ethereum live mint, bad evidence, missing or wrong phrase', () => {
     expect(() => assertEnableAllowed(facts({ ethereumLiveMintProven: false }))).toThrow('ETHEREUM_LIVE_MINT_REQUIRED');
     expect(() => assertEnableAllowed(facts({ evidence: checkEvidenceFile(goodFile({ E3: undefined }), NOW) }))).toThrow('EVIDENCE_INCOMPLETE');
     expect(() => assertEnableAllowed(facts({ evidence: { ok: [], problems: [] } }))).toThrow('EVIDENCE_INCOMPLETE');
     expect(() => assertEnableAllowed(facts({ confirm: undefined }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
     expect(() => assertEnableAllowed(facts({ confirm: `${phrase} ` }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
-    expect(() => assertEnableAllowed(facts({ confirm: enablePhrase('0'.repeat(64), ENABLEMENT_DAYS) }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
-    for (const days of [0, 8, 1.5, Number.NaN, -1]) expect(() => assertEnableAllowed(facts({ days })), String(days)).toThrow('DAYS_INVALID');
-    // The phrase for one length of enablement does not work for another.
-    expect(() => assertEnableAllowed(facts({ days: 3 }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(() => assertEnableAllowed(facts({ confirm: enablePhrase('0'.repeat(64)) }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    // The old day-limited phrase is not accepted any more (D-062).
+    expect(() => assertEnableAllowed(facts({ confirm: `ENABLE-ROBINHOOD-FREE 7-DAYS ${(evidence.fileDigest ?? '').slice(0, 8)}` }))).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(phrase).toMatch(/^ENABLE-ROBINHOOD-FREE PERMANENT [0-9a-f]{8}$/);
   });
 });
 
@@ -110,18 +110,19 @@ describe('runRobinhoodEnable: the whole command with a stand-in store', () => {
   const NOW2 = new Date('2026-10-20T12:00:00.000Z');
   const file = goodFile();
   const digest = checkEvidenceFile(file, NOW2).fileDigest ?? '';
-  const phrase = enablePhrase(digest, 7);
+  const phrase = enablePhrase(digest);
   const makeStore = (over: Partial<{ proven: boolean; record: unknown }> = {}) => {
     const writes: unknown[] = [];
-    const store = { ethereumLiveMintProven: () => over.proven ?? true, robinhoodEnablement: () => over.record, enableRobinhood: (input: unknown) => { writes.push(input); } };
-    return { store, writes };
+    const revokes: unknown[] = [];
+    const store = { ethereumLiveMintProven: () => over.proven ?? true, robinhoodEnablement: () => over.record, enableRobinhood: (input: unknown) => { writes.push(input); }, revokeRobinhood: (input: unknown) => { revokes.push(input); return { enablementId: 'x' }; } };
+    return { store, writes, revokes };
   };
-  const run = (store: unknown, over: Record<string, unknown> = {}) => runRobinhoodEnable({ action: 'record', evidenceText: file, evidenceFile: 'e.json', days: 7, confirm: phrase, now: NOW2, store: store as never, newId: () => 'rh_enable_test', ...over });
+  const run = (store: unknown, over: Record<string, unknown> = {}) => runRobinhoodEnable({ action: 'record', evidenceText: file, evidenceFile: 'e.json', confirm: phrase, now: NOW2, store: store as never, newId: () => 'rh_enable_test', ...over });
 
   it('status never writes, says what is missing, and prints the exact command only when everything is ready', () => {
     const ready = makeStore();
     const out = run(ready.store, { action: 'status', confirm: undefined });
-    expect(out).toMatchObject({ state: 'ReadyToRecord', ethereumLiveMintConfirmed: true, problems: [], currentlyEnabledUntil: null });
+    expect(out).toMatchObject({ state: 'ReadyToRecord', ethereumLiveMintConfirmed: true, problems: [], enabledNow: null });
     expect(String(out.copyThisToRecord)).toContain(`--confirm "${phrase}"`);
     expect(ready.writes).toEqual([]);
     const notProven = makeStore({ proven: false });
@@ -132,23 +133,24 @@ describe('runRobinhoodEnable: the whole command with a stand-in store', () => {
     expect(notProven.writes).toEqual([]);
   });
 
-  it('record writes exactly once, with the evidence, the digest and a 7-day expiry, only after every check passed', () => {
+  it('record writes exactly once, with the evidence, the digest and the permanent "until revoked" expiry (D-062), only after every check passed', () => {
     const { store, writes } = makeStore();
     const out = run(store);
-    expect(out).toMatchObject({ state: 'Enabled', expiresAt: '2026-10-27T12:00:00.000Z' });
+    expect(out).toMatchObject({ state: 'Enabled', paidAllowed: false });
+    expect(String(out.message)).toContain('until you revoke it');
     expect(writes).toHaveLength(1);
-    expect(writes[0]).toEqual({ id: 'rh_enable_test', approvedAt: NOW2.toISOString(), expiresAt: '2026-10-27T12:00:00.000Z', evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true }, paidAllowed: false, confirmationDigest: confirmationDigest(phrase, digest) });
+    expect(writes[0]).toEqual({ id: 'rh_enable_test', approvedAt: NOW2.toISOString(), expiresAt: '9999-12-31T23:59:59.999Z', evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true }, paidAllowed: false, confirmationDigest: confirmationDigest(phrase, digest) });
   });
 
   it('records paid enablement only with the paid file, flag and paid-specific phrase', () => {
     const text = paidFile();
     const fileDigest = checkEvidenceFile(text, NOW2, true).fileDigest ?? '';
-    const paidPhrase = enablePhrase(fileDigest, 7, true);
+    const paidPhrase = enablePhrase(fileDigest, true);
     const { store, writes } = makeStore();
     const out = run(store, { evidenceText: text, paid: true, confirm: paidPhrase });
     expect(out).toMatchObject({ state: 'Enabled', paidAllowed: true });
     expect(writes[0]).toMatchObject({ paidAllowed: true, evidence: { paidRehearsal: true, paidPolicyApproved: true } });
-    expect(() => run(makeStore().store, { evidenceText: text, paid: true, confirm: enablePhrase(fileDigest, 7, false) })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(() => run(makeStore().store, { evidenceText: text, paid: true, confirm: enablePhrase(fileDigest, false) })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
   });
 
   it('record writes nothing when any condition fails', () => {
@@ -158,7 +160,6 @@ describe('runRobinhoodEnable: the whole command with a stand-in store', () => {
       ['wrong phrase', { confirm: 'ENABLE-ROBINHOOD-FREE 7-DAYS 00000000' }],
       ['bad evidence', { evidenceText: goodFile({ E5: { ...entry(), passed: false } }) }],
       ['old evidence', { evidenceText: goodFile({ E2: entry('2026-01-01') }) }],
-      ['bad days', { days: 30 }],
       ['not json', { evidenceText: 'nope' }],
     ];
     for (const [label, over, storeOver] of cases) {
@@ -168,10 +169,31 @@ describe('runRobinhoodEnable: the whole command with a stand-in store', () => {
     }
   });
 
-  it('shows when it is already enabled', () => {
-    const record = { recordId: 'x', approvedBy: 'owner-cli', approvedAt: '2026-10-20T10:00:00.000Z', expiresAt: '2026-10-27T10:00:00.000Z', paidAllowed: false, evidence: Object.fromEntries(EVIDENCE_STEPS.map((step) => [step, true])) };
-    const out = run(makeStore({ record }).store, { action: 'status', confirm: undefined });
-    expect(out.currentlyEnabledUntil).toBe('2026-10-27T10:00:00.000Z');
+  const permanent = { recordId: 'rh-perm', approvedBy: 'owner-cli', approvedAt: '2026-10-20T10:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', paidAllowed: false, evidence: Object.fromEntries(EVIDENCE_STEPS.map((step) => [step, true])) };
+
+  it('shows when it is already enabled, and that it lasts until revoked', () => {
+    const out = run(makeStore({ record: permanent }).store, { action: 'status', confirm: undefined });
+    expect(out.enabledNow).toEqual({ since: '2026-10-20T10:00:00.000Z', until: 'you revoke it', paidAllowed: false });
+    expect(out.toRevoke).toBeDefined();
+  });
+
+  it('revoke: prints the phrase first, revokes only with that exact phrase, and refuses when nothing is enabled', () => {
+    const first = makeStore({ record: permanent });
+    const shown = runRobinhoodEnable({ action: 'revoke', confirm: undefined, now: NOW2, store: first.store as never, newId: () => 'rev-1' });
+    expect(shown).toMatchObject({ state: 'ConfirmToRevoke' });
+    expect(String(shown.copyThisToRevoke)).toContain(revokePhrase('rh-perm'));
+    expect(first.revokes).toEqual([]);
+    expect(runRobinhoodEnable({ action: 'revoke', confirm: 'REVOKE-ROBINHOOD 00000000', now: NOW2, store: first.store as never, newId: () => 'rev-1' })).toMatchObject({ state: 'ConfirmToRevoke' });
+    expect(first.revokes).toEqual([]);
+    const done = runRobinhoodEnable({ action: 'revoke', confirm: revokePhrase('rh-perm'), now: NOW2, store: first.store as never, newId: () => 'rev-1' });
+    expect(done).toMatchObject({ state: 'Revoked' });
+    expect(first.revokes).toEqual([{ id: 'rev-1', confirmationDigest: confirmationDigest(revokePhrase('rh-perm'), 'rh-perm'), expectedEnablementId: 'rh-perm' }]);
+    expect(revokePhrase('rh-perm')).not.toBe(revokePhrase('rh-other'));
+    expect(() => runRobinhoodEnable({ action: 'revoke', confirm: revokePhrase('rh-perm'), now: NOW2, store: makeStore().store as never, newId: () => 'rev-1' })).toThrow('NOTHING_TO_REVOKE');
+  });
+
+  it('status and record need the evidence file; revoke does not', () => {
+    expect(() => runRobinhoodEnable({ action: 'status', confirm: undefined, now: NOW2, store: makeStore().store as never, newId: () => 'x' })).toThrow('EVIDENCE_FILE_REQUIRED');
   });
 });
 

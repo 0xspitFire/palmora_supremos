@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { BASE_EVIDENCE_STEPS, validBaseEnablement, type BaseEvidenceStep } from '@mint-bot/backend';
+import { BASE_EVIDENCE_STEPS, PERMANENT_ENABLEMENT_EXPIRY, validBaseEnablement, type BaseEvidenceStep } from '@mint-bot/backend';
 
-export const BASE_ENABLEMENT_DAYS = 7;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface BaseEvidenceCheck { readonly problems: readonly string[]; readonly fileDigest?: string; readonly evidence?: Record<BaseEvidenceStep, true>; }
@@ -28,23 +27,35 @@ export function checkBaseEvidenceFile(text: string, now: Date): BaseEvidenceChec
   return problems.length === 0 ? { problems, fileDigest, evidence: Object.fromEntries(BASE_EVIDENCE_STEPS.map((step) => [step, true])) as Record<BaseEvidenceStep, true> } : { problems, fileDigest };
 }
 
-export function baseEnablePhrase(digest: string, days: number): string { return `ENABLE-BASE-FREE ${days}-DAYS ${digest.slice(0, 8)} LOCAL-ATTENDED`; }
+/** D-062: permanent until revoked. */
+export function baseEnablePhrase(digest: string): string { return `ENABLE-BASE-FREE PERMANENT ${digest.slice(0, 8)} LOCAL-ATTENDED`; }
+
+/** Names the record being revoked, so a copied phrase cannot revoke a later one. */
+export function baseRevokePhrase(recordId: string): string { return `REVOKE-BASE ${createHash('sha256').update(recordId, 'utf8').digest('hex').slice(0, 8)}`; }
 
 export interface BaseEnableStore {
   baseEnablement(): unknown;
+  revokeBase(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string };
   enableBase(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<BaseEvidenceStep, true>; evidenceDigest: string; confirmationDigest: string; strategyVersion: string; feePolicyVersion: string; primaryEndpointReference: string; fallbackEndpointReference: string; custodyMode: 'local-personal-live' }): void;
 }
 
-export function runBaseEnable(input: { action: 'status' | 'record'; evidenceText: string; evidenceFile: string; days: number; confirm?: string; now: Date; store: BaseEnableStore; newId(): string }): Record<string, unknown> {
-  if (!Number.isInteger(input.days) || input.days < 1 || input.days > BASE_ENABLEMENT_DAYS) throw new Error('DAYS_INVALID: use a whole number from 1 to 7');
-  const checked = checkBaseEvidenceFile(input.evidenceText, input.now);
+export function runBaseEnable(input: { action: 'status' | 'record' | 'revoke'; evidenceText?: string; evidenceFile?: string; confirm?: string; now: Date; store: BaseEnableStore; newId(): string }): Record<string, unknown> {
   const current = validBaseEnablement(input.store.baseEnablement(), input.now);
-  const phrase = checked.fileDigest ? baseEnablePhrase(checked.fileDigest, input.days) : undefined;
-  if (input.action === 'status') return { state: checked.evidence && phrase ? 'ReadyToRecord' : 'NotReady', problems: checked.problems, currentlyEnabledUntil: current?.expiresAt ?? null, ...(phrase ? { copyThisToRecord: `base-enable record --evidence-file ${input.evidenceFile} --days ${input.days} --confirm "${phrase}"` } : {}) };
+  if (input.action === 'revoke') {
+    if (!current) throw new Error('NOTHING_TO_REVOKE: Base is not enabled');
+    const phrase = baseRevokePhrase(current.recordId);
+    if (input.confirm !== phrase) return { state: 'ConfirmToRevoke', message: 'Revoking switches Base execution off at once. Runs already in flight are not undone; new ones are refused.', enabledSince: current.approvedAt, copyThisToRevoke: `base-enable revoke --confirm "${phrase}"` };
+    const revoked = input.store.revokeBase({ id: input.newId(), confirmationDigest: createHash('sha256').update(`${phrase}\n${current.recordId}`).digest('hex'), expectedEnablementId: current.recordId });
+    return { state: 'Revoked', message: 'Base execution is off. Record a new enablement to switch it on again.', revokedEnablement: revoked.enablementId };
+  }
+  if (input.evidenceText === undefined || input.evidenceFile === undefined) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
+  const checked = checkBaseEvidenceFile(input.evidenceText, input.now);
+  const phrase = checked.fileDigest ? baseEnablePhrase(checked.fileDigest) : undefined;
+  const enabledNow = current ? { since: current.approvedAt, until: current.expiresAt === PERMANENT_ENABLEMENT_EXPIRY ? 'you revoke it' : current.expiresAt } : null;
+  if (input.action === 'status') return { state: checked.evidence && phrase ? 'ReadyToRecord' : 'NotReady', problems: checked.problems, enabledNow, ...(phrase && checked.evidence ? { copyThisToRecord: `base-enable record --evidence-file ${input.evidenceFile} --confirm "${phrase}"` } : {}), ...(current ? { toRevoke: 'base-enable revoke (prints the phrase to type)' } : {}) };
   if (!checked.evidence || !checked.fileDigest || checked.problems.length > 0) throw new Error(`EVIDENCE_INCOMPLETE: ${checked.problems.join(' ')}`);
   if (input.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run base-enable status and copy its phrase exactly');
   const approvedAt = input.now.toISOString();
-  const expiresAt = new Date(input.now.getTime() + input.days * 86_400_000).toISOString();
-  input.store.enableBase({ id: input.newId(), approvedAt, expiresAt, evidence: checked.evidence, evidenceDigest: checked.fileDigest, confirmationDigest: createHash('sha256').update(`${phrase}\n${checked.fileDigest}`).digest('hex'), strategyVersion: 'seadrop-v1-public', feePolicyVersion: 'base-free-d057-v1', primaryEndpointReference: 'BASE_RPC_URL', fallbackEndpointReference: 'BASE_RPC_FBACK', custodyMode: 'local-personal-live' });
-  return { state: 'Enabled', message: `Base free attended execution is enabled until ${expiresAt}. Paid Base remains disabled.`, expiresAt, paidAllowed: false };
+  input.store.enableBase({ id: input.newId(), approvedAt, expiresAt: PERMANENT_ENABLEMENT_EXPIRY, evidence: checked.evidence, evidenceDigest: checked.fileDigest, confirmationDigest: createHash('sha256').update(`${phrase}\n${checked.fileDigest}`).digest('hex'), strategyVersion: 'seadrop-v1-public', feePolicyVersion: 'base-free-d057-v1', primaryEndpointReference: 'BASE_RPC_URL', fallbackEndpointReference: 'BASE_RPC_FBACK', custodyMode: 'local-personal-live' });
+  return { state: 'Enabled', message: 'Base free attended execution is on until you revoke it (base-enable revoke). Paid Base remains disabled. The kill switch still stops everything at once.', paidAllowed: false };
 }

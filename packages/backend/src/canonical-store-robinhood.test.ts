@@ -8,6 +8,8 @@ import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 // The database compares expiry with its own clock, so the enablement times are relative to now (the fixture's NOW is in the past).
 const REAL = new Date().toISOString();
+// D-062: new enablements last until the owner revokes them.
+const PERM = '9999-12-31T23:59:59.999Z';
 const day = (offset: number): string => new Date(Date.parse(REAL) + offset * 86_400_000).toISOString();
 const EVIDENCE = { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true } as const;
 const DIGEST = 'b'.repeat(64);
@@ -48,7 +50,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     const value = await fixture(ROBINHOOD);
     try {
       expect(value.store.robinhoodEnablement()).toBeUndefined();
-      expect(() => value.store.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST })).toThrow('ETHEREUM_LIVE_MINT_REQUIRED');
+      expect(() => value.store.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST })).toThrow('ETHEREUM_LIVE_MINT_REQUIRED');
       expect(value.store.robinhoodEnablement()).toBeUndefined();
       expect(value.db.prepare('SELECT count(*) AS n FROM robinhood_enablement').get()).toEqual({ n: 0 });
       expect(() => assertRobinhoodLiveAllowed('free', value.store.robinhoodEnablement(), new Date(REAL))).toThrow('ROBINHOOD_EXECUTION_DISABLED');
@@ -60,13 +62,14 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
     try {
       await proven.open();
-      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
       expect(value.db.prepare("SELECT execution_enabled AS e, verification_status AS s FROM chain_profile WHERE chain_id = 4663").get()).toEqual({ e: 1, s: 'verified' });
       const record = value.store.robinhoodEnablement();
       expect(record).toMatchObject({ recordId: 'rh-1', approvedBy: 'owner-cli', paidAllowed: false });
       expect(() => assertRobinhoodLiveAllowed('free', record, new Date(REAL))).not.toThrow();
       expect(() => assertRobinhoodLiveAllowed('paid', record, new Date(REAL))).toThrow('ROBINHOOD_PAID_MINTS_DISABLED');
-      expect(() => assertRobinhoodLiveAllowed('free', record, new Date(day(7)))).toThrow('ROBINHOOD_EXECUTION_DISABLED');
+      // No end date any more: a year later it still allows free; before the approval it never did.
+      expect(() => assertRobinhoodLiveAllowed('free', record, new Date(day(400)))).not.toThrow();
       expect(() => assertRobinhoodLiveAllowed('free', record, new Date(day(-1)))).toThrow('ROBINHOOD_EXECUTION_DISABLED');
     } finally { proven.close(); await close(value); }
   });
@@ -77,7 +80,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     try {
       await proven.open();
       const paidEvidence = { ...EVIDENCE, paidRehearsal: true, paidPolicyApproved: true } as const;
-      proven.enableRobinhood({ id: 'rh-paid', approvedAt: REAL, expiresAt: day(7), evidence: paidEvidence, paidAllowed: true, confirmationDigest: DIGEST });
+      proven.enableRobinhood({ id: 'rh-paid', approvedAt: REAL, expiresAt: PERM, evidence: paidEvidence, paidAllowed: true, confirmationDigest: DIGEST });
       expect(() => assertRobinhoodLiveAllowed('paid', proven.robinhoodEnablement(), new Date(REAL))).not.toThrow();
       const paidFixture = { ...value, store: proven, application: new BackendApplication(proven, {} as never) };
       const paidCampaign = await campaign(paidFixture, ROBINHOOD, true);
@@ -97,7 +100,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     } finally { proven.close(); await close(value); }
   });
 
-  it('lets a free Robinhood run get past the chain checks only while the record is valid, and refuses again once it has expired', async () => {
+  it('lets a free Robinhood run get past the chain checks while enabled, and refuses again once revoked', async () => {
     const value = await fixture(ROBINHOOD);
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
     try {
@@ -105,30 +108,35 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       const campaignValue = await campaign(value, ROBINHOOD);
       const prepared = await armed(value, campaignValue);
       await expect(value.store.admitExecution(prepared.input)).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
-      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
       const now = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
       await now.open();
       await expect(now.admitExecution(prepared.input)).resolves.toBeDefined();
-      // Past the expiry the same store refuses again, even though the profile flag was never switched off.
-      const later = new CanonicalStoreBridge(value.db, { now: () => new Date(day(8)), fleetPolicy: OPEN_FLEET_POLICY });
+      // (That it stays allowed with time is shown at the policy above; a second admission here would meet D-056's stale-reservation rule.)
+      const later = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
       await later.open();
-      await expect(later.admitExecution(prepared.input)).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
+      proven.revokeRobinhood({ id: 'rev-1', confirmationDigest: DIGEST });
+      const afterRevoke = await armed(value, await campaign(value, ROBINHOOD), [WALLET_ONE], [], '-revoked');
+      await expect(later.admitExecution(afterRevoke.input)).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
       later.close();
     } finally { proven.close(); await close(value); }
   });
 
-  it('switches the profile off when the record expires, and not before', async () => {
+  it('never switches itself off with time; the owner revocation switches it off', async () => {
     const value = await fixture(ROBINHOOD);
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
     try {
       await proven.open();
-      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
       expect(proven.disableExpiredRobinhood()).toBe(false);
-      const later = new CanonicalStoreBridge(value.db, { now: () => new Date(day(7)) });
+      const later = new CanonicalStoreBridge(value.db, { now: () => new Date(day(400)) });
       await later.open();
-      expect(later.disableExpiredRobinhood()).toBe(true);
-      expect(value.db.prepare("SELECT execution_enabled AS e FROM chain_profile WHERE chain_id = 4663").get()).toEqual({ e: 0 });
       expect(later.disableExpiredRobinhood()).toBe(false);
+      expect(value.db.prepare("SELECT execution_enabled AS e FROM chain_profile WHERE chain_id = 4663").get()).toEqual({ e: 1 });
+      expect(later.revokeRobinhood({ id: 'rev-1', confirmationDigest: DIGEST })).toEqual({ enablementId: 'rh-1' });
+      expect(value.db.prepare("SELECT execution_enabled AS e FROM chain_profile WHERE chain_id = 4663").get()).toEqual({ e: 0 });
+      expect(later.robinhoodEnablement()).toBeUndefined();
+      expect(() => later.revokeRobinhood({ id: 'rev-2', confirmationDigest: DIGEST })).toThrow('NOTHING_TO_REVOKE');
       later.close();
     } finally { proven.close(); await close(value); }
   });
@@ -142,13 +150,13 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
   });
 });
 
-describe('the service switches Robinhood off when the record expires (D-051)', () => {
+describe('the service tick leaves a permanent enablement alone (D-062)', () => {
   const idleJobs = { open: async () => undefined, list: async () => [], recoverRunning: async () => 0, claimDue: async () => [], update: async () => undefined, put: async () => undefined } as never;
   const run = async (clock: string) => {
     const value = await fixture(ROBINHOOD);
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
     await proven.open();
-    proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+    proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
     const store = new CanonicalStoreBridge(value.db, { now: () => new Date(clock), fleetPolicy: OPEN_FLEET_POLICY });
     await store.open();
     const coordinator = { start: async () => undefined, reconcile: async () => ({}) } as never;
@@ -162,8 +170,8 @@ describe('the service switches Robinhood off when the record expires (D-051)', (
     return enabled;
   };
 
-  it('leaves a valid enablement alone and switches an expired one off on the first tick', async () => {
+  it('keeps Robinhood on at any later time; only a revocation (tested above) switches it off', async () => {
     expect(await run(day(3))).toBe(1);
-    expect(await run(day(8))).toBe(0);
+    expect(await run(day(400))).toBe(1);
   });
 });

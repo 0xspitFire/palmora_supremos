@@ -26,9 +26,9 @@ import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
-import { ENABLEMENT_DAYS, runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
+import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { refreshFinalityEvidence } from './robinhood-evidence-refresh.js';
-import { BASE_ENABLEMENT_DAYS, runBaseEnable, type BaseEnableStore } from './base-enable.js';
+import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
 import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
@@ -869,35 +869,41 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         } finally { database.close(); }
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
-  .command('robinhood-enable <action>', 'Owner-run: switch Robinhood execution on for up to 7 days (status | record). Paid also needs D-054 evidence', (args) => args
-    .positional('action', { type: 'string', choices: ['status', 'record'] as const, demandOption: true })
-    .option('evidence-file', { type: 'string', demandOption: true, describe: 'Your JSON file with E1 to E7 (see Docs/robinhood-enable-evidence.template.json)' })
-    .option('days', { type: 'number', default: ENABLEMENT_DAYS, describe: 'How long it stays on (1 to 7)' })
+  .command('robinhood-enable <action>', 'Owner-run: switch Robinhood execution on until you revoke it (status | record | revoke). Paid also needs D-054 evidence', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
+    .option('evidence-file', { type: 'string', describe: 'Your JSON file with E1 to E7 (status and record; see Docs/robinhood-enable-evidence.template.json)' })
     .option('paid', { type: 'boolean', default: false, describe: 'Enable paid mints too; requires paidRehearsal and paidPolicyApproved evidence' })
-    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (record only)' }), async (args) => {
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase status (record) or revoke printed' }), async (args) => {
       try {
-        const info = await lstat(args.evidenceFile);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 20_000) throw new Error('EVIDENCE_FILE_INVALID: it must be a plain file under 20 KB');
-        const evidenceText = await readFile(args.evidenceFile, 'utf8');
+        let evidenceText: string | undefined;
+        if (args.action !== 'revoke') {
+          if (!args.evidenceFile) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
+          const info = await lstat(args.evidenceFile);
+          if (!info.isFile() || info.isSymbolicLink() || info.size > 20_000) throw new Error('EVIDENCE_FILE_INVALID: it must be a plain file under 20 KB');
+          evidenceText = await readFile(args.evidenceFile, 'utf8');
+        }
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<EnableStore>;
-        if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function' || typeof store.robinhoodEnablement !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, evidenceText, evidenceFile: args.evidenceFile, days: args.days, paid: args.paid, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function' || typeof store.robinhoodEnablement !== 'function' || typeof store.revokeRobinhood !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
+        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), paid: args.paid, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
-  .command('base-enable <action>', 'Owner-run: record Base free attended enablement for up to 7 days (status | record)', (args) => args
-    .positional('action', { type: 'string', choices: ['status', 'record'] as const, demandOption: true })
-    .option('evidence-file', { type: 'string', demandOption: true, describe: 'Completed copy of Docs/base-enable-evidence.template.json' })
-    .option('days', { type: 'number', default: BASE_ENABLEMENT_DAYS, describe: 'How long it stays on (1 to 7)' })
-    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (record only)' }), async (args) => {
+  .command('base-enable <action>', 'Owner-run: record Base free attended enablement until you revoke it (status | record | revoke)', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
+    .option('evidence-file', { type: 'string', describe: 'Completed copy of Docs/base-enable-evidence.template.json (status and record)' })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase status (record) or revoke printed' }), async (args) => {
       try {
-        const info = await lstat(args.evidenceFile);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 20_000) throw new Error('EVIDENCE_FILE_INVALID: it must be a plain file under 20 KB');
-        const evidenceText = await readFile(args.evidenceFile, 'utf8');
+        let evidenceText: string | undefined;
+        if (args.action !== 'revoke') {
+          if (!args.evidenceFile) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
+          const info = await lstat(args.evidenceFile);
+          if (!info.isFile() || info.isSymbolicLink() || info.size > 20_000) throw new Error('EVIDENCE_FILE_INVALID: it must be a plain file under 20 KB');
+          evidenceText = await readFile(args.evidenceFile, 'utf8');
+        }
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<BaseEnableStore>;
-        if (typeof store.enableBase !== 'function' || typeof store.baseEnablement !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runBaseEnable({ action: args.action, evidenceText, evidenceFile: args.evidenceFile, days: args.days, confirm: args.confirm, now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        if (typeof store.enableBase !== 'function' || typeof store.baseEnablement !== 'function' || typeof store.revokeBase !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
+        process.stdout.write(`${json(runBaseEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), ...(args.confirm !== undefined ? { confirm: args.confirm } : {}), now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('chain-evidence <action>', 'Owner-run: record Ethereum SeaDrop chain evidence for 7 days after a typed confirmation (needed before a live arm)', (args) => args

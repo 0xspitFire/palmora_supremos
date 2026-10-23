@@ -8,7 +8,6 @@ import { OPEN_FLEET_POLICY, ROBINHOOD, armed, campaign, close, fixture } from '.
  * the proof, and they show where the staged-finality path stops (an Ethereum-final observer is still needed for settlement).
  */
 const REAL = new Date().toISOString();
-const day = (offset: number): string => new Date(Date.parse(REAL) + offset * 86_400_000).toISOString();
 const EVIDENCE = { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true } as const;
 
 class ProvenStore extends CanonicalStoreBridge {
@@ -19,7 +18,7 @@ async function enabledAdmission() {
   const value = await fixture(ROBINHOOD);
   const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
   await proven.open();
-  proven.enableRobinhood({ id: 'rh-rows', approvedAt: REAL, expiresAt: day(7), evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: 'c'.repeat(64) });
+  proven.enableRobinhood({ id: 'rh-rows', approvedAt: REAL, expiresAt: '9999-12-31T23:59:59.999Z', evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: 'c'.repeat(64) });
   const campaignValue = await campaign(value, ROBINHOOD);
   const prepared = await armed(value, campaignValue);
   const store = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
@@ -91,12 +90,13 @@ describe('Robinhood rows can be stored once the owner has switched free executio
     } finally { ctx.store.close(); ctx.proven.close(); await close(ctx.value); }
   });
 
-  it('still refuses to store anything once the record has expired (the database clock and the policy both say no)', async () => {
+  it('refuses to store anything once the owner has revoked the record (the database and the policy both say no)', async () => {
     const { value, proven, store, prepared } = await enabledAdmission();
     try {
-      const later = new CanonicalStoreBridge(value.db, { now: () => new Date(day(8)), fleetPolicy: OPEN_FLEET_POLICY });
+      proven.revokeRobinhood({ id: 'rev-rows', confirmationDigest: 'd'.repeat(64) });
+      const later = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
       await later.open();
-      await expect(later.admitExecution(prepared.input)).rejects.toThrow(/ROBINHOOD_EXECUTION_DISABLED|IDEMPOTENCY|RUN_/);
+      await expect(later.admitExecution(prepared.input)).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
       later.close();
     } finally { store.close(); proven.close(); await close(value); }
   });

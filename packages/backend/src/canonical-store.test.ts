@@ -83,7 +83,7 @@ describe('CanonicalStoreBridge', () => {
     const value = await fixture(BASE, false, false, '2099-01-01T00:00:00.000Z', false, OPEN_FLEET_POLICY, () => new Date(BASE_NOW));
     try {
       value.store.enableBase({
-        id: 'base-enable-runtime-evidence', approvedAt: BASE_NOW, expiresAt: '2026-10-27T14:00:00.000Z',
+        id: 'base-enable-runtime-evidence', approvedAt: BASE_NOW, expiresAt: '9999-12-31T23:59:59.999Z',
         evidence: { reviewedCode: true, forkRehearsal: true, finality: true, endpointAgreement: true, feeObservation: true, liveSimulation: true, custodyReadiness: true },
         evidenceDigest: 'a'.repeat(64), confirmationDigest: 'b'.repeat(64), strategyVersion: 'seadrop-v1-public@1', feePolicyVersion: 'base-free-d057-v1',
         primaryEndpointReference: 'BASE_RPC_URL', fallbackEndpointReference: 'BASE_RPC_FBACK', custodyMode: 'local-personal-live',
