@@ -20,7 +20,11 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(service).toContain("...(config.mode === 'host' ? {");
     expect(service).toContain('coordinatorAssurance: async (store)');
     expect(service).toContain('readiness.probeAtStart()');
-    expect(service).toContain("if (config.mode === 'host' && !watchConfig) throw new Error('HOST_MODE_REQUIRES_WALLET_WATCHER')");
+    expect(service).toContain("if (!watchConfig) throw new Error('HOST_MODE_REQUIRES_WALLET_WATCHER')");
+    expect(service).toContain("throw new Error('HOST_MODE_REQUIRES_APPROVER_KEY_PIN')");
+    // both refusals come before the runtime (and so the database) is opened
+    expect(service.indexOf("'HOST_MODE_REQUIRES_WALLET_WATCHER'")).toBeLessThan(service.indexOf('const runtime = await createCliRuntime'));
+    expect(service.indexOf("'HOST_MODE_REQUIRES_APPROVER_KEY_PIN'")).toBeLessThan(service.indexOf('const runtime = await createCliRuntime'));
     expect(service).toContain('watcherHandle = started.watcher');
   });
 

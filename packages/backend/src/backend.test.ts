@@ -246,6 +246,30 @@ describe('backend Phase 1 blockers', () => {
     const coordinator = new ExecutionCoordinator(store, adapter); const run = await coordinator.arm(input, 'live'); await expect(coordinator.execute(run.id, ['wallet-1'])).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED'); expect(store.snapshot().reservations).toHaveLength(0);
   });
 
+  it('fresh readiness at execute (T-042 requirement 2): a failing refresh refuses before any admission, and only the refreshed snapshot is judged', async () => {
+    const store = new ReadyStore(); const input = await readyLiveInput(store);
+    const armed = await new ExecutionCoordinator(store, engine(), { refreshReadiness: async () => undefined }).arm(input, 'live');
+    const execute = (refreshReadiness: () => Promise<void>) => new ExecutionCoordinator(store, engine(), { refreshReadiness }).execute(armed.id, ['wallet-1']);
+    // a no-op refresh leaves the good stored readiness in place: the run gets past readiness to the next wall (Robinhood disabled)
+    await expect(execute(async () => undefined)).rejects.toThrow('ROBINHOOD_EXECUTION_DISABLED');
+    // a failing refresh refuses, shows only a fixed code, and nothing was admitted
+    await expect(execute(async () => { throw new Error('TURNKEY_RECORD_CHANGED_RESTART_REQUIRED'); })).rejects.toThrow('READINESS_REFRESH_FAILED:TURNKEY_RECORD_CHANGED_RESTART_REQUIRED');
+    await expect(execute(async () => { throw new Error('provider said https://rpc.example/secret'); })).rejects.toThrow(/^READINESS_REFRESH_FAILED$/);
+    expect(store.snapshot().reservations).toHaveLength(0);
+    // the stored observation is good, yet what the refresh leaves behind is what is judged
+    await expect(execute(async () => { await store.transaction(state => { state.runtime.operational = { ...state.runtime.operational!, killSwitchEngaged: true }; }); })).rejects.toThrow('KILL_SWITCH_ENGAGED');
+    await expect(execute(async () => { await store.transaction(state => { state.runtime.operational = undefined; }); })).rejects.toThrow('RUNTIME_READINESS_REQUIRED');
+    expect(store.snapshot().reservations).toHaveLength(0);
+  });
+
+  it('a kill set while the refresh is running still stops the execute', async () => {
+    const store = new ReadyStore(); const input = await readyLiveInput(store);
+    const armed = await new ExecutionCoordinator(store, engine(), { refreshReadiness: async () => undefined }).arm(input, 'live');
+    const killing = new ExecutionCoordinator(store, engine(), { refreshReadiness: async () => { await store.transaction(state => { state.killed = true; }); } });
+    await expect(killing.execute(armed.id, ['wallet-1'])).rejects.toThrow('KILLED');
+    expect(store.snapshot().reservations).toHaveLength(0);
+  });
+
   it('does not begin a Robinhood run that could later require reorg reconciliation', async () => {
     const store = new ReadyStore(); const input = await readyLiveInput(store); let observation = 0;
     const adapter = engine({ execute: async request => ({ executionIds: ['execution-1'], attempts: [{ id: 'attempt-1', executionId: 'execution-1', runId: request.runId, wallet: 'wallet-1', nonce: 1, hash: '0xhash', state: 'Pending', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], receipts: [], state: 'Pending' }), reconcile: async run => { observation += 1; return observation === 1 ? { result: 'final', attempts: [{ id: 'attempt-final', executionId: 'execution-1', runId: run.id, wallet: 'wallet-1', nonce: 1, hash: '0xhash', state: 'Confirmed', robinhoodFinality: 'final', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], receipts: [{ id: 'receipt-final', executionId: 'execution-1', runId: run.id, state: 'Confirmed', robinhoodFinality: 'final', blockNumber: 2n, blockHash: '0xfinal', actualSpendWei: 12n, observedAt: new Date().toISOString() }] } : { result: 'reorged', attempts: [], receipts: [{ id: 'receipt-reorg', executionId: 'execution-1', runId: run.id, state: 'Reorged', robinhoodFinality: 'soft', blockNumber: 2n, blockHash: '0xreorged', actualSpendWei: 12n, observedAt: new Date().toISOString() }], reason: 'canonical block changed' }; } });

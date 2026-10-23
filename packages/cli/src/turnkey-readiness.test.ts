@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { assertLiveOperationalReadiness, computeWalletSetDigest, type AssuranceRun, type Campaign, type CompensatingAssuranceContext, type OperationalReadiness } from '@mint-bot/backend';
+import { createHash } from 'node:crypto';
+import { assertApproverKeyPin } from './turnkey-readiness-service.js';
 import { createTurnkeyReadiness, type ReadinessSigner, type TurnkeyReadinessOptions, type VerifiedTurnkeyRecord } from './turnkey-readiness.js';
 
 /**
@@ -204,5 +206,20 @@ describe('Turnkey readiness at the service (T-042 requirements 1 to 4)', () => {
     await readiness.refresh(run());
     expect(() => readiness.assurance(run({ campaign: campaign({ mintPriceWei: 4_100_000_000_000_000n }) }))).toThrow(/FUNDING_PLAN_BLOCKED:RUN_ENVELOPE_ABOVE_CHAIN_BOUND/);
     expect(() => readiness.assurance(run({ campaign: campaign({ feePolicy: { kind: 'free', configuredPriorityFeeWei: 0n } as never }) }))).toThrow('TOTAL_FEE_BUDGET_REQUIRED');
+  });
+});
+
+describe('pinned approver key (digest in settings the service cannot change)', () => {
+  const key = '-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n';
+  const pin = createHash('sha256').update(key, 'utf8').digest('hex');
+  it('accepts the key whose digest is pinned, in either letter case', () => {
+    expect(() => assertApproverKeyPin(key, pin)).not.toThrow();
+    expect(() => assertApproverKeyPin(key, pin.toUpperCase())).not.toThrow();
+  });
+  it('refuses a swapped key, a changed byte, and a malformed pin', () => {
+    expect(() => assertApproverKeyPin(`${key} `, pin)).toThrow('TURNKEY_APPROVER_KEY_PIN_MISMATCH');
+    expect(() => assertApproverKeyPin('other', pin)).toThrow('TURNKEY_APPROVER_KEY_PIN_MISMATCH');
+    expect(() => assertApproverKeyPin(key, '')).toThrow('TURNKEY_APPROVER_KEY_PIN_MISMATCH');
+    expect(() => assertApproverKeyPin(key, 'z'.repeat(64))).toThrow('TURNKEY_APPROVER_KEY_PIN_MISMATCH');
   });
 });

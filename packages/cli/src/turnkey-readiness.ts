@@ -107,7 +107,8 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
 
   const startup = await loadRecord();
   const binding: CustodyPolicyBinding = { provider: 'turnkey', providerIdentity: startup.organizationId, policyReference: startup.policyReference, policyDigest: startup.policyDigest };
-  let observed: { chainId: number; at: number; balances: Map<string, bigint>; record: VerifiedTurnkeyRecord; lockfileDigest: string } | undefined;
+  // One observation per chain, so a refresh on one chain never replaces the one another chain's arm is about to use.
+  const observations = new Map<number, { at: number; balances: Map<string, bigint>; record: VerifiedTurnkeyRecord; lockfileDigest: string }>();
 
   /** Re-verifies the record and requires it to be the very record the service started with. */
   const currentRecord = async (): Promise<VerifiedTurnkeyRecord> => {
@@ -132,14 +133,15 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
   };
 
   const assurance = (run: AssuranceRun): CompensatingAssuranceConfig => {
-    if (!observed || observed.chainId !== run.chainId || now().getTime() - observed.at > OBSERVATION_USABLE_MS) throw new Error('READINESS_NOT_REFRESHED');
+    const observed = observations.get(run.chainId);
+    if (!observed || now().getTime() - observed.at > OBSERVATION_USABLE_MS) throw new Error('READINESS_NOT_REFRESHED');
     const wallets = run.wallets.map((wallet) => wallet.toLowerCase());
     const required = requiredPerWallet(run.campaign);
     const plan = planRunFunding({
       chainId: run.chainId,
       ceiling: ceilings[run.chainId],
       wallets: wallets.map((address) => {
-        const balanceWei = observed!.balances.get(address);
+        const balanceWei = observed.balances.get(address);
         if (balanceWei === undefined) throw new Error('COMPENSATING_CONTROL_WALLET_NOT_COVERED');
         return { address, balanceWei, requiredWei: required };
       }),
@@ -182,7 +184,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
         now: at,
         balanceValiditySeconds: Math.floor(COMPENSATING_OBSERVATION_MAX_AGE_MS / 1000),
       });
-      observed = { chainId: run.chainId, at: at.getTime(), balances: new Map(balances.map((balance) => [balance.address.toLowerCase(), balance.balanceWei])), record, lockfileDigest };
+      observations.set(run.chainId, { at: at.getTime(), balances: new Map(balances.map((balance) => [balance.address.toLowerCase(), balance.balanceWei])), record, lockfileDigest });
       const reconciledAt = options.reconciledAt();
       if (!reconciledAt) throw new Error('RECONCILIATION_REQUIRED');
       const observedAt = at.toISOString();

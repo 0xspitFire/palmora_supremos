@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createPublicClient, http, type Address } from 'viem';
@@ -17,6 +18,8 @@ export interface ServiceReadinessInputs {
   secretRoot: string;
   killSwitchPath: string;
   storePath: string;
+  /** SHA-256 (hex) of the pinned approver public key file, set in the root-owned settings so a swap of both secret-root files is detected. */
+  approverKeySha256: string;
   /** Where a watcher handle appears once the watcher has started; until then no wallet counts as watched (fail closed). */
   watcher: () => { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean } | undefined;
   now?: () => Date;
@@ -28,6 +31,11 @@ export interface CoordinatorAssuranceWiring {
   refreshReadiness: (run: AssuranceRun) => Promise<void>;
   walletWatch: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean };
   readiness: TurnkeyReadiness;
+}
+
+/** The approver public key must hash to the digest pinned in settings; anything else is refused with one fixed code. */
+export function assertApproverKeyPin(publicKeyText: string, expectedSha256Hex: string): void {
+  if (!/^[0-9a-fA-F]{64}$/.test(expectedSha256Hex) || createHash('sha256').update(publicKeyText, 'utf8').digest('hex') !== expectedSha256Hex.toLowerCase()) throw new Error('TURNKEY_APPROVER_KEY_PIN_MISMATCH');
 }
 
 async function readJsonIfPresent(path: string): Promise<unknown | undefined> {
@@ -43,6 +51,8 @@ export async function createServiceAssurance(store: CanonicalStoreBridge, inputs
       const config = await readTurnkeySecretConfig(inputs.secretRoot);
       const signed = JSON.parse(await readProtectedText(config.policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED', true)) as unknown;
       const publicKey = await readProtectedText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED', true);
+      // The key file sits beside the record it verifies, so its digest is also pinned in settings the service cannot change.
+      assertApproverKeyPin(publicKey, inputs.approverKeySha256);
       return { signed, publicKey };
     },
     readOptional: (name) => readJsonIfPresent(join(inputs.secretRoot, name === 'rehearsal' ? 'turnkey-signing-rehearsal.json' : 'turnkey-trust-center-review.json')),

@@ -50,7 +50,11 @@ export class ExecutionCoordinator {
   private async refreshReadiness(campaign: Campaign, wallets: readonly string[]): Promise<boolean> {
     const refresh = this.options.refreshReadiness;
     if (!refresh) return false;
-    try { await refresh({ chainId: campaign.chainId, wallets, campaign }); } catch { throw new Error('READINESS_REFRESH_FAILED'); }
+    try { await refresh({ chainId: campaign.chainId, wallets, campaign }); } catch (error) {
+      // Only a fixed, upper-case code may be shown (so the operator sees which check failed); free text from a provider never is.
+      const code = error instanceof Error && /^[A-Z][A-Z0-9_]{2,80}(?::[A-Z0-9_]{1,80})?$/.test(error.message) ? error.message : undefined;
+      throw new Error(code ? `READINESS_REFRESH_FAILED:${code}` : 'READINESS_REFRESH_FAILED');
+    }
     return true;
   }
 
@@ -96,6 +100,8 @@ export class ExecutionCoordinator {
       if (!initial.runtime.dependencies.engine || !initial.runtime.dependencies.chain || !initial.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
       this.assertLiveStoreReady();
       const readiness = (await this.refreshReadiness(campaign, input.wallets ?? [])) ? this.store.snapshot() : initial;
+      // The refresh can take seconds; a kill set meanwhile must still stop this arm.
+      if (readiness.killed) throw new Error('KILLED');
       if (!readiness.runtime.operational?.secretStoreReference || !readiness.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
       assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.assuranceContext(campaign, input.wallets ?? []));
       this.assertWalletWatch(campaign.chainId, input.wallets ?? []);
@@ -150,6 +156,7 @@ export class ExecutionCoordinator {
     if (!current.runtime.dependencies.engine || !current.runtime.dependencies.chain || !current.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
     this.assertLiveStoreReady();
     const readiness = (await this.refreshReadiness(campaign, intent.wallets)) ? this.store.snapshot() : current;
+    if (readiness.killed) throw new Error('KILLED');
     if (!readiness.runtime.operational?.secretStoreReference || !readiness.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
     assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined, this.assuranceContext(campaign, intent.wallets));
     this.assertWalletWatch(campaign.chainId, intent.wallets);
