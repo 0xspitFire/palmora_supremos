@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { encodeFunctionData, parseAbi, zeroAddress, type Hash, type PublicClient } from 'viem';
+import { encodeFunctionData, parseAbi, toFunctionSelector, zeroAddress, type Hash, type PublicClient } from 'viem';
 import { SEADROP_V1_ADDRESS } from '@mint-bot/engine';
-import { createNitroFinalitySources, dryRunDrop, observeFinality, checkFees } from './robinhood-readonly.js';
+import { createNitroFinalitySources, dryRunDrop, explainRevert, observeFinality, checkFees, readSupply, revertDataOf } from './robinhood-readonly.js';
 
 const H = (n: number): Hash => `0x${n.toString(16).padStart(64, '0')}` as Hash;
 
@@ -110,6 +110,49 @@ describe('dry run (E6)', () => {
     expect((await dryRunDrop(dropClient({ mintPrice: 0n, ...open }), nft, [], { now })).summary).toContain('1 to 50 valid wallet');
     expect((await dryRunDrop(dropClient({ mintPrice: 0n, ...open }), nft, ['bad'], { now })).verdict).toBe('blocked');
     expect((await dryRunDrop(dropClient({ mintPrice: 0n, ...open }), nft, [wallet], { now, quantity: 0 })).summary).toContain('whole number');
+  });
+});
+
+describe('why a simulated mint reverted (plain words)', () => {
+  const nft = '0x1111111111111111111111111111111111111111';
+  const wallet = '0x2222222222222222222222222222222222222222';
+  const now = new Date('2026-10-01T12:00:00Z');
+  const open = { startTime: Math.floor(now.getTime() / 1000) - 3600, endTime: Math.floor(now.getTime() / 1000) + 3600 };
+  const withRevert = (data: string | undefined, supply?: { totalSupply: bigint; maxSupply: bigint }): PublicClient => ({
+    ...dropClient({ mintPrice: 0n, ...open }),
+    readContract: async ({ functionName }: { functionName: string }) => {
+      if (functionName === 'getPublicDrop') return { mintPrice: 0n, startTime: open.startTime, endTime: open.endTime, maxTotalMintableByWallet: 5, feeBps: 0, restrictFeeRecipients: false };
+      if (supply && functionName === 'totalSupply') return supply.totalSupply;
+      if (supply && functionName === 'maxSupply') return supply.maxSupply;
+      throw new Error('not implemented');
+    },
+    call: async () => { throw Object.assign(new Error('Execution reverted for an unknown reason.'), { cause: data ? { data } : undefined }); },
+  }) as unknown as PublicClient;
+  const encoded = (signature: string, ...words: bigint[]): string => `${toFunctionSelector(`function ${signature}`)}${words.map((word) => word.toString(16).padStart(64, '0')).join('')}`;
+
+  it('stops with a clear answer when the collection is sold out, without simulating', async () => {
+    const report = await dryRunDrop(withRevert(undefined, { totalSupply: 1000n, maxSupply: 1000n }), nft, [wallet], { now });
+    expect(report).toMatchObject({ verdict: 'blocked', wallets: [], supply: { totalSupply: '1000', maxSupply: '1000', soldOut: true } });
+    expect(report.summary).toContain('sold out (1000 of 1000');
+    expect(await readSupply(withRevert(undefined), nft)).toBeNull();
+  });
+
+  it('names a known SeaDrop error and keeps only the public selector', async () => {
+    const report = await dryRunDrop(withRevert(encoded('MintQuantityExceedsMaxSupply(uint256,uint256)', 1001n, 1000n)), nft, [wallet], { now });
+    expect(report.wallets[0]).toMatchObject({ simulation: 'failed', revertSelector: toFunctionSelector('function MintQuantityExceedsMaxSupply(uint256,uint256)') });
+    expect(report.wallets[0]?.reason).toContain('sold out');
+    expect(explainRevert({ cause: { data: encoded('NotActive(uint256,uint256,uint256)', 5n, 10n, 20n) } }).reason).toContain('not active');
+    expect(explainRevert({ cause: { data: encoded('FeeRecipientNotAllowed()') } }).reason).toContain('allowed list');
+  });
+
+  it('reports an unknown error by selector and an empty revert as such, never printing a long hex string or an address', () => {
+    const unknown = explainRevert({ data: `0xdeadbeef${'ab'.repeat(40)}` });
+    expect(unknown.selector).toBe('0xdeadbeef');
+    expect(unknown.reason).toContain('0xdeadbeef');
+    expect(unknown.reason).not.toContain('abab');
+    expect(explainRevert(new Error('Execution reverted for an unknown reason. https://rpc.example/secret-key-1234567890abcdefghijklmnop')).reason).not.toContain('secret-key');
+    expect(revertDataOf({ cause: { cause: { data: { data: '0x1234abcd' } } } })).toBe('0x1234abcd');
+    expect(revertDataOf(new Error('x'))).toBeUndefined();
   });
 });
 
