@@ -569,6 +569,12 @@ export class DurableRepository {
       if (input.expectedEnablementId !== undefined && input.expectedEnablementId !== latest.id) throw new Error('REVOCATION_RECORD_CHANGED');
       this.db.prepare("INSERT INTO chain_enablement_revocation (id, chain_id, enablement_id, approved_by, revoked_at, confirmation_digest, created_at) VALUES (?, ?, ?, 'owner-cli', ?, ?, ?)").run(input.id, chainId, latest.id, input.revokedAt, input.confirmationDigest, input.revokedAt);
       const profile = this.db.prepare('SELECT id, execution_enabled FROM chain_profile WHERE chain_id = ?').get(chainId) as { id: string; execution_enabled: number } | undefined;
+      // A revoked paid record also takes paid mints out of the chain's fee policy, so that layer follows the owner's paid state too.
+      const activeFee = profile ? this.db.prepare('SELECT * FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(profile.id) as Record<string, unknown> | undefined : undefined;
+      if (profile && activeFee && Number(activeFee['paid_mints_enabled']) === 1) {
+        this.db.prepare('UPDATE fee_policy SET active = 0 WHERE id = ?').run(activeFee['id']);
+        this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)').run(`${String(activeFee['id'])}:revoked:${input.id}`, profile.id, `${String(activeFee['version'])}-paid-revoked`, activeFee['priority_fee_semantics'], activeFee['max_total_fee_wei'], activeFee['free_mint_total_fee_cap_wei'], activeFee['free_mint_priority_fee_component_wei'], activeFee['free_mint_priority_fee_multiplier'], input.revokedAt, activeFee['zero_priority_fee_policy']);
+      }
       if (profile && profile.execution_enabled === 1) {
         this.db.prepare('UPDATE chain_profile SET execution_enabled = 0 WHERE id = ?').run(profile.id);
         this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(`enablement-revoked:${input.id}`, 'chain_profile', profile.id, 'execution_enabled', 'execution_disabled', 'owner-cli', `enablement ${latest.id} revoked by the owner (D-062)`, input.revokedAt);

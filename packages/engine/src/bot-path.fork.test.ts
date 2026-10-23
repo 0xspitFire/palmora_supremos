@@ -208,7 +208,8 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     if (paidMode) {
       expect(records.every((record) => record.maxValueWei > 0n)).toBe(true);
       expect(records.every((record) => record.actualMintValueWei === record.maxValueWei)).toBe(true);
-      expect(records.every((record) => record.actualL1DataGasWei !== undefined)).toBe(true);
+      // An L2 mint always pays some L1 data fee; zero would mean it was not observed at settlement.
+      expect(records.every((record) => record.actualL1DataGasWei !== undefined && record.actualL1DataGasWei > 0n)).toBe(true);
     }
     expect(attempts.length).toBeGreaterThanOrEqual(2);
     expect(receipts.length).toBe(2);

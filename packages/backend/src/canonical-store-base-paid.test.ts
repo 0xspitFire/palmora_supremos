@@ -30,6 +30,11 @@ describe('paid Base admission (D-062)', () => {
       const third = '0x3333333333333333333333333333333333333333';
       const threeWallets = await armed(value, await value.application.createCampaign(paidInput()), [WALLET_ONE, WALLET_TWO, third], [], '-three');
       await expect(value.store.admitExecution(threeWallets.input)).rejects.toThrow('PAID_WALLET_LIMIT_EXCEEDED');
+
+      // Revoking the paid record stops paid Base at admission, and the fee policy no longer allows paid mints either.
+      value.store.revokeBase({ id: 'rev-paid', confirmationDigest: 'c'.repeat(64), expectedEnablementId: 'base-paid' });
+      await expect(value.application.createCampaign(paidInput())).rejects.toThrow(/BASE_EXECUTION_DISABLED|BASE_PAID_MINTS_DISABLED/);
+      expect(value.db.prepare("SELECT paid_mints_enabled AS paid FROM fee_policy WHERE active = 1 AND chain_profile_id = (SELECT id FROM chain_profile WHERE chain_id = 8453)").get()).toEqual({ paid: 0 });
     } finally { await close(value); }
   });
 });
