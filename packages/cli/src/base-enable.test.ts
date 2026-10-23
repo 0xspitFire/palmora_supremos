@@ -37,7 +37,7 @@ describe('base-enable (D-062)', () => {
   });
 
   it('shows the current enablement as lasting until revoked', () => {
-    expect(run(store(current).store, { action: 'status', confirm: undefined }).enabledNow).toEqual({ since: '2026-10-23T10:00:00.000Z', until: 'you revoke it' });
+    expect(run(store(current).store, { action: 'status', confirm: undefined }).enabledNow).toEqual({ since: '2026-10-23T10:00:00.000Z', until: 'you revoke it', paidAllowed: false });
   });
 
   it('revoke: phrase first, then only the exact phrase revokes; nothing to revoke is refused', () => {
@@ -51,5 +51,17 @@ describe('base-enable (D-062)', () => {
 
   it('status and record need the evidence file', () => {
     expect(() => runBaseEnable({ action: 'record', now: NOW, store: store().store as never, newId: () => 'x' })).toThrow('EVIDENCE_FILE_REQUIRED');
+  });
+
+  it('D-062 item 3: --paid needs the two paid steps in the file and its own phrase, and records paidAllowed', () => {
+    const paidFile = JSON.stringify(Object.fromEntries([...BASE_EVIDENCE_STEPS, 'paidRehearsal', 'paidPolicyApproved'].map((step) => [step, { passed: true, checkedOn: '2026-10-23', reference: `${step} evidence reference` }])));
+    const paidDigest = createHash('sha256').update(paidFile).digest('hex');
+    const s = store();
+    expect(String(run(s.store, { action: 'status', evidenceText: paidFile, paid: true, confirm: undefined }).copyThisToRecord)).toContain(`--paid --confirm "ENABLE-BASE-PAID PERMANENT ${paidDigest.slice(0, 8)} LOCAL-ATTENDED"`);
+    expect(() => run(s.store, { evidenceText: paidFile, paid: true, confirm: baseEnablePhrase(paidDigest) })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(run(s.store, { evidenceText: paidFile, paid: true, confirm: baseEnablePhrase(paidDigest, true) })).toMatchObject({ state: 'Enabled', paidAllowed: true });
+    expect(s.writes[0]).toMatchObject({ paidAllowed: true, evidence: { paidRehearsal: true, paidPolicyApproved: true } });
+    // a free file cannot be recorded as paid
+    expect(() => run(store().store, { paid: true, confirm: baseEnablePhrase(digest, true) })).toThrow('EVIDENCE_INCOMPLETE');
   });
 });

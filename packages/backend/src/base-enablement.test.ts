@@ -26,4 +26,16 @@ describe('Base owner enablement', () => {
     expect(() => assertBaseFirstRehearsal({ completed: false, outstanding: true, walletCount: 1, quantity: 1 })).toThrow('BASE_FIRST_REHEARSAL_PENDING_FINALIZATION');
     expect(() => assertBaseFirstRehearsal({ completed: true, outstanding: true, walletCount: 6, quantity: 4 })).not.toThrow();
   });
+
+  it('D-062: a paid record needs both paid keys and the paid flag; only then is paid Base allowed', () => {
+    const paidEvidence = { ...evidence, paidRehearsal: true, paidPolicyApproved: true } as const;
+    const paid = { ...record, expiresAt: '9999-12-31T23:59:59.999Z', paidAllowed: true, evidence: paidEvidence };
+    expect(validBaseEnablement(paid, now)).toEqual(paid);
+    expect(() => assertBaseLiveAllowed('paid', paid, now)).not.toThrow();
+    expect(() => assertBaseLiveAllowed('free', paid, now)).not.toThrow();
+    expect(validBaseEnablement({ ...paid, evidence: { ...evidence, paidRehearsal: true } }, now)).toBeUndefined();
+    expect(validBaseEnablement({ ...paid, paidAllowed: false }, now)).toBeUndefined();
+    expect(validBaseEnablement({ ...paid, evidence: { ...paidEvidence, paidRehearsal: false } }, now)).toBeUndefined();
+    expect(() => assertBaseLiveAllowed('paid', { ...paid, paidAllowed: false, evidence }, now)).toThrow('BASE_PAID_MINTS_DISABLED');
+  });
 });

@@ -146,14 +146,15 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     // The free-mint reserve cap (0.0002 ETH per wallet) bounds padded gas x max fee, so the fee is kept low here.
     fees: { maxFeePerGasGwei: Number(process.env.REHEARSAL_MAX_FEE_GWEI ?? '0.8'), maxPriorityFeePerGasGwei: 0.05, gasLimitPadding: 1.3 },
     safety: {
-      maxSpendEth: chainName === 'base' ? 0.0002 : 0.01,
-      dailySpendCapEth: chainName === 'base' ? 0.0012 : 0.01,
+      // Base: the free D-057 numbers, or in paid mode the D-062 paid numbers (0.0037 per NFT + 0.0002 fee allowance; 0.0082 a day).
+      maxSpendEth: chainName === 'base' ? (paidMode ? 0.0039 : 0.0002) : 0.01,
+      dailySpendCapEth: chainName === 'base' ? (paidMode ? 0.0082 : 0.0012) : 0.01,
       maxReplacementBumps: 0,
       dryRun: false,
       killSwitchFile,
       ...(chainName === 'base' ? {
         freeMintReserveCaps: { perWalletCapWei: 200_000_000_000_000n, activePeriodCapWei: 1_200_000_000_000_000n },
-        baseGrant: { expiresAt: '2099-01-01T00:00:00.000Z', freeAllowed: true as const, paidAllowed: false as const },
+        baseGrant: { expiresAt: '9999-12-31T23:59:59.999Z', freeAllowed: true as const, paidAllowed: paidMode },
       } : {}),
     },
     broadcast: { mode: 'public', rpcEndpoints: chainName === 'base' ? [rpcUrl!, rpcUrl!.replace('127.0.0.1', 'localhost')] : [rpcUrl!], blastParallel: false },

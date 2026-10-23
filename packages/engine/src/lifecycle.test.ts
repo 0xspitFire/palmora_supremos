@@ -54,6 +54,19 @@ describe('Gate 3 lifecycle boundaries', () => {
     expect(() => assertDirectChainExecutionPolicy(1, 1n, false)).not.toThrow();
   });
 
+  it('D-062: paid Base is refused without a current grant that allows paid mints, and allowed with one', () => {
+    const now = new Date('2026-10-23T12:00:00.000Z');
+    const free = { expiresAt: '9999-12-31T23:59:59.999Z', freeAllowed: true as const, paidAllowed: false };
+    const paid = { ...free, paidAllowed: true };
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, undefined, now, undefined)).toThrowError(/Paid Base/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, undefined, now, free)).toThrowError(/Paid Base/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, true, undefined, now, free)).toThrowError(/Paid Base/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, undefined, now, { ...paid, expiresAt: '2026-10-22T00:00:00.000Z' })).toThrowError(/Paid Base/);
+    expect(() => assertDirectChainExecutionPolicy(8453, 1n, false, undefined, now, paid)).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, false, undefined, now, free)).not.toThrow();
+    expect(() => assertDirectChainExecutionPolicy(8453, 0n, false, undefined, now, undefined)).toThrowError(/Base live execution/);
+  });
+
   it('keeps stable canonical run, execution, and intent identity', () => {
     const first = canonicalExecutionIdentity('run_1', 'intent_1', 0, wallet);
     const second = canonicalExecutionIdentity('run_1', 'intent_1', 0, wallet);
