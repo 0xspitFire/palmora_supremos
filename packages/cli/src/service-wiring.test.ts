@@ -55,5 +55,20 @@ describe('outside monitor liveness signal', () => {
     expect(service).toContain("get('HEALTHCHECK_PING_URL')");
     expect(service).toContain('logger.registerSecret(pingUrl)');
     expect(service).toContain('liveness?.stop();');
+
+describe('RPC failover wiring (owner instruction 2026-10-23)', () => {
+  const adapter = read('engine-adapter.ts');
+  const watch = read('fleet-watch-service.ts');
+  const readiness = read('turnkey-readiness-service.ts');
+  it('every service read path uses the failover transport', () => {
+    expect(service).toContain('rpcUrls: (chainId) => [watcherRpcSecretName(chainId), ...chainRpcSecretNames(');
+    expect(service).toContain('EngineIntelligencePort.fromRpcUrls(rpcUrls)');
+    expect(watch).toContain('transport: failoverTransport(urls)');
+    expect(readiness).toContain('transport: failoverTransport(chain.rpcEndpoints)');
+    expect(adapter).toContain('failoverTransport(isBase ? splitBaseEndpoints(config.rpcEndpoints).primary : config.rpcEndpoints)');
+  });
+  it('the CLI read commands fail over too, with the public Robinhood RPC only as the last resort', () => {
+    expect(index).toContain('const urls = rpcUrl ? [rpcUrl] : [...configured, PUBLIC_ROBINHOOD_RPC];');
+    expect(index.match(/failoverTransport\(/g)?.length).toBeGreaterThanOrEqual(7);
   });
 });
