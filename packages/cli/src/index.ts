@@ -27,6 +27,7 @@ import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
 import { ENABLEMENT_DAYS, runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
+import { refreshFinalityEvidence } from './robinhood-evidence-refresh.js';
 import { BASE_ENABLEMENT_DAYS, runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
@@ -764,6 +765,22 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('rpc-url', { type: 'string', describe: 'Override the public Robinhood RPC' }), async (args) => {
       try { process.stdout.write(`${json(await observeFinality(robinhoodReadClient(args.rpcUrl) as never, { minutes: args.minutes, samples: args.samples }))}\n`); }
       catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+    })
+  .command('robinhood-evidence-refresh', 'Owner-run: re-run the finality observation (E3) and write a NEW evidence file with only E3 updated; writes nothing unless finality is proven', (args) => args
+    .option('from', { type: 'string', demandOption: true, describe: 'The current evidence file (never changed)' })
+    .option('out', { type: 'string', demandOption: true, describe: 'The new evidence file to create (must not exist)' })
+    .option('minutes', { type: 'number', default: 30, describe: 'How long to watch (1 to 60); Ethereum finality takes about 15 to 20 minutes' })
+    .option('samples', { type: 'number', default: 5, describe: 'Fresh transactions to follow (3 to 20)' })
+    .option('rpc-url', { type: 'string', describe: 'Override the public Robinhood RPC' }), async (args) => {
+      try {
+        const evidenceText = await readFile(resolve(args.from), 'utf8');
+        const out = resolve(args.out);
+        if (existsSync(out)) throw new Error('OUTPUT_FILE_EXISTS: choose a new file name; the old file is never overwritten');
+        const report = await observeFinality(robinhoodReadClient(args.rpcUrl) as never, { minutes: args.minutes, samples: args.samples });
+        const refreshed = refreshFinalityEvidence({ evidenceText, report, today: new Date() });
+        await writeFile(out, refreshed.text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        process.stdout.write(`${json({ state: 'Refreshed', out, e3: refreshed.reference, summary: report.summary, next: `Run: robinhood-enable status --evidence-file ${out}` })}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); process.exitCode = 1; }
     })
   .command('check-feed', 'Read-only (Robinhood E4): compare the sequencer feed with the RPC', (args) => args
     .option('seconds', { type: 'number', default: 45, describe: 'How long to listen to the feed (5 to 300)' })
