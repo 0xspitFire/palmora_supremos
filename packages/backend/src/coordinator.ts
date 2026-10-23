@@ -9,8 +9,10 @@ import { assertBaseLiveAllowed } from './base-enablement.js';
 import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
 import type { CompensatingAssuranceConfig } from './compensating-controls.js';
 
-const resolveAssurance = (option: CoordinatorAssuranceOption, run: { chainId: number; wallets: readonly string[] }): CompensatingAssuranceConfig | undefined => (option === undefined ? undefined : typeof option === 'function' ? option(run) : option);
-type CoordinatorAssuranceOption = CompensatingAssuranceConfig | ((run: { chainId: number; wallets: readonly string[] }) => CompensatingAssuranceConfig) | undefined;
+const resolveAssurance = (option: CoordinatorAssuranceOption, run: AssuranceRun): CompensatingAssuranceConfig | undefined => (option === undefined ? undefined : typeof option === 'function' ? option(run) : option);
+/** What the arm gate knows about the run being armed or executed. The campaign is the stored one, never the caller's copy. */
+export interface AssuranceRun { chainId: number; wallets: readonly string[]; campaign: Campaign }
+type CoordinatorAssuranceOption = CompensatingAssuranceConfig | ((run: AssuranceRun) => CompensatingAssuranceConfig) | undefined;
 
 export function receiptAuthorizesSettlement(chainId: 1 | 8453 | 4663, receipt: Pick<ReceiptRecord, 'state' | 'finalityStage' | 'robinhoodFinality'>): boolean {
   if (receipt.state !== 'Confirmed' && receipt.state !== 'Failed') return false;
@@ -26,7 +28,7 @@ export class ExecutionCoordinator {
   constructor(
     private readonly store: BackendStore,
     private readonly engine: EngineAdapter,
-    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding; /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: { chainId: number; wallets: readonly string[] }) => CompensatingAssuranceConfig); /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void> } } = {},
+    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding; /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: AssuranceRun) => CompensatingAssuranceConfig); /** T-042 requirement 2: awaited before every live arm and execute so readiness is observed in-process just now, never read from an earlier observation. A failure refuses the run (fail closed). */ refreshReadiness?: (run: AssuranceRun) => Promise<void>; /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void> } } = {},
   ) {
     // T-044 security re-review (D1): the compensated profile counts on the watcher to see what the other checks cannot, so
     // configuring one without the other is a start-up error, not a silently weaker arm gate.
@@ -35,12 +37,25 @@ export class ExecutionCoordinator {
     this.evidence = new EvidenceService(store);
   }
 
-  private assuranceContext(chainId: number, wallets: readonly string[]): { config: CompensatingAssuranceConfig; chainId: number; wallets: readonly string[] } | undefined {
-    const config = resolveAssurance(this.options.compensatingAssurance, { chainId, wallets });
+  private assuranceContext(campaign: Campaign, wallets: readonly string[]): { config: CompensatingAssuranceConfig; chainId: number; wallets: readonly string[] } | undefined {
+    const chainId = campaign.chainId;
+    const config = resolveAssurance(this.options.compensatingAssurance, { chainId, wallets, campaign });
     // A per-run function must supply the funding envelope and the minimum balance for EVERY wallet in this run; without them the funding
     // arrival (D-059 item 3, D-060) would silently not be enforced.
     if (config && typeof this.options.compensatingAssurance === 'function' && !wallets.every(wallet => config.runEnvelopeWei?.[wallet.toLowerCase()] !== undefined && config.minimumBalanceWei?.[wallet.toLowerCase()] !== undefined)) throw new Error('COMPENSATING_ASSURANCE_FUNDING_MISSING');
     return config ? { config, chainId, wallets } : undefined;
+  }
+
+  /** Fresh readiness for a live arm or execute. Without the hook the stored observation is used as before. */
+  private async refreshReadiness(campaign: Campaign, wallets: readonly string[]): Promise<boolean> {
+    const refresh = this.options.refreshReadiness;
+    if (!refresh) return false;
+    try { await refresh({ chainId: campaign.chainId, wallets, campaign }); } catch (error) {
+      // Only a fixed, upper-case code may be shown (so the operator sees which check failed); free text from a provider never is.
+      const code = error instanceof Error && /^[A-Z][A-Z0-9_]{2,80}(?::[A-Z0-9_]{1,80})?$/.test(error.message) ? error.message : undefined;
+      throw new Error(code ? `READINESS_REFRESH_FAILED:${code}` : 'READINESS_REFRESH_FAILED');
+    }
+    return true;
   }
 
   /** D-059 item 6: an unwatched wallet, or a watcher that has gone quiet, cannot be armed or executed. Absent option = no change in behaviour. */
@@ -84,8 +99,11 @@ export class ExecutionCoordinator {
       if (initial.runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED');
       if (!initial.runtime.dependencies.engine || !initial.runtime.dependencies.chain || !initial.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
       this.assertLiveStoreReady();
-      if (!initial.runtime.operational?.secretStoreReference || !initial.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
-      assertLiveOperationalReadiness(initial.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.assuranceContext(campaign.chainId, input.wallets ?? []));
+      const readiness = (await this.refreshReadiness(campaign, input.wallets ?? [])) ? this.store.snapshot() : initial;
+      // The refresh can take seconds; a kill set meanwhile must still stop this arm.
+      if (readiness.killed) throw new Error('KILLED');
+      if (!readiness.runtime.operational?.secretStoreReference || !readiness.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
+      assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.assuranceContext(campaign, input.wallets ?? []));
       this.assertWalletWatch(campaign.chainId, input.wallets ?? []);
       simulationIds = this.evidence.assertLiveEvidence(canonicalInput);
       if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
@@ -137,8 +155,10 @@ export class ExecutionCoordinator {
     if (current.runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED');
     if (!current.runtime.dependencies.engine || !current.runtime.dependencies.chain || !current.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
     this.assertLiveStoreReady();
-    if (!current.runtime.operational?.secretStoreReference || !current.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
-    assertLiveOperationalReadiness(current.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined, this.assuranceContext(campaign.chainId, intent.wallets));
+    const readiness = (await this.refreshReadiness(campaign, intent.wallets)) ? this.store.snapshot() : current;
+    if (readiness.killed) throw new Error('KILLED');
+    if (!readiness.runtime.operational?.secretStoreReference || !readiness.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
+    assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined, this.assuranceContext(campaign, intent.wallets));
     this.assertWalletWatch(campaign.chainId, intent.wallets);
     this.evidence.assertLiveEvidence({ campaign, wallets: intent.wallets, simulationIds: intent.simulationIds, evidenceAt: intent.evidenceAt });
     if (wallets.length !== intent.wallets.length || wallets.some(wallet => !intent.wallets.some(armed => armed.toLowerCase() === wallet.toLowerCase()))) throw new Error('EXECUTION_FLEET_MISMATCH');

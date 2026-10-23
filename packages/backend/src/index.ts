@@ -23,7 +23,7 @@ export { HealthMonitor, scanCauseWords } from './health-monitor.js';
 export type { HealthMonitorOptions, HealthSample } from './health-monitor.js';
 export { ambiguousSubmissionCard, mintBlockedCard, mintConfirmedCard, mintFailedCard, mintSubmittedCard, runStartedCard, runSummaryCard, shortHash } from './live-run-messages.js';
 export type { RunSummaryFacts } from './live-run-messages.js';
-export { ExecutionCoordinator } from './coordinator.js';
+export { ExecutionCoordinator, type AssuranceRun } from './coordinator.js';
 export { Orchestrator, ExecutionOrchestrator, BackendOrchestrator } from './orchestrator.js';
 export type { OrchestratorOptions, OrchestratorStatus, ScheduleExecutionInput, ScheduleJobInput, TickResult } from './orchestrator.js';
 export { BackendApplication, MAX_FREE_TIP_WEI } from './application.js';

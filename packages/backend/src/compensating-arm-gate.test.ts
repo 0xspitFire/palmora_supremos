@@ -49,15 +49,16 @@ const assurance: CompensatingAssuranceConfig = {
 // The compensated profile cannot be configured without the wallet watcher (T-044 security re-review D1), so tests that are not about the
 // watcher give it a healthy one that covers every wallet.
 const HEALTHY_WATCH = { covers: () => true, isHealthy: () => true };
-async function armWith(evidence: CompensatingControlsEvidence, givenOptions: ConstructorParameters<typeof ExecutionCoordinator>[2]): Promise<string> {
+async function armWith(evidence: CompensatingControlsEvidence, givenOptions: ConstructorParameters<typeof ExecutionCoordinator>[2], extra: { skipStoredReadiness?: boolean; onFixture?: (value: Awaited<ReturnType<typeof fixture>>) => void } = {}): Promise<string> {
   const options = givenOptions?.compensatingAssurance !== undefined && !givenOptions.walletWatch ? { ...givenOptions, walletWatch: HEALTHY_WATCH } : givenOptions;
   const value = await fixture(ETHEREUM, false, true, '2099-01-01T00:00:00.000Z', true, undefined, () => FIXTURE_NOW);
+  extra.onFixture?.(value);
   try {
     const created = await campaign(value, ETHEREUM);
     const validated = { campaign: created, wallets: [WALLET_ONE], simulationIds: [] as string[], evidenceAt: FIXTURE_NOW.toISOString() };
     const application = new BackendApplication(value.store, new ExecutionCoordinator(value.store, noopEngine, options));
     await application.command('approve', { validated });
-    await value.store.transaction((state) => { state.runtime.startupState = 'Ready'; state.runtime.dependencies = { engine: true, chain: true, backup: true, notifications: true }; state.runtime.operational = operational(evidence); });
+    await value.store.transaction((state) => { state.runtime.startupState = 'Ready'; state.runtime.dependencies = { engine: true, chain: true, backup: true, notifications: true }; if (!extra.skipStoredReadiness) state.runtime.operational = operational(evidence); });
     try { await application.command('arm', { validated, mode: 'live' }); return 'ARMED'; } catch (error) { return (error as Error).message.split(':')[0]!; }
   } finally { await close(value); }
 }
@@ -86,6 +87,33 @@ describe('compensating controls at the live arm gate', () => {
 
   it('a chain without a configured ceiling cannot arm', async () => {
     expect(await armWith(controls(), { compensatingAssurance: { ...assurance, ceilings: {} }, expectedCustodyPolicy })).toBe('COMPENSATING_CONTROL_BOUNDED_BALANCES_NO_BALANCE_CEILING_FOR_CHAIN');
+  });
+
+  describe('fresh readiness at the arm gate (T-042 requirement 2)', () => {
+    it('awaits the refresh before checking, uses what the refresh just recorded, and passes the stored campaign and wallets', async () => {
+      const seen: Array<{ chainId: number; wallets: readonly string[]; campaignId: string }> = [];
+      let fixtureRef: Awaited<ReturnType<typeof fixture>> | undefined;
+      const refreshReadiness = async (run: { chainId: number; wallets: readonly string[]; campaign: { id: string } }) => {
+        seen.push({ chainId: run.chainId, wallets: run.wallets, campaignId: run.campaign.id });
+        await fixtureRef!.store.transaction((state) => { state.runtime.operational = operational(controls()); });
+      };
+      // nothing is stored beforehand: arming can only get past RUNTIME_READINESS_REQUIRED because the refresh wrote it
+      const result = await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy, refreshReadiness }, { skipStoredReadiness: true, onFixture: (value) => { fixtureRef = value; } });
+      expect(result).toBe('PER_WALLET_SIMULATION_REQUIRED');
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ chainId: ETHEREUM, wallets: [WALLET_ONE] });
+    });
+
+    it('without the hook, nothing stored means the run cannot arm (unchanged behaviour)', async () => {
+      expect(await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy }, { skipStoredReadiness: true })).toBe('RUNTIME_READINESS_REQUIRED');
+    });
+
+    it('fails closed when the refresh fails: the run is refused and the stored observation is not used instead', async () => {
+      const refreshReadiness = async () => { throw new Error('PROVIDER_DOWN secret-detail'); };
+      // a good observation IS stored, yet a failing refresh must still refuse
+      const result = await armWith(controls(), { compensatingAssurance: assurance, expectedCustodyPolicy, refreshReadiness });
+      expect(result).toBe('READINESS_REFRESH_FAILED');
+    });
   });
 
   describe('independent wallet watcher at the arm gate (D-059 item 6)', () => {
