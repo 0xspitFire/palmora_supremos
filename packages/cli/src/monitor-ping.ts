@@ -30,3 +30,23 @@ export function createMonitorPing(address: string, options: { fetchImpl?: typeof
     if (!response.ok) throw new Error(`MONITOR_PING_FAILED_${response.status}`);
   };
 }
+
+/**
+ * Service liveness for the outside monitor when no chain scanning runs (the production service). Every interval it sends "ok"
+ * while the service can still read its own database, and "fail" when it cannot. If the process or the machine stops, the
+ * signals stop and the monitor alerts: that silence is the point. A failed send is reported to `onError` without the address.
+ */
+export function startLivenessPing(ping: MonitorPing, options: { healthy: () => boolean; intervalMs?: number; onError?: (code: string) => void }): { stop(): void; tick(): Promise<void> } {
+  let busy = false;
+  const tick = async (): Promise<void> => {
+    if (busy) return;
+    busy = true;
+    let healthy = false;
+    try { healthy = options.healthy(); } catch { healthy = false; }
+    try { await ping(healthy ? 'ok' : 'fail'); } catch (error) { options.onError?.(error instanceof Error ? error.message : 'MONITOR_PING_FAILED'); } finally { busy = false; }
+  };
+  const timer = setInterval(() => { void tick(); }, options.intervalMs ?? 60_000);
+  timer.unref?.();
+  void tick();
+  return { stop: () => clearInterval(timer), tick };
+}

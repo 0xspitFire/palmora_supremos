@@ -48,3 +48,12 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(build).toContain('node_modules package.json pnpm-lock.yaml; do');
   });
 });
+
+describe('outside monitor liveness signal', () => {
+  it('starts from the production check address when no chain scanning runs, never both, and stops with the service', () => {
+    expect(service).toContain("if (!intelligence && config.secretStorePath) {");
+    expect(service).toContain("get('HEALTHCHECK_PING_URL')");
+    expect(service).toContain('logger.registerSecret(pingUrl)');
+    expect(service).toContain('liveness?.stop();');
+  });
+});
