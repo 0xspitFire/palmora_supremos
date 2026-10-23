@@ -195,3 +195,8 @@ export function resolveChainId(chainName: 'ethereum' | 'base' | 'robinhood'): Su
   }
   return id;
 }
+
+/** The secret names of a chain's RPC providers, primary first (for services that read the host secret store directly). */
+export function chainRpcSecretNames(chainId: SupportedChainId): readonly string[] {
+  return CHAIN_ENV_REFS[chainId] ?? [];
+}

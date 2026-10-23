@@ -27,6 +27,7 @@ import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './f
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
+import { chainRpcSecretNames } from '@mint-bot/engine';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -140,11 +141,13 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const secrets = await loadHostSecretStore(config.secretStorePath);
     const rpcUrl = secrets.get(config.intelligenceRpcName);
     if (!rpcUrl) throw new Error('INTELLIGENCE_RPC_SECRET_MISSING');
-    logger.registerSecret(rpcUrl);
+    // The configured provider first, then Ethereum's other configured providers, so a timeout or failure moves the scan on.
+    const rpcUrls = [...new Set([rpcUrl, ...chainRpcSecretNames(1).map((name) => secrets.get(name)).filter((url): url is string => Boolean(url))])];
+    for (const url of rpcUrls) logger.registerSecret(url);
     const monitorUrl = validMonitorUrl(secrets.get('HEALTHCHECK_PING_URL'));
     if (secrets.get('HEALTHCHECK_PING_URL') && !monitorUrl) logger.warn({ event: 'monitor_url_invalid' }, 'outside monitor address is not a valid https address; no signal will be sent');
     if (monitorUrl) logger.registerSecret(monitorUrl);
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrl(rpcUrl), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
   // D-059: the independent on-chain wallet watcher, only when the owner enables it. Fails the start on a bad setting.
@@ -161,7 +164,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         const outcomes = await Promise.allSettled([engageKillSwitchFile(config.killSwitchPath, reason), runtime.coordinator.kill(reason)]);
         if (outcomes.every((outcome) => outcome.status === 'rejected')) throw new Error('KILL_SWITCH_NOT_ENGAGED');
       },
-      rpcUrl: (chainId) => watchSecrets.get(watcherRpcSecretName(chainId)),
+      // The watcher's own provider first; the engine's providers for that chain keep it watching if that one fails.
+      rpcUrls: (chainId) => [watcherRpcSecretName(chainId), ...chainRpcSecretNames(chainId as 1 | 8453 | 4663)].map((name) => watchSecrets.get(name)).filter((url): url is string => Boolean(url)),
       logger,
     });
     fleetWatcher = started;
