@@ -70,6 +70,7 @@ import { createBroadcaster } from './broadcasters/index.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
 import { assertBaseProviderAgreement, type BaseAgreementClient } from './base-provider-agreement.js';
 import { KillSwitch, SpendTracker } from './safety.js';
+import { failoverTransport } from './rpc-transport.js';
 import { createLogger, childLogger } from './logger.js';
 import { safeEndpointReference } from './endpoint-reference.js';
 import {
@@ -282,13 +283,16 @@ export class MintEngine {
       }
 
       const viemChain = getViemChain(chainId);
-      const publicClient = createPublicClient({
-        chain: viemChain,
-        transport: http(rpcUrl),
-      }) as PublicClient;
       const baseFallbackUrl = chainId === 8453
         ? this.config.broadcast.rpcEndpoints[1] ?? chainConfig.rpcEndpoints.find((endpoint) => endpoint !== rpcUrl)
         : undefined;
+      // Reads fail over to the next configured provider on a timeout or failure. On Base the independent cross-check provider is
+      // kept out of that list, so the agreement check never asks the same provider twice.
+      const readEndpoints = [...new Set([rpcUrl, ...this.config.broadcast.rpcEndpoints, ...chainConfig.rpcEndpoints])].filter((endpoint) => endpoint !== baseFallbackUrl);
+      const publicClient = createPublicClient({
+        chain: viemChain,
+        transport: failoverTransport(readEndpoints),
+      }) as PublicClient;
       if (chainId === 8453 && !this.config.safety.dryRun && (!baseFallbackUrl || baseFallbackUrl === rpcUrl)) {
         throw new MintError(MintErrorType.RPC_ERROR, 'Base live execution requires an independent fallback RPC');
       }

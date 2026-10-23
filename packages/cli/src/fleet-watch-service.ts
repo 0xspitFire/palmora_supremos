@@ -1,4 +1,4 @@
-import { createPublicClient, http } from 'viem';
+import { createPublicClient } from 'viem';
 import {
   DEFAULT_IDLE_BALANCE_CEILINGS,
   FleetWatcher,
@@ -9,6 +9,7 @@ import {
   type WatchTarget,
   type WatcherAlertSink,
 } from '@mint-bot/backend';
+import { failoverTransport } from '@mint-bot/engine';
 
 /**
  * D-059 item 6 wiring: starts the independent on-chain watcher inside the existing service. Off unless the owner sets
@@ -94,8 +95,8 @@ export interface StartFleetWatcherOptions {
   alerts: Pick<AlertManager, 'intelligence'>;
   /** Engages the kill switch for the whole service: the coordinator and the kill file. */
   kill(reason: string): Promise<void>;
-  /** The network provider address for a chain, from the host secret store. */
-  rpcUrl(chainId: number): string | undefined;
+  /** The provider addresses for a chain from the host secret store, the watcher's own first; reads move on when one fails. */
+  rpcUrls(chainId: number): string[];
   logger?: { info(data: Record<string, unknown>, message: string): void; warn(data: Record<string, unknown>, message: string): void; registerSecret?(value: string): void };
   clients?: ReadonlyMap<number, ReaderClient>;
   intervalMs?: number;
@@ -105,10 +106,10 @@ export function startFleetWatcher(options: StartFleetWatcherOptions): { stop(): 
   const clients = options.clients ?? new Map<number, ReaderClient>();
   if (!options.clients) {
     for (const chainId of new Set(options.config.targets.map((target) => target.chainId))) {
-      const url = options.rpcUrl(chainId);
-      if (!url) throw new Error('WATCHER_RPC_SECRET_MISSING');
-      options.logger?.registerSecret?.(url);
-      (clients as Map<number, ReaderClient>).set(chainId, createPublicClient({ transport: http(url) }) as unknown as ReaderClient);
+      const urls = options.rpcUrls(chainId);
+      if (urls.length === 0) throw new Error('WATCHER_RPC_SECRET_MISSING');
+      for (const url of urls) options.logger?.registerSecret?.(url);
+      (clients as Map<number, ReaderClient>).set(chainId, createPublicClient({ transport: failoverTransport(urls) }) as unknown as ReaderClient);
     }
   }
   const watcher = new FleetWatcher({

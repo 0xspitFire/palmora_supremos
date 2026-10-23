@@ -230,3 +230,5 @@ export {
   type RetryAction,
   type RetryDecisionInput,
 } from './gas-strategy.js';
+export { READ_TIMEOUT_MS, failoverTransport, splitBaseEndpoints } from './rpc-transport.js';
+export { chainRpcSecretNames } from './chains.js';
