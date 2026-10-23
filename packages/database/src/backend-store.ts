@@ -103,6 +103,7 @@ export class SqliteBackendStore implements BackendStore {
   public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string }): void { this.repository.enableBase(record, chain); }
   public latestBaseEnablement(): BaseEnablementRow | undefined { return this.repository.latestBaseEnablement(); }
   public disableBaseIfNotEnabled(now: Date): boolean { return this.repository.disableBaseIfNotEnabled(now); }
+  public revokeEnablement(chainId: 4663 | 8453, input: { id: string; revokedAt: string; confirmationDigest: string }): { enablementId: string } { return this.repository.revokeEnablement(chainId, input); }
   public recordRetentionEvidence(record: RetentionEvidenceRecord): void { this.repository.recordRetentionEvidence(record); }
   public settleExecution(id: string, mintValueWei: bigint, l2ExecutionGasWei: bigint, l1DataGasWei: bigint): void { this.reservations.settleExecution(id, mintValueWei, l2ExecutionGasWei, l1DataGasWei); }
   public settleExecutionComponents(id: string, components: SettlementComponents, at?: Date): void { this.reservations.settleExecutionComponents(id, components, at); }

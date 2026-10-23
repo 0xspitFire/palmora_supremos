@@ -60,6 +60,8 @@ function judge(value: unknown, now: Date): RobinhoodEnablement | undefined {
 
 /** The error code each kind of refusal has always used, so callers and tests see no change while Key 2 is absent. */
 export const ROBINHOOD_EXECUTION_DISABLED = 'ROBINHOOD_EXECUTION_DISABLED';
+/** D-062: the expiry written on every new Base or Robinhood enablement, meaning "until the owner revokes it". */
+export const PERMANENT_ENABLEMENT_EXPIRY = '9999-12-31T23:59:59.999Z';
 export const ROBINHOOD_PAID_MINTS_DISABLED = 'ROBINHOOD_PAID_MINTS_DISABLED';
 
 /** Throws unless Key 2 allows this kind of Robinhood live mint. */

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { validRobinhoodEnablement } from '@mint-bot/backend';
+import { PERMANENT_ENABLEMENT_EXPIRY, validRobinhoodEnablement } from '@mint-bot/backend';
 
 /**
  * Owner command rules for switching Robinhood on (T-032 part B, D-040, D-050, D-051). Pure: it reads nothing and writes nothing.
@@ -15,7 +15,6 @@ export type EvidenceStep = typeof EVIDENCE_STEPS[number];
 export const PAID_EVIDENCE_STEPS = ['paidRehearsal', 'paidPolicyApproved'] as const;
 export type PaidEvidenceStep = typeof PAID_EVIDENCE_STEPS[number];
 export const MAX_EVIDENCE_AGE_DAYS = 30;
-export const ENABLEMENT_DAYS = 7;
 
 export const STEP_MEANING: Readonly<Record<EvidenceStep, string>> = {
   E1: 'survey: public mints are common on Robinhood',
@@ -79,9 +78,14 @@ export function checkEvidenceFile(text: string, now: Date, paid = false): Eviden
   return { ok, problems, fileDigest };
 }
 
-/** The phrase names the evidence file (first 8 characters of its digest) and the length of the enablement, so a stale or copied phrase does not match. */
-export function enablePhrase(fileDigest: string, days = ENABLEMENT_DAYS, paid = false): string {
-  return `ENABLE-ROBINHOOD-${paid ? 'PAID' : 'FREE'} ${days}-DAYS ${fileDigest.slice(0, 8)}`;
+/** The phrase names the evidence file (first 8 characters of its digest) and that the enablement is permanent until revoked (D-062). */
+export function enablePhrase(fileDigest: string, paid = false): string {
+  return `ENABLE-ROBINHOOD-${paid ? 'PAID' : 'FREE'} PERMANENT ${fileDigest.slice(0, 8)}`;
+}
+
+/** The phrase that revokes the current enablement; it names that record, so a copied phrase cannot revoke a later one. */
+export function revokePhrase(recordId: string): string {
+  return `REVOKE-ROBINHOOD ${createHash('sha256').update(recordId, 'utf8').digest('hex').slice(0, 8)}`;
 }
 
 /** What goes into the record as the typed-confirmation digest. */
@@ -93,17 +97,15 @@ export interface EnableFacts {
   evidence: EvidenceCheck;
   ethereumLiveMintProven: boolean;
   confirm: string | undefined;
-  days: number;
   paid: boolean;
 }
 
 /** Throws a plain error unless every condition holds. Nothing is written before this returns. */
 export function assertEnableAllowed(facts: EnableFacts): { phrase: string; digest: string; evidence: Record<EvidenceStep, true> & Partial<Record<PaidEvidenceStep, true>> } {
-  if (!Number.isInteger(facts.days) || facts.days < 1 || facts.days > ENABLEMENT_DAYS) throw new Error(`DAYS_INVALID: use a whole number from 1 to ${ENABLEMENT_DAYS}`);
   if (!facts.ethereumLiveMintProven) throw new Error('ETHEREUM_LIVE_MINT_REQUIRED: one live Ethereum mint must have worked and been confirmed before Robinhood can be switched on');
   const { evidence, fileDigest } = facts.evidence;
   if (!evidence || !fileDigest || facts.evidence.problems.length > 0) throw new Error(`EVIDENCE_INCOMPLETE: ${facts.evidence.problems.join(' ') || 'the evidence file is not usable'}`);
-  const phrase = enablePhrase(fileDigest, facts.days, facts.paid);
+  const phrase = enablePhrase(fileDigest, facts.paid);
   if (typeof facts.confirm !== 'string' || facts.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run robinhood-enable status and copy the phrase it prints exactly');
   return { phrase, digest: confirmationDigest(phrase, fileDigest), evidence };
 }
@@ -113,35 +115,45 @@ export interface EnableStore {
   ethereumLiveMintProven(): boolean;
   robinhoodEnablement(): unknown;
   enableRobinhood(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<EvidenceStep, true> & Partial<Record<PaidEvidenceStep, true>>; paidAllowed: boolean; confirmationDigest: string }): void;
+  revokeRobinhood(input: { id: string; confirmationDigest: string }): { enablementId: string };
 }
 
 /**
  * The whole `robinhood-enable` command after the evidence file has been read. `status` only reads. `record` writes exactly once,
  * and only after `assertEnableAllowed` has returned. Returns what the command prints.
  */
-export function runRobinhoodEnable(input: { action: 'status' | 'record'; evidenceText: string; evidenceFile: string; days: number; paid?: boolean; confirm: string | undefined; now: Date; store: EnableStore; newId: () => string }): Record<string, unknown> {
+export function runRobinhoodEnable(input: { action: 'status' | 'record' | 'revoke'; evidenceText?: string; evidenceFile?: string; paid?: boolean; confirm: string | undefined; now: Date; store: EnableStore; newId: () => string }): Record<string, unknown> {
   const { store, now } = input;
+  const current = validRobinhoodEnablement(store.robinhoodEnablement(), now);
+  if (input.action === 'revoke') {
+    if (!current) throw new Error('NOTHING_TO_REVOKE: Robinhood is not enabled');
+    const phrase = revokePhrase(current.recordId);
+    if (input.confirm !== phrase) return { state: 'ConfirmToRevoke', message: 'Revoking switches Robinhood execution off at once. Runs already in flight are not undone; new ones are refused.', enabledSince: current.approvedAt, copyThisToRevoke: `robinhood-enable revoke --confirm "${phrase}"` };
+    const revoked = store.revokeRobinhood({ id: input.newId(), confirmationDigest: confirmationDigest(phrase, current.recordId) });
+    return { state: 'Revoked', message: 'Robinhood execution is off. Record a new enablement to switch it on again.', revokedEnablement: revoked.enablementId };
+  }
+  if (input.evidenceText === undefined || input.evidenceFile === undefined) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
   const paid = input.paid === true;
   const evidence = checkEvidenceFile(input.evidenceText, now, paid);
   const proven = store.ethereumLiveMintProven();
-  const current = validRobinhoodEnablement(store.robinhoodEnablement(), now);
+  const enabledNow = current ? { since: current.approvedAt, until: current.expiresAt === PERMANENT_ENABLEMENT_EXPIRY ? 'you revoke it' : current.expiresAt, paidAllowed: current.paidAllowed } : null;
   if (input.action === 'status') {
     const ready = proven && evidence.problems.length === 0 && evidence.fileDigest !== undefined;
     return {
       state: ready ? 'ReadyToRecord' : 'NotReady',
-      message: ready ? `Everything checks out. Recording switches Robinhood ${paid ? 'paid and free' : 'free'} execution on for ${input.days} day(s).` : 'Not ready yet. Fix the items below.',
+      message: ready ? `Everything checks out. Recording switches Robinhood ${paid ? 'paid and free' : 'free'} execution on until you revoke it (D-062).` : 'Not ready yet. Fix the items below.',
       ethereumLiveMintConfirmed: proven,
       steps: [
         ...EVIDENCE_STEPS.map((step) => ({ step, meaning: STEP_MEANING[step], ok: evidence.ok.includes(step) })),
-        ...(paid ? PAID_EVIDENCE_STEPS.map((step) => ({ step, meaning: step === 'paidRehearsal' ? 'paid fork rehearsal passed' : 'D-041 paid policy approved', ok: evidence.evidence?.[step] === true })) : []),
+        ...(paid ? PAID_EVIDENCE_STEPS.map((step) => ({ step, meaning: step === 'paidRehearsal' ? 'paid fork rehearsal passed' : 'D-041 paid policy approved (D-062)', ok: evidence.evidence?.[step] === true })) : []),
       ],
       problems: [...(proven ? [] : ['No confirmed live Ethereum mint yet (D-040 item 6).']), ...evidence.problems],
-      currentlyEnabledUntil: current?.expiresAt ?? null,
-      ...(ready && evidence.fileDigest ? { copyThisToRecord: `robinhood-enable record --evidence-file ${input.evidenceFile} --days ${input.days}${paid ? ' --paid' : ''} --confirm "${enablePhrase(evidence.fileDigest, input.days, paid)}"` } : {}),
+      enabledNow,
+      ...(ready && evidence.fileDigest ? { copyThisToRecord: `robinhood-enable record --evidence-file ${input.evidenceFile}${paid ? ' --paid' : ''} --confirm "${enablePhrase(evidence.fileDigest, paid)}"` } : {}),
+      ...(current ? { toRevoke: 'robinhood-enable revoke (prints the phrase to type)' } : {}),
     };
   }
-  const allowed = assertEnableAllowed({ evidence, ethereumLiveMintProven: proven, confirm: input.confirm, days: input.days, paid });
-  const expiresAt = new Date(now.getTime() + input.days * 86_400_000).toISOString();
-  store.enableRobinhood({ id: input.newId(), approvedAt: now.toISOString(), expiresAt, evidence: allowed.evidence, paidAllowed: paid, confirmationDigest: allowed.digest });
-  return { state: 'Enabled', message: `Robinhood ${paid ? 'paid and free' : 'free'} execution is on until ${expiresAt}.${paid ? '' : ' Paid mints stay blocked.'} The service switches it off by itself when this expires; the kill switch still stops everything.`, expiresAt, paidAllowed: paid };
+  const allowed = assertEnableAllowed({ evidence, ethereumLiveMintProven: proven, confirm: input.confirm, paid });
+  store.enableRobinhood({ id: input.newId(), approvedAt: now.toISOString(), expiresAt: PERMANENT_ENABLEMENT_EXPIRY, evidence: allowed.evidence, paidAllowed: paid, confirmationDigest: allowed.digest });
+  return { state: 'Enabled', message: `Robinhood ${paid ? 'paid and free' : 'free'} execution is on until you revoke it (robinhood-enable revoke).${paid ? '' : ' Paid mints stay blocked.'} The kill switch still stops everything at once.`, paidAllowed: paid };
 }

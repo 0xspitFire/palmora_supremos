@@ -1,6 +1,6 @@
 export * from './types.js';
 export { BASE_EVIDENCE_STEPS, assertBaseFirstRehearsal, assertBaseLiveAllowed, validBaseEnablement, type BaseEnablement, type BaseEvidenceStep } from './base-enablement.js';
-export { ROBINHOOD_EVIDENCE_STEPS, assertRobinhoodLiveAllowed, validRobinhoodEnablement, type RobinhoodEnablement, type RobinhoodEvidenceStep } from './robinhood-enablement.js';
+export { PERMANENT_ENABLEMENT_EXPIRY, ROBINHOOD_EVIDENCE_STEPS, assertRobinhoodLiveAllowed, validRobinhoodEnablement, type RobinhoodEnablement, type RobinhoodEvidenceStep } from './robinhood-enablement.js';
 export { PauseWatch, type PauseSpan } from './pause-watch.js';
 export { DurableStore } from './store.js';
 export type { BackendStore } from './store.js';

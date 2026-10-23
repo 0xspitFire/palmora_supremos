@@ -541,6 +541,39 @@ export class DurableRepository {
 
   /** The newest enablement row (it alone decides), or undefined. Validity at a time is the caller's judgement (see `robinhoodEnabledAt`). */
   public latestRobinhoodEnablement(): RobinhoodEnablementRow | undefined {
+    // D-062: a revoked enablement counts as none, so everything downstream (policy, guards, the off-switch tick) sees "not enabled".
+    const latest = this.newestRobinhoodEnablementRow();
+    return latest && !this.isRevoked(latest.id) ? latest : undefined;
+  }
+
+  /** The owner's revocation of an enablement (D-062), if any. */
+  public enablementRevocation(enablementId: string): { revokedAt: string; id: string } | undefined {
+    const row = this.db.prepare('SELECT id, revoked_at FROM chain_enablement_revocation WHERE enablement_id = ?').get(enablementId) as { id: string; revoked_at: string } | undefined;
+    return row ? { id: row.id, revokedAt: row.revoked_at } : undefined;
+  }
+
+  private isRevoked(enablementId: string): boolean { return this.enablementRevocation(enablementId) !== undefined; }
+
+  /**
+   * Owner command only (D-062). Ends the newest enablement of a chain: writes the immutable revocation row and switches the chain
+   * off, in one transaction. Refuses when there is nothing current to revoke.
+   */
+  public revokeEnablement(chainId: 4663 | 8453, input: { id: string; revokedAt: string; confirmationDigest: string }): { enablementId: string } {
+    if (!/^[0-9a-f]{64}$/.test(input.confirmationDigest)) throw new Error('Revocation requires a confirmation digest');
+    return this.immediate(() => {
+      const latest = chainId === 4663 ? this.newestRobinhoodEnablementRow() : this.newestBaseEnablementRow();
+      if (!latest || this.isRevoked(latest.id)) throw new Error('NOTHING_TO_REVOKE');
+      this.db.prepare("INSERT INTO chain_enablement_revocation (id, chain_id, enablement_id, approved_by, revoked_at, confirmation_digest, created_at) VALUES (?, ?, ?, 'owner-cli', ?, ?, ?)").run(input.id, chainId, latest.id, input.revokedAt, input.confirmationDigest, input.revokedAt);
+      const profile = this.db.prepare('SELECT id, execution_enabled FROM chain_profile WHERE chain_id = ?').get(chainId) as { id: string; execution_enabled: number } | undefined;
+      if (profile && profile.execution_enabled === 1) {
+        this.db.prepare('UPDATE chain_profile SET execution_enabled = 0 WHERE id = ?').run(profile.id);
+        this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(`enablement-revoked:${input.id}`, 'chain_profile', profile.id, 'execution_enabled', 'execution_disabled', 'owner-cli', `enablement ${latest.id} revoked by the owner (D-062)`, input.revokedAt);
+      }
+      return { enablementId: latest.id };
+    });
+  }
+
+  private newestRobinhoodEnablementRow(): RobinhoodEnablementRow | undefined {
     const row = this.db.prepare('SELECT id, approved_by, approved_at, expires_at, paid_allowed, evidence_json, confirmation_digest, created_at FROM robinhood_enablement ORDER BY rowid DESC LIMIT 1').get() as { id: string; approved_by: string; approved_at: string; expires_at: string; paid_allowed: number; evidence_json: string; confirmation_digest: string; created_at: string } | undefined;
     if (!row) return undefined;
     let evidence: unknown;
@@ -577,6 +610,11 @@ export class DurableRepository {
   }
 
   public latestBaseEnablement(): BaseEnablementRow | undefined {
+    const latest = this.newestBaseEnablementRow();
+    return latest && !this.isRevoked(latest.id) ? latest : undefined;
+  }
+
+  private newestBaseEnablementRow(): BaseEnablementRow | undefined {
     const row = this.db.prepare('SELECT * FROM base_enablement ORDER BY rowid DESC LIMIT 1').get() as Record<string, unknown> | undefined;
     if (!row) return undefined;
     let evidence: unknown;
