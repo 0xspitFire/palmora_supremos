@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AlertManager, DurableStore, type ChainScanOutcome, type DropSnapshot, type IntelligenceChainPort, type IntelligenceRepositoryPort, type SimulationOutcome } from '@mint-bot/backend';
 import { startIntelligence } from './intelligence-service.js';
-import { createMonitorPing, validMonitorUrl } from './monitor-ping.js';
+import { createMonitorPing, startLivenessPing, validMonitorUrl } from './monitor-ping.js';
 
 const URL_OK = 'https://hc-ping.com/11111111-2222-3333-4444-555555555555';
 
@@ -81,5 +81,25 @@ describe('monitor signal from the service', () => {
     await run(() => new Date('2026-10-11T10:00:00.000Z'), async () => { throw new Error('MONITOR_PING_FAILED'); }, logs);
     expect(JSON.stringify(logs)).toContain('MONITOR_PING_FAILED');
     expect(JSON.stringify(logs)).not.toContain('hc-ping');
+  });
+});
+
+describe('service liveness signal (production service without chain scanning)', () => {
+  it('sends ok while the service can read its database, fail when it cannot, and keeps going after a send failure', async () => {
+    const sent: string[] = [];
+    let healthy = true;
+    let failNext = false;
+    const errors: string[] = [];
+    const running = startLivenessPing(async (status) => { if (failNext) { failNext = false; throw new Error('MONITOR_PING_FAILED_503'); } sent.push(status); }, { healthy: () => { if (!healthy) throw new Error('database gone'); return true; }, intervalMs: 3_600_000, onError: (code) => errors.push(code) });
+    await running.tick();
+    healthy = false;
+    await running.tick();
+    failNext = true;
+    healthy = true;
+    await running.tick();
+    await running.tick();
+    running.stop();
+    expect(sent.slice(-3)).toEqual(['ok', 'fail', 'ok']);
+    expect(errors).toEqual(['MONITOR_PING_FAILED_503']);
   });
 });
