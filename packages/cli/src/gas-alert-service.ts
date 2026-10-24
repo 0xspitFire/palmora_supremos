@@ -12,6 +12,10 @@ export interface GasAlertDeps {
   alert(text: string, dedupe: string): Promise<void>;
   now?(): Date;
   log?(event: string, fields?: Record<string, unknown>): void;
+  /** Longest wait for one price (default 15 s). */
+  readTimeoutMs?: number;
+  /** Least time between two messages for the same alert (default 10 minutes). */
+  minGapMs?: number;
 }
 
 const CHAIN_NAMES: Record<number, string> = { 1: 'Ethereum', 8453: 'Base', 4663: 'Robinhood' };
@@ -19,28 +23,34 @@ export const gasAlertSentence = (alert: Pick<GasAlertRow, 'chainId' | 'direction
 
 export function createGasAlertChecker(deps: GasAlertDeps): { tick(): Promise<number> } {
   const crossed = new Map<string, boolean>();
+  const lastSent = new Map<string, number>();
+  const minGap = deps.minGapMs ?? 600_000;
+  const readTimeout = deps.readTimeoutMs ?? 15_000;
   return {
     async tick(): Promise<number> {
       const alerts = deps.alerts();
       const prices = new Map<number, number | undefined>();
       let sent = 0;
       for (const alert of alerts) {
-        if (!prices.has(alert.chainId)) prices.set(alert.chainId, await deps.gasGwei(alert.chainId).catch(() => undefined));
+        if (!prices.has(alert.chainId)) prices.set(alert.chainId, await Promise.race([deps.gasGwei(alert.chainId), new Promise<undefined>((resolve) => { const timer = setTimeout(() => resolve(undefined), readTimeout); timer.unref?.(); })]).catch(() => undefined));
         const price = prices.get(alert.chainId);
         // A price that could not be read changes nothing: no alert and no reset.
         if (price === undefined || !Number.isFinite(price)) continue;
         const threshold = Number(alert.thresholdGwei);
         const isCrossed = alert.direction === 'below' ? price < threshold : price > threshold;
         const was = crossed.get(alert.id) ?? false;
-        crossed.set(alert.id, isCrossed);
-        if (isCrossed && !was) {
-          try { await deps.alert(`Fee alert: ${gasAlertSentence(alert)}. Now ${price.toFixed(4)} gwei.`, `gas-alert:${alert.id}:${(deps.now?.() ?? new Date()).getTime()}`); sent += 1; }
-          catch { deps.log?.('gas_alert_delivery_failed'); }
-        }
+        if (!isCrossed) { crossed.set(alert.id, false); continue; }
+        if (was) continue;
+        const at = (deps.now?.() ?? new Date()).getTime();
+        // A price that keeps flapping across the line is told at most once per gap, with one stable key per gap, so the log cannot grow fast.
+        if (at - (lastSent.get(alert.id) ?? Number.NEGATIVE_INFINITY) < minGap) { crossed.set(alert.id, true); continue; }
+        try { await deps.alert(`Fee alert: ${gasAlertSentence(alert)}. Now ${price.toFixed(4)} gwei.`, `gas-alert:${alert.id}:${Math.floor(at / Math.max(minGap, 1))}`); lastSent.set(alert.id, at); crossed.set(alert.id, true); sent += 1; }
+        // A delivery that failed is tried again on the next pass.
+        catch { deps.log?.('gas_alert_delivery_failed'); }
       }
       // Alerts the owner removed no longer need their state.
       const live = new Set(alerts.map((alert) => alert.id));
-      for (const id of [...crossed.keys()]) if (!live.has(id)) crossed.delete(id);
+      for (const id of [...crossed.keys()]) if (!live.has(id)) { crossed.delete(id); lastSent.delete(id); }
       return sent;
     },
   };

@@ -66,6 +66,9 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(wiring).toContain("alerts: () => bridge.gasAlertRepository().active()");
     expect(wiring).toContain("kind: 'status'");
     expect(service).toContain('gasAlertChecker?.stop()');
+    // The owner's fee alerts go to the owner only: through `alerts`, never through the viewer fan-out.
+    expect(wiring.slice(wiring.indexOf('gasAlertChecker = startGasAlerts'))).toContain('await alerts.intelligence(');
+    expect(wiring.slice(wiring.indexOf('gasAlertChecker = startGasAlerts'))).not.toContain('intelligenceAlerts');
     expect(service.indexOf('gasAlertChecker = startGasAlerts')).toBeGreaterThan(service.indexOf('if (telegramCommandSetup) {'));
     const loop = readFileSync(join(here, 'telegram-command-service.ts'), 'utf8');
     expect(loop).toContain('await options.router.registerMenus?.()');

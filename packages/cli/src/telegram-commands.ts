@@ -197,11 +197,12 @@ export class TelegramCommandRouter {
   public async registerMenus(): Promise<void> {
     const api = this.options.api;
     if (!api.setMyCommands) return;
-    try {
-      await api.setMyCommands([{ command: 'join', description: 'Join with an invite code from the owner' }]);
-      await api.setMyCommands(menuFor('owner'), this.options.ownerUserId);
-      for (const user of this.options.access.activeUsers()) await api.setMyCommands(menuFor('viewer'), user.userId);
-    } catch (error) { this.options.log?.('telegram_menu_failed', { code: errorCode(error) }); }
+    const set = async (commands: BotCommand[], chatId?: number | string): Promise<void> => {
+      try { await api.setMyCommands!(commands, chatId); } catch (error) { this.options.log?.('telegram_menu_failed', { code: errorCode(error) }); }
+    };
+    await set([{ command: 'join', description: 'Join with an invite code from the owner' }]);
+    await set(menuFor('owner'), this.options.ownerUserId);
+    for (const user of this.options.access.activeUsers()) await set(menuFor('viewer'), user.userId);
   }
 
   /** The service restarted: any open session ends (D-063 item 6). */

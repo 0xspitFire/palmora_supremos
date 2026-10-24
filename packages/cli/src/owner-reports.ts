@@ -6,6 +6,15 @@ import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY, ROBINHOOD_
  */
 const CHAINS: ReadonlyArray<{ id: 1 | 8453 | 4663; name: string }> = [{ id: 1, name: 'Ethereum' }, { id: 8453, name: 'Base' }, { id: 4663, name: 'Robinhood' }];
 const DAY_MS = 86_400_000;
+/**
+ * A name from outside (a contract's `name()`, a discovered collection) is untrusted text: control and direction-changing characters
+ * are removed, spaces collapsed and the length capped, so it can only ever show as a short plain label.
+ */
+export function cleanName(value: unknown, max = 40): string {
+  const text = typeof value === 'string' ? value : '';
+  const cleaned = text.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g, '').replace(/\s+/g, ' ').trim();
+  return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
+}
 const when = (iso: string): string => iso.slice(0, 16).replace('T', ' ');
 const short = (address: string): string => `${address.slice(0, 6)}…${address.slice(-4)}`;
 
@@ -28,14 +37,15 @@ export function describeLimits(state: Pick<BackendState, 'reservations' | 'campa
     for (const reservation of state.reservations) {
       if (reservation.chainId !== chain.id) continue;
       if (reservation.status === 'reserved') openReservations += 1;
-      const counts = reservation.status === 'reserved' || (reservation.status === 'settled' && Date.parse(reservation.updatedAt) >= cutoff);
-      if (counts) used[classOf.get(reservation.campaignId) ?? 'free'] += reservation.amountWei;
+      const counts = reservation.status === 'reserved' || (reservation.status === 'settled' && !(Date.parse(reservation.updatedAt) < cutoff));
+      // Like the guard: a reservation whose class is unknown counts in both, so the report never shows more room than the guard allows.
+      if (counts) { const kind = classOf.get(reservation.campaignId); if (kind === undefined || kind === 'free') used.free += reservation.amountWei; if (kind === undefined || kind === 'paid') used.paid += reservation.amountWei; }
     }
     const left = (cap: bigint, spent: bigint): string => formatEth(cap > spent ? cap - spent : 0n);
-    lines.push(`${chain.name}: free ${formatEth(used.free)} of ${formatEth(caps.free)} ETH (${left(caps.free, used.free)} left)${caps.paid > 0n ? `, paid ${formatEth(used.paid)} of ${formatEth(caps.paid)} ETH (${left(caps.paid, used.paid)} left)` : ''}`);
+    lines.push(`${chain.name}: free ${formatEth(used.free)} of ${formatEth(caps.free)} ETH (${left(caps.free, used.free)} left)${caps.paid > 0n && chain.id !== 4663 ? `, paid ${formatEth(used.paid)} of ${formatEth(caps.paid)} ETH (${left(caps.paid, used.paid)} left)` : ''}`);
   }
   lines.push(`Per wallet, per free mint: Robinhood ${formatEth(ROBINHOOD_FREE_PER_WALLET_CAP_WEI)} ETH, Base ${formatEth(BASE_PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei)} ETH, Ethereum ${formatEth(PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei)} ETH (the fee allowance).`);
-  lines.push(`Reservations still open: ${openReservations}.`);
+  lines.push(`Reservations still open: ${openReservations}. (A close view of what the guards count at admission; the guards decide.)`);
   return lines.join('\n');
 }
 
@@ -48,7 +58,7 @@ export function describeHistory(state: Pick<BackendState, 'runs' | 'campaigns' |
     const campaign = campaigns.get(run.campaignId);
     const receipts = state.receipts.filter((receipt) => receipt.runId === run.id);
     const confirmed = receipts.filter((receipt) => receipt.state === 'Confirmed');
-    const wallets = state.reservations.filter((reservation) => reservation.runId === run.id).length;
+    const wallets = state.reservations.filter((reservation) => reservation.runId === run.id && reservation.status !== 'released').length;
     const spent = receipts.reduce((total, receipt) => total + (receipt.actualSpendWei ?? 0n), 0n);
     return { run, campaign, wallets, minted: confirmed.length, nfts: confirmed.length * (campaign?.quantity ?? 0), spent };
   });
@@ -77,7 +87,7 @@ export function describeActivity(events: BackendState['events'], labels: Readonl
     if (seen.has(contract)) continue;
     seen.add(contract);
     const minters = (event.data.watchedMinters as unknown[]).map((address) => { const key = String(address).toLowerCase(); return labels.get(key) ?? short(key); });
-    const name = typeof event.data.collectionName === 'string' ? event.data.collectionName : 'unnamed';
+    const name = cleanName(event.data.collectionName) || 'unnamed';
     lines.push(`• ${when(event.at)} UTC — ${name} ${contract ? short(contract) : ''} — ${[...new Set(minters)].slice(0, 4).join(', ')}${typeof event.data.score === 'number' ? ` (score ${event.data.score})` : ''}${contract ? `\n  ${contract}` : ''}`);
     if (lines.length > limit) break;
   }

@@ -4,7 +4,7 @@ import { createPublicClient, formatEther, formatGwei, http as httpTransport, par
 import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import type { GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
-import { describeActivity, describeHistory, describeLimits } from './owner-reports.js';
+import { cleanName, describeActivity, describeHistory, describeLimits } from './owner-reports.js';
 import { gasAlertSentence } from './gas-alert-service.js';
 import type { TelegramActions, TelegramRole } from './telegram-commands.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -67,6 +67,8 @@ export interface TelegramActionDeps {
   /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
   nftBalance?: (chainId: number, contract: string, wallet: string) => Promise<bigint>;
   nftName?: (chainId: number, contract: string) => Promise<string | undefined>;
+  /** T-066: how `/eligible` checks one drop (default: the same check as `/check`). Tests supply their own. */
+  dropCheck?: (chain: string, contract: string) => Promise<string>;
   /** Robinhood dry run (default: read the chain). Tests supply their own. */
   robinhoodDryRun?: (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date) => Promise<DryRunReport>;
   robinhoodLatestBlock?: () => Promise<{ number: bigint; hash: string }>;
@@ -203,13 +205,13 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const items = new Phase2ReadModelService(now).opportunities(deps.store.snapshot()).data ?? [];
       const top = [...items].sort((left, right) => (right.score.value ?? -1) - (left.score.value ?? -1)).slice(0, 8);
       if (top.length === 0) return 'No opportunities found yet.';
-      return ['Top opportunities:', ...top.map((item) => `• ${item.project.name ?? 'Unnamed'} ${item.project.contract ? short(item.project.contract) : ''} — ${item.chain.name}, score ${item.score.value ?? '?'}${item.price?.amount ? `, ${formatEth(BigInt(item.price.amount.value))} ETH` : ''}${item.openingAt ? `, opens ${minutes(item.openingAt)} UTC` : ''}${item.project.contract ? `\n  ${item.project.contract}` : ''}`)].join('\n');
+      return ['Top opportunities:', ...top.map((item) => `• ${cleanName(item.project.name) || 'Unnamed'} ${item.project.contract ? short(item.project.contract) : ''} — ${chainName(Number(item.chain.id))}, score ${item.score.value ?? '?'}${item.price?.amount ? `, ${formatEth(BigInt(item.price.amount.value))} ETH` : ''}${item.openingAt ? `, opens ${minutes(item.openingAt)} UTC` : ''}${item.project.contract ? `\n  ${item.project.contract}` : ''}`)].join('\n');
     },
     async calendar() {
       const entries = new Phase2ReadModelService(now).calendar(deps.store.snapshot()).data ?? [];
       const upcoming = [...entries].filter((entry) => entry.openingAt).sort((left, right) => (left.openingAt ?? '').localeCompare(right.openingAt ?? '')).slice(0, 10);
       if (upcoming.length === 0) return 'Nothing on the calendar yet.';
-      return ['Mint calendar (UTC):', ...upcoming.map((entry) => `• ${minutes(entry.openingAt!)} — ${entry.project.name ?? 'Unnamed'} on ${entry.chain.name}, ${entry.price.amount ? `${formatEth(BigInt(entry.price.amount.value))} ETH` : 'price unknown'}, ${entry.publicStatus}${entry.project.contract ? `\n  ${entry.project.contract}` : ''}`)].join('\n');
+      return ['Mint calendar (UTC):', ...upcoming.map((entry) => `• ${minutes(entry.openingAt!)} — ${cleanName(entry.project.name) || 'Unnamed'} on ${chainName(Number(entry.chain.id))}, ${entry.price.amount ? `${formatEth(BigInt(entry.price.amount.value))} ETH` : 'price unknown'}, ${entry.publicStatus}${entry.project.contract ? `\n  ${entry.project.contract}` : ''}`)].join('\n');
     },
     async check(chainText, contract, includeFleet) {
       if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
@@ -386,10 +388,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (upcoming.length === 0) return 'No upcoming or open drops are on the calendar. /drops shows what discovery found.';
       const blocks: string[] = [];
       for (const entry of upcoming) {
-        const chain = CHAINS.find((item) => String(item.id) === entry.chain.id || item.name.toLowerCase() === entry.chain.name.toLowerCase());
+        // By id only: the calendar's own chain name calls every chain but Robinhood "Ethereum".
+        const chain = CHAINS.find((item) => String(item.id) === entry.chain.id);
         if (!chain) continue;
-        const text = await actions.check(chain.name.toLowerCase(), entry.project.contract!, true).catch((error: unknown) => `could not be checked (${error instanceof Error ? error.message.split(':')[0] : 'error'})`);
-        blocks.push(`${entry.openingAt ? `${minutes(entry.openingAt)} UTC — ` : ''}${entry.project.name ?? 'Unnamed'}\n${text}`);
+        const text = await (deps.dropCheck ? deps.dropCheck(chain.name.toLowerCase(), entry.project.contract!) : actions.check(chain.name.toLowerCase(), entry.project.contract!, true)).catch((error: unknown) => `could not be checked (${error instanceof Error ? error.message.split(':')[0] : 'error'})`);
+        blocks.push(`${entry.openingAt ? `${minutes(entry.openingAt)} UTC — ` : ''}${cleanName(entry.project.name) || 'Unnamed'}\n${text}`);
       }
       return blocks.length === 0 ? 'No drop on the calendar is on a chain MintBot can check.' : ['Upcoming drops against your wallets:', ...blocks].join('\n\n');
     },
@@ -405,16 +408,17 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (campaignsMinted.size === 0) return 'MintBot has not minted anything yet, so there is nothing to show. (This lists NFTs from MintBot\'s own mints; a full portfolio needs an outside data service, which is not set up.)';
       const wallets = (await deps.walletList()).slice(0, 12);
       const lines = ['NFTs your wallets hold from MintBot mints:'];
+      if (campaignsMinted.size > 6) lines.push(`(showing the first 6 of ${campaignsMinted.size} contracts)`);
+      if (wallets.length > 10) lines.push(`(showing the first 10 of ${wallets.length} wallets)`);
       const balance = deps.nftBalance ?? (async (chainId: number, contract: string, wallet: string) => (await client(chainId as ChainId)).readContract({ address: contract as Address, abi: ERC721_BALANCE_ABI, functionName: 'balanceOf', args: [wallet as Address] }));
       const nameOf = deps.nftName ?? (async (chainId: number, contract: string) => (await client(chainId as ChainId)).readContract({ address: contract as Address, abi: ERC721_NAME_ABI, functionName: 'name' }).catch(() => undefined));
-      for (const item of [...campaignsMinted.values()].slice(0, 8)) {
-        const held: string[] = [];
-        let total = 0n;
-        for (const wallet of wallets) {
-          try { const count = await balance(item.chainId, item.contract, wallet); if (count > 0n) { held.push(`${short(wallet)} ${count}`); total += count; } }
-          catch { held.push(`${short(wallet)} unreadable`); }
-        }
-        const name = await nameOf(item.chainId, item.contract).catch(() => undefined);
+      // Each read has its own short time limit and the wallets of one contract are read together, so a slow provider cannot hold the reply.
+      const within = <T,>(work: Promise<T>): Promise<T> => Promise.race([work, new Promise<never>((_resolve, reject) => { const timer = setTimeout(() => reject(new Error('TIMED_OUT')), 8_000); timer.unref?.(); })]);
+      for (const item of [...campaignsMinted.values()].slice(0, 6)) {
+        const reads = await Promise.all(wallets.slice(0, 10).map(async (wallet) => { try { return { wallet, count: await within(balance(item.chainId, item.contract, wallet)) }; } catch { return { wallet, count: undefined }; } }));
+        const held = reads.flatMap((read) => read.count === undefined ? [`${short(read.wallet)} unreadable`] : read.count > 0n ? [`${short(read.wallet)} ${read.count}`] : []);
+        const total = reads.reduce((sum, read) => sum + (read.count ?? 0n), 0n);
+        const name = cleanName(await within(nameOf(item.chainId, item.contract)).catch(() => undefined));
         lines.push(`• ${chainName(item.chainId)} ${name ? `${name} ` : ''}${short(item.contract)}: ${total} NFT(s)${held.length > 0 ? ` — ${held.join(', ')}` : ''}`);
       }
       return lines.join('\n');
@@ -427,8 +431,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const chainId = chainFrom(chainText);
       const way = direction.toLowerCase();
       if (way !== 'below' && way !== 'above') throw new Error('DIRECTION_INVALID: use below or above');
-      if (!Number.isFinite(gwei) || gwei <= 0 || gwei > 100_000) throw new Error('GWEI_OUT_OF_RANGE: use a number above 0 and at most 100000');
-      const row = deps.gasAlerts().add(chainId, way, String(gwei));
+      if (!Number.isFinite(gwei) || gwei < 0.0001 || gwei > 100_000) throw new Error('GWEI_OUT_OF_RANGE: use a number from 0.0001 to 100000');
+      // A plain decimal with at most 4 places (never 1e-7 or a long tail), which the database accepts.
+      const threshold = String(Number(gwei.toFixed(4)));
+      if (deps.gasAlerts().active().length >= 20) throw new Error('TOO_MANY_ALERTS: you have 20 fee alerts; remove one with /gasalert remove <id> first');
+      const row = deps.gasAlerts().add(chainId, way, threshold);
       return `Fee alert set: ${gasAlertSentence(row)} (id ${row.id.slice(-6)}). I will message you when it crosses.`;
     },
     async gasAlertRemove(id) {

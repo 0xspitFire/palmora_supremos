@@ -280,6 +280,75 @@ describe('Telegram actions', () => {
       expect(await none.holdings()).toContain('has not minted anything yet');
     });
 
+    describe('/eligible', () => {
+      const C = (n: number) => `0x${n.toString(16).padStart(40, '0')}`;
+      const event = (n: number, chainId: number, openingAt: string, closingAt?: string) => ({ id: `ev${n}`, type: 'calendar_entry', at: '2026-10-24T10:00:00.000Z', data: { id: `cal${n}`, chainId, contract: C(n), projectName: `Drop ${n}`, openingAt, ...(closingAt ? { closingAt } : {}), priceWei: '0' } });
+      const build = (events: unknown[], campaigns: unknown[] = [], dropCheck?: (chain: string, contract: string) => Promise<string>) => {
+        const asked: string[] = [];
+        const store = { snapshot: () => ({ schemaVersion: 1, events, campaigns, runs: [], intents: [], attempts: [], receipts: [], reconciliations: [], reservations: [], simulations: [], chainEvidence: [], readiness: [], jobs: [], notificationOutbox: [], runtime: { startupState: 'Ready', blockingReasons: [], dependencies: {} }, killed: false }) };
+        const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T12:00:00.000Z'), dropCheck: dropCheck ?? (async (chain, contract) => { asked.push(`${chain}:${contract.slice(-2)}`); return `checked ${chain}`; }) }));
+        return { actions, asked };
+      };
+
+      it('checks each upcoming drop on its own chain, by id (a prepared Base campaign is Base, not Ethereum), soonest first', async () => {
+        const base = { id: 'cmp_base', chainId: 8453, contract: C(9), strategy: 'seadrop-v1-public', mintPriceWei: 0n, quantity: 1, dryRun: false, createdAt: 'x', updatedAt: 'x', chainVerification: { chainId: 8453, status: 'verified' }, feePolicy: { kind: 'free' }, spendPolicy: {} };
+        const { actions, asked } = build([event(1, 1, '2026-10-24T14:00:00.000Z'), event(2, 4663, '2026-10-24T13:00:00.000Z')], [base]);
+        const text = await actions.eligible();
+        expect(asked).toEqual(expect.arrayContaining(['ethereum:01', 'robinhood:02', 'base:09']));
+        expect(asked).toHaveLength(3);
+        expect(text).toContain('Upcoming drops against your wallets');
+        expect(text.indexOf('Drop 2')).toBeLessThan(text.indexOf('Drop 1'));
+      });
+
+      it('leaves out a drop that has closed, looks at four drops at most, and says when none is left', async () => {
+        const six = [1, 2, 3, 4, 5, 6].map((n) => event(n, 1, `2026-10-24T${12 + n}:00:00.000Z`));
+        const { actions, asked } = build([event(7, 1, '2026-10-24T08:00:00.000Z', '2026-10-24T09:00:00.000Z'), ...six]);
+        await actions.eligible();
+        expect(asked).toHaveLength(4);
+        expect(asked).not.toContain('ethereum:07');
+        const none = build([event(7, 1, '2026-10-24T08:00:00.000Z', '2026-10-24T09:00:00.000Z')]);
+        expect(await none.actions.eligible()).toContain('No upcoming or open drops');
+        expect(await build([]).actions.eligible()).toContain('No upcoming or open drops');
+      });
+
+      it('a drop that cannot be checked is reported, and the others still are', async () => {
+        const { actions } = build([event(1, 1, '2026-10-24T13:00:00.000Z'), event(2, 4663, '2026-10-24T14:00:00.000Z')], [], async (chain) => { if (chain === 'ethereum') throw new Error('RPC_UNAVAILABLE: x'); return 'checked robinhood'; });
+        const text = await actions.eligible();
+        expect(text).toContain('could not be checked (RPC_UNAVAILABLE)');
+        expect(text).toContain('checked robinhood');
+      });
+    });
+
+    it('names from outside are cleaned: control and direction characters removed, long names cut', async () => {
+      const { cleanName } = await import('./owner-reports.js');
+      expect(cleanName('Cool\u202e Name\u0000\u200b  here')).toBe('Cool Name here');
+      expect(cleanName('x'.repeat(100))).toHaveLength(40);
+      expect(cleanName(undefined)).toBe('');
+      expect(cleanName(42)).toBe('');
+    });
+
+    it('a fee alert below 0.0001, a 20th-plus alert and a long number are refused plainly', async () => {
+      const { rows, repo } = alertsRepo();
+      const actions = createTelegramActions(deps({ gasAlerts: () => repo as never }));
+      await expect(actions.gasAlertSet('ethereum', 'below', 0.00001)).rejects.toThrow('GWEI_OUT_OF_RANGE');
+      await expect(actions.gasAlertSet('ethereum', 'below', 1e-7)).rejects.toThrow('GWEI_OUT_OF_RANGE');
+      expect(await actions.gasAlertSet('ethereum', 'below', 0.123456789)).toContain('below 0.1235 gwei');
+      for (let index = 1; index < 20; index += 1) await actions.gasAlertSet('base', 'above', index);
+      await expect(actions.gasAlertSet('base', 'above', 50)).rejects.toThrow('TOO_MANY_ALERTS');
+      expect(rows).toHaveLength(20);
+    });
+
+    it('/limits counts a reservation of unknown class in both classes, and /history leaves released reservations out of the wallet count', async () => {
+      const reservation = { id: 'r', runId: 'run1', campaignId: 'gone', chainId: 1, wallet: '0x1', amountWei: 100_000_000_000_000n, status: 'reserved', createdAt: 'x', updatedAt: '2026-10-24T11:00:00.000Z', accountingDate: '2026-10-24' };
+      const store = { snapshot: () => ({ killed: false, campaigns: [], reservations: [reservation], runs: [{ id: 'run1', campaignId: 'c', mode: 'live', state: 'Completed', createdAt: '2026-10-24T10:00:00.000Z' }], receipts: [], events: [] }) };
+      const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T12:00:00.000Z') }));
+      const text = await actions.limits();
+      expect(text).toContain('Ethereum: free 0.0001 of 0.0024 ETH');
+      expect(text).toContain('paid 0.0001 of 0.0082 ETH');
+      expect(text).toContain('the guards decide');
+      expect(text).not.toContain('Robinhood: free 0 of 0.002 ETH (0.002 left), paid');
+    });
+
     it('/limits and /history read what the database holds', async () => {
       const store = { snapshot: () => ({ killed: false, campaigns: [], reservations: [], runs: [], receipts: [], events: [] }) };
       const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T12:00:00.000Z') }));

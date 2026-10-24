@@ -262,17 +262,19 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     });
     telegramCommands = startTelegramCommands({ api, offsets: access, router, log: (event, fields) => logger.warn({ event, ...fields }, event) });
     // T-066: the owner's fee alerts. It only reads each chain's gas price and messages the owner when it crosses a threshold.
-    const gasClients = new Map<number, ReturnType<typeof createPublicClient>>();
+    const gasClients = new Map<number, { reader: ReturnType<typeof createPublicClient>; at: number }>();
     gasAlertChecker = startGasAlerts({
       alerts: () => bridge.gasAlertRepository().active(),
       gasGwei: async (chainId) => {
-        let reader = gasClients.get(chainId);
-        if (!reader) {
+        let cached = gasClients.get(chainId);
+        // The provider list is read again every ten minutes, so a changed or repaired provider is picked up without a restart.
+        if (!cached || Date.now() - cached.at > 600_000) {
           const endpoints = [...(await resolveChainConfigFromSecrets(chainId as 1 | 8453 | 4663, 'mainnet', secretRoot)).rpcEndpoints];
           if (endpoints.length === 0) return undefined;
-          reader = createPublicClient({ transport: failoverTransport(endpoints) });
-          gasClients.set(chainId, reader);
+          cached = { reader: createPublicClient({ transport: failoverTransport(endpoints) }), at: Date.now() };
+          gasClients.set(chainId, cached);
         }
+        const reader = cached.reader;
         return Number(formatGwei(await reader.getGasPrice()));
       },
       alert: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },

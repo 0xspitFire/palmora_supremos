@@ -219,6 +219,15 @@ describe('more owner commands and the Telegram menu (T-066)', () => {
     expect(t.menus).toContainEqual({ chat: String(VIEWER), commands: menuFor('viewer').map((item) => item.command) });
   });
 
+  it('a menu that fails for one chat does not stop the others from being set', async () => {
+    const t = setup();
+    await admitViewer(t);
+    const set: string[] = [];
+    const router = new TelegramCommandRouter({ api: { getUpdates: async () => [], sendMessage: async () => undefined, answerCallback: async () => undefined, deleteMessage: async () => undefined, setMyCommands: async (_commands, chatId) => { if (chatId === undefined) throw new Error('TELEGRAM_SETMYCOMMANDS_FAILED:429'); set.push(String(chatId)); } }, access: t.access, actions: {} as never, ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: t.now });
+    await router.registerMenus();
+    expect(set).toEqual([String(OWNER), String(VIEWER)]);
+  });
+
   it('a menu that cannot be set never stops the bot', async () => {
     const t = setup();
     const failing = new TelegramCommandRouter({ api: { getUpdates: async () => [], sendMessage: async () => undefined, answerCallback: async () => undefined, deleteMessage: async () => undefined, setMyCommands: async () => { throw new Error('TELEGRAM_SETMYCOMMANDS_FAILED:429'); } }, access: t.access, actions: {} as never, ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: t.now });
