@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openDatabase, TelegramAccessRepository } from '@mint-bot/database';
-import { COMMANDS, TelegramCommandRouter, type TelegramActions } from './telegram-commands.js';
+import { COMMANDS, TelegramCommandRouter, menuFor, type TelegramActions } from './telegram-commands.js';
 import type { InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
 import { timeStepAt, totpCode } from './totp.js';
 
@@ -16,11 +16,14 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
   const access = new TelegramAccessRepository(openDatabase(), clock);
   const sent: Array<{ chatId: string; text: string; buttons?: InlineButton[][] }> = [];
   const deleted: number[] = [];
+  const menus: Array<{ chat: string; commands: string[] }> = [];
   const api: TelegramBotApi = {
     getUpdates: async () => [],
     sendMessage: async (chatId, text, buttons) => { sent.push({ chatId: String(chatId), text, ...(buttons ? { buttons } : {}) }); },
     answerCallback: async () => undefined,
     deleteMessage: async (_chat, messageId) => { deleted.push(messageId); },
+    setMyCommands: async (commands, chatId) => { menus.push({ chat: chatId === undefined ? 'default' : String(chatId), commands: commands.map((item) => item.command) }); },
+    deleteMyCommands: async (chatId) => { menus.push({ chat: String(chatId), commands: [] }); },
   };
   const calls: string[] = [];
   let killedAfter: string | undefined;
@@ -30,6 +33,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
     check: ok('check'), plan: ok('plan'),
     requestPreview: async (campaignId, wallets, gwei) => { calls.push(`requestPreview(${campaignId}|${wallets}|${gwei})`); return { text: 'preview', wallets: ['0x1111111111111111111111111111111111111111'], phrase: `LIVE-REQUEST ${campaignId.slice(-8)} 1-WALLETS 0.0002 ${gwei}-GWEI` }; },
     requestCreate: ok('requestCreate'), requests: ok('requests'), runs: ok('runs'), run: ok('run'), watchlist: ok('watchlist'), track: ok('track'), untrack: ok('untrack'),
+    limits: ok('limits'), history: ok('history'), eligible: ok('eligible'), activity: ok('activity'), holdings: ok('holdings'), gasAlerts: ok('gasAlerts'), gasAlertSet: ok('gasAlertSet'), gasAlertRemove: ok('gasAlertRemove'),
     prepare: ok('prepare'), simulate: ok('simulate'), cancel: ok('cancel'), kill: ok('kill'), revoke: ok('revoke'), release: ok('release'), watchAccept: ok('watchAccept'),
     killEngagedSince: (openedAt) => killedAfter !== undefined && killedAfter > openedAt,
   };
@@ -43,7 +47,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
   const send = (update: TelegramUpdate) => router.handle(update);
   const code = (offsetSteps = 0) => totpCode(KEY, timeStepAt(now) + offsetSteps);
   const lastTo = (chat: number) => [...sent].reverse().find((item) => item.chatId === String(chat))?.text ?? '';
-  return { now: clock, access, sent, deleted, calls, records, alerts, router, message, tap, send, code, lastTo, advance: (ms: number) => { now = new Date(now.getTime() + ms); }, killAt: (iso: string) => { killedAfter = iso; } };
+  return { now: clock, menus, access, sent, deleted, calls, records, alerts, router, message, tap, send, code, lastTo, advance: (ms: number) => { now = new Date(now.getTime() + ms); }, killAt: (iso: string) => { killedAfter = iso; } };
 }
 
 const admitViewer = async (t: ReturnType<typeof setup>) => {
@@ -92,7 +96,7 @@ describe('viewers (D-063 item 8)', () => {
     await admitViewer(t);
     const allowed = Object.entries(COMMANDS).filter(([, spec]) => spec.roles.includes('viewer')).map(([name]) => name).sort();
     expect(allowed).toEqual(['calendar', 'check', 'drops', 'gas', 'help', 'menu', 'start', 'status', 'watchlist']);
-    for (const name of ['wallets', 'funding', 'runs', 'run', 'requests', 'request', 'plan', 'health', 'kill', 'unlock', 'release', 'invite', 'users', 'broadcast', 'track', 'prepare', 'cancel', 'revoke']) {
+    for (const name of ['wallets', 'funding', 'runs', 'run', 'requests', 'request', 'plan', 'health', 'kill', 'unlock', 'release', 'invite', 'users', 'broadcast', 'track', 'prepare', 'cancel', 'revoke', 'limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts', 'gasalert']) {
       t.calls.length = 0;
       await t.send(t.message(VIEWER, `/${name} x y z`));
       expect(t.calls, name).toEqual([]);
@@ -161,6 +165,73 @@ describe('viewers (D-063 item 8)', () => {
     await t.send(t.message(OWNER, '/broadcast Drop at 18:00'));
     expect(t.lastTo(VIEWER)).toBe('Message from the owner:\nDrop at 18:00');
     expect(t.lastTo(OWNER)).toBe('Sent to 1 of 1 user(s).');
+  });
+});
+
+describe('more owner commands and the Telegram menu (T-066)', () => {
+  it('the owner can read limits, history, eligibility, activity and holdings, and set or remove a fee alert', async () => {
+    const t = setup();
+    for (const name of ['limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts']) await t.send(t.message(OWNER, `/${name}`));
+    await t.send(t.message(OWNER, '/gasalert ethereum below 1.5'));
+    await t.send(t.message(OWNER, '/gasalert remove abc123'));
+    expect(t.calls).toEqual(['limits()', 'history()', 'eligible()', 'activity()', 'holdings()', 'gasAlerts()', 'gasAlertSet(ethereum|below|1.5)', 'gasAlertRemove(abc123)']);
+  });
+
+  it('a fee alert needs all its parts, and a number above zero', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, '/gasalert'));
+    expect(t.lastTo(OWNER)).toContain('MISSING_CHAIN');
+    await t.send(t.message(OWNER, '/gasalert ethereum below'));
+    expect(t.lastTo(OWNER)).toContain('MISSING_GWEI');
+    await t.send(t.message(OWNER, '/gasalert ethereum below -2'));
+    expect(t.lastTo(OWNER)).toContain('INVALID_GWEI');
+    await t.send(t.message(OWNER, '/gasalert remove'));
+    expect(t.lastTo(OWNER)).toContain('MISSING_ALERT_ID');
+    expect(t.calls).toEqual([]);
+  });
+
+  it('the menu Telegram shows has only valid names, and a viewer\'s has none of the owner\'s commands', () => {
+    for (const role of ['owner', 'viewer'] as const) for (const item of menuFor(role)) { expect(item.command, item.command).toMatch(/^[a-z0-9_]{1,32}$/); expect(item.description.length).toBeGreaterThan(0); expect(item.description.length).toBeLessThanOrEqual(256); }
+    const owner = menuFor('owner').map((item) => item.command);
+    const viewer = menuFor('viewer').map((item) => item.command);
+    for (const name of ['limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts', 'gasalert', 'plan', 'kill', 'unlock', 'invite']) expect(owner).toContain(name);
+    for (const name of ['limits', 'history', 'holdings', 'gasalert', 'plan', 'kill', 'unlock', 'invite', 'wallets', 'runs']) expect(viewer).not.toContain(name);
+    expect(owner.length).toBeLessThanOrEqual(100);
+    expect(viewer).toEqual(expect.arrayContaining(['drops', 'calendar', 'check']));
+  });
+
+  it('at start everyone sees only /join, the owner sees the owner list, each viewer the viewer list; joining and removal update the menu', async () => {
+    const t = setup();
+    await admitViewer(t);
+    t.menus.length = 0;
+    await t.router.registerMenus();
+    expect(t.menus[0]).toEqual({ chat: 'default', commands: ['join'] });
+    expect(t.menus[1]).toEqual({ chat: String(OWNER), commands: menuFor('owner').map((item) => item.command) });
+    expect(t.menus[2]).toEqual({ chat: String(VIEWER), commands: menuFor('viewer').map((item) => item.command) });
+    t.menus.length = 0;
+    await t.send(t.message(OWNER, `/removeuser ${VIEWER}`));
+    expect(t.menus).toEqual([{ chat: String(VIEWER), commands: [] }]);
+  });
+
+  it('a new viewer gets the viewer menu when they join', async () => {
+    const t = setup();
+    await admitViewer(t);
+    expect(t.menus).toContainEqual({ chat: String(VIEWER), commands: menuFor('viewer').map((item) => item.command) });
+  });
+
+  it('a menu that fails for one chat does not stop the others from being set', async () => {
+    const t = setup();
+    await admitViewer(t);
+    const set: string[] = [];
+    const router = new TelegramCommandRouter({ api: { getUpdates: async () => [], sendMessage: async () => undefined, answerCallback: async () => undefined, deleteMessage: async () => undefined, setMyCommands: async (_commands, chatId) => { if (chatId === undefined) throw new Error('TELEGRAM_SETMYCOMMANDS_FAILED:429'); set.push(String(chatId)); } }, access: t.access, actions: {} as never, ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: t.now });
+    await router.registerMenus();
+    expect(set).toEqual([String(OWNER), String(VIEWER)]);
+  });
+
+  it('a menu that cannot be set never stops the bot', async () => {
+    const t = setup();
+    const failing = new TelegramCommandRouter({ api: { getUpdates: async () => [], sendMessage: async () => undefined, answerCallback: async () => undefined, deleteMessage: async () => undefined, setMyCommands: async () => { throw new Error('TELEGRAM_SETMYCOMMANDS_FAILED:429'); } }, access: t.access, actions: {} as never, ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: t.now });
+    await expect(failing.registerMenus()).resolves.toBeUndefined();
   });
 });
 

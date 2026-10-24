@@ -12,7 +12,7 @@ export interface PollOffsetStore { pollOffset(): number; savePollOffset(offset: 
 export function startTelegramCommands(options: {
   api: TelegramBotApi;
   offsets: PollOffsetStore;
-  router: Pick<TelegramCommandRouter, 'handle' | 'checkSession' | 'onStart'>;
+  router: Pick<TelegramCommandRouter, 'handle' | 'checkSession' | 'onStart'> & { registerMenus?(): Promise<void> };
   log(event: string, fields?: Record<string, unknown>): void;
   pollTimeoutSeconds?: number;
   retryDelayMs?: number;
@@ -49,6 +49,7 @@ export function startTelegramCommands(options: {
   };
   const done = (async () => {
     try { await options.router.onStart(); } catch { options.log('telegram_start_notice_failed'); }
+    try { await options.router.registerMenus?.(); } catch { options.log('telegram_menu_failed'); }
     while (running) {
       try { await pollOnce(); }
       catch (error) {

@@ -16,7 +16,12 @@ export interface TelegramBotApi {
   sendMessage(chatId: number | string, text: string, buttons?: InlineButton[][]): Promise<void>;
   answerCallback(callbackId: string, text?: string): Promise<void>;
   deleteMessage(chatId: number | string, messageId: number): Promise<void>;
+  /** T-066: the command menu Telegram shows. Without a chat it sets the default list for every private chat. */
+  setMyCommands?(commands: BotCommand[], chatId?: number | string): Promise<void>;
+  deleteMyCommands?(chatId: number | string): Promise<void>;
 }
+
+export interface BotCommand { command: string; description: string }
 
 const MAX_TEXT = 4_000;
 
@@ -55,6 +60,13 @@ export function createTelegramBotApi(options: { token: string; apiBaseUrl?: stri
     },
     async deleteMessage(chatId, messageId) {
       await call('deleteMessage', { chat_id: chatId, message_id: messageId });
+    },
+    async setMyCommands(commands, chatId) {
+      const valid = commands.filter((item) => /^[a-z0-9_]{1,32}$/.test(item.command) && item.description.length >= 1).slice(0, 100).map((item) => ({ command: item.command, description: item.description.slice(0, 256) }));
+      await call('setMyCommands', { commands: valid, ...(chatId === undefined ? { scope: { type: 'all_private_chats' } } : { scope: { type: 'chat', chat_id: chatId } }) });
+    },
+    async deleteMyCommands(chatId) {
+      await call('deleteMyCommands', { scope: { type: 'chat', chat_id: chatId } });
     },
   };
 }

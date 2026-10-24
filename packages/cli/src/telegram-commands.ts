@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { redactText } from '@mint-bot/backend';
 import type { TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } from '@mint-bot/database';
-import type { InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
+import type { BotCommand, InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
 import { base32Encode, matchTotp } from './totp.js';
 
 /**
@@ -64,6 +64,14 @@ export interface TelegramActions {
   revoke(chain: string, phrase: string | undefined): Promise<string>;
   release(phrase: string | undefined): Promise<string>;
   watchAccept(chain: string, address: string, phrase: string | undefined): Promise<string>;
+  limits(): Promise<string>;
+  history(): Promise<string>;
+  eligible(): Promise<string>;
+  activity(): Promise<string>;
+  holdings(): Promise<string>;
+  gasAlerts(): Promise<string>;
+  gasAlertSet(chain: string, direction: string, gwei: number): Promise<string>;
+  gasAlertRemove(id: string): Promise<string>;
   /** True when a kill (file or stored) was engaged after this moment: an open session then ends (D-063 item 6). */
   killEngagedSince(openedAt: string): boolean;
 }
@@ -133,11 +141,23 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   release: { tier: 'start', roles: OWNER, usage: '/release [phrase]', help: 'Turn the kill switch off' },
   confirm: { tier: 'start', roles: OWNER, usage: '/confirm <phrase from /request>', help: 'Send a live request to the service' },
   watchaccept: { tier: 'start', roles: OWNER, usage: '/watchaccept <chain> <address> [phrase]', help: 'Accept a wallet change the watcher flagged' },
+  limits: { tier: 'read', roles: OWNER, usage: '/limits', help: 'How much of each daily limit is used and left' },
+  history: { tier: 'read', roles: OWNER, usage: '/history', help: 'Past live mints: totals per chain and newest runs' },
+  eligible: { tier: 'read', roles: OWNER, usage: '/eligible', help: 'Upcoming drops against your wallets' },
+  activity: { tier: 'read', roles: OWNER, usage: '/activity', help: 'Recent mints by wallets you track' },
+  holdings: { tier: 'read', roles: OWNER, usage: '/holdings', help: 'NFTs your wallets hold from MintBot mints' },
+  gasalerts: { tier: 'read', roles: OWNER, usage: '/gasalerts', help: 'Your fee alerts' },
+  gasalert: { tier: 'change', roles: OWNER, usage: '/gasalert <chain> <below|above> <gwei>  or  /gasalert remove <id>', help: 'Add or remove a fee alert' },
   invite: { tier: 'admin', roles: OWNER, usage: '/invite', help: 'One-time code for a friend (viewer, 24 hours)' },
   users: { tier: 'admin', roles: OWNER, usage: '/users', help: 'Who has access' },
   removeuser: { tier: 'admin', roles: OWNER, usage: '/removeuser <user id>', help: 'End someone\'s access now' },
   broadcast: { tier: 'admin', roles: OWNER, usage: '/broadcast <text>', help: 'Message every user' },
 };
+
+/** The commands Telegram lists for a role (names are lower case letters, digits and underscores, as Telegram requires). */
+export function menuFor(role: TelegramRole): BotCommand[] {
+  return Object.entries(COMMANDS).filter(([name, spec]) => spec.roles.includes(role) && name !== 'start' && /^[a-z0-9_]{1,32}$/.test(name)).map(([name, spec]) => ({ command: name, description: spec.help.slice(0, 256) }));
+}
 
 /** Text from errors is cleaned before it reaches a chat: no addresses with keys, no long hex. */
 export function plainError(error: unknown): string {
@@ -169,6 +189,21 @@ export class TelegramCommandRouter {
   }
   private readonly startedAt: number;
   private readonly viewerUse = new Map<string, number[]>();
+
+  /**
+   * T-066: the command list Telegram shows in its menu. Everyone sees only /join; the owner and each viewer see their own commands.
+   * Best effort: a failure here never stops the bot.
+   */
+  public async registerMenus(): Promise<void> {
+    const api = this.options.api;
+    if (!api.setMyCommands) return;
+    const set = async (commands: BotCommand[], chatId?: number | string): Promise<void> => {
+      try { await api.setMyCommands!(commands, chatId); } catch (error) { this.options.log?.('telegram_menu_failed', { code: errorCode(error) }); }
+    };
+    await set([{ command: 'join', description: 'Join with an invite code from the owner' }]);
+    await set(menuFor('owner'), this.options.ownerUserId);
+    for (const user of this.options.access.activeUsers()) await set(menuFor('viewer'), user.userId);
+  }
 
   /** The service restarted: any open session ends (D-063 item 6). */
   public async onStart(): Promise<void> {
@@ -281,6 +316,13 @@ export class TelegramCommandRouter {
       case 'runs': return reply(await a.runs());
       case 'run': return reply(await a.run(required(args[0], 'run id')));
       case 'watchlist': return reply(await a.watchlist());
+      case 'limits': return reply(await a.limits());
+      case 'history': return reply(await a.history());
+      case 'eligible': return reply(await a.eligible());
+      case 'activity': return reply(await a.activity());
+      case 'holdings': return reply(await a.holdings());
+      case 'gasalerts': return reply(await a.gasAlerts());
+      case 'gasalert': return reply(args[0]?.toLowerCase() === 'remove' ? await a.gasAlertRemove(required(args[1], 'alert id')) : await a.gasAlertSet(required(args[0], 'chain'), required(args[1], 'below or above'), requiredNumber(args[2], 'gwei')));
       case 'track': return reply(await a.track(required(args[0], 'address'), args.slice(1).join(' ') || undefined));
       case 'untrack': return reply(await a.untrack(required(args[0], 'address')));
       case 'prepare': return reply(await a.prepare(required(args[0], 'chain'), required(args[1], 'contract'), requiredNumber(args[2], 'quantity'), required(args.slice(3).join(' ') || undefined, 'phrase from /plan')));
@@ -314,6 +356,7 @@ export class TelegramCommandRouter {
         if (!/^\d{1,20}$/.test(userId)) throw new Error('USER_ID_INVALID: use the number /users shows');
         const removed = this.options.access.removeUser(userId);
         if (removed) await this.options.api.sendMessage(userId, 'Your access to this MintBot has ended.').catch(() => undefined);
+        if (removed) await this.options.api.deleteMyCommands?.(userId).catch(() => undefined);
         return reply(removed ? `Access for ${userId} ended.` : `${userId} had no access.`);
       }
       case 'broadcast': {
@@ -383,6 +426,7 @@ export class TelegramCommandRouter {
     if (!user) return;
     await this.record('viewer', incoming, 'join', 'ok');
     await this.reply(incoming, 'Welcome. You can now see drops, the calendar and contract checks. Send /menu to start.', this.menu('viewer'));
+    await this.options.api.setMyCommands?.(menuFor('viewer'), incoming.userId).catch(() => undefined);
     await this.options.api.sendMessage(this.options.ownerUserId, `Telegram user ${incoming.userId} joined as a viewer. Remove them at any time with /removeuser ${incoming.userId}.`).catch(() => undefined);
   }
 

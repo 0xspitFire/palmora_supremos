@@ -93,6 +93,17 @@ describe('Telegram client', () => {
     await api.getUpdates(10, 25);
     expect(JSON.parse(body)).toEqual({ offset: 10, timeout: 25, allowed_updates: ['message', 'callback_query'] });
   });
+
+  it('sets the command menu: a default list for private chats, or one chat\'s own, keeping only names Telegram accepts', async () => {
+    const bodies: Array<{ method: string; body: Record<string, unknown> }> = [];
+    const api = createTelegramBotApi({ token: FAKE_TOKEN, fetcher: async (url, init) => { bodies.push({ method: String(url).split('/').pop()!, body: JSON.parse(String(init?.body)) }); return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) }; } });
+    await api.setMyCommands!([{ command: 'join', description: 'Join' }, { command: 'Bad-Name', description: 'x' }, { command: 'ok_1', description: 'y'.repeat(300) }]);
+    await api.setMyCommands!([{ command: 'status', description: 'Status' }], 1001);
+    await api.deleteMyCommands!(2002);
+    expect(bodies[0]).toEqual({ method: 'setMyCommands', body: { commands: [{ command: 'join', description: 'Join' }, { command: 'ok_1', description: 'y'.repeat(256) }], scope: { type: 'all_private_chats' } } });
+    expect(bodies[1]!.body).toEqual({ commands: [{ command: 'status', description: 'Status' }], scope: { type: 'chat', chat_id: 1001 } });
+    expect(bodies[2]).toEqual({ method: 'deleteMyCommands', body: { scope: { type: 'chat', chat_id: 2002 } } });
+  });
 });
 
 describe('Telegram actions', () => {
@@ -111,6 +122,7 @@ describe('Telegram actions', () => {
     watchedWallets: () => [],
     watcherHealthy: () => undefined,
     intelligence: () => ({}) as never,
+    gasAlerts: () => ({}) as never,
     ...overrides,
   });
 
@@ -229,6 +241,119 @@ describe('Telegram actions', () => {
         await expect(actions.simulate('cmp_1')).rejects.toThrow('MINT_NOT_OPEN');
         expect(simulations).toEqual([]);
       } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+  });
+
+  describe('fee alerts, holdings and limits (T-066)', () => {
+    const alertsRepo = () => { const rows: Array<{ id: string; chainId: number; direction: string; thresholdGwei: string; createdAt: string }> = []; return { rows, repo: { add: (chainId: number, direction: string, thresholdGwei: string) => { const row = { id: `gas_alert_${rows.length}abcdef`, chainId, direction, thresholdGwei, createdAt: 'x' }; rows.push(row); return row; }, active: () => rows, remove: (id: string) => { const found = rows.filter((row) => row.id.endsWith(id)); if (found.length !== 1) return false; rows.splice(rows.indexOf(found[0]!), 1); return true; } } }; };
+
+    it('adds, lists and removes a fee alert, and refuses a bad direction, chain or number', async () => {
+      const { rows, repo } = alertsRepo();
+      const actions = createTelegramActions(deps({ gasAlerts: () => repo as never }));
+      expect(await actions.gasAlerts()).toContain('No fee alerts');
+      expect(await actions.gasAlertSet('ethereum', 'BELOW', 1.5)).toContain('Ethereum fees below 1.5 gwei');
+      expect(await actions.gasAlertSet('robinhood', 'above', 0.2)).toContain('Robinhood fees above 0.2 gwei');
+      expect(rows).toHaveLength(2);
+      expect(await actions.gasAlerts()).toContain('Ethereum fees below 1.5 gwei');
+      await expect(actions.gasAlertSet('ethereum', 'sideways', 1)).rejects.toThrow('DIRECTION_INVALID');
+      await expect(actions.gasAlertSet('solana', 'below', 1)).rejects.toThrow('CHAIN_INVALID');
+      for (const gwei of [0, -1, 100_001, Number.NaN]) await expect(actions.gasAlertSet('ethereum', 'below', gwei), String(gwei)).rejects.toThrow('GWEI_OUT_OF_RANGE');
+      expect(rows).toHaveLength(2);
+      expect(await actions.gasAlertRemove('0abcdef')).toContain('removed');
+      expect(await actions.gasAlertRemove('nothing')).toContain('No single alert');
+      expect(rows).toHaveLength(1);
+    });
+
+    it('/holdings lists only contracts MintBot minted, counts what the wallets hold, and says when a wallet cannot be read', async () => {
+      const A = '0x365952eb1e8209bf2bcc2db5ed213111a87d061e';
+      const B = '0x81c104dcb898416fd4f81ead091dba5b8f46f37a';
+      const contract = '0xa686fde3299d5451af22382240e0dff62f7b94db';
+      const state = { events: [], simulations: [], killed: false, runtime: { startupState: 'Ready', blockingReasons: [] }, runs: [{ id: 'run_1', campaignId: 'c1', mode: 'live' }, { id: 'run_dry', campaignId: 'c2', mode: 'dry-run' }], campaigns: [{ id: 'c1', chainId: 4663, contract }, { id: 'c2', chainId: 1, contract: '0x9999999999999999999999999999999999999999' }], receipts: [{ runId: 'run_1', state: 'Confirmed' }, { runId: 'run_dry', state: 'Confirmed' }] };
+      const asked: string[] = [];
+      const actions = createTelegramActions(deps({ store: { snapshot: () => state } as never, walletList: async () => [A, B], nftName: async () => 'Test Drop', nftBalance: async (chainId, address, wallet) => { asked.push(`${chainId}:${address.slice(-4)}:${wallet.slice(-4)}`); if (wallet === B) throw new Error('rpc'); return 2n; } }));
+      const text = await actions.holdings();
+      expect(text).toContain('Robinhood Test Drop 0xa686…94db: 2 NFT(s)');
+      expect(text).toContain('0x3659…061e 2');
+      expect(text).toContain('0x81c1…f37a unreadable');
+      expect(asked).toEqual(['4663:94db:061e', '4663:94db:f37a']);
+      const none = createTelegramActions(deps({ store: { snapshot: () => ({ ...state, receipts: [] }) } as never }));
+      expect(await none.holdings()).toContain('has not minted anything yet');
+    });
+
+    describe('/eligible', () => {
+      const C = (n: number) => `0x${n.toString(16).padStart(40, '0')}`;
+      const event = (n: number, chainId: number, openingAt: string, closingAt?: string) => ({ id: `ev${n}`, type: 'calendar_entry', at: '2026-10-24T10:00:00.000Z', data: { id: `cal${n}`, chainId, contract: C(n), projectName: `Drop ${n}`, openingAt, ...(closingAt ? { closingAt } : {}), priceWei: '0' } });
+      const build = (events: unknown[], campaigns: unknown[] = [], dropCheck?: (chain: string, contract: string) => Promise<string>) => {
+        const asked: string[] = [];
+        const store = { snapshot: () => ({ schemaVersion: 1, events, campaigns, runs: [], intents: [], attempts: [], receipts: [], reconciliations: [], reservations: [], simulations: [], chainEvidence: [], readiness: [], jobs: [], notificationOutbox: [], runtime: { startupState: 'Ready', blockingReasons: [], dependencies: {} }, killed: false }) };
+        const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T12:00:00.000Z'), dropCheck: dropCheck ?? (async (chain, contract) => { asked.push(`${chain}:${contract.slice(-2)}`); return `checked ${chain}`; }) }));
+        return { actions, asked };
+      };
+
+      it('checks each upcoming drop on its own chain, by id (a prepared Base campaign is Base, not Ethereum), soonest first', async () => {
+        const base = { id: 'cmp_base', chainId: 8453, contract: C(9), strategy: 'seadrop-v1-public', mintPriceWei: 0n, quantity: 1, dryRun: false, createdAt: 'x', updatedAt: 'x', chainVerification: { chainId: 8453, status: 'verified' }, feePolicy: { kind: 'free' }, spendPolicy: {} };
+        const { actions, asked } = build([event(1, 1, '2026-10-24T14:00:00.000Z'), event(2, 4663, '2026-10-24T13:00:00.000Z')], [base]);
+        const text = await actions.eligible();
+        expect(asked).toEqual(expect.arrayContaining(['ethereum:01', 'robinhood:02', 'base:09']));
+        expect(asked).toHaveLength(3);
+        expect(text).toContain('Upcoming drops against your wallets');
+        expect(text.indexOf('Drop 2')).toBeLessThan(text.indexOf('Drop 1'));
+      });
+
+      it('leaves out a drop that has closed, looks at four drops at most, and says when none is left', async () => {
+        const six = [1, 2, 3, 4, 5, 6].map((n) => event(n, 1, `2026-10-24T${12 + n}:00:00.000Z`));
+        const { actions, asked } = build([event(7, 1, '2026-10-24T08:00:00.000Z', '2026-10-24T09:00:00.000Z'), ...six]);
+        await actions.eligible();
+        expect(asked).toHaveLength(4);
+        expect(asked).not.toContain('ethereum:07');
+        const none = build([event(7, 1, '2026-10-24T08:00:00.000Z', '2026-10-24T09:00:00.000Z')]);
+        expect(await none.actions.eligible()).toContain('No upcoming or open drops');
+        expect(await build([]).actions.eligible()).toContain('No upcoming or open drops');
+      });
+
+      it('a drop that cannot be checked is reported, and the others still are', async () => {
+        const { actions } = build([event(1, 1, '2026-10-24T13:00:00.000Z'), event(2, 4663, '2026-10-24T14:00:00.000Z')], [], async (chain) => { if (chain === 'ethereum') throw new Error('RPC_UNAVAILABLE: x'); return 'checked robinhood'; });
+        const text = await actions.eligible();
+        expect(text).toContain('could not be checked (RPC_UNAVAILABLE)');
+        expect(text).toContain('checked robinhood');
+      });
+    });
+
+    it('names from outside are cleaned: control and direction characters removed, long names cut', async () => {
+      const { cleanName } = await import('./owner-reports.js');
+      expect(cleanName('Cool\u202e Name\u0000\u200b  here')).toBe('Cool Name here');
+      expect(cleanName('x'.repeat(100))).toHaveLength(40);
+      expect(cleanName(undefined)).toBe('');
+      expect(cleanName(42)).toBe('');
+    });
+
+    it('a fee alert below 0.0001, a 20th-plus alert and a long number are refused plainly', async () => {
+      const { rows, repo } = alertsRepo();
+      const actions = createTelegramActions(deps({ gasAlerts: () => repo as never }));
+      await expect(actions.gasAlertSet('ethereum', 'below', 0.00001)).rejects.toThrow('GWEI_OUT_OF_RANGE');
+      await expect(actions.gasAlertSet('ethereum', 'below', 1e-7)).rejects.toThrow('GWEI_OUT_OF_RANGE');
+      expect(await actions.gasAlertSet('ethereum', 'below', 0.123456789)).toContain('below 0.1235 gwei');
+      for (let index = 1; index < 20; index += 1) await actions.gasAlertSet('base', 'above', index);
+      await expect(actions.gasAlertSet('base', 'above', 50)).rejects.toThrow('TOO_MANY_ALERTS');
+      expect(rows).toHaveLength(20);
+    });
+
+    it('/limits counts a reservation of unknown class in both classes, and /history leaves released reservations out of the wallet count', async () => {
+      const reservation = { id: 'r', runId: 'run1', campaignId: 'gone', chainId: 1, wallet: '0x1', amountWei: 100_000_000_000_000n, status: 'reserved', createdAt: 'x', updatedAt: '2026-10-24T11:00:00.000Z', accountingDate: '2026-10-24' };
+      const store = { snapshot: () => ({ killed: false, campaigns: [], reservations: [reservation], runs: [{ id: 'run1', campaignId: 'c', mode: 'live', state: 'Completed', createdAt: '2026-10-24T10:00:00.000Z' }], receipts: [], events: [] }) };
+      const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T12:00:00.000Z') }));
+      const text = await actions.limits();
+      expect(text).toContain('Ethereum: free 0.0001 of 0.0024 ETH');
+      expect(text).toContain('paid 0.0001 of 0.0082 ETH');
+      expect(text).toContain('the guards decide');
+      expect(text).not.toContain('Robinhood: free 0 of 0.002 ETH (0.002 left), paid');
+    });
+
+    it('/limits and /history read what the database holds', async () => {
+      const store = { snapshot: () => ({ killed: false, campaigns: [], reservations: [], runs: [], receipts: [], events: [] }) };
+      const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T12:00:00.000Z') }));
+      expect(await actions.limits()).toContain('Robinhood: free 0 of 0.002 ETH');
+      expect(await actions.history()).toBe('No live mints yet.');
     });
   });
 

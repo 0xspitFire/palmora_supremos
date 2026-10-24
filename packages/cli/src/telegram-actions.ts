@@ -1,9 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
-import { createPublicClient, formatEther, formatGwei, http as httpTransport, type Address } from 'viem';
+import { createPublicClient, formatEther, formatGwei, http as httpTransport, parseAbi, type Address } from 'viem';
 import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
-import type { IntelligenceRepository } from '@mint-bot/database';
+import type { GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
+import { cleanName, describeActivity, describeHistory, describeLimits } from './owner-reports.js';
+import { gasAlertSentence } from './gas-alert-service.js';
 import type { TelegramActions, TelegramRole } from './telegram-commands.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { checkDrop } from './drop-check.js';
@@ -35,6 +37,8 @@ export function chainFrom(text: string | undefined): ChainId {
 }
 const chainName = (id: number): string => CHAINS.find((chain) => chain.id === id)?.name ?? `chain ${id}`;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const ERC721_BALANCE_ABI = parseAbi(['function balanceOf(address owner) view returns (uint256)']);
+const ERC721_NAME_ABI = parseAbi(['function name() view returns (string)']);
 const PROBE_ADDRESS = '0x000000000000000000000000000000000000dEaD';
 const short = (address: string): string => `${address.slice(0, 6)}…${address.slice(-4)}`;
 const minutes = (iso: string): string => iso.slice(0, 16).replace('T', ' ');
@@ -58,6 +62,13 @@ export interface TelegramActionDeps {
   watchedWallets(chainId: number): string[];
   watcherHealthy(): boolean | undefined;
   intelligence(): IntelligenceRepository;
+  /** T-066: the owner's fee alerts. */
+  gasAlerts(): GasAlertRepository;
+  /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
+  nftBalance?: (chainId: number, contract: string, wallet: string) => Promise<bigint>;
+  nftName?: (chainId: number, contract: string) => Promise<string | undefined>;
+  /** T-066: how `/eligible` checks one drop (default: the same check as `/check`). Tests supply their own. */
+  dropCheck?: (chain: string, contract: string) => Promise<string>;
   /** Robinhood dry run (default: read the chain). Tests supply their own. */
   robinhoodDryRun?: (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date) => Promise<DryRunReport>;
   robinhoodLatestBlock?: () => Promise<{ number: bigint; hash: string }>;
@@ -96,7 +107,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   const robinhoodBlock = async (): Promise<{ number: bigint; hash: string }> => deps.robinhoodLatestBlock ? deps.robinhoodLatestBlock() : (async () => { const block = await (await client(4663)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; })();
   const walletsFor = async (text: string): Promise<string[]> => text.toLowerCase() === 'all' ? deps.walletList() : text.split(',').map((item) => item.trim()).filter(Boolean);
 
-  return {
+  const actions: TelegramActions = {
     async status(role: TelegramRole) {
       const state = deps.store.snapshot();
       const uptimeHours = ((now().getTime() - deps.startedAt.getTime()) / 3_600_000).toFixed(1);
@@ -194,13 +205,13 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const items = new Phase2ReadModelService(now).opportunities(deps.store.snapshot()).data ?? [];
       const top = [...items].sort((left, right) => (right.score.value ?? -1) - (left.score.value ?? -1)).slice(0, 8);
       if (top.length === 0) return 'No opportunities found yet.';
-      return ['Top opportunities:', ...top.map((item) => `• ${item.project.name ?? 'Unnamed'} ${item.project.contract ? short(item.project.contract) : ''} — ${item.chain.name}, score ${item.score.value ?? '?'}${item.price?.amount ? `, ${formatEth(BigInt(item.price.amount.value))} ETH` : ''}${item.openingAt ? `, opens ${minutes(item.openingAt)} UTC` : ''}${item.project.contract ? `\n  ${item.project.contract}` : ''}`)].join('\n');
+      return ['Top opportunities:', ...top.map((item) => `• ${cleanName(item.project.name) || 'Unnamed'} ${item.project.contract ? short(item.project.contract) : ''} — ${chainName(Number(item.chain.id))}, score ${item.score.value ?? '?'}${item.price?.amount ? `, ${formatEth(BigInt(item.price.amount.value))} ETH` : ''}${item.openingAt ? `, opens ${minutes(item.openingAt)} UTC` : ''}${item.project.contract ? `\n  ${item.project.contract}` : ''}`)].join('\n');
     },
     async calendar() {
       const entries = new Phase2ReadModelService(now).calendar(deps.store.snapshot()).data ?? [];
       const upcoming = [...entries].filter((entry) => entry.openingAt).sort((left, right) => (left.openingAt ?? '').localeCompare(right.openingAt ?? '')).slice(0, 10);
       if (upcoming.length === 0) return 'Nothing on the calendar yet.';
-      return ['Mint calendar (UTC):', ...upcoming.map((entry) => `• ${minutes(entry.openingAt!)} — ${entry.project.name ?? 'Unnamed'} on ${entry.chain.name}, ${entry.price.amount ? `${formatEth(BigInt(entry.price.amount.value))} ETH` : 'price unknown'}, ${entry.publicStatus}${entry.project.contract ? `\n  ${entry.project.contract}` : ''}`)].join('\n');
+      return ['Mint calendar (UTC):', ...upcoming.map((entry) => `• ${minutes(entry.openingAt!)} — ${cleanName(entry.project.name) || 'Unnamed'} on ${chainName(Number(entry.chain.id))}, ${entry.price.amount ? `${formatEth(BigInt(entry.price.amount.value))} ETH` : 'price unknown'}, ${entry.publicStatus}${entry.project.contract ? `\n  ${entry.project.contract}` : ''}`)].join('\n');
     },
     async check(chainText, contract, includeFleet) {
       if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
@@ -363,5 +374,73 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       try { if (statSync(deps.killSwitchPath).mtimeMs > since) return true; } catch { /* no file */ }
       return false;
     },
+    async limits() {
+      return describeLimits(deps.store.snapshot(), now(), existsSync(deps.killSwitchPath));
+    },
+    async history() { return describeHistory(deps.store.snapshot()); },
+    async activity() {
+      const labels = new Map(deps.intelligence().observedAddresses(1).map((row) => [row.address.toLowerCase(), row.label] as const));
+      return describeActivity(deps.store.snapshot().events, labels);
+    },
+    async eligible() {
+      const entries = new Phase2ReadModelService(now).calendar(deps.store.snapshot()).data ?? [];
+      const upcoming = [...entries].filter((entry) => entry.project.contract && (!entry.closingAt || entry.closingAt > now().toISOString())).sort((left, right) => (left.openingAt ?? '').localeCompare(right.openingAt ?? '')).slice(0, 4);
+      if (upcoming.length === 0) return 'No upcoming or open drops are on the calendar. /drops shows what discovery found.';
+      const blocks: string[] = [];
+      for (const entry of upcoming) {
+        // By id only: the calendar's own chain name calls every chain but Robinhood "Ethereum".
+        const chain = CHAINS.find((item) => String(item.id) === entry.chain.id);
+        if (!chain) continue;
+        const text = await (deps.dropCheck ? deps.dropCheck(chain.name.toLowerCase(), entry.project.contract!) : actions.check(chain.name.toLowerCase(), entry.project.contract!, true)).catch((error: unknown) => `could not be checked (${error instanceof Error ? error.message.split(':')[0] : 'error'})`);
+        blocks.push(`${entry.openingAt ? `${minutes(entry.openingAt)} UTC — ` : ''}${cleanName(entry.project.name) || 'Unnamed'}\n${text}`);
+      }
+      return blocks.length === 0 ? 'No drop on the calendar is on a chain MintBot can check.' : ['Upcoming drops against your wallets:', ...blocks].join('\n\n');
+    },
+    async holdings() {
+      const state = deps.store.snapshot();
+      const confirmedRuns = new Set(state.receipts.filter((receipt) => receipt.state === 'Confirmed').map((receipt) => receipt.runId));
+      const campaignsMinted = new Map<string, { chainId: number; contract: string }>();
+      for (const run of state.runs) {
+        if (run.mode !== 'live' || !confirmedRuns.has(run.id)) continue;
+        const campaign = state.campaigns.find((item) => item.id === run.campaignId);
+        if (campaign) campaignsMinted.set(`${campaign.chainId}:${campaign.contract.toLowerCase()}`, { chainId: campaign.chainId, contract: campaign.contract.toLowerCase() });
+      }
+      if (campaignsMinted.size === 0) return 'MintBot has not minted anything yet, so there is nothing to show. (This lists NFTs from MintBot\'s own mints; a full portfolio needs an outside data service, which is not set up.)';
+      const wallets = (await deps.walletList()).slice(0, 12);
+      const lines = ['NFTs your wallets hold from MintBot mints:'];
+      if (campaignsMinted.size > 6) lines.push(`(showing the first 6 of ${campaignsMinted.size} contracts)`);
+      if (wallets.length > 10) lines.push(`(showing the first 10 of ${wallets.length} wallets)`);
+      const balance = deps.nftBalance ?? (async (chainId: number, contract: string, wallet: string) => (await client(chainId as ChainId)).readContract({ address: contract as Address, abi: ERC721_BALANCE_ABI, functionName: 'balanceOf', args: [wallet as Address] }));
+      const nameOf = deps.nftName ?? (async (chainId: number, contract: string) => (await client(chainId as ChainId)).readContract({ address: contract as Address, abi: ERC721_NAME_ABI, functionName: 'name' }).catch(() => undefined));
+      // Each read has its own short time limit and the wallets of one contract are read together, so a slow provider cannot hold the reply.
+      const within = <T,>(work: Promise<T>): Promise<T> => Promise.race([work, new Promise<never>((_resolve, reject) => { const timer = setTimeout(() => reject(new Error('TIMED_OUT')), 8_000); timer.unref?.(); })]);
+      for (const item of [...campaignsMinted.values()].slice(0, 6)) {
+        const reads = await Promise.all(wallets.slice(0, 10).map(async (wallet) => { try { return { wallet, count: await within(balance(item.chainId, item.contract, wallet)) }; } catch { return { wallet, count: undefined }; } }));
+        const held = reads.flatMap((read) => read.count === undefined ? [`${short(read.wallet)} unreadable`] : read.count > 0n ? [`${short(read.wallet)} ${read.count}`] : []);
+        const total = reads.reduce((sum, read) => sum + (read.count ?? 0n), 0n);
+        const name = cleanName(await within(nameOf(item.chainId, item.contract)).catch(() => undefined));
+        lines.push(`• ${chainName(item.chainId)} ${name ? `${name} ` : ''}${short(item.contract)}: ${total} NFT(s)${held.length > 0 ? ` — ${held.join(', ')}` : ''}`);
+      }
+      return lines.join('\n');
+    },
+    async gasAlerts() {
+      const alerts = deps.gasAlerts().active();
+      return alerts.length === 0 ? 'No fee alerts. Add one: /gasalert <chain> <below|above> <gwei>' : ['Your fee alerts:', ...alerts.map((alert) => `• ${gasAlertSentence(alert)} — id ${alert.id.slice(-6)}`), '', 'Remove one: /gasalert remove <id>'].join('\n');
+    },
+    async gasAlertSet(chainText, direction, gwei) {
+      const chainId = chainFrom(chainText);
+      const way = direction.toLowerCase();
+      if (way !== 'below' && way !== 'above') throw new Error('DIRECTION_INVALID: use below or above');
+      if (!Number.isFinite(gwei) || gwei < 0.0001 || gwei > 100_000) throw new Error('GWEI_OUT_OF_RANGE: use a number from 0.0001 to 100000');
+      // A plain decimal with at most 4 places (never 1e-7 or a long tail), which the database accepts.
+      const threshold = String(Number(gwei.toFixed(4)));
+      if (deps.gasAlerts().active().length >= 20) throw new Error('TOO_MANY_ALERTS: you have 20 fee alerts; remove one with /gasalert remove <id> first');
+      const row = deps.gasAlerts().add(chainId, way, threshold);
+      return `Fee alert set: ${gasAlertSentence(row)} (id ${row.id.slice(-6)}). I will message you when it crosses.`;
+    },
+    async gasAlertRemove(id) {
+      return deps.gasAlerts().remove(id.trim()) ? 'Fee alert removed.' : 'No single alert matches that id. See /gasalerts.';
+    },
   };
+  return actions;
 }
