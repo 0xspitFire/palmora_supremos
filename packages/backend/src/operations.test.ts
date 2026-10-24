@@ -196,4 +196,55 @@ describe('phase 2 operations', () => {
       await orchestrator.stop();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+
+  describe('releasing the kill file (T-060)', () => {
+    const setup = async (initial: { killed?: boolean; reasons?: string[] } = {}) => {
+      const root = await mkdtemp(join(tmpdir(), 'mintbot-kill-release-'));
+      const store = new DurableStore();
+      await store.open();
+      await store.transaction((state) => { state.runtime = { startupState: 'Ready', blockingReasons: [...(initial.reasons ?? [])], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; if (initial.killed) state.killed = true; });
+      let killFile = true;
+      const orchestrator = new OrchestratorService(store, {} as BackendApplication, { start: async () => undefined, reconcile: async () => undefined }, { jobs: new JsonJobStore(join(root, 'jobs.json')), dryRunOnly: true, killSwitchProbe: async () => killFile, logger: new RedactedLogger({ stdout: false }) });
+      return { root, store, orchestrator, release: () => { killFile = false; } };
+    };
+
+    it('stays Blocked while the kill file exists, and is Ready again once the owner removes it', async () => {
+      const { root, store, orchestrator, release } = await setup();
+      try {
+        await orchestrator.start();
+        await orchestrator.tick();
+        expect(store.snapshot().runtime).toMatchObject({ startupState: 'Blocked', blockingReasons: ['KILL_SWITCH_ENGAGED'] });
+        release();
+        await orchestrator.tick();
+        expect(store.snapshot().runtime).toMatchObject({ startupState: 'Ready', blockingReasons: [] });
+        await orchestrator.stop();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+
+    it('stays Blocked after the file is removed while a kill command is in force (fail closed)', async () => {
+      const { root, store, orchestrator, release } = await setup({ killed: true });
+      try {
+        await orchestrator.start();
+        release();
+        await orchestrator.tick();
+        await orchestrator.tick();
+        expect(store.snapshot().runtime.startupState).toBe('Blocked');
+        expect(store.snapshot().runtime.blockingReasons).toContain('KILL_SWITCH_ENGAGED');
+        await orchestrator.stop();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+
+    it('keeps any other blocking reason after the file is removed (fail closed)', async () => {
+      const { root, store, orchestrator, release } = await setup({ reasons: ['UNRESOLVED_EXECUTIONS'] });
+      try {
+        await orchestrator.start();
+        await orchestrator.tick();
+        release();
+        await orchestrator.tick();
+        expect(store.snapshot().runtime.startupState).toBe('Blocked');
+        expect(store.snapshot().runtime.blockingReasons).toEqual(['UNRESOLVED_EXECUTIONS']);
+        await orchestrator.stop();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+  });
 });

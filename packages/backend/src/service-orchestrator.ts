@@ -157,6 +157,15 @@ export class OrchestratorService {
         this.jobsSnapshot = await this.options.jobs.list();
         return;
       }
+      // T-060 (owner-approved 2026-10-24): once the owner has removed the kill file (and no `kill` command is in force), the
+      // kill-file block it caused is lifted, as BACKUP_NOT_READY is above. Any other reason keeps the service Blocked.
+      if (this.store.snapshot().runtime.blockingReasons.includes('KILL_SWITCH_ENGAGED')) {
+        await this.store.transaction((state) => {
+          if (state.killed) return;
+          const blockingReasons = state.runtime.blockingReasons.filter((reason) => reason !== 'KILL_SWITCH_ENGAGED');
+          state.runtime = { ...state.runtime, startupState: blockingReasons.length === 0 ? 'Ready' : state.runtime.startupState, blockingReasons };
+        });
+      }
       if (this.store.snapshot().runtime.startupState !== 'Ready') return;
       if (capacity === 0) return;
       const claimed = await this.options.jobs.claimDue(this.now(), capacity);
