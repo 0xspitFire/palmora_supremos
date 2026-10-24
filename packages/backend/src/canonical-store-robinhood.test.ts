@@ -3,7 +3,9 @@ import { CanonicalStoreBridge, hasConfirmedLiveEthereumMint } from './canonical-
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { BackendApplication } from './application.js';
 import { OrchestratorService } from './service-orchestrator.js';
-import { ETHEREUM, OPEN_FLEET_POLICY, ROBINHOOD, WALLET_ONE, WALLET_TWO, armed, campaign, campaignInput, close, fixture } from './canonical-fixtures.js';
+import { EvidenceService } from './evidence.js';
+import { recordWalletSimulations } from './personal-live-readiness.js';
+import { ETHEREUM, NOW, OPEN_FLEET_POLICY, ROBINHOOD, WALLET_ONE, WALLET_TWO, armed, campaign, campaignInput, close, fixture } from './canonical-fixtures.js';
 import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 // The database compares expiry with its own clock, so the enablement times are relative to now (the fixture's NOW is in the past).
@@ -116,6 +118,66 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     } finally { proven.close(); await close(value); }
   });
 
+  describe('the enablement writes the chain evidence a live arm reads (D-065 item 2)', () => {
+    const live = async () => {
+      const value = await fixture(ROBINHOOD);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
+      await proven.open();
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+      const evidence = proven.snapshot().chainEvidence.find((item) => item.chainId === ROBINHOOD && item.status === 'accepted' && item.executionEnabled)!;
+      const application = new BackendApplication(proven, {} as never);
+      const created = await application.createCampaign({ ...campaignInput(ROBINHOOD), chainVerification: { chainId: ROBINHOOD, status: 'verified', seaDropCompatible: true, evidenceId: evidence.id, checkedAt: evidence.checkedAt, sourceBlock: evidence.sourceBlock, endpointReference: evidence.endpointIdentity } });
+      value.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run('wallet-rh-evidence', 'profile-4663', WALLET_ONE, 'test-key', NOW);
+      value.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(created.id, 'wallet-rh-evidence', NOW);
+      const ids = await recordWalletSimulations(proven, created, [{ wallet: WALLET_ONE, success: true }], { blockNumber: 5n, blockHash: '0xabc' }, () => new Date(REAL));
+      const service = new EvidenceService(proven, () => new Date(REAL));
+      return { value, proven, evidence, created, ids, service };
+    };
+
+    it('carries every fact the arm needs, so a real enablement can pass assertLiveEvidence, and revoking it ends that', async () => {
+      const { value, proven, evidence, created, ids, service } = await live();
+      try {
+        expect(evidence).toMatchObject({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: 'robinhood-sequencer', strategyVersion: 'seadrop-v1-public@1', sourceBlock: 1n, acceptedBy: 'owner-cli', expiresAt: PERM });
+        expect(Object.values(evidence.negativeCases)).toEqual(Array(9).fill(true));
+        expect(evidence.approvalProof).toBe(DIGEST);
+        expect(service.assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL })).toEqual(ids);
+        proven.revokeRobinhood({ id: 'rev-1', confirmationDigest: DIGEST });
+        expect(() => new EvidenceService(proven, () => new Date(REAL)).assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+      } finally { proven.close(); await close(value); }
+    });
+
+    it('after a revoke and a new record, only the newest enablement\'s evidence counts; the older one never comes back', async () => {
+      const { value, proven, evidence, created, ids } = await live();
+      try {
+        proven.revokeRobinhood({ id: 'rev-1', confirmationDigest: DIGEST });
+        proven.enableRobinhood({ id: 'rh-2', approvedAt: new Date(Date.parse(REAL) + 1000).toISOString(), expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: 'c'.repeat(64) });
+        const service = new EvidenceService(proven, () => new Date(REAL));
+        const evidenceRows = proven.snapshot().chainEvidence.filter((item) => item.chainId === ROBINHOOD && item.status === 'accepted');
+        expect(evidenceRows.filter((item) => item.executionEnabled)).toHaveLength(1);
+        expect(evidenceRows.find((item) => item.id === evidence.id)?.executionEnabled).toBe(false);
+        expect(() => service.assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+      } finally { proven.close(); await close(value); }
+    });
+
+    it('fails closed when any single fact is missing, or the snapshot no longer matches', async () => {
+      const { value, proven, evidence, created, ids } = await live();
+      try {
+        const check = (changed: Partial<typeof evidence> | { negativeCases: Record<string, boolean> }) => new EvidenceService({ ...proven, snapshot: () => ({ ...proven.snapshot(), chainEvidence: [{ ...evidence, ...changed }] }) } as never, () => new Date(REAL)).assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL });
+        expect(() => check({})).not.toThrow();
+        expect(() => check({ seaDropCompatible: false })).toThrow('SEADROP_EVIDENCE_REQUIRED');
+        expect(() => check({ positiveLivePath: false })).toThrow('SEADROP_EVIDENCE_REQUIRED');
+        expect(() => check({ archiveForkPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
+        expect(() => check({ reconciliationPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
+        expect(() => check({ finalityPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
+        for (const name of Object.keys(evidence.negativeCases)) expect(() => check({ negativeCases: { ...evidence.negativeCases, [name]: false } }), name).toThrow('ROBINHOOD_NEGATIVE_EVIDENCE_INCOMPLETE');
+        expect(() => check({ executionEnabled: false })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+        expect(() => check({ status: 'pending' })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+        expect(() => check({ endpointIdentity: 'another-endpoint' })).toThrow('CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
+        expect(() => check({ checkedAt: '2026-01-01T00:00:00.000Z' })).toThrow('CHAIN_VERIFICATION_SNAPSHOT_MISMATCH');
+      } finally { proven.close(); await close(value); }
+    });
+  });
+
   describe('a free Robinhood campaign with the real numbers (T-063, D-065)', () => {
     const ALLOWANCE = 200_000_000_000_000n; // D-041: 0.0002 ETH per wallet
     const TIP = 100_000_000n; // 0.1 gwei, separate from the budget
@@ -139,6 +201,46 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
         const prepared = await armed({ ...value, store: proven, application }, created, [WALLET_ONE, WALLET_TWO]);
         const admission = await proven.admitExecution(prepared.input);
         expect(admission.reservations.map((item) => item.amountWei)).toEqual([ALLOWANCE, ALLOWANCE]);
+      } finally { proven.close(); await close(value); }
+    });
+
+    it('holds the 0.002 ETH active-period cap across campaigns: ten wallets in all are admitted, an eleventh is not (D-066)', async () => {
+      const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, PERSONAL_LIVE_FLEET_POLICY);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL), fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+      try {
+        await proven.open();
+        value.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ?').run('profile-4663');
+        proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+        const application = new BackendApplication(proven, {} as never, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+        const fixtureValue = { ...value, store: proven, application };
+        const wallets = (count: number, from: number) => Array.from({ length: count }, (_, index) => `0x${(from + index + 1).toString(16).padStart(40, '0')}`);
+        const sized = (count: number) => real({ maxRunWei: ALLOWANCE * BigInt(count) });
+        // Six wallets (0.0012 ETH), then four more in another campaign (0.0008 ETH): exactly 0.002 ETH in all, which is allowed.
+        const first = await application.createCampaign(sized(6));
+        await expect(proven.admitExecution((await armed(fixtureValue, first, wallets(6, 0), [], '-a')).input)).resolves.toBeDefined();
+        const second = await application.createCampaign(sized(4));
+        await expect(proven.admitExecution((await armed(fixtureValue, second, wallets(4, 100), [], '-b')).input)).resolves.toBeDefined();
+        // One more wallet in a third campaign would make 0.0022 ETH: above the Robinhood cap, though below the fleet's 0.0024 ETH.
+        const third = await application.createCampaign(sized(1));
+        await expect(proven.admitExecution((await armed(fixtureValue, third, wallets(1, 200), [], '-c')).input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+      } finally { proven.close(); await close(value); }
+    });
+
+    it('a smaller fleet cap still wins on Robinhood (the 0.002 ETH limit only lowers a larger cap)', async () => {
+      const small = { ...PERSONAL_LIVE_FLEET_POLICY, freeDailyCapWei: 1_000_000_000_000_000n };
+      const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, small);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL), fleetPolicy: small });
+      try {
+        await proven.open();
+        value.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ?').run('profile-4663');
+        proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+        const application = new BackendApplication(proven, {} as never, { fleetPolicy: small });
+        const fixtureValue = { ...value, store: proven, application };
+        const wallets = (count: number, from: number) => Array.from({ length: count }, (_, index) => `0x${(from + index + 1).toString(16).padStart(40, '0')}`);
+        const first = await application.createCampaign(real({ maxRunWei: ALLOWANCE * 5n }));
+        await expect(proven.admitExecution((await armed(fixtureValue, first, wallets(5, 0), [], '-a')).input)).resolves.toBeDefined();
+        const second = await application.createCampaign(real({ maxRunWei: ALLOWANCE }));
+        await expect(proven.admitExecution((await armed(fixtureValue, second, wallets(1, 100), [], '-b')).input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
       } finally { proven.close(); await close(value); }
     });
 
