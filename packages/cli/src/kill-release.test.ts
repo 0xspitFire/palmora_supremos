@@ -85,7 +85,7 @@ describe('kill-release command wiring', () => {
 
   it('on the host the default kill file is the service\'s KILL_SWITCH_PATH', async () => {
     const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
-    expect(source).toContain("const DEFAULT_KILL_FILE = process.env.KILL_SWITCH_PATH ? resolve(process.env.KILL_SWITCH_PATH) : join(runtimeRoot, 'Rets', 'state', 'killswitch');");
+    expect(source).toContain("const DEFAULT_KILL_FILE = process.env.KILL_SWITCH_PATH ? resolve(runtimeRoot, process.env.KILL_SWITCH_PATH) : join(runtimeRoot, 'Rets', 'state', 'killswitch');");
   });
 
   it('leaves the old kill --clear refusal in place, pointing nowhere else', async () => {

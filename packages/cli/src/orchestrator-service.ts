@@ -20,7 +20,7 @@ import {
   summarizeServiceConfig,
   TelegramNotifier,
 } from '@mint-bot/backend';
-import { createCliRuntime, configuredSecretRoot, configuredWalletPath, configuredWallets } from './runtime.js';
+import { createCliRuntime, configuredSecretRoot, configuredWalletPath, configuredWallets, turnkeyCustodyEnabled } from './runtime.js';
 import type { TelegramAccessRepository } from '@mint-bot/database';
 import { createTelegramBotApi, type TelegramBotApi } from './telegram-api.js';
 import { TelegramCommandRouter } from './telegram-commands.js';
@@ -232,6 +232,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
     const actions = createTelegramActions({
       mode: config.mode,
+      custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local',
       store: runtime.store,
       application: ownerApplication,
       coordinator: runtime.coordinator,

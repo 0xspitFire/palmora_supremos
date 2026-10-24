@@ -28,7 +28,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
   const actions: TelegramActions = {
     status: ok('status'), health: ok('health'), rpc: ok('rpc'), gas: ok('gas'), backup: ok('backup'), wallets: ok('wallets'), funding: ok('funding'), enablement: ok('enablement'), drops: ok('drops'), calendar: ok('calendar'),
     check: ok('check'), plan: ok('plan'),
-    requestPreview: async (campaignId, wallets, gwei) => { calls.push(`requestPreview(${campaignId}|${wallets}|${gwei})`); return { text: 'preview', phrase: `LIVE-REQUEST ${campaignId.slice(-8)} 1-WALLETS 0.0002 ${gwei}-GWEI` }; },
+    requestPreview: async (campaignId, wallets, gwei) => { calls.push(`requestPreview(${campaignId}|${wallets}|${gwei})`); return { text: 'preview', wallets: ['0x1111111111111111111111111111111111111111'], phrase: `LIVE-REQUEST ${campaignId.slice(-8)} 1-WALLETS 0.0002 ${gwei}-GWEI` }; },
     requestCreate: ok('requestCreate'), requests: ok('requests'), runs: ok('runs'), run: ok('run'), watchlist: ok('watchlist'), track: ok('track'), untrack: ok('untrack'),
     prepare: ok('prepare'), simulate: ok('simulate'), cancel: ok('cancel'), kill: ok('kill'), revoke: ok('revoke'), release: ok('release'), watchAccept: ok('watchAccept'),
     killEngagedSince: (openedAt) => killedAfter !== undefined && killedAfter > openedAt,
@@ -133,6 +133,28 @@ describe('viewers (D-063 item 8)', () => {
     expect(t.lastTo(STRANGER)).toBe('');
   });
 
+  it('a viewer is limited to 10 commands a minute; the owner never is', async () => {
+    const t = setup();
+    await admitViewer(t);
+    t.calls.length = 0;
+    for (let index = 0; index < 15; index += 1) await t.send(t.message(VIEWER, '/drops'));
+    expect(t.calls).toHaveLength(10);
+    for (let index = 0; index < 15; index += 1) await t.send(t.message(OWNER, '/drops'));
+    expect(t.calls).toHaveLength(25);
+    t.advance(60_000);
+    await t.send(t.message(VIEWER, '/drops'));
+    expect(t.calls).toHaveLength(26);
+  });
+
+  it('button taps carry only the bot\'s own buttons; anything else in a tap is ignored', async () => {
+    const t = setup();
+    await t.send(t.tap(OWNER, '/release RELEASE-KILL x'));
+    await t.send(t.tap(OWNER, '/track 0x1111111111111111111111111111111111111111'));
+    expect(t.calls).toEqual([]);
+    await t.send(t.tap(OWNER, '/status'));
+    expect(t.calls).toEqual(['status(owner)']);
+  });
+
   it('/broadcast reaches every viewer', async () => {
     const t = setup();
     await admitViewer(t);
@@ -184,6 +206,43 @@ describe('the unlocked session (D-063 items 5 and 6)', () => {
     expect(t.access.openSession()).toBeDefined();
   });
 
+  it('a session from before a restart never carries over, even when closing it at start failed (fail closed)', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, `/unlock ${t.code()}`));
+    t.advance(60_000);
+    // A new process: its router starts after the session opened, and nothing closed the session at start.
+    const restarted = new TelegramCommandRouter({
+      api: { getUpdates: async () => [], sendMessage: async (chat, text) => { t.sent.push({ chatId: String(chat), text }); }, answerCallback: async () => undefined, deleteMessage: async () => undefined },
+      access: t.access,
+      actions: { release: async () => 'released', killEngagedSince: () => false } as unknown as TelegramActions,
+      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: () => new Date('2026-10-24T10:01:00.000Z'),
+    });
+    await restarted.handle(t.message(OWNER, '/release'));
+    expect(t.lastTo(OWNER)).toContain('needs an unlocked session');
+    expect(t.access.openSession()).toBeUndefined();
+  });
+
+  it('a code sent with a space ("123 456") still counts as the code', async () => {
+    const t = setup();
+    const code = t.code();
+    await t.send(t.message(OWNER, `/unlock ${code.slice(0, 3)} ${code.slice(3)}`));
+    expect(t.access.openSession()).toBeDefined();
+  });
+
+  it('a session whose kill state cannot be checked counts as ended (fail closed)', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, `/unlock ${t.code()}`));
+    const failing = new TelegramCommandRouter({
+      api: { getUpdates: async () => [], sendMessage: async (_chat, text) => { t.sent.push({ chatId: String(OWNER), text }); }, answerCallback: async () => undefined, deleteMessage: async () => undefined },
+      access: t.access,
+      actions: { release: async () => 'released', killEngagedSince: () => { throw new Error('DB_LOCKED'); } } as unknown as TelegramActions,
+      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined,
+    });
+    await failing.handle(t.message(OWNER, '/release'));
+    expect(t.access.openSession()).toBeUndefined();
+    expect(t.lastTo(OWNER)).toContain('needs an unlocked session');
+  });
+
   it('the session ends after 12 hours, and the owner is told', async () => {
     const t = setup();
     await t.send(t.message(OWNER, `/unlock ${t.code()}`));
@@ -200,7 +259,7 @@ describe('the unlocked session (D-063 items 5 and 6)', () => {
     t.advance(60_000);
     t.killAt('2026-10-24T10:01:00.000Z');
     await t.send(t.message(OWNER, '/release'));
-    expect(t.sent.some((item) => item.text.includes('kill switch was engaged, so your unlocked session has ended'))).toBe(true);
+    expect(t.sent.some((item) => item.text.includes('your unlocked session has ended'))).toBe(true);
     expect(t.lastTo(OWNER)).toContain('needs an unlocked session');
     expect(t.calls).toEqual([]);
   });
@@ -237,6 +296,21 @@ describe('stop and request commands', () => {
     expect(t.calls).toEqual(['kill()']);
   });
 
+  it('a kill that could not be engaged still ends the session', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, `/unlock ${t.code()}`));
+    const router = new TelegramCommandRouter({
+      api: { getUpdates: async () => [], sendMessage: async (chat, text, buttons) => { t.sent.push({ chatId: String(chat), text, ...(buttons ? { buttons } : {}) }); }, answerCallback: async () => undefined, deleteMessage: async () => undefined },
+      access: t.access,
+      actions: { kill: async () => { throw new Error('KILL_SWITCH_NOT_ENGAGED'); }, killEngagedSince: () => false } as unknown as TelegramActions,
+      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined,
+    });
+    await router.handle(t.message(OWNER, '/kill'));
+    await router.handle(t.tap(OWNER, t.sent.at(-1)!.buttons![0]![0]!.callback_data));
+    expect(t.lastTo(OWNER)).toContain('KILL_SWITCH_NOT_ENGAGED');
+    expect(t.access.openSession()).toBeUndefined();
+  });
+
   it('a kill tap that is more than 2 minutes old does nothing (fail closed)', async () => {
     const t = setup();
     await t.send(t.message(OWNER, '/kill'));
@@ -254,7 +328,7 @@ describe('stop and request commands', () => {
     await t.send(t.message(OWNER, '/request cmp_00000000abcdef12 all 5'));
     expect(t.lastTo(OWNER)).toContain('/confirm LIVE-REQUEST abcdef12 1-WALLETS 0.0002 5-GWEI');
     await t.send(t.message(OWNER, '/confirm LIVE-REQUEST abcdef12 1-WALLETS 0.0002 5-GWEI'));
-    expect(t.calls.at(-1)).toBe('requestCreate(cmp_00000000abcdef12|all|5|LIVE-REQUEST abcdef12 1-WALLETS 0.0002 5-GWEI)');
+    expect(t.calls.at(-1)).toBe('requestCreate(cmp_00000000abcdef12|0x1111111111111111111111111111111111111111|5|LIVE-REQUEST abcdef12 1-WALLETS 0.0002 5-GWEI)');
     await t.send(t.message(OWNER, '/confirm LIVE-REQUEST abcdef12 1-WALLETS 0.0002 5-GWEI'));
     expect(t.lastTo(OWNER)).toContain('PREVIEW_NOT_FOUND');
   });

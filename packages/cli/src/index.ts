@@ -88,7 +88,7 @@ const blocked = (error: unknown) => JSON.stringify({ state: 'Blocked', blockingR
 
 const DEFAULT_WALLET_FILE = configuredWalletPath(runtimeRoot);
 // On the host the service's kill file is KILL_SWITCH_PATH (T-061): owner commands run with the service's settings use the same file.
-const DEFAULT_KILL_FILE = process.env.KILL_SWITCH_PATH ? resolve(process.env.KILL_SWITCH_PATH) : join(runtimeRoot, 'Rets', 'state', 'killswitch');
+const DEFAULT_KILL_FILE = process.env.KILL_SWITCH_PATH ? resolve(runtimeRoot, process.env.KILL_SWITCH_PATH) : join(runtimeRoot, 'Rets', 'state', 'killswitch');
 const DEFAULT_WALLET_IMPORT_ROOT = '/home/Junayd/W3/Rets/wallets';
 
 function walletFile(value: string | undefined): string {
@@ -637,12 +637,12 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           throw new Error('KILL_SWITCH_RESET_REQUIRES_RECOVERY_APPROVAL');
         }
         await ensureParent(args.file);
-        await writeFile(args.file, `killed at ${new Date().toISOString()}\n`, { flag: 'wx' });
+        // An existing file (the host service starts with one) never skips the stored flag and the abort of remaining runs.
+        const existed = await writeFile(args.file, `killed at ${new Date().toISOString()}\n`, { flag: 'wx' }).then(() => false, (error: NodeJS.ErrnoException) => { if (error.code === 'EEXIST') return true; throw error; });
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         await runtime.application.command('kill', { reason: 'operator CLI kill switch' });
-        console.log(`Kill switch enabled: ${args.file}`);
+        console.log(existed ? `Kill switch was already on (${args.file}); the stored stop is now set as well.` : `Kill switch enabled: ${args.file}`);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') printError(new Error(`Kill switch already exists: ${args.file}`));
         printError(error);
       }
     })

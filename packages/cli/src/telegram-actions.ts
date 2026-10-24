@@ -40,6 +40,8 @@ const minutes = (iso: string): string => iso.slice(0, 16).replace('T', ' ');
 
 export interface TelegramActionDeps {
   mode: 'dry-run' | 'host';
+  /** Who signs: from the service's custody setting, exactly as the host commands read it. */
+  custody: 'local' | 'turnkey';
   store: BackendStore;
   /** The service's own application (not the read-only one), for health, approval and campaign records. */
   application: BackendApplication;
@@ -221,7 +223,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async plan(chainText, contract, quantityLimit) {
       if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
       const chainId = evmChain(chainText);
-      const planned = await livePlanAction({ chainId, contract, wallets: await deps.walletList(), ...(quantityLimit === undefined ? {} : { quantityLimit }), port: await port(chainId), killFile: deps.killSwitchPath, custody: 'turnkey' });
+      const planned = await livePlanAction({ chainId, contract, wallets: await deps.walletList(), ...(quantityLimit === undefined ? {} : { quantityLimit }), port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
       const { plan } = planned;
       return [
         plan.summary,
@@ -232,7 +234,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
-      return { text: `The service will arm and run ${chainName(preview.chainId)} ${short(preview.contract)}: ${preview.quantityPerWallet} NFT(s) per wallet at ${preview.priceEth} ETH, from ${preview.wallets.length} wallet(s). The most that can be spent is ${preview.maxExposureEth} ETH, signing at no more than ${preview.maxFeeGwei} gwei. Every guard still applies.`, phrase: preview.phrase };
+      return { wallets: preview.wallets, text: `The service will arm and run ${chainName(preview.chainId)} ${short(preview.contract)}: ${preview.quantityPerWallet} NFT(s) per wallet at ${preview.priceEth} ETH, from ${preview.wallets.length} wallet(s). The most that can be spent is ${preview.maxExposureEth} ETH, signing at no more than ${preview.maxFeeGwei} gwei. Every guard still applies.`, phrase: preview.phrase };
     },
     async requestCreate(campaignId, walletsText, maxFeeGwei, phrase) {
       if (deps.mode !== 'host') throw new Error('LIVE_MODE_REQUIRED: the service is in practice mode, so nothing would run this request');
@@ -267,8 +269,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
       const chainId = evmChain(chainText);
       const wallets = await deps.walletList();
-      const planned = await livePlanAction({ chainId, contract, wallets, quantityLimit, port: await port(chainId), killFile: deps.killSwitchPath, custody: 'turnkey' });
-      const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei: 0.1, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
+      const planned = await livePlanAction({ chainId, contract, wallets, quantityLimit, port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
+      // The tip is the one the stored Ethereum fee policy uses (live-prepare refuses any other); Base uses the host default.
+      const policy = chainId === 1 ? (deps.store as unknown as PrepareStore).ethereumFeePolicyStatus?.() : undefined;
+      const tipWei = policy?.stored?.tipWei ?? policy?.approved?.tipWei;
+      const priorityFeeGwei = tipWei === undefined ? 0.1 : Number(formatGwei(BigInt(tipWei)));
+      const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
       return [`Campaign recorded: ${prepared.campaign.id}`, `${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`, '', 'Next, close to the mint:', `/simulate ${prepared.campaign.id}`, `/request ${prepared.campaign.id} all ${prepared.planningMaxFeeGwei ?? '<max gwei>'}`].join('\n');
     },
     async simulate(campaignId) {

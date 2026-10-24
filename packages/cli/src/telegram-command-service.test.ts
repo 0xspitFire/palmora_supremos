@@ -24,6 +24,37 @@ describe('Telegram polling (T-061, D-063 item 1)', () => {
   });
 });
 
+describe('stop commands are never held up (D-063 item 4)', () => {
+  it('a /kill tap is handled while a slow command is still running, and a failing session check never stops polling', async () => {
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const slow = new Promise<void>((resolve) => { release = resolve; });
+    let offset = 0;
+    let polls = 0;
+    const batches: TelegramUpdate[][] = [
+      [{ update_id: 1, message: { message_id: 1, date: 0, chat: { id: 1, type: 'private' }, from: { id: 1 }, text: '/simulate cmp' } }],
+      [{ update_id: 2, callback_query: { id: 'c', from: { id: 1 }, data: '/tap_kill_abc', message: { message_id: 2, date: 0, chat: { id: 1, type: 'private' } } } }],
+    ];
+    const service = startTelegramCommands({
+      api: { getUpdates: async () => { polls += 1; return batches.shift() ?? await new Promise<TelegramUpdate[]>(() => undefined); }, sendMessage: async () => undefined, answerCallback: async () => undefined, deleteMessage: async () => undefined },
+      offsets: { pollOffset: () => offset, savePollOffset: (value) => { offset = value; } },
+      router: {
+        handle: async (update) => { const label = update.message?.text ?? update.callback_query?.data; order.push(`start:${label}`); if (label === '/simulate cmp') await slow; order.push(`end:${label}`); },
+        checkSession: async () => { throw new Error('DB_LOCKED'); },
+        onStart: async () => undefined,
+      },
+      log: () => undefined,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(order).toEqual(['start:/simulate cmp', 'start:/tap_kill_abc', 'end:/tap_kill_abc']);
+    expect(polls).toBe(3);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(order.at(-1)).toBe('end:/simulate cmp');
+    service.stop();
+  });
+});
+
 describe('viewer alerts (D-063 item 8)', () => {
   const alertsWith = (recorded: boolean) => ({ intelligence: async () => recorded, kill: async () => undefined }) as unknown as AlertManager;
   const input = (kind: IntelligenceAlertInput['kind']): IntelligenceAlertInput => ({ kind, dedupe: kind, text: `${kind} text`, priority: 'immediate' });
@@ -67,6 +98,7 @@ describe('Telegram client', () => {
 describe('Telegram actions', () => {
   const deps = (overrides: Partial<TelegramActionDeps> = {}): TelegramActionDeps => ({
     mode: 'dry-run',
+    custody: 'turnkey',
     store: { snapshot: () => ({ events: [], campaigns: [], runs: [], simulations: [], killed: false, runtime: { startupState: 'Ready', blockingReasons: [] } }), transaction: async () => undefined } as never,
     application: {} as never,
     coordinator: { kill: async () => undefined },
@@ -120,6 +152,43 @@ describe('Telegram actions', () => {
     const text = await createTelegramActions(deps()).status('viewer');
     expect(text).toMatch(/^MintBot is running/);
     expect(text).not.toContain('Kill switch');
+  });
+
+  it('/cancel only wins when the service has not claimed the request', async () => {
+    const claims: string[] = [];
+    const store = { snapshot: () => ({ events: [] }), claimLiveRunRequest: (id: string, outcome: string) => { claims.push(`${id}:${outcome}`); return id === 'fresh'; } };
+    const actions = createTelegramActions(deps({ store: store as never }));
+    await expect(actions.cancel('fresh')).resolves.toContain('cancelled');
+    await expect(actions.cancel('started')).resolves.toContain('Not cancelled');
+    expect(claims).toEqual(['fresh:cancelled', 'started:cancelled']);
+  });
+
+  it('/release shows the phrase first, refuses a wrong one, and releases only with the exact one, as the host command does', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mintbot-tg-release-'));
+    try {
+      const file = join(dir, 'killswitch');
+      await writeFile(file, 'on\n');
+      const released: string[] = [];
+      const store = { snapshot: () => ({ killed: true, events: [], runs: [], attempts: [], reconciliations: [], campaigns: [] }), killSwitchStatus: () => ({ engaged: true, changedBy: 'x', changedAt: '2026-10-24T10:00:00.000Z' }), releaseKillSwitch: async (actor: string) => { released.push(actor); return { released: true }; } };
+      const actions = createTelegramActions(deps({ store: store as never, killSwitchPath: file }));
+      const preview = await actions.release(undefined);
+      const phrase = /\/release (.+)$/.exec(preview)![1]!;
+      await expect(actions.release('RELEASE-KILL wrong')).rejects.toThrow('CONFIRMATION_PHRASE_MISMATCH');
+      expect(released).toEqual([]);
+      await expect(actions.release(phrase)).resolves.toContain('The kill switch is off');
+      expect(released).toEqual(['owner-telegram']);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it('/revoke shows the phrase first and changes nothing without it', async () => {
+    const revoked: string[] = [];
+    const record = { recordId: 'rh_1', approvedBy: 'owner-cli', approvedAt: '2026-10-20T00:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', paidAllowed: false, evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true } };
+    const store = { snapshot: () => ({ events: [] }), robinhoodEnablement: () => record, revokeRobinhood: () => { revoked.push('rh_1'); return { enablementId: 'rh_1' }; } };
+    const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T10:00:00.000Z') }));
+    const preview = await actions.revoke('robinhood', undefined);
+    expect(preview).toContain('/revoke robinhood ');
+    expect(revoked).toEqual([]);
+    await expect(actions.revoke('ethereum', undefined)).rejects.toThrow('NOTHING_TO_REVOKE');
   });
 
   it('Robinhood planning and preparing are refused plainly until they exist', async () => {

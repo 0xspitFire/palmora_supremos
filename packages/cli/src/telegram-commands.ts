@@ -48,7 +48,8 @@ export interface TelegramActions {
   calendar(): Promise<string>;
   check(chain: string, contract: string, includeFleet: boolean): Promise<string>;
   plan(chain: string, contract: string, quantityLimit: number | undefined): Promise<string>;
-  requestPreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; phrase: string }>;
+  /** The preview names the exact wallets, so a later `/confirm` uses those and no others. */
+  requestPreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; phrase: string; wallets: string[] }>;
   requestCreate(campaignId: string, wallets: string, maxFeeGwei: number, phrase: string): Promise<string>;
   requests(): Promise<string>;
   runs(): Promise<string>;
@@ -164,7 +165,10 @@ export class TelegramCommandRouter {
     this.now = options.now ?? (() => new Date());
     this.sessionLifetimeMs = options.sessionLifetimeMs ?? SESSION_LIFETIME_MS;
     this.inviteLifetimeMs = options.inviteLifetimeMs ?? INVITE_LIFETIME_MS;
+    this.startedAt = this.now().getTime();
   }
+  private readonly startedAt: number;
+  private readonly viewerUse = new Map<string, number[]>();
 
   /** The service restarted: any open session ends (D-063 item 6). */
   public async onStart(): Promise<void> {
@@ -185,7 +189,14 @@ export class TelegramCommandRouter {
       if (command === 'join') await this.join(incoming, args);
       return;
     }
-    if (role === 'viewer') this.options.access.touchUser(incoming.userId);
+    if (role === 'viewer') {
+      // A viewer is limited to 10 commands a minute, so a friend's chat can never crowd out the owner's.
+      const nowMs = this.now().getTime();
+      const recent = (this.viewerUse.get(incoming.userId) ?? []).filter((at) => nowMs - at < 60_000);
+      if (recent.length >= VIEWER_COMMANDS_PER_MINUTE) return;
+      this.viewerUse.set(incoming.userId, [...recent, nowMs]);
+      this.options.access.touchUser(incoming.userId);
+    }
     if (this.now().getTime() - incoming.sentAt > MAX_MESSAGE_AGE_MS) {
       await this.reply(incoming, 'That message is more than 5 minutes old, so it was not run. Send it again if you still want it.');
       await this.record(role, incoming, command || 'unknown', 'refused:TOO_OLD');
@@ -204,7 +215,9 @@ export class TelegramCommandRouter {
         await this.record(role, incoming, command, 'refused:SESSION_REQUIRED');
         return;
       }
-      await this.run(command, role, incoming, args);
+      const work = this.run(command, role, incoming, args);
+      // Only a read is given up after a while: anything that records something runs to its end, so its answer is always true.
+      await (spec.tier === 'read' ? withTimeout(work, ACTION_TIMEOUT_MS) : work);
       await this.record(role, incoming, command, 'ok');
     } catch (error) {
       await this.reply(incoming, `Not done: ${plainError(error)}`);
@@ -217,6 +230,8 @@ export class TelegramCommandRouter {
       const query = update.callback_query;
       const message = query.message;
       if (!message || message.chat.type !== 'private' || message.chat.id !== query.from.id || query.from.is_bot || typeof query.data !== 'string') return undefined;
+      // Only the bot's own buttons: a menu command without arguments, or a kill confirmation.
+      if (!/^\/(?:tap_kill_[0-9a-f]{18}|[a-z]{2,16})$/.test(query.data)) return undefined;
       // A tap counts from the moment it was made, not when its message was sent.
       return { userId: String(query.from.id), chatId: message.chat.id, text: query.data, callbackId: query.id, sentAt: this.now().getTime() };
     }
@@ -251,7 +266,7 @@ export class TelegramCommandRouter {
       case 'request': {
         const preview = await a.requestPreview(required(args[0], 'campaign'), required(args[1], 'wallets'), requiredNumber(args[2], 'max gwei'));
         this.prune();
-        this.previews.set(preview.phrase, { campaignId: args[0]!, wallets: args[1]!, maxFeeGwei: Number(args[2]), at: this.now().getTime() });
+        this.previews.set(preview.phrase, { campaignId: args[0]!, wallets: preview.wallets.join(','), maxFeeGwei: Number(args[2]), at: this.now().getTime() });
         return reply(`${preview.text}\n\nTo send it, within 15 minutes:\n/confirm ${preview.phrase}`);
       }
       case 'confirm': {
@@ -282,7 +297,7 @@ export class TelegramCommandRouter {
         const closed = this.options.access.closeSession('lock');
         return reply(closed ? 'Locked. Start commands need /unlock again.' : 'There was no unlocked session.');
       }
-      case 'unlock': return this.unlock(incoming, args[0]);
+      case 'unlock': return this.unlock(incoming, args.length > 0 ? args.join('') : undefined);
       case 'release': return reply(await a.release(args.join(' ') || undefined));
       case 'watchaccept': return reply(await a.watchAccept(required(args[0], 'chain'), required(args[1], 'address'), args.slice(2).join(' ') || undefined));
       case 'invite': {
@@ -328,6 +343,8 @@ export class TelegramCommandRouter {
       await this.reply(incoming, `${text}\nAny unlocked session has ended.`);
       await this.record('owner', incoming, 'kill', 'ok');
     } catch (error) {
+      // Even when the kill could not be engaged, the session ends: the owner meant to stop.
+      this.options.access.closeSession('kill');
       await this.reply(incoming, `Not done: ${plainError(error)}. If you need to stop now, create the kill file on the host.`);
       await this.record('owner', incoming, 'kill', `refused:${errorCode(error)}`);
     }
@@ -355,13 +372,16 @@ export class TelegramCommandRouter {
 
   private async join(incoming: Incoming, args: string[]): Promise<void> {
     const now = this.now().getTime();
+    // Strangers are counted in memory only (bounded), so nobody outside can fill the store or this map.
+    if (this.joinAttempts.size > 1_000) for (const [userId, times] of this.joinAttempts) if (times.every((at) => now - at >= UNLOCK_WINDOW_MS)) this.joinAttempts.delete(userId);
+    if (this.joinAttempts.size > 1_000) return;
     const attempts = (this.joinAttempts.get(incoming.userId) ?? []).filter((at) => now - at < UNLOCK_WINDOW_MS);
     if (attempts.length >= JOIN_ATTEMPT_LIMIT) return;
     this.joinAttempts.set(incoming.userId, [...attempts, now]);
     const code = (args[0] ?? '').toUpperCase();
     const user = /^[A-Z2-7]{16}$/.test(code) ? this.options.access.join(code, incoming.userId) : undefined;
-    await this.record(user ? 'viewer' : 'unknown', incoming, 'join', user ? 'ok' : 'refused:INVITE_INVALID');
     if (!user) return;
+    await this.record('viewer', incoming, 'join', 'ok');
     await this.reply(incoming, 'Welcome. You can now see drops, the calendar and contract checks. Send /menu to start.', this.menu('viewer'));
     await this.options.api.sendMessage(this.options.ownerUserId, `Telegram user ${incoming.userId} joined as a viewer. Remove them at any time with /removeuser ${incoming.userId}.`).catch(() => undefined);
   }
@@ -370,12 +390,20 @@ export class TelegramCommandRouter {
   private async currentSession(): Promise<TelegramSessionRow | undefined> {
     const session = this.options.access.openSession();
     if (!session) return undefined;
+    // A session from before this process started never carries over a restart, even if closing it at start failed.
+    if (Date.parse(session.openedAt) < this.startedAt) {
+      if (this.options.access.closeSession('restart')) await this.announce('Your unlocked session ended because the service restarted. Send /unlock with a new code when you need start commands.');
+      return undefined;
+    }
     if (Date.parse(session.expiresAt) <= this.now().getTime()) {
       if (this.options.access.closeSession('expired')) await this.announce('Your 12-hour unlocked session has ended. Send /unlock with a new code when you need start commands again.');
       return undefined;
     }
-    if (this.options.actions.killEngagedSince(session.openedAt)) {
-      if (this.options.access.closeSession('kill')) await this.announce('The kill switch was engaged, so your unlocked session has ended.');
+    // A session whose kill state cannot be checked counts as ended (fail closed).
+    let killed: boolean;
+    try { killed = this.options.actions.killEngagedSince(session.openedAt); } catch { killed = true; }
+    if (killed) {
+      if (this.options.access.closeSession('kill')) await this.announce('The kill switch was engaged (or could not be checked), so your unlocked session has ended.');
       return undefined;
     }
     return session;
@@ -419,6 +447,22 @@ export class TelegramCommandRouter {
     try { await this.options.record({ role, userId: incoming.userId, command: /^[a-z_]{1,32}$/.test(command) ? command : 'unknown', outcome }); }
     catch (error) { this.options.log?.('telegram_record_failed', { code: errorCode(error) }); }
   }
+}
+
+const ACTION_TIMEOUT_MS = 90_000;
+const VIEWER_COMMANDS_PER_MINUTE = 10;
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('TIMED_OUT: the chain or a provider did not answer in time; try again')), ms); timer.unref?.(); });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Stop commands and their confirmation taps (D-063 item 4): the service handles these at once, never behind a slower command. */
+export function isStopUpdate(update: TelegramUpdate): boolean {
+  const text = (update.callback_query?.data ?? update.message?.text ?? '').trim();
+  const command = (text.split(/\s+/)[0] ?? '').replace(/^\//, '').replace(/@.*$/, '').toLowerCase();
+  return command.startsWith('tap_kill_') || COMMANDS[command]?.tier === 'stop';
 }
 
 function required(value: string | undefined, name: string): string {
