@@ -19,9 +19,10 @@ export interface EthPriceProvider { price(): Promise<EthPrice | undefined> }
 export interface ChainlinkReader {
   description(): Promise<string>;
   decimals(): Promise<number>;
-  latestRoundData(): Promise<{ answer: bigint; updatedAt: Date }>;
+  /** `roundId` and `answeredInRound` are optional so a simple reader works; when both are given the answer must belong to its own round. */
+  latestRoundData(): Promise<{ answer: bigint; updatedAt: Date; roundId?: bigint; answeredInRound?: bigint }>;
 }
-export interface PriceFetchResponse { ok: boolean; status: number; text(): Promise<string> }
+export interface PriceFetchResponse { ok: boolean; status: number; headers?: { get(name: string): string | null }; text(): Promise<string> }
 export type PriceFetch = (url: string, init: { signal: AbortSignal; redirect: 'error' }) => Promise<PriceFetchResponse>;
 
 const MAX_AGE_MS = 3 * 3_600_000;
@@ -39,6 +40,7 @@ export async function readChainlink(reader: ChainlinkReader, now: Date): Promise
     if (decimals !== 8) return undefined;
     const round = await reader.latestRoundData();
     const age = now.getTime() - round.updatedAt.getTime();
+    if (round.roundId !== undefined && round.answeredInRound !== undefined && round.answeredInRound < round.roundId) return undefined;
     if (round.answer <= 0n || !Number.isFinite(age) || age > MAX_AGE_MS || -age > MAX_FUTURE_MS) return undefined;
     const usd = Number(round.answer) / 10 ** decimals;
     return usd >= MIN_USD && usd <= MAX_USD ? { usd, source: 'chainlink', asOf: round.updatedAt } : undefined;
@@ -51,6 +53,7 @@ export async function readCoinbase(fetcher: PriceFetch, now: Date): Promise<EthP
   try {
     const response = await fetcher(COINBASE_URL, { signal: controller.signal, redirect: 'error' });
     if (!response.ok) return undefined;
+    if (Number(response.headers?.get('content-length') ?? 0) > MAX_BODY) return undefined;
     const body = await response.text();
     if (body.length > MAX_BODY) return undefined;
     const amount = (JSON.parse(body) as { data?: { amount?: unknown; base?: unknown; currency?: unknown } }).data;

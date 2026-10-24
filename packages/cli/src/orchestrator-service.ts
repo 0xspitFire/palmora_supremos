@@ -292,7 +292,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       chainlink: {
         description: async () => (await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'description' })),
         decimals: async () => Number(await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'decimals' })),
-        latestRoundData: async () => { const round = await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'latestRoundData' }); return { answer: round[1], updatedAt: new Date(Number(round[3]) * 1000) }; },
+        latestRoundData: async () => { const round = await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'latestRoundData' }); return { answer: round[1], updatedAt: new Date(Number(round[3]) * 1000), roundId: round[0], answeredInRound: round[4] }; },
       },
     });
     const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });

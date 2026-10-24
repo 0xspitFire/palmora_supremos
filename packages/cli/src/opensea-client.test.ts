@@ -33,6 +33,15 @@ describe('OpenSea floors', () => {
     await expect(t.floors.floor(1, 'nope')).rejects.toThrow('OPENSEA_CONTRACT_INVALID');
   });
 
+  it('shares one lookup between simultaneous requests, and refuses a body declared too large before reading it', async () => {
+    const t = client([reply(200, { collection: 'moonbirds' }), reply(200, stats(0.5))]);
+    const [one, two] = await Promise.all([t.floors.floor(1, A), t.floors.floor(1, A)]);
+    expect(one).toEqual(two);
+    expect(t.calls).toHaveLength(2);
+    const big = createOpenSeaFloors({ apiKey: KEY, sleep: async () => undefined, fetcher: async () => ({ ok: true, status: 200, headers: { get: () => '9999999' }, text: async () => { throw new Error('must not be read'); } }) });
+    await expect(big.floor(1, A)).rejects.toThrow('OPENSEA_UNAVAILABLE');
+  });
+
   it('keeps an answer for 10 minutes and the collection for a day', async () => {
     const t = client([reply(200, { collection: 'moonbirds' }), reply(200, stats(0.5)), reply(200, stats(0.6))]);
     await t.floors.floor(1, A); await t.floors.floor(1, A);

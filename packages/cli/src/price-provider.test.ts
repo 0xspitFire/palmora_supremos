@@ -12,6 +12,11 @@ const coinbase = (body: unknown, status = 200): PriceFetch => async () => ({ ok:
 const spot = (amount: unknown) => ({ data: { base: 'ETH', currency: 'USD', amount } });
 
 describe('Chainlink', () => {
+  it('refuses an answer that belongs to an older round than the one reported', async () => {
+    const reader: ChainlinkReader = { ...chainlink(), latestRoundData: async () => ({ answer: 250_000_000_000n, updatedAt: new Date(NOW.getTime() - 600_000), roundId: 10n, answeredInRound: 9n }) };
+    expect(await readChainlink(reader, NOW)).toBeUndefined();
+    expect((await readChainlink({ ...reader, latestRoundData: async () => ({ answer: 250_000_000_000n, updatedAt: new Date(NOW.getTime() - 600_000), roundId: 10n, answeredInRound: 10n }) }, NOW))?.usd).toBe(2500);
+  });
   it('reads a good ETH / USD answer', async () => {
     expect(await readChainlink(chainlink(), NOW)).toEqual({ usd: 2500, source: 'chainlink', asOf: new Date(NOW.getTime() - 600_000) });
   });
@@ -31,6 +36,7 @@ describe('Coinbase', () => {
     }
     expect(await readCoinbase(coinbase(spot('2500'), 500), NOW)).toBeUndefined();
     expect(await readCoinbase(coinbase('x'.repeat(10_001)), NOW)).toBeUndefined();
+    expect(await readCoinbase(async () => ({ ok: true, status: 200, headers: { get: () => '999999' }, text: async () => { throw new Error('must not be read'); } }), NOW)).toBeUndefined();
     expect(await readCoinbase(async () => { throw new Error('offline'); }, NOW)).toBeUndefined();
   });
 });

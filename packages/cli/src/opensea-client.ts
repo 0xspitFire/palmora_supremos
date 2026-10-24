@@ -6,7 +6,7 @@
  */
 export const OPENSEA_CHAIN_SLUG: Readonly<Record<number, string>> = { 1: 'ethereum', 8453: 'base', 4663: 'robinhood' };
 
-export interface OpenSeaResponse { ok: boolean; status: number; text(): Promise<string> }
+export interface OpenSeaResponse { ok: boolean; status: number; headers?: { get(name: string): string | null }; text(): Promise<string> }
 export type OpenSeaFetch = (url: string, init: { headers: Record<string, string>; signal: AbortSignal; redirect: 'error' }) => Promise<OpenSeaResponse>;
 
 export interface FloorResult { collection: string; floorEth: number | undefined }
@@ -28,6 +28,8 @@ export function createOpenSeaFloors(options: { apiKey: string; fetcher?: OpenSea
   const slugs = new Map<string, { at: number; slug: string }>();
   const stats = new Map<string, { at: number; value: FloorResult }>();
   const failures = new Map<string, { at: number; code: string }>();
+  // Two commands asking for the same collection at once share one lookup.
+  const inFlight = new Map<string, Promise<FloorResult>>();
   // One request at a time, at least 500 ms apart (2 a second; the key allows 120 a minute).
   let queue: Promise<unknown> = Promise.resolve();
   let lastAt = 0;
@@ -45,6 +47,8 @@ export function createOpenSeaFloors(options: { apiKey: string; fetcher?: OpenSea
       if (response.status === 404) throw new Error('OPENSEA_NOT_FOUND');
       if (response.status === 429) throw new Error('OPENSEA_RATE_LIMITED');
       if (!response.ok) throw new Error('OPENSEA_UNAVAILABLE');
+      // A declared size over the cap is refused before the body is read; the length is checked again after reading.
+      if (Number(response.headers?.get('content-length') ?? 0) > MAX_BODY) throw new Error('OPENSEA_UNAVAILABLE');
       const body = await response.text();
       if (body.length > MAX_BODY) throw new Error('OPENSEA_UNAVAILABLE');
       const parsed = JSON.parse(body) as unknown;
@@ -82,15 +86,21 @@ export function createOpenSeaFloors(options: { apiKey: string; fetcher?: OpenSea
       if (hit && now().getTime() - hit.at < STATS_CACHE_MS) return hit.value;
       const failed = failures.get(key);
       if (failed && now().getTime() - failed.at < FAILURE_CACHE_MS) throw new Error(failed.code);
-      try {
-        const value = await lookup(chainId, contract.toLowerCase(), key);
-        stats.set(key, { at: now().getTime(), value });
-        return value;
-      } catch (error) {
-        const code = error instanceof Error && /^OPENSEA_[A-Z_]+$/.test(error.message) ? error.message : 'OPENSEA_UNAVAILABLE';
-        failures.set(key, { at: now().getTime(), code });
-        throw new Error(code);
-      }
+      const pending = inFlight.get(key);
+      if (pending) return pending;
+      const work = (async () => {
+        try {
+          const value = await lookup(chainId, contract.toLowerCase(), key);
+          stats.set(key, { at: now().getTime(), value });
+          return value;
+        } catch (error) {
+          const code = error instanceof Error && /^OPENSEA_[A-Z_]+$/.test(error.message) ? error.message : 'OPENSEA_UNAVAILABLE';
+          failures.set(key, { at: now().getTime(), code });
+          throw new Error(code);
+        } finally { inFlight.delete(key); }
+      })();
+      inFlight.set(key, work);
+      return work;
     },
   };
 }
