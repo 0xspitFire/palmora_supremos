@@ -53,10 +53,15 @@ const compact = (date: Date): string => date.toISOString().replace(/[-:]/g, '').
 export function createFireWiring(deps: FireWiringDeps): FireWiring {
   const now = deps.now ?? (() => new Date());
   const inFlight = new Set<string>();
+  /** When each campaign was last fired: after the processor claims a request it no longer shows as waiting, so a short memory covers its run. */
+  const firedAt = new Map<string, number>();
+  const RECENT_FIRE_MS = 10 * 60_000;
   const findCampaign = (campaignId: string): Campaign | undefined => deps.store.snapshot().campaigns.find((item) => item.id === campaignId);
 
   /** Open schedules and waiting requests. The in-flight guard is separate: the pipeline itself holds it while it runs. */
   const persistentConflict = (campaignId: string, ignoreScheduleId?: string): string | undefined => {
+    const last = firedAt.get(campaignId);
+    if (last !== undefined && now().getTime() - last < RECENT_FIRE_MS) return 'this campaign was fired in the last 10 minutes; see /requests and /runs';
     const schedule = deps.fireSchedules().open(campaignId).find((item) => item.id !== ignoreScheduleId);
     if (schedule) return `a scheduled mint (${schedule.id.slice(-6)}) is open for this campaign; cancel it first with /cancel ${schedule.id.slice(-6)}`;
     const nowMs = now().getTime();
@@ -109,7 +114,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     // Held for the whole pipeline, so a second tap or a scheduler pass cannot start the same campaign twice.
     if (inFlight.has(input.campaignId)) throw new Error('FIRE_CONFLICT: this campaign is being fired right now');
     inFlight.add(input.campaignId);
-    try { return await runFire(fireDeps, input); } finally { inFlight.delete(input.campaignId); }
+    try { const result = await runFire(fireDeps, input); firedAt.set(input.campaignId, now().getTime()); return result; } finally { inFlight.delete(input.campaignId); }
   };
 
   return {

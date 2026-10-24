@@ -37,7 +37,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
     prepare: ok('prepare'), simulate: ok('simulate'), cancel: ok('cancel'), kill: ok('kill'), revoke: ok('revoke'), release: ok('release'), watchAccept: ok('watchAccept'),
     firePreview: async (campaignId, wallets, gwei) => { calls.push(`firePreview(${campaignId}|${wallets}|${gwei})`); return { text: 'fire preview', wallets: ['0x1111111111111111111111111111111111111111'] }; },
     fireNow: ok('fireNow'), schedules: ok('schedules'), scheduleCreate: ok('scheduleCreate'),
-    schedulePreview: async (campaignId, wallets, gwei, from, until) => { calls.push(`schedulePreview(${campaignId}|${wallets}|${gwei}|${from}|${until})`); return { text: 'schedule preview', phrase: 'SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI', wallets: ['0x1111111111111111111111111111111111111111'] }; },
+    schedulePreview: async (campaignId, wallets, gwei, from, until) => { calls.push(`schedulePreview(${campaignId}|${wallets}|${gwei}|${from}|${until})`); return { text: 'schedule preview', phrase: 'SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI', wallets: ['0x1111111111111111111111111111111111111111'], from, until };  },
     killEngagedSince: (openedAt) => killedAfter !== undefined && killedAfter > openedAt,
   };
   const records: Array<{ role: string; userId: string; command: string; outcome: string }> = [];

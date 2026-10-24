@@ -64,7 +64,8 @@ export interface TelegramActions {
   /** T-067 (D-067): the preview of an attended fire; throws when the mint is not open or anything is not ready. */
   firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[] }>;
   fireNow(campaignId: string, wallets: string, maxFeeGwei: number): Promise<string>;
-  schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[] }>;
+  /** `from` and `until` are the resolved ISO times, so a relative time such as `+2h` means the same at `/confirm`. */
+  schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[]; from: string; until: string }>;
   scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string): Promise<string>;
   schedules(): Promise<string>;
   kill(): Promise<string>;
@@ -332,7 +333,7 @@ export class TelegramCommandRouter {
         const until = required(args[4], 'until');
         const preview = await a.schedulePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei, from, until);
         this.prune();
-        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from, until } });
+        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until } });
         return reply(`${preview.text}\n\nTo store it, within 15 minutes:\n/confirm ${preview.phrase}`);
       }
       case 'schedules': return reply(await a.schedules());

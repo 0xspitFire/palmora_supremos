@@ -100,7 +100,7 @@ describe('/fire', () => {
       await expect(open.actions.firePreview('campaign_abcdef12', 'all', 0)).rejects.toThrow('MAX_FEE_GWEI_REQUIRED');
       await expect(open.actions.firePreview('nope', 'all', 0.2)).rejects.toThrow('CAMPAIGN_NOT_FOUND');
       await open.actions.fireNow('campaign_abcdef12', A, 0.2);
-      await expect(open.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FIRE_CONFLICT.*waiting/);
+      await expect(open.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FIRE_CONFLICT.*fired in the last 10 minutes/);
       await expect(open.actions.fireNow('campaign_abcdef12', A, 0.2)).rejects.toThrow('FIRE_CONFLICT');
       expect(open.requests).toHaveLength(1);
       expect([early, ended, killed].flatMap((item) => item.requests)).toEqual([]);
@@ -152,9 +152,21 @@ describe('/schedule', () => {
       const again = await t.actions.schedulePreview('campaign_abcdef12', A, 0.2, ...WINDOW);
       await t.actions.scheduleCreate('campaign_abcdef12', A, 0.2, ...WINDOW, again.phrase);
       expect(t.schedules.open()).toHaveLength(1);
-      expect(await t.actions.kill()).toContain('Scheduled mints are cancelled');
+      expect(await t.actions.kill()).toContain('1 scheduled mint(s) cancelled');
       expect(t.schedules.open()).toEqual([]);
       expect(await t.actions.schedules()).toContain('cancelled');
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('a relative window resolves once at the preview, so the stored times match the phrase; /request refuses while a schedule is open', async () => {
+    const t = await setup({ status: 'upcoming' });
+    try {
+      const preview = await t.actions.schedulePreview('campaign_abcdef12', A, 0.2, '+30m', '+2h');
+      expect(preview.from).toBe(new Date(NOW.getTime() + 30 * 60_000).toISOString());
+      // The router passes these resolved times to /confirm; they must give the same phrase later.
+      await expect(t.actions.scheduleCreate('campaign_abcdef12', A, 0.2, preview.from, preview.until, preview.phrase)).resolves.toContain('stored');
+      await expect(t.actions.requestCreate('campaign_abcdef12', A, 0.2, 'x')).rejects.toThrow('FIRE_CONFLICT');
+      await expect(t.actions.schedulePreview('campaign_abcdef12', A, 1e-7, ...WINDOW)).rejects.toThrow('MAX_FEE_GWEI_REQUIRED');
     } finally { await cleanup(t.directory); }
   });
 

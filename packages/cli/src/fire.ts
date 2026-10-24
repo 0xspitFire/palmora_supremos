@@ -50,7 +50,7 @@ export function parseWhen(text: string, now: Date): Date | undefined {
   if (value === 'now') return new Date(now.getTime());
   const relative = /^\+(\d{1,4})([mh])$/.exec(value);
   if (relative) return new Date(now.getTime() + Number(relative[1]) * (relative[2] === 'h' ? 3_600_000 : 60_000));
-  const absolute = /^(\d{4}-\d{2}-\d{2})t(\d{2}):(\d{2})(?::(\d{2}))?z?$/.exec(value);
+  const absolute = /^(\d{4}-\d{2}-\d{2})t(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d{1,3})?z?$/.exec(value);
   if (!absolute) return undefined;
   const parsed = new Date(`${absolute[1]}T${absolute[2]}:${absolute[3]}:${absolute[4] ?? '00'}.000Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().startsWith(absolute[1]!) ? parsed : undefined;
@@ -91,6 +91,7 @@ const safeCode = (error: unknown): string => {
 
 export function createFireScheduler(deps: SchedulerDeps): { tick(): Promise<number> } {
   const told = new Set<string>();
+  const waitingRecorded = new Set<string>();
   const tellOnce = async (key: string, text: string): Promise<void> => { if (told.has(key)) return; told.add(key); await deps.alert(text, key).catch(() => undefined); };
   return {
     async tick(): Promise<number> {
@@ -102,11 +103,11 @@ export function createFireScheduler(deps: SchedulerDeps): { tick(): Promise<numb
         const end = async (code: string, text: string): Promise<void> => {
           if (deps.claim(schedule.id, 'expired')) { await deps.record({ scheduleId: schedule.id, state: 'expired', code }); await tellOnce(`fire-schedule:${schedule.id}:end`, text); }
         };
-        if (now >= Date.parse(schedule.windowUntil)) { await end('SCHEDULE_WINDOW_ENDED', `Scheduled mint ${label} ended without firing: the mint did not open in its window, or it could not be fired.`); continue; }
+        if (now >= Date.parse(schedule.windowUntil)) { await end('SCHEDULE_WINDOW_ENDED', `Scheduled mint ${label} ended without firing: the mint did not open inside its window (or could not be read). Nothing was sent.`); continue; }
         const campaign = deps.campaign(schedule.campaignId);
         if (!campaign || deps.campaignDigest(campaign) !== schedule.campaignDigest) { await end('CAMPAIGN_CHANGED', `Scheduled mint ${label} was cancelled: its campaign changed or is gone since you scheduled it.`); continue; }
         // The kill switch is the owner's: a schedule only waits while it is on, and the owner is told once.
-        if (deps.killSwitchOn()) { await tellOnce(`fire-schedule:${schedule.id}:kill`, `Scheduled mint ${label} is waiting: the kill switch is on. Release it (/unlock, then /release) before the mint opens.`); await deps.record({ scheduleId: schedule.id, state: 'waiting', code: 'KILL_SWITCH_ON' }).catch(() => undefined); continue; }
+        if (deps.killSwitchOn()) { await tellOnce(`fire-schedule:${schedule.id}:kill`, `Scheduled mint ${label} is waiting: the kill switch is on. Release it (/unlock, then /release) before the mint opens.`); if (!waitingRecorded.has(schedule.id)) { waitingRecorded.add(schedule.id); await deps.record({ scheduleId: schedule.id, state: 'waiting', code: 'KILL_SWITCH_ON' }).catch(() => undefined); } continue; }
         const state = await deps.mintState(campaign).catch((): MintState => 'unknown');
         if (state === 'ended') { await end('MINT_ENDED', `Scheduled mint ${label} ended without firing: the mint is over.`); continue; }
         if (state !== 'open') continue;

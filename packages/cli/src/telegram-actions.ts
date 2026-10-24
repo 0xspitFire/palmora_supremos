@@ -116,7 +116,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     return deps.fire;
   };
   const fireCampaign = (campaignId: string, maxFeeGwei: number) => {
-    if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500) throw new Error('MAX_FEE_GWEI_REQUIRED: use more than 0 and at most 500');
+    if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500 || !/^\d+(\.\d+)?$/.test(String(maxFeeGwei))) throw new Error('MAX_FEE_GWEI_REQUIRED: use more than 0 and at most 500, as a plain number such as 0.2');
     const target = campaign(campaignId);
     if (target.dryRun) throw new Error('LIVE_REQUIRES_NON_DRY_CAMPAIGN');
     if (existsSync(deps.killSwitchPath) || deps.store.snapshot().killed) throw new Error('KILL_SWITCH_ON: release it first (/unlock, then /release)');
@@ -285,6 +285,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async requestCreate(campaignId, walletsText, maxFeeGwei, phrase) {
       if (deps.mode !== 'host') throw new Error('LIVE_MODE_REQUIRED: the service is in practice mode, so nothing would run this request');
+      if (deps.fireSchedulesRepository?.().open(campaignId).length) throw new Error('FIRE_CONFLICT: a scheduled mint is open for this campaign; cancel it first with /schedules and /cancel');
       const result = await runLiveRequest({ action: 'create', campaignId, wallets: await walletsFor(walletsText), maxFeeGwei, confirm: phrase, now: now(), store: deps.store as never, approve: (validated) => deps.application.command('approve', { validated }) });
       return `Request ${String(result.requestId)} sent. The service starts it within a few seconds; follow it with /requests and /runs. /kill stops everything.`;
     },
@@ -368,7 +369,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const wallets = await wiring.wallets(walletsText);
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
+      return { wallets, from: from.toISOString(), until: until.toISOString(), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
     },
     async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase) {
       const wiring = fireWiring();
@@ -397,8 +398,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const outcomes = await Promise.allSettled([engageKillSwitchFile(deps.killSwitchPath, 'owner Telegram /kill'), deps.coordinator.kill('owner Telegram /kill')]);
       if (outcomes.every((outcome) => outcome.status === 'rejected')) throw new Error('KILL_SWITCH_NOT_ENGAGED');
       // A kill ends every scheduled mint too (D-067); a failure here never hides that the kill switch is on.
-      try { deps.fireSchedulesRepository?.().cancelAllOpen(); } catch { /* the kill switch itself is what stops a fire */ }
-      return 'The kill switch is ON. Scheduled mints are cancelled. Nothing new can be spent. Release it with /unlock then /release when you are ready.';
+      let cancelled = 0;
+      let scheduleFailed = false;
+      try { cancelled = deps.fireSchedulesRepository?.().cancelAllOpen() ?? 0; } catch { scheduleFailed = true; /* the kill switch itself is what stops a fire */ }
+      const scheduleNote = scheduleFailed ? ' Scheduled mints could not be cancelled; check /schedules (the kill switch still stops them).' : cancelled > 0 ? ` ${cancelled} scheduled mint(s) cancelled.` : '';
+      return `The kill switch is ON.${scheduleNote} Nothing new can be spent. Release it with /unlock then /release when you are ready.`;
     },
     async revoke(chainText, phrase) {
       const chainId = chainFrom(chainText);

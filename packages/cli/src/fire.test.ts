@@ -72,6 +72,7 @@ describe('typed times and windows', () => {
     expect(parseWhen('+90m', NOW)?.toISOString()).toBe('2026-10-25T19:30:00.000Z');
     expect(parseWhen('+2H', NOW)?.toISOString()).toBe('2026-10-25T20:00:00.000Z');
     expect(parseWhen('2026-10-26T09:30', NOW)?.toISOString()).toBe('2026-10-26T09:30:00.000Z');
+    expect(parseWhen('2026-10-26T09:30:00.000Z', NOW)?.toISOString()).toBe('2026-10-26T09:30:00.000Z');
     for (const bad of ['soon', '', '+5', '+5d', '2026-13-01T10:00', '2026-02-31T10:00', '25/10/2026 18:00', '+99999m']) expect(parseWhen(bad, NOW), bad).toBeUndefined();
   });
 
@@ -161,7 +162,7 @@ describe('the scheduler', () => {
     await t.scheduler.tick();
     expect(t.claimed.size).toBe(0);
     expect(t.alerts).toHaveLength(1);
-    expect(t.events.every((event) => event === 'waiting:KILL_SWITCH_ON')).toBe(true);
+    expect(t.events).toEqual(['waiting:KILL_SWITCH_ON']);
     t.setKill(false);
     await t.scheduler.tick();
     expect(t.events.at(-1)).toBe('fired');
