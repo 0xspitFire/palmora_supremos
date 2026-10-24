@@ -198,15 +198,61 @@ describe('phase 2 operations', () => {
   });
 
   describe('releasing the kill file (T-060)', () => {
-    const setup = async (initial: { killed?: boolean; reasons?: string[] } = {}) => {
+    const setup = async (initial: { killed?: boolean; reasons?: string[]; activeRun?: boolean; staleKillReads?: boolean } = {}) => {
       const root = await mkdtemp(join(tmpdir(), 'mintbot-kill-release-'));
       const store = new DurableStore();
       await store.open();
-      await store.transaction((state) => { state.runtime = { startupState: 'Ready', blockingReasons: [...(initial.reasons ?? [])], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; if (initial.killed) state.killed = true; });
+      await store.transaction((state) => {
+        state.runtime = { startupState: 'Ready', blockingReasons: [...(initial.reasons ?? [])], dependencies: { engine: true, chain: true, backup: true, notifications: true } };
+        if (initial.killed) state.killed = true;
+        if (initial.activeRun) state.runs.push({ id: 'run_interrupted', intentId: 'intent', campaignId: 'cmp', mode: 'live', requestDigest: 'd', state: 'Active', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+      });
       let killFile = true;
-      const orchestrator = new OrchestratorService(store, {} as BackendApplication, { start: async () => undefined, reconcile: async () => undefined }, { jobs: new JsonJobStore(join(root, 'jobs.json')), dryRunOnly: true, killSwitchProbe: async () => killFile, logger: new RedactedLogger({ stdout: false }) });
-      return { root, store, orchestrator, release: () => { killFile = false; } };
+      const probes: boolean[] = [];
+      // A kill that lands after the service's own reads: those reads see none, only the transaction (on the real store) sees it.
+      const seen = initial.staleKillReads ? new Proxy(store, { get: (target, key) => { if (key === 'snapshot') return () => ({ ...target.snapshot(), killed: false }); const value = Reflect.get(target, key, target) as unknown; return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value; } }) : store;
+      const orchestrator = new OrchestratorService(seen, {} as BackendApplication, { start: async () => undefined, reconcile: async () => undefined }, { jobs: new JsonJobStore(join(root, 'jobs.json')), dryRunOnly: true, killSwitchProbe: async () => { const value = probes.length > 0 ? probes.shift()! : killFile; return value; }, logger: new RedactedLogger({ stdout: false }) });
+      return { root, store, orchestrator, release: () => { killFile = false; }, nextProbes: (...values: boolean[]) => { probes.push(...values); } };
     };
+
+    it('an unresolved run the kill interrupted keeps it Blocked after the file is removed (fail closed)', async () => {
+      const { root, store, orchestrator, release } = await setup({ activeRun: true });
+      try {
+        await orchestrator.start();
+        await orchestrator.tick();
+        release();
+        await orchestrator.tick();
+        expect(store.snapshot().runtime).toMatchObject({ startupState: 'Blocked', blockingReasons: ['UNRESOLVED_EXECUTIONS'] });
+        await orchestrator.stop();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+
+    it('a kill command that lands after the file check keeps the block (fail closed)', async () => {
+      const { root, store, orchestrator, release } = await setup({ staleKillReads: true });
+      try {
+        await orchestrator.start();
+        await orchestrator.tick();
+        release();
+        await store.transaction((state) => { state.killed = true; });
+        await orchestrator.tick();
+        expect(store.snapshot().runtime.blockingReasons).toContain('KILL_SWITCH_ENGAGED');
+        expect(store.snapshot().runtime.startupState).toBe('Blocked');
+        await orchestrator.stop();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+
+    it('a kill file created again while the block is lifted blocks at once (fail closed)', async () => {
+      const { root, store, orchestrator, release, nextProbes } = await setup();
+      try {
+        await orchestrator.start();
+        await orchestrator.tick();
+        release();
+        nextProbes(false, true);
+        await orchestrator.tick();
+        expect(store.snapshot().runtime).toMatchObject({ startupState: 'Blocked', blockingReasons: ['KILL_SWITCH_ENGAGED'] });
+        await orchestrator.stop();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
 
     it('stays Blocked while the kill file exists, and is Ready again once the owner removes it', async () => {
       const { root, store, orchestrator, release } = await setup();
