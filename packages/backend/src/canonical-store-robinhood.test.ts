@@ -204,6 +204,46 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       } finally { proven.close(); await close(value); }
     });
 
+    it('holds the 0.002 ETH active-period cap across campaigns: ten wallets in all are admitted, an eleventh is not (D-066)', async () => {
+      const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, PERSONAL_LIVE_FLEET_POLICY);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL), fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+      try {
+        await proven.open();
+        value.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ?').run('profile-4663');
+        proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+        const application = new BackendApplication(proven, {} as never, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+        const fixtureValue = { ...value, store: proven, application };
+        const wallets = (count: number, from: number) => Array.from({ length: count }, (_, index) => `0x${(from + index + 1).toString(16).padStart(40, '0')}`);
+        const sized = (count: number) => real({ maxRunWei: ALLOWANCE * BigInt(count) });
+        // Six wallets (0.0012 ETH), then four more in another campaign (0.0008 ETH): exactly 0.002 ETH in all, which is allowed.
+        const first = await application.createCampaign(sized(6));
+        await expect(proven.admitExecution((await armed(fixtureValue, first, wallets(6, 0), [], '-a')).input)).resolves.toBeDefined();
+        const second = await application.createCampaign(sized(4));
+        await expect(proven.admitExecution((await armed(fixtureValue, second, wallets(4, 100), [], '-b')).input)).resolves.toBeDefined();
+        // One more wallet in a third campaign would make 0.0022 ETH: above the Robinhood cap, though below the fleet's 0.0024 ETH.
+        const third = await application.createCampaign(sized(1));
+        await expect(proven.admitExecution((await armed(fixtureValue, third, wallets(1, 200), [], '-c')).input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+      } finally { proven.close(); await close(value); }
+    });
+
+    it('a smaller fleet cap still wins on Robinhood (the 0.002 ETH limit only lowers a larger cap)', async () => {
+      const small = { ...PERSONAL_LIVE_FLEET_POLICY, freeDailyCapWei: 1_000_000_000_000_000n };
+      const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, small);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL), fleetPolicy: small });
+      try {
+        await proven.open();
+        value.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ?').run('profile-4663');
+        proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+        const application = new BackendApplication(proven, {} as never, { fleetPolicy: small });
+        const fixtureValue = { ...value, store: proven, application };
+        const wallets = (count: number, from: number) => Array.from({ length: count }, (_, index) => `0x${(from + index + 1).toString(16).padStart(40, '0')}`);
+        const first = await application.createCampaign(real({ maxRunWei: ALLOWANCE * 5n }));
+        await expect(proven.admitExecution((await armed(fixtureValue, first, wallets(5, 0), [], '-a')).input)).resolves.toBeDefined();
+        const second = await application.createCampaign(real({ maxRunWei: ALLOWANCE }));
+        await expect(proven.admitExecution((await armed(fixtureValue, second, wallets(1, 100), [], '-b')).input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
+      } finally { proven.close(); await close(value); }
+    });
+
     it('refuses every shape that is not the approved one, and any number above the D-041 caps (fail closed)', async () => {
       const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, PERSONAL_LIVE_FLEET_POLICY);
       try {
