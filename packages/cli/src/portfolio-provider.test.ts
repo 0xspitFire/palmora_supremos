@@ -8,7 +8,7 @@ const A = '0x365952eb1e8209bf2bcc2db5ed213111a87d061e';
 const B = '0x81c104dcb898416fd4f81ead091dba5b8f46f37a';
 const C1 = '0x1111111111111111111111111111111111111111';
 const item = (id: string, contract = C1, name: string | null = 'Cool Cats', extra: Record<string, unknown> = {}) => ({ id, token_type: 'ERC-721', value: '1', token: { address_hash: contract, ...(name ? { name } : {}) }, ...extra });
-const reply = (status: number, body: unknown): Awaited<ReturnType<PortfolioFetch>> => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const reply = (status: number, body: unknown): Awaited<ReturnType<PortfolioFetch>> => ({ ok: status >= 200 && status < 300, status, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) });
 
 function provider(responses: Array<Awaited<ReturnType<PortfolioFetch>> | Error>) {
   const urls: string[] = [];
@@ -49,6 +49,32 @@ describe('Blockscout portfolio client', () => {
       expect(error?.message).not.toContain(KEY);
     }
     await expect(provider([]).p.list(1, 'not-an-address')).rejects.toThrow('PORTFOLIO_WALLET_INVALID');
+  });
+
+  it('remembers a failure for a minute, refuses a huge body and a foreign paging key, and never follows a redirect', async () => {
+    const down = provider([reply(500, {})]);
+    await expect(down.p.list(1, A)).rejects.toThrow('PORTFOLIO_UNAVAILABLE');
+    await expect(down.p.list(1, A)).rejects.toThrow('PORTFOLIO_UNAVAILABLE');
+    expect(down.urls).toHaveLength(1);
+    down.advance(61_000);
+    await expect(down.p.list(1, A)).resolves.toMatchObject({ items: [] });
+    expect(down.urls).toHaveLength(2);
+
+    const huge = provider([reply(200, 'x'.repeat(1_000_001))]);
+    await expect(huge.p.list(1, A)).rejects.toThrow('PORTFOLIO_UNAVAILABLE');
+    const notJson = provider([reply(200, 'not json')]);
+    await expect(notJson.p.list(1, A)).rejects.toThrow('PORTFOLIO_UNAVAILABLE');
+
+    const foreign = provider([reply(200, { items: [], next_page_params: { [['api', 'key'].join('')]: 'stolen', 'bad key': '1', token_id: '3' } }), reply(200, { items: [], next_page_params: null })]);
+    await foreign.p.list(1, A);
+    expect(foreign.urls[1]).toContain('token_id=3');
+    expect(foreign.urls[1]).not.toContain('stolen');
+    expect(foreign.urls[1]).not.toContain('bad');
+
+    const inits: unknown[] = [];
+    const redirecting = createBlockscoutPortfolio({ apiKey: KEY, fetcher: async (_url, init) => { inits.push(init.redirect); return reply(200, { items: [], next_page_params: null }); }, sleep: async () => undefined });
+    await redirecting.list(1, A);
+    expect(inits).toEqual(['error']);
   });
 
   it('spaces requests at least 250 ms apart', async () => {
