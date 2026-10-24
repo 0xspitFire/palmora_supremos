@@ -25,7 +25,7 @@ import { createDashboard } from './dashboard.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { startIntelligence } from './intelligence-service.js';
 import { runBackupJob, startBackupScheduler } from './backup-scheduler.js';
-import { createMonitorPing, validMonitorUrl } from './monitor-ping.js';
+import { createMonitorPing, startLivenessPing, validMonitorUrl } from './monitor-ping.js';
 import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './fleet-watch-service.js';
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
@@ -227,6 +227,20 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   const dashboard = createDashboard(runtime.store);
   const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics, readModel: dashboard.readModel, dashboard: (url) => dashboard.render(url) });
   await http.start();
+  // Outside monitor when no chain scanning runs: a liveness signal every minute ("ok" while the service can read its own database).
+  // When intelligence runs, its own scan-based signal uses the same address instead, so the two never both report.
+  let liveness: { stop(): void } | undefined;
+  if (!intelligence && config.secretStorePath) {
+    const pingUrl = validMonitorUrl((await loadHostSecretStore(config.secretStorePath)).get('HEALTHCHECK_PING_URL'));
+    if (pingUrl) {
+      logger.registerSecret(pingUrl);
+      liveness = startLivenessPing(createMonitorPing(pingUrl), {
+        healthy: () => { runtime.store.snapshot(); return true; },
+        onError: (code) => logger.warn({ event: 'monitor_ping_failed', code }, 'outside monitor signal could not be sent'),
+      });
+      logger.info({ event: 'liveness_ping_started' }, 'outside monitor liveness signal started');
+    }
+  }
   metrics.set('mintbot_process_up', 1);
   logger.info({ event: 'service_started', bindHost: config.bindHost, port: config.port, mode: config.mode }, 'orchestrator service started');
 
@@ -236,6 +250,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     stopped = true;
     metrics.set('mintbot_process_up', 0);
     intelligence?.stop();
+    liveness?.stop();
     fleetWatcher?.stop();
     liveRequests?.stop();
     backups?.stop();

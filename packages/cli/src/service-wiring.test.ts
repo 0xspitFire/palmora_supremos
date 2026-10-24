@@ -58,6 +58,15 @@ describe('service wiring of the compensated Turnkey profile', () => {
   });
 });
 
+describe('outside monitor liveness signal', () => {
+  it('starts from the production check address when no chain scanning runs, never both, and stops with the service', () => {
+    expect(service).toContain("if (!intelligence && config.secretStorePath) {");
+    expect(service).toContain("get('HEALTHCHECK_PING_URL')");
+    expect(service).toContain('logger.registerSecret(pingUrl)');
+    expect(service).toContain('liveness?.stop();');
+  });
+});
+
 describe('RPC failover wiring (owner instruction 2026-10-23)', () => {
   const adapter = read('engine-adapter.ts');
   const watch = read('fleet-watch-service.ts');
