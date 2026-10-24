@@ -19,7 +19,7 @@ export interface FireDeps {
   /** Dry-runs the wallets and records a passing test mint for each wallet that passed; throws when the mint is not open or none passed. */
   recordSimulations(campaign: Campaign, wallets: readonly string[]): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }>;
   /** Approves exactly the recorded test mints and stores the live request for the request processor. */
-  createRequest(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number): Promise<{ requestId: string }>;
+  createRequest(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number): Promise<{ requestId: string; /** The wallets the request really covers (never more than the campaign was sized for). */ wallets?: string[]; /** Wallets that passed but were left out because the campaign is sized for fewer. */ leftOut?: string[] }>;
   /** Asks the request processor to look now instead of at its next pass. */
   kick(): void;
 }
@@ -39,7 +39,7 @@ export async function runFire(deps: FireDeps, input: FireInput): Promise<FireRes
   if (recorded.recorded.length === 0) throw new Error('SIMULATION_NOT_PASSED: no wallet passed the test mint');
   const request = await deps.createRequest(campaign, recorded.recorded, input.maxFeeGwei);
   deps.kick();
-  return { requestId: request.requestId, wallets: recorded.recorded, skipped: recorded.skipped };
+  return { requestId: request.requestId, wallets: request.wallets ?? recorded.recorded, skipped: [...recorded.skipped, ...(request.leftOut ?? []).map((wallet) => ({ wallet, why: 'it passed, but the campaign was sized for fewer wallets' }))] };
 }
 
 // ── schedule windows ─────────────────────────────────────────────────────────────────────────────────

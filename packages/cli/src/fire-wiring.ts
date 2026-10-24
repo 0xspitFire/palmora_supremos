@@ -4,7 +4,7 @@ import { formatEth, campaignInputDigest, type BackendStore, type Campaign, type 
 import type { FireScheduleRepository, FireScheduleRecord } from '@mint-bot/database';
 import { checkDrop } from './drop-check.js';
 import { assertScheduleWindow, parseWhen, runFire, type FireDeps, type FireResult, type MintState } from './fire.js';
-import { previewLiveRequest, runLiveRequest } from './live-request.js';
+import { previewLiveRequest, runLiveRequest, sizedWalletCount } from './live-request.js';
 import { recordPassingSimulationsAction } from './owner-actions.js';
 import { recordRobinhoodSimulationsAction } from './robinhood-live.js';
 import type { DryRunReport } from './robinhood-readonly.js';
@@ -103,9 +103,13 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     conflict: persistentConflict,
     recordSimulations,
     createRequest: async (campaign, wallets, maxFeeGwei) => {
-      const preview = previewLiveRequest(deps.store.snapshot(), campaign.id, wallets, maxFeeGwei, now());
+      // A campaign sized for N wallets covers at most N: the others that passed are left out and said so, never refused as an error.
+      const sized = Math.max(1, sizedWalletCount(campaign));
+      const used = wallets.slice(0, sized);
+      const leftOut = wallets.slice(sized);
+      const preview = previewLiveRequest(deps.store.snapshot(), campaign.id, used, maxFeeGwei, now());
       const result = await runLiveRequest({ action: 'create', campaignId: campaign.id, wallets: preview.wallets, maxFeeGwei, confirm: preview.phrase, now: now(), store: deps.store as never, approve: (validated) => deps.approve(validated as never) });
-      return { requestId: String(result.requestId) };
+      return { requestId: String(result.requestId), wallets: preview.wallets, leftOut };
     },
     kick: deps.kick,
   };
@@ -128,15 +132,18 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     },
     describe(campaign, wallets, maxFeeGwei) {
       const fee = campaign.feePolicy.totalFeeBudgetWei ?? 0n;
-      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(wallets.length);
-      return `${campaign.quantity} NFT(s) per wallet at ${formatEth(campaign.mintPriceWei)} ETH from ${wallets.length} wallet(s) on chain ${campaign.chainId}, contract ${campaign.contract.slice(0, 6)}…${campaign.contract.slice(-4)}. The most that can be spent is ${formatEth(total)} ETH, signing at no more than ${maxFeeGwei} gwei. Every guard still applies.`;
+      // A campaign sized for N wallets spends for at most N, however many are listed.
+      const used = Math.min(wallets.length, Math.max(1, sizedWalletCount(campaign)));
+      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(used);
+      return `${campaign.quantity} NFT(s) per wallet at ${formatEth(campaign.mintPriceWei)} ETH from ${used} wallet(s) on chain ${campaign.chainId}, contract ${campaign.contract.slice(0, 6)}…${campaign.contract.slice(-4)}. The most that can be spent is ${formatEth(total)} ETH, signing at no more than ${maxFeeGwei} gwei. Every guard still applies.`;
     },
     fireNow: (campaignId, wallets, maxFeeGwei) => run({ campaignId, wallets, maxFeeGwei }),
     fireSchedule: (schedule) => run({ campaignId: schedule.campaignId, wallets: schedule.wallets, maxFeeGwei: Number(schedule.maxFeeGwei), scheduleId: schedule.id }),
     schedulePhrase(campaign, wallets, maxFeeGwei, from, until) {
       const fee = campaign.feePolicy.totalFeeBudgetWei ?? 0n;
-      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(wallets.length);
-      return `SCHEDULE ${campaign.id.slice(-8)} ${wallets.length}-WALLETS ${formatEth(total)} ${maxFeeGwei}-GWEI ${compact(from)}-${compact(until)}`;
+      const used = Math.min(wallets.length, Math.max(1, sizedWalletCount(campaign)));
+      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(used);
+      return `SCHEDULE ${campaign.id.slice(-8)} ${used}-WALLETS ${formatEth(total)} ${maxFeeGwei}-GWEI ${compact(from)}-${compact(until)}`;
     },
     parseWindow(fromText, untilText) {
       const at = now();

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { redactText } from '@mint-bot/backend';
 import type { TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } from '@mint-bot/database';
 import type { BotCommand, InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
-import { GuidedFlows, flowNeedsSession, type FlowKind, type FlowResult, type GuidedActions } from './guided-flows.js';
+import { GuidedFlows, flowNeedsSession, type FlowKind, type FlowPreset, type FlowResult, type GuidedActions } from './guided-flows.js';
 import { base32Encode, matchTotp } from './totp.js';
 
 /**
@@ -50,7 +50,6 @@ export interface TelegramActions extends GuidedActions {
   check(chain: string, contract: string, includeFleet: boolean): Promise<string>;
   plan(chain: string, contract: string, quantityLimit: number | undefined): Promise<string>;
   /** The preview names the exact wallets, so a later `/confirm` uses those and no others. */
-  requestPreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; phrase: string; wallets: string[] }>;
   requestCreate(campaignId: string, wallets: string, maxFeeGwei: number, phrase: string): Promise<string>;
   requests(): Promise<string>;
   runs(): Promise<string>;
@@ -101,7 +100,6 @@ export const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1000;
 export const INVITE_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const MAX_MESSAGE_AGE_MS = 5 * 60 * 1000;
 const CONFIRM_TAP_LIFETIME_MS = 2 * 60 * 1000;
-const PREVIEW_LIFETIME_MS = 15 * 60 * 1000;
 const UNLOCK_FAILURE_LIMIT = 5;
 const UNLOCK_WINDOW_MS = 60 * 60 * 1000;
 const JOIN_ATTEMPT_LIMIT = 5;
@@ -123,30 +121,29 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   gas: { tier: 'read', roles: BOTH, usage: '/gas [ethereum|base|robinhood]', help: 'Current network fees' },
   backup: { tier: 'read', roles: OWNER, usage: '/backup', help: 'Last backup and its check' },
   wallets: { tier: 'read', roles: OWNER, usage: '/wallets', help: 'Fleet balances per chain, watcher state' },
-  funding: { tier: 'read', roles: OWNER, usage: '/funding <campaign>', help: 'What each wallet needs for a campaign' },
+  funding: { tier: 'read', roles: OWNER, usage: '/funding', help: 'What each wallet needs for a campaign (pick it with a button)' },
   enablement: { tier: 'read', roles: OWNER, usage: '/enablement', help: 'Base and Robinhood records' },
   drops: { tier: 'read', roles: BOTH, usage: '/drops', help: 'Upcoming opportunities' },
   calendar: { tier: 'read', roles: BOTH, usage: '/calendar', help: 'Mint calendar' },
   check: { tier: 'read', roles: BOTH, usage: '/check <chain> <contract>', help: 'Price, phase and limits (and your wallets, for the owner)' },
-  plan: { tier: 'read', roles: OWNER, usage: '/plan <chain> <contract> [quantity]', help: 'Quantity and cost plan (Ethereum, Base, Robinhood), and the phrase for /prepare' },
-  request: { tier: 'read', roles: OWNER, usage: '/request <campaign> <wallets|all> <max gwei>', help: 'Preview a live request and its phrase' },
+  plan: { tier: 'read', roles: OWNER, usage: '/plan', help: 'Check a drop and prepare a campaign, step by step (same guide as /prepare)' },
+  request: { tier: 'read', roles: OWNER, usage: '/request', help: 'Send a live request: campaign, wallets, fee, then one button' },
   requests: { tier: 'read', roles: OWNER, usage: '/requests', help: 'Pending and recent requests' },
   runs: { tier: 'read', roles: OWNER, usage: '/runs', help: 'Recent runs' },
-  run: { tier: 'read', roles: OWNER, usage: '/run <run id>', help: 'Result, spend and receipts of a run' },
+  run: { tier: 'read', roles: OWNER, usage: '/run', help: 'Result, spend and receipts of a run (pick it with a button)' },
   watchlist: { tier: 'read', roles: BOTH, usage: '/watchlist', help: 'Tracked whale wallets' },
   track: { tier: 'change', roles: OWNER, usage: '/track <address> [label]', help: 'Track a whale wallet' },
   untrack: { tier: 'change', roles: OWNER, usage: '/untrack <address>', help: 'Stop tracking a wallet' },
-  prepare: { tier: 'change', roles: OWNER, usage: '/prepare <chain> <contract> <quantity> <phrase from /plan>', help: 'Record a live campaign (spends nothing)' },
-  simulate: { tier: 'change', roles: OWNER, usage: '/simulate <campaign>', help: 'Record fresh test mints (good 30 minutes)' },
-  cancel: { tier: 'change', roles: OWNER, usage: '/cancel <request or schedule id>', help: 'Cancel a request or scheduled mint the service has not started' },
+  prepare: { tier: 'change', roles: OWNER, usage: '/prepare', help: 'Record a live campaign step by step (spends nothing)' },
+  simulate: { tier: 'change', roles: OWNER, usage: '/simulate', help: 'Record fresh test mints (good 30 minutes), then choose the wallets' },
+  cancel: { tier: 'change', roles: OWNER, usage: '/cancel', help: 'Cancel a request or scheduled mint the service has not started (pick it with a button)' },
   kill: { tier: 'stop', roles: OWNER, usage: '/kill', help: 'Stop everything at once (one tap to confirm)' },
   revoke: { tier: 'stop', roles: OWNER, usage: '/revoke <base|robinhood> [phrase]', help: 'Switch a chain off' },
   lock: { tier: 'stop', roles: OWNER, usage: '/lock', help: 'End the unlocked session now' },
   unlock: { tier: 'session', roles: OWNER, usage: '/unlock <6-digit code>', help: 'Unlock start commands for 12 hours' },
-  release: { tier: 'start', roles: OWNER, usage: '/release [phrase]', help: 'Turn the kill switch off' },
-  confirm: { tier: 'start', roles: OWNER, usage: '/confirm <phrase from /request or /schedule>', help: 'Send a live request, or store a scheduled mint' },
-  fire: { tier: 'start', roles: OWNER, usage: '/fire <campaign> <wallets|all> <max gwei>', help: 'Mint now: test, approve and run a prepared campaign (one tap)' },
-  schedule: { tier: 'start', roles: OWNER, usage: '/schedule <campaign> <wallets|all> <max gwei> <from> <until>', help: 'Fire a prepared mint when it opens, inside a window (UTC)' },
+  release: { tier: 'start', roles: OWNER, usage: '/release', help: 'Turn the kill switch off (one button)' },
+  fire: { tier: 'start', roles: OWNER, usage: '/fire', help: 'Mint now: test, approve and run a prepared campaign, step by step' },
+  schedule: { tier: 'start', roles: OWNER, usage: '/schedule', help: 'Fire a prepared mint when it opens, inside a window (UTC), step by step' },
   schedules: { tier: 'read', roles: OWNER, usage: '/schedules', help: 'Scheduled mints and what became of them' },
   watchaccept: { tier: 'start', roles: OWNER, usage: '/watchaccept <chain> <address> [phrase]', help: 'Accept a wallet change the watcher flagged' },
   limits: { tier: 'read', roles: OWNER, usage: '/limits', help: 'How much of each daily limit is used and left' },
@@ -186,7 +183,6 @@ export class TelegramCommandRouter {
   private readonly sessionLifetimeMs: number;
   private readonly inviteLifetimeMs: number;
   private readonly confirmTaps = new Map<string, number>();
-  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string; digest?: string } }>();
   private readonly fireTaps = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; digest?: string }>();
   private readonly joinAttempts = new Map<string, number[]>();
   private readonly flows: GuidedFlows;
@@ -311,17 +307,17 @@ export class TelegramCommandRouter {
       case 'gas': return reply(await a.gas(args[0]));
       case 'backup': return reply(await a.backup());
       case 'wallets': return reply(await a.wallets());
-      case 'funding': return reply(await a.funding(args[0]));
+      case 'funding': return args.length === 0 ? this.startFlow(incoming, 'funding') : reply(await a.funding(args[0]));
       case 'enablement': return reply(await a.enablement());
       case 'drops': return reply(await a.drops());
       case 'calendar': return reply(await a.calendar());
       case 'check': return reply(await a.check(required(args[0], 'chain'), required(args[1], 'contract'), role === 'owner'));
-      case 'plan': return reply(await a.plan(required(args[0], 'chain'), required(args[1], 'contract'), optionalNumber(args[2], 'quantity')));
+      // /plan is the first steps of the prepare guide: with a chain and a contract it goes straight to the quantity; nothing to copy.
+      case 'plan': return args.length >= 2 ? this.startFlow(incoming, 'prepare', { chain: args[0]!, contract: args[1]! }) : this.startFlow(incoming, 'prepare');
       case 'request': {
-        const preview = await a.requestPreview(required(args[0], 'campaign'), required(args[1], 'wallets'), requiredNumber(args[2], 'max gwei'));
-        this.prune();
-        this.previews.set(preview.phrase, { campaignId: args[0]!, wallets: preview.wallets.join(','), maxFeeGwei: Number(args[2]), at: this.now().getTime() });
-        return reply(`${preview.text}\n\nTo send it, within 15 minutes:\n\n/confirm ${preview.phrase}`);
+        if (args.length === 0) return this.startFlow(incoming, 'request');
+        // Typed in full: the summary and a Send Request button (the confirmation phrase is built and checked by the service).
+        return this.startFlow(incoming, 'request', { campaign: required(args[0], 'campaign'), wallets: walletsArg(required(args[1], 'wallets')), fee: requiredNumber(args[2], 'max gwei') });
       }
       case 'fire': {
         if (args.length === 0) return this.startFlow(incoming, 'fire');
@@ -339,24 +335,12 @@ export class TelegramCommandRouter {
         const maxFeeGwei = requiredNumber(args[2], 'max gwei');
         const from = required(args[3], 'from');
         const until = required(args[4], 'until');
-        const preview = await a.schedulePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei, from, until);
-        this.prune();
-        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until, ...(preview.digest ? { digest: preview.digest } : {}) } });
-        return reply(`${preview.text}\n\nTo store it, within 15 minutes:\n\n/confirm ${preview.phrase}`);
+        return this.startFlow(incoming, 'schedule', { campaign: campaignId, wallets: walletsArg(required(args[1], 'wallets')), fee: maxFeeGwei, from, until });
       }
       case 'schedules': return reply(await a.schedules());
-      case 'confirm': {
-        const phrase = args.join(' ');
-        this.prune();
-        const preview = this.previews.get(phrase);
-        if (!preview) throw new Error('PREVIEW_NOT_FOUND: send /request or /schedule again and copy the /confirm line it prints');
-        this.previews.delete(phrase);
-        if (preview.schedule) return reply(await a.scheduleCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, preview.schedule.from, preview.schedule.until, phrase, preview.schedule.digest));
-        return reply(await a.requestCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, phrase));
-      }
       case 'requests': return reply(await a.requests());
       case 'runs': return reply(await a.runs());
-      case 'run': return reply(await a.run(required(args[0], 'run id')));
+      case 'run': return args.length === 0 ? this.startFlow(incoming, 'run') : reply(await a.run(args[0]!));
       case 'watchlist': return reply(await a.watchlist());
       case 'limits': return reply(await a.limits());
       case 'history': return reply(await a.history());
@@ -368,9 +352,17 @@ export class TelegramCommandRouter {
       case 'gasalert': return reply(args[0]?.toLowerCase() === 'remove' ? await a.gasAlertRemove(required(args[1], 'alert id')) : await a.gasAlertSet(required(args[0], 'chain'), required(args[1], 'below or above'), requiredNumber(args[2], 'gwei')));
       case 'track': return reply(await a.track(required(args[0], 'address'), args.slice(1).join(' ') || undefined));
       case 'untrack': return reply(await a.untrack(required(args[0], 'address')));
-      case 'prepare': if (args.length === 0) return this.startFlow(incoming, 'prepare'); return reply(await a.prepare(required(args[0], 'chain'), required(args[1], 'contract'), requiredNumber(args[2], 'quantity'), required(args.slice(3).join(' ') || undefined, 'phrase from /plan')));
-      case 'simulate': return reply(await a.simulate(required(args[0], 'campaign')));
-      case 'cancel': return reply(await a.cancel(required(args[0], 'request id')));
+      case 'prepare': {
+        if (args.length === 0) return this.startFlow(incoming, 'prepare');
+        const text = await a.prepare(required(args[0], 'chain'), required(args[1], 'contract'), requiredNumber(args[2], 'quantity'), required(args.slice(3).join(' ') || undefined, 'phrase from /plan'));
+        // Straight on to the next step (the test mints) with its button.
+        const campaign = /cmp_[0-9a-f-]{36}/.exec(text)?.[0];
+        if (!campaign) return reply(text);
+        const next = await this.flows.start('simulate', { campaign });
+        return reply(`${text}\n\n${next.reply.text}`, next.reply.buttons);
+      }
+      case 'simulate': return args.length === 0 ? this.startFlow(incoming, 'simulate') : this.showFlow(incoming, await this.flows.runSimulate(args[0]!));
+      case 'cancel': return args.length === 0 ? this.startFlow(incoming, 'cancel') : reply(await a.cancel(args[0]!));
       case 'kill': {
         this.prune();
         const nonce = randomBytes(9).toString('hex');
@@ -417,8 +409,8 @@ export class TelegramCommandRouter {
 
   // ── guided flows (T-073, D-069) ─────────────────────────────────────────────────────────────────
 
-  private async startFlow(incoming: Incoming, kind: FlowKind): Promise<void> {
-    const result = await this.flows.start(kind);
+  private async startFlow(incoming: Incoming, kind: FlowKind, preset?: FlowPreset): Promise<void> {
+    const result = await this.flows.start(kind, preset);
     await this.reply(incoming, result.reply.text, result.reply.buttons);
   }
 
@@ -434,7 +426,7 @@ export class TelegramCommandRouter {
     try {
       const kind = this.flows.kind(match[1]!);
       // A flow that releases, fires or schedules needs the unlocked session at every tap, as the typed commands do.
-      if (kind && flowNeedsSession(kind) && match[2] !== 'x' && !(await this.currentSession())) {
+      if (kind && flowNeedsSession(kind, match[2]!.slice(1)) && match[2]!.slice(1) !== 'x' && !(await this.currentSession())) {
         await this.reply(incoming, 'This needs an unlocked session. Send /unlock followed by the 6-digit code, then tap the button again.');
         await this.record('owner', incoming, kind, 'refused:SESSION_REQUIRED');
         return;
@@ -522,7 +514,7 @@ export class TelegramCommandRouter {
       if (count >= UNLOCK_FAILURE_LIMIT) await this.options.alert('Five wrong unlock codes were sent to the Telegram bot in the last hour. Unlocking is blocked for an hour. If this was not you, send /kill and secure your Telegram account.', `telegram-unlock-locked:${Math.floor(now.getTime() / UNLOCK_WINDOW_MS)}`).catch(() => undefined);
       throw new Error(`UNLOCK_CODE_WRONG: that code did not work (codes work once and change every 30 seconds). ${Math.max(0, UNLOCK_FAILURE_LIMIT - count)} attempt(s) left this hour`);
     }
-    await this.reply(incoming, `Unlocked until ${session.expiresAt.slice(0, 16).replace('T', ' ')} UTC. Start commands (/release, /confirm, /fire, /schedule, /watchaccept) now need only their phrase. Send /lock when you are done.`);
+    await this.reply(incoming, `Unlocked until ${session.expiresAt.slice(0, 16).replace('T', ' ')} UTC. Release, Fire, Schedule, the last Send Request button and /watchaccept now work with your tap or phrase. Send /lock when you are done.`);
   }
 
   private async join(incoming: Incoming, args: string[]): Promise<void> {
@@ -580,7 +572,7 @@ export class TelegramCommandRouter {
 
   private helpText(role: TelegramRole): string {
     const lines = Object.values(COMMANDS).filter((spec) => spec.roles.includes(role) && spec.usage !== '/start').map((spec) => `${spec.usage} — ${spec.help}`);
-    const note = role === 'owner' ? '\n\nStart commands (/release, /confirm, /fire, /schedule, /watchaccept) need /unlock first; /kill never does.' : '';
+    const note = role === 'owner' ? '\n\nRelease, Fire, Schedule, the last Send Request button and /watchaccept need /unlock first; /kill never does.' : '';
     return `Commands:\n${lines.join('\n')}${note}`;
   }
 
@@ -588,7 +580,6 @@ export class TelegramCommandRouter {
     const now = this.now().getTime();
     for (const [nonce, at] of this.confirmTaps) if (now - at > CONFIRM_TAP_LIFETIME_MS) this.confirmTaps.delete(nonce);
     for (const [nonce, tap] of this.fireTaps) if (now - tap.at > CONFIRM_TAP_LIFETIME_MS) this.fireTaps.delete(nonce);
-    for (const [phrase, preview] of this.previews) if (now - preview.at > PREVIEW_LIFETIME_MS) this.previews.delete(phrase);
   }
 
   private async reply(incoming: Incoming, text: string, buttons?: InlineButton[][]): Promise<void> {
@@ -623,6 +614,9 @@ export function isStopUpdate(update: TelegramUpdate): boolean {
   return command.startsWith('tap_kill_') || COMMANDS[command]?.tier === 'stop';
 }
 
+/** The wallets typed after a command: `all`, or addresses separated by commas. */
+function walletsArg(text: string): string[] | 'all' { return text.toLowerCase() === 'all' ? 'all' : text.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean); }
+
 function required(value: string | undefined, name: string): string {
   if (value === undefined || value.trim() === '') throw new Error(`MISSING_${name.toUpperCase().replace(/[^A-Z]+/g, '_')}: add the ${name}. Send /help for the format`);
   return value;
@@ -631,7 +625,4 @@ function requiredNumber(value: string | undefined, name: string): number {
   const parsed = Number(required(value, name));
   if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`INVALID_${name.toUpperCase().replace(/[^A-Z]+/g, '_')}: the ${name} must be a number above 0`);
   return parsed;
-}
-function optionalNumber(value: string | undefined, name: string): number | undefined {
-  return value === undefined ? undefined : requiredNumber(value, name);
 }

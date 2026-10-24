@@ -11,8 +11,8 @@ import type { LivePlanResult } from './owner-actions.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { checkDrop } from './drop-check.js';
 import { dryRunDrop, type DryRunReport } from './robinhood-readonly.js';
-import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, recordSimulationAction, watchAcceptAction, type PrepareStore } from './owner-actions.js';
-import { previewLiveRequest, runLiveRequest } from './live-request.js';
+import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, recordPassingSimulationsAction, recordSimulationAction, watchAcceptAction, type PrepareStore } from './owner-actions.js';
+import { previewLiveRequest, runLiveRequest, sizedWalletCount } from './live-request.js';
 import { ROBINHOOD_DEFAULT_TIP_GWEI, buildRobinhoodPlan, type RobinhoodPlan, recordRobinhoodSimulationsAction, robinhoodConfirmationPhrase, robinhoodPrepareAction } from './robinhood-live.js';
 import { describeLiveRunResult } from './live-run.js';
 import { planCampaignFunding, renderFundingPlan } from './fleet-funding-cli.js';
@@ -183,7 +183,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const candidates = only ? [...only] : await deps.walletList();
       const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantityLimit, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity: quantityLimit ?? 1 });
       const prepared = await robinhoodPrepareAction({ contract, priorityFeeGwei: ROBINHOOD_DEFAULT_TIP_GWEI, confirm: phrase, plan: robinhoodPlan, killFile: deps.killSwitchPath, store: deps.store as never, createCampaign: (input) => deps.application.createCampaign(input), now: now() });
-      return sections([`Campaign recorded: ${prepared.campaign.id}`], [`Sized for ${prepared.walletsSized} wallet(s), ${prepared.quantity} NFT(s) each, the most it can spend is ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['When the mint is open:', '', `/simulate ${prepared.campaign.id}`], ['Then it prints the exact /request line to use (keep the fee ceiling at or below your Turnkey policy limit).']);
+      return sections([`Campaign recorded: ${prepared.campaign.id}`], [`Sized for ${prepared.walletsSized} wallet(s), ${prepared.quantity} NFT(s) each, the most it can spend is ${prepared.maxExposureEth} ETH. Nothing was sent.`]);
     }
     const chainId = evmChain(chainText);
     const wallets = only ? [...only] : await deps.walletList();
@@ -193,7 +193,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     const tipWei = policy?.stored?.tipWei ?? policy?.approved?.tipWei;
     const priorityFeeGwei = tipWei === undefined ? 0.1 : Number(formatGwei(BigInt(tipWei)));
     const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
-    return sections([`Campaign recorded: ${prepared.campaign.id}`], [`${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['Next, close to the mint:', '', `/simulate ${prepared.campaign.id}`, `/request ${prepared.campaign.id} all ${prepared.planningMaxFeeGwei ?? '<max gwei>'}`]);
+    return sections([`Campaign recorded: ${prepared.campaign.id}`], [`${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`]);
   };
   const releaseResult = (outcome: { state: string; message: string; phrase?: string }): string =>
     outcome.state === 'Released' ? `${outcome.message} The service accepts live work again within a few seconds if nothing else blocks it. /kill stops everything at any time.` : outcome.message;
@@ -351,7 +351,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async runs() {
       const runs = [...deps.store.snapshot().runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 10);
       if (runs.length === 0) return 'No runs yet.';
-      return ['Recent runs (newest first):', ...runs.map((run) => `• ${run.id} — ${run.mode}, ${run.state}, ${minutes(run.createdAt)} UTC`), '', 'Details: /run <id>'].join('\n');
+      return ['Recent runs (newest first):', ...runs.map((run) => `• ${run.id} — ${run.mode}, ${run.state}, ${minutes(run.createdAt)} UTC`), '', 'To look at one, send /run and tap it.'].join('\n');
     },
     async run(runId) { return describeLiveRunResult(deps.store.snapshot(), runId).summary; },
     async watchlist() {
@@ -378,12 +378,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         return sections(
           [`${recorded.recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`],
           recorded.skipped.map((item) => `✗ ${short(item.wallet)}: ${item.why}`),
-          ['Send the request with a fee ceiling (gwei) at or below your Turnkey policy limit. 0.2 is the limit of the standard policy; use a lower number if yours is lower:', '', `/request ${target.id} ${recorded.recorded.join(',')} 0.2`],
+          recorded.recorded.length > sizedWalletCount(target) ? [`This campaign was sized for ${sizedWalletCount(target)} wallet(s), so a request uses at most ${sizedWalletCount(target)} of them.`] : [],
         );
       }
       const reader = await client(target.chainId);
       const ids = await recordSimulationAction({ store: deps.store, campaign: target, wallets: await deps.walletList(), port: await port(target.chainId), latestBlock: async () => { const block = await reader.getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; } });
-      return `${ids.length} wallet(s) passed the test mint. The records are good for 30 minutes: send /request soon.`;
+      return `${ids.length} wallet(s) passed the test mint. The records are good for 30 minutes.`;
     },
     async firePreview(campaignId, walletsText, maxFeeGwei) {
       const wiring = fireWiring();
@@ -391,9 +391,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const state = await wiring.mintState(target);
       if (state !== 'open') throw new Error(`MINT_NOT_OPEN: the mint is ${state === 'unknown' ? 'not readable right now' : state}. Test mints only pass once it is open; use /schedule to fire it when it opens`);
       const wallets = await wiring.wallets(walletsText);
+      // A campaign sized for N wallets covers at most N: it uses the first N that pass their test mint, and the owner is told.
+      const sized = sizedWalletCount(target);
+      if (sized < 1) throw new Error('CAMPAIGN_SIZED_FOR_NONE: this campaign was sized for no wallet (its run limit is below what one wallet can spend). Prepare a new one.');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, digest: wiring.campaignDigest(target), text: `The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.\n${wiring.describe(target, wallets, maxFeeGwei)}` };
+      return { wallets, digest: wiring.campaignDigest(target), text: sections([`The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.`], [wiring.describe(target, wallets, maxFeeGwei)], wallets.length > sized ? [`This campaign was sized for ${sized} wallet(s), so it uses the first ${sized} that pass their test mint.`] : []) };
     },
     async fireNow(campaignId, walletsText, maxFeeGwei, digest) {
       if (digest !== undefined && fireWiring().campaignDigest(campaign(campaignId)) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; send /fire again');
@@ -405,9 +408,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const target = fireCampaign(campaignId, maxFeeGwei);
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
+      const sized = sizedWalletCount(target);
+      if (sized < 1) throw new Error('CAMPAIGN_SIZED_FOR_NONE: this campaign was sized for no wallet (its run limit is below what one wallet can spend). Prepare a new one.');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, from: from.toISOString(), until: until.toISOString(), digest: wiring.campaignDigest(target), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
+      return { wallets, from: from.toISOString(), until: until.toISOString(), digest: wiring.campaignDigest(target), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}${wallets.length > sized ? `\nThis campaign was sized for ${sized} wallet(s), so it uses the first ${sized} that pass their test mint.` : ''}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
     },
     async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase, digest) {
       const wiring = fireWiring();
@@ -415,11 +420,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (digest !== undefined && wiring.campaignDigest(target) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; start the schedule again');
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
-      if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: send /schedule again and copy the /confirm line it prints');
+      if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: the schedule changed since the preview. Send /schedule to start again');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
       const record = deps.fireSchedulesRepository!().create({ campaignId, campaignDigest: wiring.campaignDigest(target), wallets, maxFeeGwei: String(maxFeeGwei), windowFrom: from.toISOString(), windowUntil: until.toISOString(), confirmationDigest: scheduleConfirmationDigest(phrase, campaignId, wallets, from, until) });
-      return `Scheduled mint ${record.id.slice(-6)} stored. It fires once, when the mint opens between ${minutes(record.windowFrom)} and ${minutes(record.windowUntil)} UTC. Cancel with /cancel ${record.id.slice(-6)}. Keep the kill switch off until then.`;
+      return `Scheduled mint ${record.id.slice(-6)} stored. It fires once, when the mint opens between ${minutes(record.windowFrom)} and ${minutes(record.windowUntil)} UTC. Cancel it any time with /cancel (it lists what can be cancelled as buttons). Keep the kill switch off until then.`;
     },
     async schedules() {
       const rows = deps.fireSchedulesRepository ? deps.fireSchedulesRepository().recent(10) : [];
@@ -486,7 +491,8 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (!phrase) throw new Error('LIVE_PLAN_NOT_READY: the plan is not ready');
       // The phrase names the contract, quantity, number of wallets and the most that can be spent: it must be the one that was reviewed.
       if (expectedPhrase !== undefined && phrase !== expectedPhrase) throw new Error('PLAN_CHANGED: the plan changed since you reviewed it (the amount that can be spent or the wallets differ). Start the guide again.');
-      return prepareFor(chainText, contract, quantity, phrase, wallets);
+      const text = await prepareFor(chainText, contract, quantity, phrase, wallets);
+      return { text, campaignId: /cmp_[0-9a-f-]{36}/.exec(text)?.[0] };
     },
     async releaseStatus() {
       const outcome = await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: undefined, actor: 'owner-telegram' });
@@ -515,6 +521,65 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async feeOptions(campaignId) {
       // Robinhood's Turnkey policy pins the fee limit (the standard policy: 0.2 gwei). Other chains have no fixed limit here; the spend caps bound them.
       return campaign(campaignId).chainId === 4663 ? { presets: [0.1, 0.2], limit: deps.policyFeeLimitGwei ?? 0.2, unit: 'gwei' } : { presets: [5, 10, 25], limit: undefined, unit: 'gwei' };
+    },
+    async recentRuns() {
+      return [...deps.store.snapshot().runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 8).map((run) => ({ id: run.id, label: `${run.mode} · ${run.state} · ${minutes(run.createdAt).slice(5)} UTC` }));
+    },
+    async simulateCampaign(campaignId) {
+      const target = campaign(campaignId);
+      let recorded: string[];
+      let skipped: Array<{ wallet: string; why: string }>;
+      if (target.chainId === 4663) {
+        const report = await robinhoodDryRun(target.contract, await deps.walletList(), target.quantity, now());
+        const result = await recordRobinhoodSimulationsAction({ store: deps.store, campaign: target, report, latestBlock: robinhoodBlock });
+        recorded = result.recorded; skipped = result.skipped;
+      } else {
+        const reader = await client(target.chainId);
+        const result = await recordPassingSimulationsAction({ store: deps.store, campaign: target, wallets: await deps.walletList(), port: await port(target.chainId), latestBlock: async () => { const block = await reader.getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; } });
+        recorded = result.recorded; skipped = result.skipped;
+      }
+      const sized = sizedWalletCount(target);
+      return { recorded, sized, text: sections([`${recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`], skipped.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`), recorded.length > sized ? [`This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized} of them.`] : []) };
+    },
+    async requestCandidates() {
+      const at = now().toISOString();
+      const state = deps.store.snapshot();
+      const byCampaign = new Map<string, { wallets: Set<string>; until: string }>();
+      for (const sim of state.simulations) {
+        if (!sim.success || sim.expiresAt <= at) continue;
+        const entry = byCampaign.get(sim.campaignId) ?? { wallets: new Set<string>(), until: sim.expiresAt };
+        entry.wallets.add(sim.wallet.toLowerCase());
+        if (sim.expiresAt > entry.until) entry.until = sim.expiresAt;
+        byCampaign.set(sim.campaignId, entry);
+      }
+      return state.campaigns.filter((item) => !item.dryRun && byCampaign.has(item.id)).slice(-6).reverse().map((item) => {
+        const entry = byCampaign.get(item.id)!;
+        const left = Math.max(0, Math.round((Date.parse(entry.until) - now().getTime()) / 60_000));
+        return { id: item.id, label: `${chainName(item.chainId)} ${short(item.contract)} · ${item.quantity} NFT`, note: `${entry.wallets.size} wallet(s) tested, about ${left} min left` };
+      });
+    },
+    async requestWallets(campaignId) {
+      const target = campaign(campaignId);
+      const at = now().toISOString();
+      const latest = new Map<string, string>();
+      for (const sim of deps.store.snapshot().simulations) {
+        if (sim.campaignId !== campaignId || !sim.success || sim.expiresAt <= at) continue;
+        const wallet = sim.wallet.toLowerCase();
+        if (!latest.has(wallet) || sim.checkedAt > latest.get(wallet)!) latest.set(wallet, sim.checkedAt);
+      }
+      return { wallets: [...latest.keys()], sized: Math.max(1, sizedWalletCount(target)) };
+    },
+    async requestSend(campaignId, walletsText, maxFeeGwei, expectedPhrase) {
+      const preview = await actions.requestPreview(campaignId, walletsText, maxFeeGwei);
+      // The phrase names the campaign, the number of wallets, the most that can be spent and the fee ceiling: it must be the reviewed one.
+      if (preview.phrase !== expectedPhrase) throw new Error('PLAN_CHANGED: the request changed since you reviewed it (the test mints expired or the amounts differ). Start again.');
+      return actions.requestCreate(campaignId, walletsText, maxFeeGwei, preview.phrase);
+    },
+    async cancellables() {
+      const nowMs = now().getTime();
+      const requests = (bridge.unclaimedLiveRunRequests ? bridge.unclaimedLiveRunRequests() : []).filter((row) => Date.parse(row.expiresAt) > nowMs).map((row) => ({ id: row.id, label: `Request ${row.id.slice(-6)} · ${row.wallets.length} wallet(s), ≤${row.maxFeeGwei} gwei` }));
+      const schedules = deps.fireSchedulesRepository ? deps.fireSchedulesRepository().open().map((row) => ({ id: row.id, label: `Schedule ${row.id.slice(-6)} · ${minutes(row.windowFrom)}–${minutes(row.windowUntil).slice(11)} UTC` })) : [];
+      return [...requests, ...schedules];
     },
     killEngagedSince(openedAt) {
       const since = Date.parse(openedAt);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FLOW_LIFETIME_MS, GuidedFlows, type FlowResult, type GuidedActions, type GuidedPlan } from './guided-flows.js';
+import { FLOW_LIFETIME_MS, GuidedFlows, flowNeedsSession, type FlowResult, type GuidedActions, type GuidedPlan } from './guided-flows.js';
 
 /** T-073 (D-069): the guided flows follow the real order of the commands, check every custom entry, and a final tap acts once. */
 const A = '0x1111111111111111111111111111111111111111';
@@ -14,12 +14,22 @@ function setup(over: Partial<GuidedActions> = {}) {
   const actions: GuidedActions = {
     guidedChains: async () => [{ key: 'ethereum', name: 'Ethereum' }, { key: 'robinhood', name: 'Robinhood' }],
     guidedPlan: async (chain, contract, quantity, count) => { calls.push(`plan(${chain},${contract},${quantity ?? ''},${count ?? ''})`); return plan(quantity, count); },
-    guidedPrepare: async (chain, contract, quantity, wallets, expected) => { calls.push(`prepare(${chain},${contract},${quantity},${wallets.join('+')},${expected})`); return 'Campaign recorded: cmp_new'; },
+    guidedPrepare: async (chain, contract, quantity, wallets, expected) => { calls.push(`prepare(${chain},${contract},${quantity},${wallets.join('+')},${expected})`); return { text: 'Campaign recorded: cmp_new', campaignId: 'cmp_new' }; },
     releaseStatus: async () => ({ text: 'The kill switch is ON. Nothing blocks the release.', canRelease: true, phrase: 'RELEASE engaged T1' }),
     releaseNow: async (expected) => { calls.push(`release(${expected})`); return 'The kill switch is off.'; },
+    simulateCampaign: async (campaignId) => { calls.push(`simulate(${campaignId})`); return { text: '2 wallet(s) passed the test mint. The records are good for 30 minutes.', recorded: [A, B], sized: 1 }; },
+    requestCandidates: async () => [{ id: 'cmp_a', label: 'Robinhood 0xa686…94db · 1 NFT', note: '2 wallet(s) tested, about 25 min left' }],
+    requestWallets: async () => ({ wallets: [A, B], sized: 1 }),
+    requestPreview: async (campaignId, wallets, fee) => { calls.push(`requestPreview(${campaignId},${wallets},${fee})`); return { text: 'The service will arm and run the request.', phrase: `REQ-${wallets.split(',').length}`, wallets: wallets.split(',') }; },
+    requestSend: async (campaignId, wallets, fee, expected) => { calls.push(`requestSend(${campaignId},${wallets},${fee},${expected})`); return 'Request sent.'; },
+    cancellables: async () => [{ id: 'live_request_1', label: 'Request 000001 · 1 wallet(s)' }, { id: 'fire_schedule_2', label: 'Schedule 000002' }],
+    cancel: async (id) => { calls.push(`cancel(${id})`); return `Cancelled ${id}.`; },
+    funding: async (id) => { calls.push(`funding(${id})`); return `Funding for ${id}.`; },
+    recentRuns: async () => [{ id: 'run_1', label: 'live · Completed · 10-25 12:00 UTC' }],
+    run: async (id) => { calls.push(`run(${id})`); return `Run ${id} result.`; },
     guidedCampaigns: async () => [{ id: 'cmp_a', label: 'Robinhood 0xa686…94db · 1 NFT', note: 'mint is open' }, { id: 'cmp_b', label: 'Ethereum 0x1234…abcd · 1 NFT', note: 'mint not open yet; busy: queued' }],
     signingWallets: async () => [A, B],
-    feeOptions: async (campaignId) => (campaignId === 'cmp_a' ? { presets: [0.1, 0.2], limit: 0.2, unit: 'gwei' } : { presets: [5, 10, 25], limit: undefined, unit: 'gwei' }),
+    feeOptions: async (campaignId) => (campaignId === 'cmp_a' || campaignId === 'cmp_new' ? { presets: [0.1, 0.2], limit: 0.2, unit: 'gwei' } : { presets: [5, 10, 25], limit: undefined, unit: 'gwei' }),
     firePreview: async (campaignId, wallets, fee) => { calls.push(`firePreview(${campaignId},${wallets},${fee})`); return { text: 'The mint is OPEN. Fire now.', wallets: wallets === 'all' ? [A, B] : wallets.split(','), digest: 'd'.repeat(64) }; },
     fireNow: async (campaignId, wallets, fee, digest) => { calls.push(`fire(${campaignId},${wallets},${fee},${digest?.slice(0, 4)})`); return 'Request sent.'; },
     schedulePreview: async (campaignId, wallets, fee, from, until) => { calls.push(`schedulePreview(${campaignId},${wallets},${fee},${from},${until})`); return { text: 'Scheduled mint preview.', phrase: 'SCHEDULE abc 2-WALLETS 0.0004 0.2-GWEI', wallets: [A, B], from: '2026-10-25T12:00:00.000Z', until: '2026-10-25T14:00:00.000Z', digest: 'dg' }; },
@@ -55,11 +65,14 @@ describe('prepare flow (kill switch ON, no unlock)', () => {
     expect(t.calls.at(-1)).toBe(`plan(robinhood,${CONTRACT},2,2)`);
     const done = await t.press(step, 'Prepare (Spends Nothing)');
     expect(t.calls.at(-1)).toBe(`prepare(robinhood,${CONTRACT},2,${A}+${B},PHRASE-2)`);
-    expect(done.reply.text).toBe('Campaign recorded: cmp_new');
+    // The next step follows as a button (the test mints), not as a command to copy.
+    expect(done.reply.text).toContain('Campaign recorded: cmp_new');
+    expect(done.reply.text).not.toContain('/simulate');
+    expect(done.reply.buttons?.flat().map((button) => button.text)).toEqual(['Record Test Mints', 'Cancel']);
     expect(done.done).toEqual({ command: 'prepare', outcome: 'ok' });
     // The same button cannot act twice.
     const again = await t.flows.onButton('abcd1234', '4go');
-    expect(again.reply.text).toContain('expired');
+    expect(again.reply.text).toMatch(/expired|earlier step/);
     expect(t.calls.filter((call) => call.startsWith('prepare('))).toHaveLength(1);
   });
 
@@ -239,7 +252,7 @@ describe('final taps are bound, short-lived and serialised (review fixes)', () =
   });
 
   it('a prepare whose plan changed since it was reviewed is refused with the reviewed phrase', async () => {
-    const t = setup({ guidedPrepare: async (_c, _k, _q, _w, expected) => { if (expected === 'PHRASE-3') throw new Error('PLAN_CHANGED: the amount differs'); return 'x'; } });
+    const t = setup({ guidedPrepare: async (_c, _k, _q, _w, expected) => { if (expected === 'PHRASE-3') throw new Error('PLAN_CHANGED: the amount differs'); return { text: 'x', campaignId: undefined }; } });
     let step = await t.flows.start('prepare');
     step = await t.press(step, 'Ethereum');
     step = (await t.flows.onText(CONTRACT))!;
@@ -319,5 +332,138 @@ describe('buttons and typed text in general', () => {
     for (const button of step.reply.buttons!.flat()) expect(button.callback_data).toMatch(/^\/f_[0-9a-f]{8}_\d[a-z0-9]{1,12}$/);
     step = await t.press(step, 'Robinhood 0xa686…94db · 1 NFT');
     for (const button of step.reply.buttons!.flat()) { expect(button.callback_data.length).toBeLessThan(64); expect(button.callback_data).not.toContain(A); }
+  });
+});
+
+describe('the steps after prepare are buttons too (T-074)', () => {
+  it('prepare, then record the test mints, then choose the wallets for the request: nothing to copy at any point', async () => {
+    const t = setup();
+    let step = await t.flows.start('prepare');
+    step = await t.press(step, 'Robinhood');
+    step = (await t.flows.onText(CONTRACT))!;
+    step = await t.press(step, '1');
+    step = await t.press(step, 'All ready (3)');
+    step = await t.press(step, 'Prepare (Spends Nothing)');
+    expect(step.reply.text).toContain('Campaign recorded: cmp_new');
+    expect(step.reply.text).toContain('Test mints only pass once the mint is open');
+    step = await t.press(step, 'Record Test Mints');
+    expect(t.calls.at(-1)).toBe('simulate(cmp_new)');
+    expect(step.reply.text).toContain('2 wallet(s) passed the test mint');
+    expect(step.reply.text).toContain('sized for 1 wallet(s)');
+    expect(step.reply.buttons?.flat().map((button) => button.text)).toEqual(['All Tested (1)', '0x1111…1111', '0x2222…2222', 'Custom…', 'Cancel']);
+    step = await t.press(step, 'All Tested (1)');
+    step = await t.press(step, '0.2 gwei');
+    expect(t.calls.at(-1)).toBe(`requestPreview(cmp_new,${A},0.2)`);
+    expect(step.reply.buttons?.flat().map((button) => button.text)).toEqual(['Send Request', 'Cancel']);
+    const sent = await t.press(step, 'Send Request');
+    expect(t.calls.at(-1)).toBe(`requestSend(cmp_new,${A},0.2,REQ-1)`);
+    expect(sent.done).toEqual({ command: 'request', outcome: 'ok' });
+  });
+
+  it('a request refuses a custom wallet list that has no fresh test mint or is longer than the campaign was sized for', async () => {
+    const t = setup();
+    let step = await t.flows.start('request');
+    step = await t.press(step, 'Robinhood 0xa686…94db · 1 NFT');
+    step = await t.press(step, 'Custom…');
+    expect((await t.flows.onText(`${C}`))!.reply.text).toContain('has no fresh test mint on this campaign');
+    expect((await t.flows.onText(`${A}, ${B}`))!.reply.text).toContain('sized for 1 wallet(s); you chose 2');
+    step = (await t.flows.onText(A))!;
+    expect(step.reply.text).toContain('Choose the fee ceiling');
+  });
+
+  it('a request is a read until its last tap: only that tap needs the unlocked session', () => {
+    expect(flowNeedsSession('request', 'o1')).toBe(false);
+    expect(flowNeedsSession('request', 'go')).toBe(true);
+    expect(flowNeedsSession('release', 'go')).toBe(true);
+    expect(flowNeedsSession('fire', 'o1')).toBe(true);
+    expect(flowNeedsSession('prepare', 'go')).toBe(false);
+    expect(flowNeedsSession('simulate', 'go')).toBe(false);
+  });
+
+  it('a command typed in full opens the summary with its button (no phrase to copy), and a changed request is refused at the tap', async () => {
+    const t = setup();
+    const summary = await t.flows.start('request', { campaign: 'cmp_a', wallets: 'all', fee: 0.2 });
+    expect(summary.reply.text).toContain('The service will arm and run the request.');
+    expect(t.calls.at(-1)).toBe(`requestPreview(cmp_a,${A},0.2)`);
+    const refused = setup({ requestSend: async (_c, _w, _f, expected) => { if (expected === 'REQ-1') throw new Error('PLAN_CHANGED: the request changed'); return 'x'; } });
+    const again = await refused.flows.start('request', { campaign: 'cmp_a', wallets: [A], fee: 0.2 });
+    const done = await refused.press(again, 'Send Request');
+    expect(done.done).toEqual({ command: 'request', outcome: 'refused:PLAN_CHANGED' });
+    const scheduled = await t.flows.start('schedule', { campaign: 'cmp_a', wallets: 'all', fee: 0.2, from: 'now', until: '+2h' });
+    expect(scheduled.reply.buttons?.flat().map((button) => button.text)).toEqual(['Store Schedule', 'Cancel']);
+    const planned = await t.flows.start('prepare', { chain: 'robinhood', contract: CONTRACT });
+    expect(planned.reply.text).toContain('How many NFTs per wallet?');
+    const simulate = await t.flows.start('simulate', { campaign: 'cmp_a' });
+    expect(simulate.reply.buttons?.flat().map((button) => button.text)).toEqual(['Record Test Mints', 'Cancel']);
+  });
+
+  it('typed /simulate in full records the test mints at once and goes straight on to the wallets', async () => {
+    const t = setup();
+    const result = await t.flows.runSimulate('cmp_a');
+    expect(t.calls).toEqual(['simulate(cmp_a)']);
+    expect(result.done).toEqual({ command: 'simulate', outcome: 'ok' });
+    expect(result.reply.buttons?.flat().map((button) => button.text)).toContain('All Tested (1)');
+    const failing = setup({ simulateCampaign: async () => { throw new Error('MINT_NOT_OPEN: the mint is upcoming'); } });
+    expect((await failing.flows.runSimulate('cmp_a')).reply.text).toContain('Not done: MINT_NOT_OPEN');
+  });
+
+  it('cancel lists what can be cancelled and cancels the chosen one; funding shows the chosen campaign; each says so when there is nothing', async () => {
+    const t = setup();
+    let step = await t.flows.start('cancel');
+    expect(step.reply.buttons?.flat().map((button) => button.text)).toEqual(['Request 000001 · 1 wallet(s)', 'Schedule 000002', 'Cancel']);
+    step = await t.press(step, 'Schedule 000002');
+    expect(t.calls.at(-1)).toBe('cancel(fire_schedule_2)');
+    expect(step.done).toEqual({ command: 'cancel', outcome: 'ok' });
+    const funding = await t.press(await t.flows.start('funding'), 'Robinhood 0xa686…94db · 1 NFT');
+    expect(t.calls.at(-1)).toBe('funding(cmp_a)');
+    expect(funding.reply.text).toBe('Funding for cmp_a.');
+    const run = await t.press(await t.flows.start('run'), 'live · Completed · 10-25 12:00 UTC');
+    expect(run.reply.text).toBe('Run run_1 result.');
+    expect((await setup({ recentRuns: async () => [] }).flows.start('run')).reply.text).toBe('No runs yet.');
+    expect((await setup({ cancellables: async () => [] }).flows.start('cancel')).reply.text).toContain('Nothing is waiting');
+    expect((await setup({ requestCandidates: async () => [] }).flows.start('request')).reply.text).toContain('No campaign has fresh test mints');
+  });
+});
+
+describe('review fixes for the button steps (T-074)', () => {
+  it('a command typed in full is held to the same fee rule as a Custom entry', async () => {
+    const t = setup();
+    expect((await t.flows.start('request', { campaign: 'cmp_a', wallets: 'all', fee: 0.5 })).reply.text).toContain('MAX_FEE_GWEI_ABOVE_LIMIT');
+    expect((await t.flows.start('fire', { campaign: 'cmp_a', wallets: 'all', fee: 0 })).reply.text).toContain('MAX_FEE_GWEI_REQUIRED');
+    expect((await t.flows.start('schedule', { campaign: 'cmp_a', wallets: 'all', fee: 0.9, from: 'now', until: '+2h' })).reply.text).toContain('MAX_FEE_GWEI_ABOVE_LIMIT');
+    expect(t.calls.filter((call) => call.startsWith('requestPreview') || call.startsWith('schedulePreview'))).toEqual([]);
+  });
+
+  it('Record Test Mints is good for 2 minutes, and a refusal says to send /simulate when the mint is open', async () => {
+    const t = setup();
+    const step = await t.flows.start('simulate', { campaign: 'cmp_a' });
+    t.advance(2 * 60_000 + 1);
+    expect((await t.press(step, 'Record Test Mints')).reply.text).toContain('expired');
+    expect(t.calls).toEqual([]);
+    const closed = setup({ simulateCampaign: async () => { throw new Error('MINT_NOT_OPEN: the mint is upcoming'); } });
+    const refused = await closed.press(await closed.flows.start('simulate', { campaign: 'cmp_a' }), 'Record Test Mints');
+    expect(refused.reply.text).toContain('Send /simulate when the mint is open.');
+    expect(refused.done).toEqual({ command: 'simulate', outcome: 'refused:MINT_NOT_OPEN' });
+  });
+
+  it('when the test mints are recorded but the wallet choices cannot be shown, it says so and keeps the outcome true', async () => {
+    const t = setup({ requestWallets: async () => { throw new Error('RPC_DOWN: no answer'); } });
+    const result = await t.flows.runSimulate('cmp_a');
+    expect(result.reply.text).toContain('2 wallet(s) passed the test mint');
+    expect(result.reply.text).toContain('The test mints are recorded; send /request to continue.');
+    expect(result.done).toEqual({ command: 'simulate', outcome: 'ok' });
+  });
+
+  it('a cancel the service refused is recorded as refused', async () => {
+    const t = setup({ cancel: async () => 'Not cancelled: that request is unknown, or the service already started it.' });
+    const done = await t.press(await t.flows.start('cancel'), 'Request 000001 · 1 wallet(s)');
+    expect(done.done).toEqual({ command: 'cancel', outcome: 'refused:NOT_CANCELLED' });
+  });
+
+  it('a request typed in full with more wallets than the campaign was sized for shows the sizing refusal and sends nothing', async () => {
+    const t = setup({ requestPreview: async () => { throw new Error('PLANNED_EXPOSURE_INVALID: this campaign was sized for 1 wallet(s); you chose 2.'); } });
+    const result = await t.flows.start('request', { campaign: 'cmp_a', wallets: [A, B], fee: 0.2 });
+    expect(result.reply.text).toContain('sized for 1 wallet(s); you chose 2');
+    expect(t.calls.some((call) => call.startsWith('requestSend'))).toBe(false);
   });
 });
