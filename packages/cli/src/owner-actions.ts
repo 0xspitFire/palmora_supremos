@@ -126,3 +126,19 @@ export async function recordSimulationAction(input: { store: BackendStore; campa
   const block = await input.latestBlock();
   return recordWalletSimulations(input.store, input.campaign, results, { blockNumber: block.number, blockHash: block.hash });
 }
+
+/**
+ * `/fire` and `/schedule` on Ethereum and Base (T-067): a test mint for each wallet; a record for each wallet that passed and is funded.
+ * Unlike `record-simulation`, a wallet that fails does not stop the others; it is returned with the reason and gets no record.
+ */
+export async function recordPassingSimulationsAction(input: { store: BackendStore; campaign: Campaign; wallets: readonly string[]; port: IntelligenceChainPort; latestBlock(): Promise<{ number: bigint; hash: string }> }): Promise<{ ids: string[]; recorded: string[]; skipped: Array<{ wallet: string; why: string }> }> {
+  if (input.campaign.dryRun || (input.campaign.chainId !== 1 && input.campaign.chainId !== 8453)) throw new Error('LIVE_SUPPORTED_CAMPAIGN_REQUIRED');
+  const report = await checkDrop(input.port, input.campaign.contract, input.wallets, { simulate: true, quantity: input.campaign.quantity });
+  if (!report.drop || report.drop.status !== 'open') throw new Error(`MINT_NOT_OPEN: ${report.drop ? `the mint is ${report.drop.status}` : report.summary}; test mints can only be recorded while it is open`);
+  const passing = report.wallets.filter((row) => row.verdict === 'ready');
+  const skipped = report.wallets.filter((row) => row.verdict !== 'ready').map((row) => ({ wallet: row.wallet.toLowerCase(), why: row.verdict === 'needs ETH' ? `it needs ${row.topUpEth ?? 'more'} ETH` : row.note || `the test mint did not pass (${row.verdict})` }));
+  if (passing.length === 0) throw new Error(`SIMULATION_NOT_PASSED: ${report.summary}`);
+  const block = await input.latestBlock();
+  const ids = await recordWalletSimulations(input.store, input.campaign, passing.map((row) => ({ wallet: row.wallet, success: true })), { blockNumber: block.number, blockHash: block.hash });
+  return { ids, recorded: passing.map((row) => row.wallet.toLowerCase()), skipped };
+}

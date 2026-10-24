@@ -40,6 +40,9 @@ import { chainRpcSecretNames, failoverTransport, resolveChainConfigFromSecrets }
 import { createPublicClient, formatGwei } from 'viem';
 import { startGasAlerts } from './gas-alert-service.js';
 import { startLiveRequestPoller } from './live-request.js';
+import { createFireWiring, type FireWiring } from './fire-wiring.js';
+import { dryRunDrop } from './robinhood-readonly.js';
+import { startFireScheduler } from './fire.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -206,7 +209,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   }
   // T-058: in host mode the service runs the owner's live requests. It uses its own application, not the read-only one above, so
   // `arm` and `run` go through every gate exactly as a guided live run does (approval, simulation, caps, custody, watcher, kill switch).
-  let liveRequests: { stop(): void } | undefined;
+  let liveRequests: { stop(): void; tick(): Promise<void> } | undefined;
   if (config.mode === 'host') {
     const bridge = runtime.store as CanonicalStoreBridge;
     const liveApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
@@ -227,12 +230,48 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   // T-061: the command router, once the watcher (read by /wallets and the coordinator) exists. Its application is not the read-only
   // one, so /confirm records the owner's approval exactly as `live-request create` does; only the owner's commands reach it.
   let telegramCommands: { stop(): void } | undefined;
+  let fireScheduler: { stop(): void } | undefined;
   let gasAlertChecker: { stop(): void } | undefined;
   if (telegramCommandSetup) {
     const { api, access, ownerUserId, totpKey } = telegramCommandSetup;
     const bridge = runtime.store as CanonicalStoreBridge;
     const secretRoot = configuredSecretRoot(config.projectRoot);
     const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+    // T-067 (D-067): `/fire` and `/schedule`, in host mode only. Both end in the same pipeline and the same request processor.
+    const reader = async (chainId: 1 | 8453 | 4663) => createPublicClient({ transport: failoverTransport([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]) });
+    const latestBlock = async (chainId: 1 | 8453 | 4663) => { const block = await (await reader(chainId)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; };
+    const walletAddresses = async () => (await configuredWallets(config.projectRoot, configuredWalletPath(config.projectRoot))).map((wallet) => wallet.address.toLowerCase());
+    const fire: FireWiring | undefined = config.mode === 'host' ? createFireWiring({
+      mode: config.mode,
+      store: runtime.store,
+      approve: (validated) => ownerApplication.command('approve', { validated }),
+      killSwitchPath: config.killSwitchPath,
+      fireSchedules: () => bridge.fireScheduleRepository(),
+      unclaimedRequests: () => bridge.unclaimedLiveRunRequests(),
+      walletList: walletAddresses,
+      evmPort: async (chainId) => EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]),
+      evmLatestBlock: latestBlock,
+      robinhoodDryRun: async (contract, wallets, quantity, at) => dryRunDrop(await reader(4663), contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at }),
+      robinhoodLatestBlock: () => latestBlock(4663),
+      kick: () => { void liveRequests?.tick(); },
+    }) : undefined;
+    if (fire) {
+      fireScheduler = startFireScheduler({
+        schedules: () => bridge.fireScheduleRepository().unclaimed(),
+        claim: (scheduleId, outcome) => bridge.fireScheduleRepository().claim(scheduleId, outcome),
+        campaign: (campaignId) => runtime.store.snapshot().campaigns.find((item) => item.id === campaignId),
+        campaignDigest: fire.campaignDigest,
+        killSwitchOn: fire.fireDeps.killSwitchOn,
+        mintState: fire.mintState,
+        fire: async (schedule) => { await fire.fireSchedule(schedule); },
+        record: async ({ scheduleId, state, code }) => {
+          await runtime.store.transaction((current) => { current.events.push({ id: `fire_schedule_result_${randomUUID()}`, type: 'fire_schedule_result', at: new Date().toISOString(), data: { scheduleId, state, ...(code ? { code } : {}) } }); });
+          logger.info({ event: 'fire_schedule_result', scheduleId, state, ...(code ? { code } : {}) }, 'scheduled mint processed');
+        },
+        alert: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },
+        now: () => new Date(),
+      }, { onError: (error) => logger.warn({ event: 'fire_schedule_tick_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'FIRE_SCHEDULE_TICK_FAILED' }, 'fire schedule pass failed') });
+    }
     const actions = createTelegramActions({
       mode: config.mode,
       custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local',
@@ -249,6 +288,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       watcherHealthy: () => watcherHandle?.isHealthy(new Date()),
       intelligence: () => bridge.intelligenceRepository(),
       gasAlerts: () => bridge.gasAlertRepository(),
+      ...(fire ? { fire, fireSchedulesRepository: () => bridge.fireScheduleRepository() } : {}),
     });
     const router = new TelegramCommandRouter({
       api,
@@ -340,6 +380,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     liveness?.stop();
     fleetWatcher?.stop();
     liveRequests?.stop();
+    fireScheduler?.stop();
     telegramCommands?.stop();
     gasAlertChecker?.stop();
     backups?.stop();

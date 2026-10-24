@@ -15,7 +15,7 @@ import type {
   SqliteDatabase,
   TransactionIntentRecord,
 } from '@mint-bot/database';
-import { GasAlertRepository, IntelligenceRepository, TelegramAccessRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
+import { FireScheduleRepository, GasAlertRepository, IntelligenceRepository, TelegramAccessRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
 import type {
   AttemptRecord,
   BackendState,
@@ -482,6 +482,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   /** Watched addresses and discovery cursors (migration 022); never custody data. */
   public intelligenceRepository(): IntelligenceRepository {
     return new IntelligenceRepository(this.db, this.now);
+  }
+
+  /** T-067 (D-067): the owner's scheduled mints (migration 036). */
+  public fireScheduleRepository(): FireScheduleRepository {
+    return new FireScheduleRepository(this.db, this.now);
   }
 
   /** T-066: the owner's fee alerts (migration 035). */

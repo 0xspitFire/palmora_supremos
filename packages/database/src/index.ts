@@ -21,3 +21,5 @@ export { TelegramAccessRepository } from './telegram-access.js';
 export type { TelegramRole, TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } from './telegram-access.js';
 export { GasAlertRepository } from './gas-alert.js';
 export type { GasAlertChain, GasAlertDirection, GasAlertRow } from './gas-alert.js';
+export { FireScheduleRepository } from './fire-schedule.js';
+export type { FireScheduleOutcome, FireScheduleRecord, FireScheduleView } from './fire-schedule.js';
