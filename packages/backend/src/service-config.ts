@@ -88,8 +88,16 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
   if (value(env, 'TG_BOT_TOKEN') !== undefined || value(env, 'TG_CHAT_ID') !== undefined) throw new Error('TELEGRAM_SECRETS_MUST_USE_SECRET_STORE');
   const root = resolve(projectRoot);
   const modeValue = value(env, 'MINT_BOT_SERVICE_MODE') ?? 'dry-run';
-  if (modeValue !== 'dry-run') throw new Error('PHASE2_DRY_RUN_ONLY');
-  const mode: ServiceMode = 'dry-run';
+  // T-059 (owner-approved 2026-10-24): host mode lets the service run the owner's live requests (T-058). It is never the default,
+  // and it only starts outside CI, with the secret store and with the startup kill switch; the service itself then refuses to start
+  // without the wallet watcher and the approver-key pin.
+  if (modeValue !== 'dry-run' && modeValue !== 'host') throw new Error('SERVICE_MODE_INVALID');
+  const mode: ServiceMode = modeValue;
+  if (mode === 'host') {
+    if (value(env, 'CI') === 'true') throw new Error('HOST_MODE_NOT_ALLOWED_IN_CI');
+    if (!value(env, 'SECRET_STORE_PATH')) throw new Error('HOST_MODE_REQUIRES_SECRET_STORE');
+    if (!bool(env, 'MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH', true)) throw new Error('HOST_MODE_REQUIRES_STARTUP_KILL_SWITCH');
+  }
   const statePath = path(env, 'MINT_BOT_STATE_PATH', value(env, 'STORE_PATH') ?? '.runtime/ci/mintbot.sqlite', root);
   const backupDir = path(env, 'MINT_BOT_BACKUP_DIR', '.runtime/ci/backups', root);
   const logPath = path(env, 'MINT_BOT_LOG_PATH', value(env, 'MINT_BOT_LOG_FILE') ?? '.runtime/ci/orchestrator.log', root);

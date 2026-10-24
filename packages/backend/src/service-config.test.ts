@@ -3,6 +3,22 @@ import { loadServiceConfig, summarizeServiceConfig } from './service-config.js';
 
 const load = (env: NodeJS.ProcessEnv) => loadServiceConfig({ CI: 'true', ...env }, '/tmp/mintbot-config');
 
+describe('service mode (T-059)', () => {
+  const host = { MINT_BOT_SERVICE_MODE: 'host', SECRET_STORE_PATH: '/etc/mint-bot/Rets/MINT_BOT_SECRETS.env' };
+  it('is dry-run unless host is asked for exactly', () => {
+    expect(load({}).mode).toBe('dry-run');
+    expect(loadServiceConfig(host, '/tmp/mintbot-config').mode).toBe('host');
+  });
+
+  it('refuses any other mode, host mode in CI, without the secret store, or without the startup kill switch (fail closed)', () => {
+    for (const bad of ['live', 'Host', 'HOST', ' host']) expect(() => loadServiceConfig({ ...host, MINT_BOT_SERVICE_MODE: bad }, '/tmp/mintbot-config'), bad).toThrow('SERVICE_MODE_INVALID');
+    expect(() => load(host)).toThrow('HOST_MODE_NOT_ALLOWED_IN_CI');
+    expect(() => loadServiceConfig({ MINT_BOT_SERVICE_MODE: 'host' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_SECRET_STORE');
+    expect(() => loadServiceConfig({ ...host, MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH: 'false' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_STARTUP_KILL_SWITCH');
+    expect(loadServiceConfig({ ...host, MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH: 'true' }, '/tmp/mintbot-config').requireStartupKillSwitch).toBe(true);
+  });
+});
+
 describe('dashboard public address (T-030)', () => {
   it('is not set by default, so alert links use the local address', () => {
     expect(load({}).dashboardPublicUrl).toBeUndefined();
