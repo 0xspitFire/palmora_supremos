@@ -124,9 +124,10 @@ describe('live-run command wiring', () => {
 
   it('records the quantity plan at live-prepare, keyed by campaign', async () => {
     const { readFile } = await import('node:fs/promises');
-    const source = await readFile(new URL('./index.ts', import.meta.url), 'utf8');
-    const start = source.indexOf(".command('live-prepare'");
-    const body = source.slice(start, source.indexOf(".command('survey-seadrop'", start));
+    // Shared by `live-prepare` and Telegram `/prepare` since T-061.
+    const source = await readFile(new URL('./owner-actions.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('export async function livePrepareAction');
+    const body = source.slice(start, source.indexOf('export async function recordSimulationAction', start));
     expect(body).toContain("type: 'quantity_plan'");
     expect(body).toContain('campaignId: campaign.id');
   });

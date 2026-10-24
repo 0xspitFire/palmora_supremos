@@ -13,7 +13,7 @@ import type {
   SqliteDatabase,
   TransactionIntentRecord,
 } from '@mint-bot/database';
-import { IntelligenceRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
+import { IntelligenceRepository, TelegramAccessRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
 import type {
   AttemptRecord,
   BackendState,
@@ -480,6 +480,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   /** Watched addresses and discovery cursors (migration 022); never custody data. */
   public intelligenceRepository(): IntelligenceRepository {
     return new IntelligenceRepository(this.db, this.now);
+  }
+
+  /** T-061 (D-063): Telegram viewers, invites, the owner's unlocked session and the polling position (migration 033). */
+  public telegramAccessRepository(): TelegramAccessRepository {
+    return new TelegramAccessRepository(this.db, this.now);
   }
 
   public capabilities(): StoreCapabilities {
@@ -1319,7 +1324,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   public recordLiveRunRequest(input: LiveRunRequestRecord): void { this.ensureOpen(); this.databaseStore.recordLiveRunRequest(input); }
   /** T-058: the host service's view of requests it has not claimed. */
   public unclaimedLiveRunRequests(): LiveRunRequestRecord[] { this.ensureOpen(); return this.databaseStore.unclaimedLiveRunRequests(); }
-  public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired'): boolean { this.ensureOpen(); return this.databaseStore.claimLiveRunRequest(requestId, outcome, this.now().toISOString()); }
+  public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired' | 'cancelled'): boolean { this.ensureOpen(); return this.databaseStore.claimLiveRunRequest(requestId, outcome, this.now().toISOString()); }
+  /** T-061: the newest live requests and what happened to each, for the owner's `/requests`. */
+  public recentLiveRunRequests(limit = 10): ReturnType<SqliteBackendStore['recentLiveRunRequests']> { this.ensureOpen(); return this.databaseStore.recentLiveRunRequests(limit); }
   public revokeBase(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } { return this.revokeEnablement(BASE_CHAIN_ID, input); }
 
   /** Creates the Robinhood chain profile row when there is none (disabled and unverified, like Ethereum's). */

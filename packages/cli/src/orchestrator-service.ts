@@ -20,7 +20,13 @@ import {
   summarizeServiceConfig,
   TelegramNotifier,
 } from '@mint-bot/backend';
-import { createCliRuntime, configuredSecretRoot } from './runtime.js';
+import { createCliRuntime, configuredSecretRoot, configuredWalletPath, configuredWallets } from './runtime.js';
+import type { TelegramAccessRepository } from '@mint-bot/database';
+import { createTelegramBotApi, type TelegramBotApi } from './telegram-api.js';
+import { TelegramCommandRouter } from './telegram-commands.js';
+import { createTelegramActions } from './telegram-actions.js';
+import { startTelegramCommands, withViewerFanout } from './telegram-command-service.js';
+import { parseTotpSecret } from './totp.js';
 import { createDashboard } from './dashboard.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { startIntelligence } from './intelligence-service.js';
@@ -124,6 +130,27 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   }
   const alerts = new AlertManager(runtime.store, dispatcher, metrics, { policy: { retentionDays: config.alertRetentionDays }, ...(config.canonicalUrlBase ? { canonicalUrlBase: config.canonicalUrlBase } : {}) });
   runtime.setAlertSink(alerts);
+  // T-061 (D-063): owner commands over Telegram, only when the owner turns them on. Without every secret they need the start fails,
+  // so the commands never run without the owner check or the authenticator.
+  const commandsFlag = environment.MINT_BOT_TELEGRAM_COMMANDS ?? '';
+  if (commandsFlag !== '' && commandsFlag !== 'true' && commandsFlag !== 'false') throw new Error('TELEGRAM_COMMANDS_FLAG_INVALID');
+  let telegramCommandSetup: { api: TelegramBotApi; access: TelegramAccessRepository; ownerUserId: string; totpKey: Buffer } | undefined;
+  let intelligenceAlerts: AlertManager = alerts;
+  if (commandsFlag === 'true') {
+    if (!config.telegramEnabled || !config.secretStorePath) throw new Error('TELEGRAM_COMMANDS_NEED_TELEGRAM');
+    const secrets = await loadHostSecretStore(config.secretStorePath);
+    const token = secrets.get(config.telegramTokenName);
+    if (!token) throw new Error('TELEGRAM_TOKEN_MISSING');
+    const ownerUserId = secrets.get('TG_OWNER_USER_ID') ?? '';
+    if (!/^\d{1,20}$/.test(ownerUserId)) throw new Error('TG_OWNER_USER_ID_MISSING');
+    logger.registerSecret(secrets.get('TELEGRAM_TOTP_SECRET') ?? '');
+    const totpKey = parseTotpSecret(secrets.get('TELEGRAM_TOTP_SECRET'));
+    const api = createTelegramBotApi({ token, apiBaseUrl: config.telegramApiBaseUrl, ...(config.telegramApprovedProxy ? { approvedProxy: config.telegramApprovedProxy } : {}) });
+    const access = (runtime.store as CanonicalStoreBridge).telegramAccessRepository();
+    telegramCommandSetup = { api, access, ownerUserId, totpKey };
+    // D-063 item 8: viewers receive opportunity and opening-soon alerts as well.
+    intelligenceAlerts = withViewerFanout(alerts, async (text) => { for (const user of access.activeUsers()) await api.sendMessage(user.userId, text).catch(() => undefined); });
+  }
   const jobs = new CanonicalJobStore(runtime.store);
   const orchestrator = new OrchestratorService(runtime.store, runtime.application, runtime.coordinator, {
     jobs,
@@ -151,7 +178,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const monitorUrl = validMonitorUrl(secrets.get('HEALTHCHECK_PING_URL'));
     if (secrets.get('HEALTHCHECK_PING_URL') && !monitorUrl) logger.warn({ event: 'monitor_url_invalid' }, 'outside monitor address is not a valid https address; no signal will be sent');
     if (monitorUrl) logger.registerSecret(monitorUrl);
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts: intelligenceAlerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
   }
   // D-059: the independent on-chain wallet watcher, only when the owner enables it. Fails the start on a bad setting.
@@ -194,6 +221,42 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       },
       now: () => new Date(),
     }, { onError: (error) => logger.warn({ event: 'live_request_poll_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'LIVE_REQUEST_POLL_FAILED' }, 'live request poll failed') });
+  }
+  // T-061: the command router, once the watcher (read by /wallets and the coordinator) exists. Its application is not the read-only
+  // one, so /confirm records the owner's approval exactly as `live-request create` does; only the owner's commands reach it.
+  let telegramCommands: { stop(): void } | undefined;
+  if (telegramCommandSetup) {
+    const { api, access, ownerUserId, totpKey } = telegramCommandSetup;
+    const bridge = runtime.store as CanonicalStoreBridge;
+    const secretRoot = configuredSecretRoot(config.projectRoot);
+    const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+    const actions = createTelegramActions({
+      mode: config.mode,
+      store: runtime.store,
+      application: ownerApplication,
+      coordinator: runtime.coordinator,
+      projectRoot: config.projectRoot,
+      secretRoot,
+      killSwitchPath: config.killSwitchPath,
+      backupStatusPath: config.backupStatusPath,
+      startedAt: new Date(),
+      walletList: async () => (await configuredWallets(config.projectRoot, configuredWalletPath(config.projectRoot))).map((wallet) => wallet.address.toLowerCase()),
+      watchedWallets: (chainId) => watchConfig?.targets.filter((target) => target.chainId === chainId).map((target) => target.address) ?? [],
+      watcherHealthy: () => watcherHandle?.isHealthy(new Date()),
+      intelligence: () => bridge.intelligenceRepository(),
+    });
+    const router = new TelegramCommandRouter({
+      api,
+      access,
+      actions,
+      ownerUserId,
+      totpKey,
+      record: async (event) => { await runtime.store.transaction((current) => { current.events.push({ id: `telegram_command_${randomUUID()}`, type: 'telegram_command', at: new Date().toISOString(), data: { ...event } }); }); },
+      alert: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },
+      log: (event, fields) => logger.warn({ event, ...fields }, event),
+    });
+    telegramCommands = startTelegramCommands({ api, offsets: access, router, log: (event, fields) => logger.warn({ event, ...fields }, event) });
+    logger.info({ event: 'telegram_commands_started', viewers: access.activeUsers().length }, 'owner commands over Telegram started');
   }
   // Scheduled encrypted backups, only when the owner has put BACKUP_ENCRYPTION_KEY in the secret store.
   let backups: { stop(): void } | undefined;
@@ -253,6 +316,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     liveness?.stop();
     fleetWatcher?.stop();
     liveRequests?.stop();
+    telegramCommands?.stop();
     backups?.stop();
     await orchestrator.stop();
     await http.stop();

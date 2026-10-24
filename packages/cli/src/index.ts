@@ -2,7 +2,7 @@
 import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createPublicKey, randomBytes } from 'node:crypto';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { type Address, type Hex, encodeFunctionData, formatEther, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
+import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, readTurnkeySecretConfig, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
@@ -16,7 +16,7 @@ import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
 import { failoverTransport, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
-import { acceptPhrase, fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
+import { fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
 import { buildCompensatingEvidence, createTrustCenterRecord, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, parseTrustCenterRecord, probeOrEngageKillSwitch, walletSetDigest } from './compensating-controls-cli.js';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
@@ -25,16 +25,16 @@ import { probeRpc } from './rpc-probe.js';
 import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFreeCampaignFields } from './live-plan.js';
 import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { refreshFinalityEvidence } from './robinhood-evidence-refresh.js';
 import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { runLiveRequest, type LiveRequestStore } from './live-request.js';
+import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, recordSimulationAction, watchAcceptAction, type PrepareStore } from './owner-actions.js';
+import { newTotpSecret, totpUri } from './totp.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
-import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
-import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, recordWalletSimulations, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
-import { assertFeePolicyApplyAllowed, assertTipMatchesStoredPolicy, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
+import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
+import { assertFeePolicyApplyAllowed, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { normalizeWalletCommandArgs } from './wallet-command-routing.js';
@@ -87,7 +87,8 @@ const runtimeRoot = process.cwd();
 const blocked = (error: unknown) => JSON.stringify({ state: 'Blocked', blockingReason: error instanceof Error ? error.message : String(error), retryable: false, policy: { robinhoodFreePerWalletCapWei: ROBINHOOD_FREE_PER_WALLET_CAP_WEI.toString(), robinhoodFreeActivePeriodCapWei: ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI.toString(), robinhoodPaidMintsEnabled: false } });
 
 const DEFAULT_WALLET_FILE = configuredWalletPath(runtimeRoot);
-const DEFAULT_KILL_FILE = join(runtimeRoot, 'Rets', 'state', 'killswitch');
+// On the host the service's kill file is KILL_SWITCH_PATH (T-061): owner commands run with the service's settings use the same file.
+const DEFAULT_KILL_FILE = process.env.KILL_SWITCH_PATH ? resolve(process.env.KILL_SWITCH_PATH) : join(runtimeRoot, 'Rets', 'state', 'killswitch');
 const DEFAULT_WALLET_IMPORT_ROOT = '/home/Junayd/W3/Rets/wallets';
 
 function walletFile(value: string | undefined): string {
@@ -601,22 +602,13 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('confirm', { type: 'string' }), async (args) => {
       try {
         if (!/^0x[0-9a-fA-F]{40}$/.test(args.address)) throw new Error('FLEET_WATCH_ADDRESS_INVALID');
-        const address = args.address.toLowerCase();
         const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', configuredSecretRoot(runtimeRoot));
         const endpoint = chain.rpcEndpoints[0];
         if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
         const client = createPublicClient({ transport: failoverTransport(chain.rpcEndpoints) });
-        const blockNumber = await client.getBlockNumber();
-        const [nonce, balanceWei] = await Promise.all([client.getTransactionCount({ address: address as Address, blockNumber }), client.getBalance({ address: address as Address, blockNumber })]);
-        const phrase = acceptPhrase(address, nonce, balanceWei);
-        process.stdout.write(`The wallet ${address} on chain ${args.chainId} now has ${nonce} sent transactions and ${formatEther(balanceWei)} ETH.\n`);
-        if (args.confirm !== phrase) {
-          process.stdout.write(`Only accept this after you have looked up the wallet's history and understand every transaction. To accept, run this command again with: --confirm "${phrase}"\n`);
-          return;
-        }
-        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
-        await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, type: 'fleet_watch_accept', at: new Date().toISOString(), data: { chainId: args.chainId, address, nonce, balanceWei: balanceWei.toString() } }); });
-        process.stdout.write('Accepted. The running watcher adopts it on its next check. This does not release the kill switch; do that separately once you are sure.\n');
+        const runtime = args.confirm === undefined ? undefined : await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
+        const outcome = await watchAcceptAction({ chainId: args.chainId as 1 | 8453 | 4663, address: args.address, confirm: args.confirm, client, store: runtime?.store ?? { transaction: async () => { throw new Error('CONFIRMATION_PHRASE_MISMATCH'); } }, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: new Date() });
+        process.stdout.write(outcome.state === 'Preview' ? `${outcome.message} To accept, run this command again with: --confirm "${outcome.phrase}"\n` : `${outcome.message}\n`);
       } catch (error) { printError(new Error(redactAddresses(error instanceof Error ? error.message : 'UNKNOWN_ERROR'))); }
     })
   .command('approve', 'Persist explicit campaign approval', (args) => args
@@ -832,21 +824,14 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('confirm', { type: 'string', describe: 'The confirmation phrase this command printed' }), async (args) => {
       try {
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
-        const store = runtime.store as unknown as { killSwitchStatus?: () => KillSwitchStatus; releaseKillSwitch?: (actor: string, reason: string) => Promise<{ released: boolean }> };
-        if (typeof store.killSwitchStatus !== 'function' || typeof store.releaseKillSwitch !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        const status = store.killSwitchStatus();
-        const fileExists = existsSync(args.file);
-        const engaged = status.engaged || runtime.store.snapshot().killed || fileExists;
-        if (!engaged) { process.stdout.write(`${json({ state: 'Off', message: 'The kill switch is already off (no file and no stored flag).' })}\n`); return; }
-        const unresolved = unresolvedRunIds(runtime.store.snapshot());
-        const phrase = killReleasePhrase(status);
-        if (args.confirm === undefined) {
-          process.stdout.write(`${json({ state: 'On', message: unresolved.length > 0 ? `The kill switch is on, and ${unresolved.length} run(s) are still in flight or unresolved, so it cannot be released yet. Run reconcile and wait until they settle.` : 'The kill switch is on. Releasing it lets live runs happen again once everything else is ready. Only do this when you mean to.', engagedAt: status.engaged ? status.changedAt : null, file: args.file, fileExists, unresolvedRuns: unresolved, ...(unresolved.length === 0 ? { copyThisToRelease: `kill-release --confirm "${phrase}"` } : {}) })}\n`);
+        const outcome = await killReleaseAction({ store: asKillStore(runtime.store), killFile: args.file, confirm: args.confirm, actor: 'owner-cli' });
+        if (outcome.state === 'Off') { process.stdout.write(`${json(outcome)}\n`); return; }
+        if (outcome.state === 'On') {
+          const { phrase, ...rest } = outcome;
+          process.stdout.write(`${json({ state: rest.state, message: rest.message, engagedAt: rest.engagedAt, file: args.file, fileExists: rest.fileExists, unresolvedRuns: rest.unresolvedRuns, ...(phrase ? { copyThisToRelease: `kill-release --confirm "${phrase}"` } : {}) })}\n`);
           return;
         }
-        assertKillReleaseAllowed({ status, confirm: args.confirm, unresolved });
-        const result = await store.releaseKillSwitch('owner-cli', 'operator release');
-        await unlink(args.file).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+        const result = outcome;
         // A short note to Telegram, best effort: the release stands even if it cannot be delivered.
         let noticeSent = false;
         try {
@@ -904,6 +889,23 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         process.stdout.write(`${json(await runLiveRequest({ action: args.action, campaignId: args.campaignId, wallets, maxFeeGwei: args.maxFeeGwei, confirm: args.confirm, now: new Date(), store: store as LiveRequestStore, approve: (validated) => runtime.application.command('approve', { validated }) }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
+  .command('telegram-setup', 'Owner-run on the host (D-063): make a new authenticator secret for /unlock and show where it goes. Writes nothing', {}, () => {
+    const secret = newTotpSecret();
+    process.stdout.write([
+      'A new authenticator secret was made. It is shown here once and saved nowhere.',
+      '',
+      `  Secret (type it into your authenticator app as a "setup key", time-based): ${secret}`,
+      `  Or open this link on your phone instead: ${totpUri(secret)}`,
+      '',
+      'Then, on the host:',
+      '  1. sudo nano /etc/mint-bot/Rets/MINT_BOT_SECRETS.env',
+      `  2. Add the line TELEGRAM_TOTP_SECRET=${secret} (replace the old line if there is one), and TG_OWNER_USER_ID=<your Telegram user ID>.`,
+      '  3. Save, then: sudo systemctl restart mint-bot',
+      '  4. In Telegram, send /unlock followed by the 6-digit code your app shows.',
+      '',
+      'Clear this screen afterwards (type: clear). Anyone who sees the secret can make codes.',
+    ].join('\n') + '\n');
+  })
   .command('base-enable <action>', 'Owner-run: record Base free attended enablement until you revoke it (status | record | revoke)', (args) => args
     .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
     .option('evidence-file', { type: 'string', describe: 'Completed copy of Docs/base-enable-evidence.template.json (status and record)' })
@@ -957,13 +959,9 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         if (campaign.dryRun || (campaign.chainId !== 1 && campaign.chainId !== 8453)) throw new Error('LIVE_SUPPORTED_CAMPAIGN_REQUIRED');
         const wallets = await publicWallets(walletFile(args.walletFile));
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : campaign.chainId === 8453 ? await basePort() : await ethereumPort();
-        const report = await checkDrop(port, campaign.contract, wallets, { simulate: true, quantity: campaign.quantity });
-        const results = report.wallets.map((row) => ({ wallet: row.wallet, success: row.verdict === 'ready' }));
-        if (results.length !== wallets.length || results.some((item) => !item.success)) throw new Error(`SIMULATION_NOT_PASSED: ${report.summary}`);
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets(campaign.chainId === 8453 ? 'base' : 'ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
         const client = createPublicClient({ transport: failoverTransport(config.rpcEndpoints) });
-        const block = await client.getBlock({ blockTag: 'latest' });
-        const ids = await recordWalletSimulations(runtime.store, campaign, results, { blockNumber: block.number, blockHash: block.hash });
+        const ids = await recordSimulationAction({ store: runtime.store, campaign, wallets, port, latestBlock: async () => { const block = await client.getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; } });
         process.stdout.write(`${json({ state: 'Recorded', message: `${ids.length} wallet(s) passed the test mint. The records are good for 30 minutes, so approve, arm and run soon.`, simulationIds: ids })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
@@ -1023,9 +1021,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const wallets = checkWallets(args.wallets);
         const chainId = args.chain === 'base' ? 8453 : 1;
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : chainId === 8453 ? await basePort() : await ethereumPort();
-        const report = await checkDrop(port, args.contract, wallets, { simulate: true, ...(args.quantityLimit === undefined ? {} : { maxQuantity: args.quantityLimit }) });
-        const plan = buildLivePlan(report, { killSwitchPresent: existsSync(DEFAULT_KILL_FILE), custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local', chainId });
-        process.stdout.write(`${json({ ...plan, ...(plan.verdict === 'ready' ? { confirmationPhrase: liveConfirmationPhrase(args.contract, plan.quantity, plan.totalMaxExposureEth), planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null } : {}) })}\n`);
+        const planned = await livePlanAction({ chainId, contract: args.contract, wallets, ...(args.quantityLimit === undefined ? {} : { quantityLimit: args.quantityLimit }), port, killFile: DEFAULT_KILL_FILE, custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local' });
+        process.stdout.write(`${json({ ...planned.plan, ...(planned.phrase ? { confirmationPhrase: planned.phrase, planningMaxFeeGwei: planned.planningMaxFeeGwei } : {}) })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('live-prepare', 'Record a live FREE Ethereum or Base campaign from a ready live-plan. Spends nothing; approve, arm and run are still separate steps', (args) => args
@@ -1041,41 +1038,13 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const chainId = args.chain === 'base' ? 8453 : 1;
         const wallets = checkWallets(args.wallets);
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : chainId === 8453 ? await basePort() : await ethereumPort();
-        const report = await checkDrop(port, args.contract, wallets, { simulate: true, ...(args.quantityLimit === undefined ? {} : { maxQuantity: args.quantityLimit }) });
-        const plan = buildLivePlan(report, { killSwitchPresent: existsSync(DEFAULT_KILL_FILE), custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local', chainId });
+        const planned = await livePlanAction({ chainId, contract: args.contract, wallets, ...(args.quantityLimit === undefined ? {} : { quantityLimit: args.quantityLimit }), port, killFile: DEFAULT_KILL_FILE, custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local' });
         const file = walletFile(args.walletFile);
-        const readyWallets = assertLivePrepareAllowed({ plan, contract: args.contract, confirm: args.confirm, priorityFeeGwei: args.priorityFeeGwei, walletFileAddresses: await publicWallets(file), killSwitchPresent: existsSync(DEFAULT_KILL_FILE) });
-        const fields = liveFreeCampaignFields({ quantity: plan.quantity, wallets: readyWallets.length, tipWei: parseGwei(args.priorityFeeGwei.toString()), chainId });
+        const walletFileAddresses = await publicWallets(file);
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: file }, { startCoordinator: false });
-        if (chainId === 1) {
-          const store = runtime.store as unknown as { ethereumFeePolicyStatus?: () => Parameters<typeof describeFeePolicy>[0] };
-          if (typeof store.ethereumFeePolicyStatus !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-          const policy = store.ethereumFeePolicyStatus();
-          if (policy.stored !== null && !policy.matchesApproved) throw new Error('FEE_POLICY_DIFFERS_FROM_APPROVED: run fee-policy status, then fee-policy apply with its confirmation phrase');
-          assertTipMatchesStoredPolicy(policy, parseGwei(args.priorityFeeGwei.toString()));
-        }
-        const evidence = runtime.store.snapshot().chainEvidence.find((item) => item.chainId === chainId && item.status === 'accepted' && item.executionEnabled && item.expiresAt > new Date().toISOString());
-        if (!evidence) throw new Error('CHAIN_EVIDENCE_NOT_ACCEPTED: run chain-evidence status, then chain-evidence accept with its phrase, before live-prepare');
-        const campaign = await runtime.application.createCampaign({
-          chainId,
-          contract: args.contract,
-          strategy: 'seadrop-v1-public',
-          quantity: fields.quantity,
-          dryRun: false,
-          maxRunWei: fields.maxRunWei,
-          dailyCapWei: fields.dailyCapWei,
-          gasCeilingWei: fields.gasCeilingWei,
-          broadcastMode: 'public',
-          chainVerification: { chainId, status: 'verified', seaDropCompatible: true, evidenceId: evidence.id, checkedAt: evidence.checkedAt, sourceBlock: evidence.sourceBlock, endpointReference: evidence.endpointIdentity },
-          mintPriceWei: fields.mintPriceWei,
-          feePolicy: fields.feePolicy,
-        });
-        // Record why the quantity is what it is (D-037); live-run copies this onto the run so the summary can explain it.
-        if (report.quantityPlan) {
-          const planData = { campaignId: campaign.id, desired: report.quantityPlan.desired, planned: report.quantityPlan.planned, reduced: report.quantityPlan.reduced, reason: report.quantityPlan.reason, maxFeeGwei: report.quantityPlan.maxFeeGwei, message: report.quantityPlan.message };
-          await runtime.store.transaction((state) => { state.events.push({ id: `evt_${randomBytes(8).toString('hex')}`, type: 'quantity_plan', at: new Date().toISOString(), data: planData }); });
-        }
-        process.stdout.write(`${json({ state: 'Prepared', campaignId: campaign.id, wallets: readyWallets, quantity: fields.quantity, maxExposureEth: plan.totalMaxExposureEth, planningMaxFeeGwei: report.quantityPlan?.maxFeeGwei ?? null, nextSteps: [`approve --campaign-id ${campaign.id}`, `arm --campaign-id ${campaign.id} --mode live`, 'remove the kill-switch file only when you are ready', 'live-run --run-id <the run id arm prints> --max-fee-gwei <the planning max fee above>'] })}\n`);
+        const prepared = await livePrepareAction({ chainId, contract: args.contract, priorityFeeGwei: args.priorityFeeGwei, confirm: args.confirm, planned, killFile: DEFAULT_KILL_FILE, walletFileAddresses, store: runtime.store as unknown as PrepareStore, createCampaign: (input) => runtime.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: new Date() });
+        const campaign = prepared.campaign;
+        process.stdout.write(`${json({ state: 'Prepared', campaignId: campaign.id, wallets: prepared.wallets, quantity: prepared.quantity, maxExposureEth: prepared.maxExposureEth, planningMaxFeeGwei: prepared.planningMaxFeeGwei, nextSteps: [`approve --campaign-id ${campaign.id}`, `arm --campaign-id ${campaign.id} --mode live`, 'remove the kill-switch file only when you are ready', 'live-run --run-id <the run id arm prints> --max-fee-gwei <the planning max fee above>'] })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('survey-seadrop', 'Read-only survey of how SeaDrop mints are made on a chain (public, signed, allowlist, other)', (args) => args

@@ -561,8 +561,15 @@ export class DurableRepository {
   }
 
   /** Claims a request exactly once. Returns false when it was already claimed (another tick, another process). */
-  public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired', at: string): boolean {
+  public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired' | 'cancelled', at: string): boolean {
+    if (!this.db.prepare('SELECT 1 FROM live_run_request WHERE id = ?').get(requestId)) return false;
     return this.db.prepare('INSERT OR IGNORE INTO live_run_request_outcome (request_id, outcome, claimed_at) VALUES (?, ?, ?)').run(requestId, outcome, at).changes === 1;
+  }
+
+  /** T-061: the newest requests with what happened to each (undefined: not claimed yet). */
+  public recentLiveRunRequests(limit: number): Array<LiveRunRequestRecord & { outcome?: 'started' | 'expired' | 'cancelled'; claimedAt?: string }> {
+    const rows = this.db.prepare('SELECT r.*, o.outcome AS outcome, o.claimed_at AS claimed_at FROM live_run_request r LEFT JOIN live_run_request_outcome o ON o.request_id = r.id ORDER BY r.rowid DESC LIMIT ?').all(Math.max(1, Math.min(50, Math.trunc(limit)))) as Array<Record<string, string | null>>;
+    return rows.map((row) => ({ id: row['id']!, campaignId: row['campaign_id']!, wallets: JSON.parse(row['wallets_json']!) as string[], simulationIds: JSON.parse(row['simulation_ids_json']!) as string[], approvalId: row['approval_id']!, evidenceAt: row['evidence_at']!, maxFeeGwei: row['max_fee_gwei']!, confirmationDigest: row['confirmation_digest']!, requestedAt: row['requested_at']!, expiresAt: row['expires_at']!, ...(row['outcome'] ? { outcome: row['outcome'] as 'started' | 'expired' | 'cancelled', claimedAt: row['claimed_at']! } : {}) }));
   }
 
   /** The owner's revocation of an enablement (D-062), if any. */
