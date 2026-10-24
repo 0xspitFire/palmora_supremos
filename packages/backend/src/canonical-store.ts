@@ -1,3 +1,4 @@
+import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI } from './policy.js';
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { assertBaseFirstRehearsal, assertBaseLiveAllowed } from './base-enablement.js';
 import { unresolvedRunIds } from './kill-switch-release.js';
@@ -1635,7 +1636,10 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private assertFleetDailyCap(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string, amount: bigint): void {
     const policy = this.fleetPolicyFor(chainId);
     if (!policy) return;
-    const cap = mintClass === 'free' ? policy.freeDailyCapWei : policy.paidDailyCapWei;
+    // D-066 (T-065): free Robinhood exposure across all campaigns is also bound by the D-041 active-period cap (0.002 ETH), so two
+    // campaigns together can never reserve more than the smaller of that and the fleet free cap in a rolling day.
+    const freeCap = chainId === ROBINHOOD_CHAIN_ID && policy.freeDailyCapWei > ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI ? ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI : policy.freeDailyCapWei;
+    const cap = mintClass === 'free' ? freeCap : policy.paidDailyCapWei;
     if (this.fleetDailyExposure(chainId, mintClass, rollingCutoff) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
   }
 
