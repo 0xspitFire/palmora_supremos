@@ -4,7 +4,7 @@ import type { AlertDeliveryRecord, AlertRecord, DomainEventRecord, FinalityObser
 import { ReadModels } from './read-models.js';
 import type { ActiveExecutionRow, ChainVerificationRow, DuplicateNonceIdentityRow, OrphanReservationRow, PendingReconciliationRow, ReadinessRow, ReorgExposureRow, ReplacementExposureRow, StaleSimulationRow } from './read-models.js';
 import type { AlertRow, EventRow, FinalityObservationView, JobRow, OpportunityDetailRow, SpendSummaryRow, WalletMetadataRow } from './phase2.js';
-import type { AuditEventRecord, ChainVerificationRecord, RobinhoodEnablementInput, RobinhoodEnablementRow, BaseEnablementInput, BaseEnablementRow, LiveRunRequestRecord, ExecutionRecord, ExecutionRunRecord, ReceiptRecord, ReconciliationRecord, ReorgEventRecord, ReorgResolutionRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
+import type { AuditEventRecord, ChainVerificationRecord, RobinhoodEnablementInput, RobinhoodEnablementRow, BaseEnablementInput, BaseEnablementRow, LiveRunRequestRecord, EthereumLiveMintProofInput, ExecutionRecord, ExecutionRunRecord, ReceiptRecord, ReconciliationRecord, ReorgEventRecord, ReorgResolutionRecord, RetentionEvidenceRecord, SimulationRecord, TransactionAttemptRecord, TransactionIntentRecord } from './repositories.js';
 import { SpendReservations } from './spend-reservations.js';
 import type { SettlementComponents } from './spend-reservations.js';
 
@@ -103,6 +103,9 @@ export class SqliteBackendStore implements BackendStore {
   public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string; paidFeePolicy?: { id: string; version: string; maxTotalFeeWei: bigint } }): void { this.repository.enableBase(record, chain); }
   public latestBaseEnablement(): BaseEnablementRow | undefined { return this.repository.latestBaseEnablement(); }
   public disableBaseIfNotEnabled(now: Date): boolean { return this.repository.disableBaseIfNotEnabled(now); }
+  public recordEthereumLiveMintProofs(rows: EthereumLiveMintProofInput[]): void { this.repository.recordEthereumLiveMintProofs(rows); }
+  public ethereumLiveMintProofs(): EthereumLiveMintProofInput[] { return this.repository.ethereumLiveMintProofs(); }
+  public hasEthereumLiveMintProof(): boolean { return this.repository.hasEthereumLiveMintProof(); }
   public recordLiveRunRequest(input: LiveRunRequestRecord): void { this.repository.recordLiveRunRequest(input); }
   public unclaimedLiveRunRequests(): LiveRunRequestRecord[] { return this.repository.unclaimedLiveRunRequests(); }
   public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired' | 'cancelled', at: string): boolean { return this.repository.claimLiveRunRequest(requestId, outcome, at); }

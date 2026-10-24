@@ -57,6 +57,22 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     } finally { await close(value); }
   });
 
+  it('an imported Ethereum mint proof (T-062, D-064) counts, and nothing else does: no proof, no enablement, and the proof alone enables nothing', async () => {
+    const value = await fixture(ROBINHOOD);
+    try {
+      expect(value.store.ethereumLiveMintProven()).toBe(false);
+      value.store.recordEthereumLiveMintProofs([{ id: 'proof-1', txHash: `0x${'1'.repeat(64)}`, blockNumber: '26227572', blockHash: `0x${'ab'.repeat(32)}`, seadropAddress: '0x00005ea00ac477b1030ce78506496e8c2de24bf5', nftContract: '0xa686fde3299d5451af22382240e0dff62f7b94db', callSelector: '0x161ac21f', evidenceReference: 'Docs/phase3-first-live-evidence.md', approvedAt: REAL, confirmationDigest: 'c'.repeat(64) }]);
+      expect(value.store.ethereumLiveMintProven()).toBe(true);
+      // The proof is not an enablement: Robinhood stays off, free and paid, until the owner's own evidence file is recorded.
+      expect(value.store.robinhoodEnablement()).toBeUndefined();
+      expect(() => assertRobinhoodLiveAllowed('free', value.store.robinhoodEnablement(), new Date(REAL))).toThrow('ROBINHOOD_EXECUTION_DISABLED');
+      expect(value.db.prepare("SELECT execution_enabled AS e FROM chain_profile WHERE chain_id = 4663").get()).not.toMatchObject({ e: 1 });
+      value.store.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+      expect(() => assertRobinhoodLiveAllowed('free', value.store.robinhoodEnablement(), new Date(REAL))).not.toThrow();
+      expect(() => assertRobinhoodLiveAllowed('paid', value.store.robinhoodEnablement(), new Date(REAL))).toThrow('ROBINHOOD_PAID_MINTS_DISABLED');
+    } finally { await close(value); }
+  });
+
   it('with the proof, writes the record, enables the profile, and the policy then says yes for free and no for paid', async () => {
     const value = await fixture(ROBINHOOD);
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
