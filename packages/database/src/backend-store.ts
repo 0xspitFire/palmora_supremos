@@ -100,7 +100,7 @@ export class SqliteBackendStore implements BackendStore {
   public enableRobinhood(record: RobinhoodEnablementInput, chain: { chainProfileId: string; verificationId: string; sequencerEndpointReference: string; archiveEndpointReference: string }): void { this.repository.enableRobinhood(record, chain); }
   public latestRobinhoodEnablement(): RobinhoodEnablementRow | undefined { return this.repository.latestRobinhoodEnablement(); }
   public disableRobinhoodIfNotEnabled(now: Date): boolean { return this.repository.disableRobinhoodIfNotEnabled(now); }
-  public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string }): void { this.repository.enableBase(record, chain); }
+  public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string; paidFeePolicy?: { id: string; version: string; maxTotalFeeWei: bigint } }): void { this.repository.enableBase(record, chain); }
   public latestBaseEnablement(): BaseEnablementRow | undefined { return this.repository.latestBaseEnablement(); }
   public disableBaseIfNotEnabled(now: Date): boolean { return this.repository.disableBaseIfNotEnabled(now); }
   public revokeEnablement(chainId: 4663 | 8453, input: { id: string; revokedAt: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } { return this.repository.revokeEnablement(chainId, input); }

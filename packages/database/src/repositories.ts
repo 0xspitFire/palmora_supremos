@@ -173,7 +173,7 @@ export interface RobinhoodEnablementRow {
   createdAt: string;
 }
 
-export type BaseEnablementEvidence = Record<'reviewedCode' | 'forkRehearsal' | 'finality' | 'endpointAgreement' | 'feeObservation' | 'liveSimulation' | 'custodyReadiness', true>;
+export type BaseEnablementEvidence = Record<'reviewedCode' | 'forkRehearsal' | 'finality' | 'endpointAgreement' | 'feeObservation' | 'liveSimulation' | 'custodyReadiness', true> & Partial<Record<'paidRehearsal' | 'paidPolicyApproved', true>>;
 export interface BaseEnablementInput {
   id: string;
   approvedAt: string;
@@ -186,8 +186,10 @@ export interface BaseEnablementInput {
   primaryEndpointReference: string;
   fallbackEndpointReference: string;
   custodyMode: 'local-personal-live';
+  /** D-062 item 3: paid Base, only with the two paid evidence keys. */
+  paidAllowed?: boolean;
 }
-export interface BaseEnablementRow extends BaseEnablementInput { approvedBy: string; freeAllowed: true; paidAllowed: false; createdAt: string; }
+export interface BaseEnablementRow extends BaseEnablementInput { approvedBy: string; freeAllowed: true; paidAllowed: boolean; createdAt: string; }
 
 export interface ReorgEventRecord {
   id: string;
@@ -567,6 +569,12 @@ export class DurableRepository {
       if (input.expectedEnablementId !== undefined && input.expectedEnablementId !== latest.id) throw new Error('REVOCATION_RECORD_CHANGED');
       this.db.prepare("INSERT INTO chain_enablement_revocation (id, chain_id, enablement_id, approved_by, revoked_at, confirmation_digest, created_at) VALUES (?, ?, ?, 'owner-cli', ?, ?, ?)").run(input.id, chainId, latest.id, input.revokedAt, input.confirmationDigest, input.revokedAt);
       const profile = this.db.prepare('SELECT id, execution_enabled FROM chain_profile WHERE chain_id = ?').get(chainId) as { id: string; execution_enabled: number } | undefined;
+      // A revoked paid record also takes paid mints out of the chain's fee policy, so that layer follows the owner's paid state too.
+      const activeFee = profile ? this.db.prepare('SELECT * FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(profile.id) as Record<string, unknown> | undefined : undefined;
+      if (profile && activeFee && Number(activeFee['paid_mints_enabled']) === 1) {
+        this.db.prepare('UPDATE fee_policy SET active = 0 WHERE id = ?').run(activeFee['id']);
+        this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)').run(`${String(activeFee['id'])}:revoked:${input.id}`, profile.id, `${String(activeFee['version'])}-paid-revoked`, activeFee['priority_fee_semantics'], activeFee['max_total_fee_wei'], activeFee['free_mint_total_fee_cap_wei'], activeFee['free_mint_priority_fee_component_wei'], activeFee['free_mint_priority_fee_multiplier'], input.revokedAt, activeFee['zero_priority_fee_policy']);
+      }
       if (profile && profile.execution_enabled === 1) {
         this.db.prepare('UPDATE chain_profile SET execution_enabled = 0 WHERE id = ?').run(profile.id);
         this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(`enablement-revoked:${input.id}`, 'chain_profile', profile.id, 'execution_enabled', 'execution_disabled', 'owner-cli', `enablement ${latest.id} revoked by the owner (D-062)`, input.revokedAt);
@@ -600,14 +608,25 @@ export class DurableRepository {
     });
   }
 
-  public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string }): void {
-    const steps = ['reviewedCode', 'forkRehearsal', 'finality', 'endpointAgreement', 'feeObservation', 'liveSimulation', 'custodyReadiness'] as const;
+  public enableBase(record: BaseEnablementInput, chain: { chainProfileId: string; verificationId: string; paidFeePolicy?: { id: string; version: string; maxTotalFeeWei: bigint } }): void {
+    const paid = record.paidAllowed === true;
+    const steps = paid
+      ? ['reviewedCode', 'forkRehearsal', 'finality', 'endpointAgreement', 'feeObservation', 'liveSimulation', 'custodyReadiness', 'paidRehearsal', 'paidPolicyApproved'] as const
+      : ['reviewedCode', 'forkRehearsal', 'finality', 'endpointAgreement', 'feeObservation', 'liveSimulation', 'custodyReadiness'] as const;
     if (steps.some((step) => record.evidence[step] !== true) || Object.keys(record.evidence).length !== steps.length) throw new Error('Base enablement evidence is incomplete');
+    if (paid && !chain.paidFeePolicy) throw new Error('Base paid enablement requires the approved paid fee policy');
     if (![record.evidenceDigest, record.confirmationDigest].every((value) => /^[0-9a-f]{64}$/.test(value))) throw new Error('Base enablement requires evidence and confirmation digests');
     if (record.primaryEndpointReference === record.fallbackEndpointReference) throw new Error('Base enablement requires independent endpoint references');
     this.immediate(() => {
-      this.db.prepare("INSERT INTO base_enablement (id, approved_by, approved_at, expires_at, free_allowed, paid_allowed, evidence_json, evidence_digest, confirmation_digest, strategy_version, fee_policy_version, primary_endpoint_reference, fallback_endpoint_reference, custody_mode, created_at) VALUES (?, 'owner-cli', ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, record.approvedAt, record.expiresAt, JSON.stringify(record.evidence), record.evidenceDigest, record.confirmationDigest, record.strategyVersion, record.feePolicyVersion, record.primaryEndpointReference, record.fallbackEndpointReference, record.custodyMode, record.approvedAt);
+      this.db.prepare("INSERT INTO base_enablement (id, approved_by, approved_at, expires_at, free_allowed, paid_allowed, evidence_json, evidence_digest, confirmation_digest, strategy_version, fee_policy_version, primary_endpoint_reference, fallback_endpoint_reference, custody_mode, created_at) VALUES (?, 'owner-cli', ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, record.approvedAt, record.expiresAt, paid ? 1 : 0, JSON.stringify(record.evidence), record.evidenceDigest, record.confirmationDigest, record.strategyVersion, record.feePolicyVersion, record.primaryEndpointReference, record.fallbackEndpointReference, record.custodyMode, record.approvedAt);
       this.recordChainVerification({ id: chain.verificationId, chainProfileId: chain.chainProfileId, chainId: 8453, status: 'verified', evidence: { finalityPassed: true, seaDropCompatible: true, positiveLivePath: false, archiveForkPassed: true, reconciliationPassed: true, baseEnablementId: record.id, expiresAt: record.expiresAt, evidenceDigest: record.evidenceDigest, endpointIdentity: record.primaryEndpointReference, archiveEndpointIdentity: record.fallbackEndpointReference, strategyVersion: record.strategyVersion, sourceBlock: '10000000', sourceBlockHash: 'base-archive-verification-anchor' }, checkedAt: record.approvedAt, approvedBy: 'owner-cli', approvedAt: record.approvedAt, executionEnabled: true });
+      if (paid && chain.paidFeePolicy) {
+        // The active Base policy stays as it is for free mints; a new version of it also allows paid mints, with the D-057 fee allowance.
+        const current = this.db.prepare('SELECT * FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(chain.chainProfileId) as Record<string, unknown> | undefined;
+        if (!current) throw new Error('Base paid enablement requires the active Base fee policy');
+        this.db.prepare('UPDATE fee_policy SET active = 0 WHERE id = ?').run(current['id']);
+        this.db.prepare('INSERT INTO fee_policy (id, chain_profile_id, version, priority_fee_semantics, max_total_fee_wei, free_mint_total_fee_cap_wei, free_mint_priority_fee_component_wei, free_mint_priority_fee_multiplier, paid_mints_enabled, active, created_at, zero_priority_fee_policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)').run(chain.paidFeePolicy.id, chain.chainProfileId, chain.paidFeePolicy.version, current['priority_fee_semantics'], chain.paidFeePolicy.maxTotalFeeWei.toString(), current['free_mint_total_fee_cap_wei'], current['free_mint_priority_fee_component_wei'], current['free_mint_priority_fee_multiplier'], record.approvedAt, current['zero_priority_fee_policy']);
+      }
     });
   }
 
@@ -621,7 +640,7 @@ export class DurableRepository {
     if (!row) return undefined;
     let evidence: unknown;
     try { evidence = JSON.parse(String(row['evidence_json'])); } catch { return undefined; }
-    return { id: String(row['id']), approvedBy: String(row['approved_by']), approvedAt: String(row['approved_at']), expiresAt: String(row['expires_at']), freeAllowed: true, paidAllowed: false, evidence: evidence as BaseEnablementEvidence, evidenceDigest: String(row['evidence_digest']), confirmationDigest: String(row['confirmation_digest']), strategyVersion: String(row['strategy_version']), feePolicyVersion: String(row['fee_policy_version']), primaryEndpointReference: String(row['primary_endpoint_reference']), fallbackEndpointReference: String(row['fallback_endpoint_reference']), custodyMode: 'local-personal-live', createdAt: String(row['created_at']) };
+    return { id: String(row['id']), approvedBy: String(row['approved_by']), approvedAt: String(row['approved_at']), expiresAt: String(row['expires_at']), freeAllowed: true, paidAllowed: Number(row['paid_allowed']) === 1, evidence: evidence as BaseEnablementEvidence, evidenceDigest: String(row['evidence_digest']), confirmationDigest: String(row['confirmation_digest']), strategyVersion: String(row['strategy_version']), feePolicyVersion: String(row['fee_policy_version']), primaryEndpointReference: String(row['primary_endpoint_reference']), fallbackEndpointReference: String(row['fallback_endpoint_reference']), custodyMode: 'local-personal-live', createdAt: String(row['created_at']) };
   }
 
   public disableBaseIfNotEnabled(now: Date): boolean {

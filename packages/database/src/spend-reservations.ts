@@ -231,6 +231,11 @@ export class SpendReservations {
         const paid = this.db.prepare("SELECT 1 AS allowed FROM robinhood_enablement WHERE rowid = (SELECT max(rowid) FROM robinhood_enablement) AND paid_allowed = 1 AND julianday('now') < julianday(expires_at) AND NOT EXISTS (SELECT 1 FROM chain_enablement_revocation r WHERE r.enablement_id = robinhood_enablement.id) AND json_type(evidence_json, '$.paidRehearsal') IS 'true' AND json_type(evidence_json, '$.paidPolicyApproved') IS 'true'").get() as { allowed: number } | undefined;
         if (!paid) throw new Error('paid Robinhood mints are blocked');
       }
+      if (chain.chain_id === 8453 && !request.freeMint) {
+        // D-062 item 3: paid Base only from the newest, unrevoked owner record that carries both paid evidence keys.
+        const paid = this.db.prepare("SELECT 1 AS allowed FROM base_enablement WHERE rowid = (SELECT max(rowid) FROM base_enablement) AND paid_allowed = 1 AND julianday('now') < julianday(expires_at) AND json_type(evidence_json, '$.paidRehearsal') IS 'true' AND json_type(evidence_json, '$.paidPolicyApproved') IS 'true' AND NOT EXISTS (SELECT 1 FROM chain_enablement_revocation r WHERE r.enablement_id = base_enablement.id)").get();
+        if (!paid) throw new Error('paid Base mints are blocked');
+      }
       if (chain.chain_id === 4663 && chain.execution_enabled !== 1) throw new Error('Robinhood execution is disabled');
       if (chain.verification_status !== 'verified' || chain.execution_enabled !== 1) throw new Error('chain execution is not enabled or verified');
       if (chain.chain_id === 4663 && request.freeMint && request.mintValueWei !== 0n) throw new Error('Robinhood free reservations must have zero mint value');

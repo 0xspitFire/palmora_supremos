@@ -174,7 +174,7 @@ export function robinhoodGrantFrom(record: unknown, now: Date): RobinhoodEnablem
 }
 export function baseGrantFrom(record: unknown, now: Date): BaseEnablementGrant | undefined {
   const valid = validBaseEnablement(record, now);
-  return valid ? Object.freeze({ expiresAt: valid.expiresAt, freeAllowed: true as const, paidAllowed: false as const }) : undefined;
+  return valid ? Object.freeze({ expiresAt: valid.expiresAt, freeAllowed: true as const, paidAllowed: valid.paidAllowed }) : undefined;
 }
 
 export function engineConfigFromCampaign(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {

@@ -12,9 +12,13 @@ const required = ['BASE_FORK_BLOCK', 'BASE_SEADROP_TX_HASH', 'BASE_SEADROP_NFT',
 for (const name of required) if (!fixture[name]) throw new Error(`${name} fixture reference is required`);
 if (!/^\d+$/.test(fixture.BASE_FORK_BLOCK)) throw new Error('BASE_FORK_BLOCK must be a decimal block number');
 
+// --paid (D-062 item 3): the paid Base fork rehearsal only. It forks at the paid drop's block and runs the bot-path rehearsal in paid
+// mode against that drop: two wallets mint and settle, the value is exactly price times quantity, the L1 data fee is observed at
+// settlement, a kill switch after the first reservation releases the second, a repeated run and re-sent bytes cannot mint again.
+const paid = process.argv.includes('--paid');
 const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', [
   '--fork-url', archive,
-  '--fork-block-number', fixture.BASE_FREE_FORK_BLOCK,
+  '--fork-block-number', paid ? fixture.BASE_FORK_BLOCK : fixture.BASE_FREE_FORK_BLOCK,
   '--chain-id', '8453',
   '--host', '127.0.0.1',
   '--port', '8547',
@@ -28,6 +32,23 @@ try {
   const reportFile = join(reportDir, 'report.json');
   const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
   if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
+  if (paid) {
+    const block = await rpc('eth_getBlockByNumber', ['latest', false]);
+    const code = await run(process.execPath, [vitest, 'run', 'packages/engine/src/bot-path.fork.test.ts', '--reporter=json', '--outputFile', reportFile], {
+      ANVIL_REHEARSAL_RPC_URL: rpcUrl,
+      REHEARSAL_CHAIN: 'base',
+      REHEARSAL_PAID: 'true',
+      REHEARSAL_NFT: fixture.BASE_SEADROP_NFT,
+      REHEARSAL_MAX_FEE_GWEI: '0.1',
+      REHEARSAL_NOW_UNIX: String(Number.parseInt(block.timestamp, 16)),
+    });
+    if (code !== 0) printFailures(reportFile);
+    assertStrictReport(reportFile);
+    const report = JSON.parse(readFileSync(reportFile, 'utf8'));
+    console.log(`Base PAID fork rehearsal: ${report.numPassedTests ?? 0} passed, ${report.numFailedTests ?? 0} failed, ${(report.numPendingTests ?? 0) + (report.numTodoTests ?? 0)} skipped`);
+    rmSync(reportDir, { recursive: true, force: true });
+    if (code !== 0) process.exitCode = code;
+  } else {
   const code = await run(process.execPath, [vitest, 'run',
     'packages/engine/src/base.fork.test.ts',
     'packages/engine/src/bot-path.fork.test.ts',
@@ -52,6 +73,7 @@ try {
   console.log(`Base fork tests: ${report.numPassedTests ?? 0} passed, ${report.numFailedTests ?? 0} failed, ${(report.numPendingTests ?? 0) + (report.numTodoTests ?? 0)} skipped`);
   rmSync(reportDir, { recursive: true, force: true });
   if (code !== 0) process.exitCode = code;
+  }
 } finally {
   anvil.kill('SIGTERM');
 }
@@ -77,6 +99,13 @@ function run(command, args, env) {
     child.on('error', () => resolveCode(1));
     child.on('exit', (code) => resolveCode(code ?? 1));
   });
+}
+
+async function rpc(method, params = []) {
+  const response = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+  const body = await response.json();
+  if (body.error) throw new Error(`fork RPC ${method} failed`);
+  return body.result;
 }
 
 async function waitForRpc() {

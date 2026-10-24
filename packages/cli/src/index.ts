@@ -891,6 +891,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .command('base-enable <action>', 'Owner-run: record Base free attended enablement until you revoke it (status | record | revoke)', (args) => args
     .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
     .option('evidence-file', { type: 'string', describe: 'Completed copy of Docs/base-enable-evidence.template.json (status and record)' })
+    .option('paid', { type: 'boolean', default: false, describe: 'Enable paid Base too (D-062); the file must also contain paidRehearsal and paidPolicyApproved' })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status (record) or revoke printed' }), async (args) => {
       try {
         let evidenceText: string | undefined;
@@ -903,7 +904,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<BaseEnableStore>;
         if (typeof store.enableBase !== 'function' || typeof store.baseEnablement !== 'function' || typeof store.revokeBase !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runBaseEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), ...(args.confirm !== undefined ? { confirm: args.confirm } : {}), now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        process.stdout.write(`${json(runBaseEnable({ action: args.action, paid: args.paid, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), ...(args.confirm !== undefined ? { confirm: args.confirm } : {}), now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('chain-evidence <action>', 'Owner-run: record Ethereum SeaDrop chain evidence for 7 days after a typed confirmation (needed before a live arm)', (args) => args

@@ -1295,10 +1295,15 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return { id, created: true };
   }
 
-  public enableBase(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<'reviewedCode' | 'forkRehearsal' | 'finality' | 'endpointAgreement' | 'feeObservation' | 'liveSimulation' | 'custodyReadiness', true>; evidenceDigest: string; confirmationDigest: string; strategyVersion: string; feePolicyVersion: string; primaryEndpointReference: string; fallbackEndpointReference: string; custodyMode: 'local-personal-live' }): void {
+  public enableBase(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<'reviewedCode' | 'forkRehearsal' | 'finality' | 'endpointAgreement' | 'feeObservation' | 'liveSimulation' | 'custodyReadiness', true> & Partial<Record<'paidRehearsal' | 'paidPolicyApproved', true>>; paidAllowed?: boolean; evidenceDigest: string; confirmationDigest: string; strategyVersion: string; feePolicyVersion: string; primaryEndpointReference: string; fallbackEndpointReference: string; custodyMode: 'local-personal-live' }): void {
     this.ensureOpen();
     const profile = this.ensureBaseChainProfile();
-    this.databaseStore.enableBase(input, { chainProfileId: profile.id, verificationId: canonicalId('verification', `base-enable:${input.id}`) });
+    this.databaseStore.enableBase(input, {
+      chainProfileId: profile.id,
+      verificationId: canonicalId('verification', `base-enable:${input.id}`),
+      // D-062 item 3: paid Base uses the D-057 fee allowance per wallet.
+      ...(input.paidAllowed ? { paidFeePolicy: { id: canonicalId('fee', `base-paid:${input.id}`), version: `base-paid-d062-${input.id}`, maxTotalFeeWei: BASE_PERSONAL_LIVE_FLEET_POLICY.paidFeeAllowanceWei } } : {}),
+    });
   }
 
   public disableExpiredBase(): boolean { this.ensureOpen(); return this.databaseStore.disableBaseIfNotEnabled(this.now()); }
