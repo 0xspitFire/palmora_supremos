@@ -146,6 +146,19 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       } finally { proven.close(); await close(value); }
     });
 
+    it('after a revoke and a new record, only the newest enablement\'s evidence counts; the older one never comes back', async () => {
+      const { value, proven, evidence, created, ids } = await live();
+      try {
+        proven.revokeRobinhood({ id: 'rev-1', confirmationDigest: DIGEST });
+        proven.enableRobinhood({ id: 'rh-2', approvedAt: new Date(Date.parse(REAL) + 1000).toISOString(), expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: 'c'.repeat(64) });
+        const service = new EvidenceService(proven, () => new Date(REAL));
+        const evidenceRows = proven.snapshot().chainEvidence.filter((item) => item.chainId === ROBINHOOD && item.status === 'accepted');
+        expect(evidenceRows.filter((item) => item.executionEnabled)).toHaveLength(1);
+        expect(evidenceRows.find((item) => item.id === evidence.id)?.executionEnabled).toBe(false);
+        expect(() => service.assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+      } finally { proven.close(); await close(value); }
+    });
+
     it('fails closed when any single fact is missing, or the snapshot no longer matches', async () => {
       const { value, proven, evidence, created, ids } = await live();
       try {
