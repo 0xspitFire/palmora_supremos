@@ -357,6 +357,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       gasAlerts: () => bridge.gasAlertRepository(),
       ...(portfolioProvider ? { portfolio: portfolioProvider } : {}),
       prices: priceProvider,
+      // T-073: the Turnkey policy's Robinhood fee limit in gwei, only to check a custom fee ceiling early; the signer enforces the real limit.
+      ...(Number(environment.MINT_BOT_POLICY_FEE_LIMIT_GWEI) > 0 && Number(environment.MINT_BOT_POLICY_FEE_LIMIT_GWEI) <= 500 ? { policyFeeLimitGwei: Number(environment.MINT_BOT_POLICY_FEE_LIMIT_GWEI) } : {}),
       ...(floorPrices ? { floors: floorPrices } : {}),
       ...(fire ? { fire, fireSchedulesRepository: () => bridge.fireScheduleRepository() } : {}),
     });
