@@ -189,7 +189,7 @@ export interface BaseEnablementInput {
   /** D-062 item 3: paid Base, only with the two paid evidence keys. */
   paidAllowed?: boolean;
 }
-export interface EthereumLiveMintProofInput { id: string; txHash: string; blockNumber: string; blockHash: string; seadropAddress: string; nftContract: string; callSelector: string; evidenceReference: string; approvedAt: string; confirmationDigest: string }
+export interface EthereumLiveMintProofInput { id: string; txHash: string; blockNumber: string; blockHash: string; seadropAddress: string; sender: string; nftContract: string; callSelector: string; evidenceReference: string; approvedAt: string; confirmationDigest: string }
 export interface LiveRunRequestRecord { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string }
 export interface BaseEnablementRow extends BaseEnablementInput { approvedBy: string; freeAllowed: true; paidAllowed: boolean; createdAt: string; }
 
@@ -556,13 +556,13 @@ export class DurableRepository {
    */
   public recordEthereumLiveMintProofs(rows: EthereumLiveMintProofInput[]): void {
     if (rows.length === 0) throw new Error('ETHEREUM_PROOF_EMPTY');
-    const insert = this.db.prepare('INSERT INTO ethereum_live_mint_proof (id, chain_id, tx_hash, block_number, block_hash, seadrop_address, nft_contract, call_selector, evidence_reference, approved_by, approved_at, confirmation_digest) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, \'owner-cli\', ?, ?)');
-    this.db.transaction(() => { for (const row of rows) insert.run(row.id, row.txHash, row.blockNumber, row.blockHash, row.seadropAddress, row.nftContract, row.callSelector, row.evidenceReference, row.approvedAt, row.confirmationDigest); }).immediate();
+    const insert = this.db.prepare('INSERT INTO ethereum_live_mint_proof (id, chain_id, tx_hash, block_number, block_hash, seadrop_address, sender, nft_contract, call_selector, evidence_reference, approved_by, approved_at, confirmation_digest) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, \'owner-cli\', ?, ?)');
+    this.db.transaction(() => { for (const row of rows) insert.run(row.id, row.txHash, row.blockNumber, row.blockHash, row.seadropAddress, row.sender, row.nftContract, row.callSelector, row.evidenceReference, row.approvedAt, row.confirmationDigest); }).immediate();
   }
 
   public ethereumLiveMintProofs(): EthereumLiveMintProofInput[] {
-    return (this.db.prepare('SELECT id, tx_hash, block_number, block_hash, seadrop_address, nft_contract, call_selector, evidence_reference, approved_at, confirmation_digest FROM ethereum_live_mint_proof ORDER BY rowid').all() as Array<Record<string, string>>)
-      .map((row) => ({ id: row['id']!, txHash: row['tx_hash']!, blockNumber: row['block_number']!, blockHash: row['block_hash']!, seadropAddress: row['seadrop_address']!, nftContract: row['nft_contract']!, callSelector: row['call_selector']!, evidenceReference: row['evidence_reference']!, approvedAt: row['approved_at']!, confirmationDigest: row['confirmation_digest']! }));
+    return (this.db.prepare('SELECT id, tx_hash, block_number, block_hash, seadrop_address, sender, nft_contract, call_selector, evidence_reference, approved_at, confirmation_digest FROM ethereum_live_mint_proof ORDER BY rowid').all() as Array<Record<string, string>>)
+      .map((row) => ({ id: row['id']!, txHash: row['tx_hash']!, blockNumber: row['block_number']!, blockHash: row['block_hash']!, seadropAddress: row['seadrop_address']!, sender: row['sender']!, nftContract: row['nft_contract']!, callSelector: row['call_selector']!, evidenceReference: row['evidence_reference']!, approvedAt: row['approved_at']!, confirmationDigest: row['confirmation_digest']! }));
   }
 
   public hasEthereumLiveMintProof(): boolean {

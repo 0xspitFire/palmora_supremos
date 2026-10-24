@@ -15,17 +15,28 @@ const TX_HASH = /^0x[0-9a-f]{64}$/;
 
 export interface ProofChainReader {
   getChainId(): Promise<number>;
-  getTransaction(args: { hash: `0x${string}` }): Promise<{ to: string | null; input: string; blockNumber: bigint | null; blockHash: string | null }>;
-  getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{ status: string; to: string | null; blockNumber: bigint; blockHash: string }>;
+  getTransaction(args: { hash: `0x${string}` }): Promise<{ hash: string; from: string; to: string | null; input: string; blockNumber: bigint | null; blockHash: string | null }>;
+  getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{ transactionHash: string; status: string; to: string | null; blockNumber: bigint; blockHash: string }>;
   getBlock(args: { blockTag: 'finalized' }): Promise<{ number: bigint | null }>;
 }
 
-export interface VerifiedMint { txHash: string; blockNumber: string; blockHash: string; nftContract: string }
+export interface VerifiedMint { txHash: string; blockNumber: string; blockHash: string; sender: string; nftContract: string }
 
 /** Reads one transaction from Ethereum and throws a plain error unless it is a successful, finalized SeaDrop v1 `mintPublic` call. */
-export async function verifyEthereumMint(reader: ProofChainReader, hash: string, finalizedBlock: bigint): Promise<VerifiedMint> {
+/** A provider behind a load balancer can answer "not found" for a transaction that exists; ask a few times before giving up. */
+async function withRetry<T>(read: () => Promise<T>, delayMs: number, attempts = 4): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try { return await read(); }
+    catch (error) { if (attempt >= attempts) throw error; await new Promise((resolve) => setTimeout(resolve, delayMs)); }
+  }
+}
+
+export async function verifyEthereumMint(reader: ProofChainReader, hash: string, finalizedBlock: bigint, retryDelayMs = 750): Promise<VerifiedMint> {
   if (!TX_HASH.test(hash)) throw new Error('TX_HASH_INVALID: a transaction hash is 0x and 64 letters or digits');
-  const [tx, receipt] = await Promise.all([reader.getTransaction({ hash: hash as `0x${string}` }), reader.getTransactionReceipt({ hash: hash as `0x${string}` })]);
+  const [tx, receipt] = await Promise.all([withRetry(() => reader.getTransaction({ hash: hash as `0x${string}` }), retryDelayMs), withRetry(() => reader.getTransactionReceipt({ hash: hash as `0x${string}` }), retryDelayMs)]);
+  // What came back must be the transaction asked for: a provider that answers with another one is refused.
+  if (tx.hash.toLowerCase() !== hash || receipt.transactionHash.toLowerCase() !== hash) throw new Error('TX_MISMATCH: the provider answered with a different transaction');
+  if (!/^0x[0-9a-fA-F]{40}$/.test(tx.from)) throw new Error('TX_MISMATCH: the sender of that transaction is not readable');
   if (receipt.status !== 'success') throw new Error('TX_NOT_SUCCESSFUL: that transaction failed on Ethereum');
   const seadrop = SEADROP_V1_ADDRESS.toLowerCase();
   if ((tx.to ?? '').toLowerCase() !== seadrop || (receipt.to ?? '').toLowerCase() !== seadrop) throw new Error('TX_NOT_SEADROP: that transaction was not sent to SeaDrop v1');
@@ -35,14 +46,14 @@ export async function verifyEthereumMint(reader: ProofChainReader, hash: string,
   if (!/^0{24}[0-9a-f]{40}$/.test(firstWord)) throw new Error('TX_NOT_PUBLIC_MINT: the NFT contract in that transaction is malformed');
   if (tx.blockNumber === null || tx.blockHash === null || tx.blockNumber !== receipt.blockNumber || tx.blockHash.toLowerCase() !== receipt.blockHash.toLowerCase()) throw new Error('TX_NOT_MINED: that transaction is not in a block yet');
   if (receipt.blockNumber > finalizedBlock) throw new Error('TX_NOT_FINAL: that transaction is not final yet; wait about 15 minutes and try again');
-  return { txHash: hash, blockNumber: receipt.blockNumber.toString(), blockHash: receipt.blockHash.toLowerCase(), nftContract: `0x${firstWord.slice(24)}` };
+  return { txHash: hash, blockNumber: receipt.blockNumber.toString(), blockHash: receipt.blockHash.toLowerCase(), sender: tx.from.toLowerCase(), nftContract: `0x${firstWord.slice(24)}` };
 }
 
 const sorted = (hashes: readonly string[]): string[] => [...hashes].sort();
 
-/** The phrase names how many transactions and which ones, so a phrase copied from another set does not match. */
-export function proofPhrase(hashes: readonly string[]): string {
-  return `IMPORT-ETHEREUM-PROOF ${hashes.length}-TX ${createHash('sha256').update(sorted(hashes).join(','), 'utf8').digest('hex').slice(0, 8)}`;
+/** The phrase names how many transactions and which ones, and the evidence reference, so a phrase copied from another set does not match. */
+export function proofPhrase(hashes: readonly string[], evidenceReference: string): string {
+  return `IMPORT-ETHEREUM-PROOF ${hashes.length}-TX ${createHash('sha256').update(`${sorted(hashes).join(',')}\n${evidenceReference}`, 'utf8').digest('hex').slice(0, 8)}`;
 }
 
 export function proofConfirmationDigest(phrase: string, hashes: readonly string[], evidenceReference: string): string {
@@ -86,16 +97,18 @@ export async function runEthereumProof(input: {
   }
   const known = new Set(input.store.ethereumLiveMintProofs().map((row) => row.txHash));
   const already = hashes.filter((hash) => known.has(hash));
-  const phrase = proofPhrase(hashes);
   const reference = input.evidenceReference?.trim();
   const referenceOk = reference !== undefined && reference.length >= 5 && reference.length <= 300;
   const ready = problems.length === 0 && already.length === 0 && referenceOk;
+  const phrase = referenceOk ? proofPhrase(hashes, reference!) : '';
   if (input.action === 'status') {
     return {
       state: ready ? 'ReadyToRecord' : 'NotReady',
       message: ready ? 'Every transaction was read from Ethereum: successful, final, and a SeaDrop public mint. Recording stores them as the proof D-040 item 6 asks for. It cannot show that your own bot sent them; that is your statement. It enables nothing by itself.' : 'Not ready yet. Fix the items below.',
       alreadyProven: input.store.ethereumLiveMintProven(),
-      verified: verified.map((item) => ({ txHash: item.txHash, block: item.blockNumber, nftContract: item.nftContract })),
+      verified: verified.map((item) => ({ txHash: item.txHash, block: item.blockNumber, sentFrom: item.sender, nftContract: item.nftContract })),
+      senders: [...new Set(verified.map((item) => item.sender))],
+      checkSenders: 'Compare sentFrom with your own wallet addresses. The chain shows a real mint happened; that your bot sent it is your statement when you record it.',
       problems: [...problems, ...already.map((txHash) => ({ txHash, problem: 'ALREADY_RECORDED' })), ...(referenceOk ? [] : [{ txHash: '', problem: 'EVIDENCE_REFERENCE_REQUIRED: pass --evidence-reference "<where the evidence is, 5 to 300 characters>"' }])],
       ...(ready ? { copyThisToRecord: `ethereum-proof record --tx ${hashes.join(',')} --evidence-reference "${reference}" --confirm "${phrase}"` } : {}),
     };
@@ -106,6 +119,6 @@ export async function runEthereumProof(input: {
   if (input.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run ethereum-proof status and copy the phrase it prints exactly');
   const digest = proofConfirmationDigest(phrase, hashes, reference!);
   const approvedAt = input.now.toISOString();
-  input.store.recordEthereumLiveMintProofs(verified.map((item) => ({ id: input.newId(), txHash: item.txHash, blockNumber: item.blockNumber, blockHash: item.blockHash, seadropAddress: SEADROP_V1_ADDRESS.toLowerCase(), nftContract: item.nftContract, callSelector: MINT_PUBLIC_SELECTOR, evidenceReference: reference!, approvedAt, confirmationDigest: digest })));
+  input.store.recordEthereumLiveMintProofs(verified.map((item) => ({ id: input.newId(), txHash: item.txHash, blockNumber: item.blockNumber, blockHash: item.blockHash, seadropAddress: SEADROP_V1_ADDRESS.toLowerCase(), sender: item.sender, nftContract: item.nftContract, callSelector: MINT_PUBLIC_SELECTOR, evidenceReference: reference!, approvedAt, confirmationDigest: digest })));
   return { state: 'Recorded', message: `${verified.length} Ethereum mint transaction(s) are recorded as the proof. Robinhood can now be recorded with robinhood-enable (it still needs its own evidence file and typed confirmation).`, recorded: verified.length, alreadyProven: input.store.ethereumLiveMintProven() };
 }

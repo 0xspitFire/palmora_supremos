@@ -14,6 +14,7 @@ CREATE TABLE ethereum_live_mint_proof (
   block_number TEXT NOT NULL CHECK (length(block_number) BETWEEN 1 AND 20 AND block_number NOT GLOB '*[^0-9]*' AND block_number <> '0'),
   block_hash TEXT NOT NULL CHECK (length(block_hash) = 66 AND block_hash GLOB '0x*' AND substr(block_hash, 3) NOT GLOB '*[^0-9a-f]*'),
   seadrop_address TEXT NOT NULL CHECK (seadrop_address = '0x00005ea00ac477b1030ce78506496e8c2de24bf5'),
+  sender TEXT NOT NULL CHECK (length(sender) = 42 AND sender GLOB '0x*' AND substr(sender, 3) NOT GLOB '*[^0-9a-f]*'),
   nft_contract TEXT NOT NULL CHECK (length(nft_contract) = 42 AND nft_contract GLOB '0x*' AND substr(nft_contract, 3) NOT GLOB '*[^0-9a-f]*'),
   call_selector TEXT NOT NULL CHECK (call_selector = '0x161ac21f'),
   evidence_reference TEXT NOT NULL CHECK (length(evidence_reference) BETWEEN 5 AND 300),
@@ -22,9 +23,12 @@ CREATE TABLE ethereum_live_mint_proof (
   confirmation_digest TEXT NOT NULL CHECK (length(confirmation_digest) = 64 AND confirmation_digest NOT GLOB '*[^0-9a-f]*')
 );
 
+-- Also refuses a row that repeats an existing id or transaction, so an INSERT OR REPLACE can never overwrite a recorded proof.
 CREATE TRIGGER ethereum_live_mint_proof_complete BEFORE INSERT ON ethereum_live_mint_proof
 WHEN julianday(NEW.approved_at) IS NULL
-BEGIN SELECT RAISE(ABORT, 'ethereum live mint proof is incomplete'); END;
+  OR NEW.approved_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*Z'
+  OR EXISTS (SELECT 1 FROM ethereum_live_mint_proof p WHERE p.id = NEW.id OR p.tx_hash = NEW.tx_hash)
+BEGIN SELECT RAISE(ABORT, 'ethereum live mint proof is incomplete or already recorded'); END;
 
 CREATE TRIGGER ethereum_live_mint_proof_immutable_update BEFORE UPDATE ON ethereum_live_mint_proof
 BEGIN SELECT RAISE(ABORT, 'ethereum live mint proofs are immutable'); END;

@@ -61,7 +61,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     const value = await fixture(ROBINHOOD);
     try {
       expect(value.store.ethereumLiveMintProven()).toBe(false);
-      value.store.recordEthereumLiveMintProofs([{ id: 'proof-1', txHash: `0x${'1'.repeat(64)}`, blockNumber: '26227572', blockHash: `0x${'ab'.repeat(32)}`, seadropAddress: '0x00005ea00ac477b1030ce78506496e8c2de24bf5', nftContract: '0xa686fde3299d5451af22382240e0dff62f7b94db', callSelector: '0x161ac21f', evidenceReference: 'Docs/phase3-first-live-evidence.md', approvedAt: REAL, confirmationDigest: 'c'.repeat(64) }]);
+      value.store.recordEthereumLiveMintProofs([{ id: 'proof-1', txHash: `0x${'1'.repeat(64)}`, blockNumber: '26227572', blockHash: `0x${'ab'.repeat(32)}`, seadropAddress: '0x00005ea00ac477b1030ce78506496e8c2de24bf5', sender: '0x1111111111111111111111111111111111111111', nftContract: '0xa686fde3299d5451af22382240e0dff62f7b94db', callSelector: '0x161ac21f', evidenceReference: 'Docs/phase3-first-live-evidence.md', approvedAt: REAL, confirmationDigest: 'c'.repeat(64) }]);
       expect(value.store.ethereumLiveMintProven()).toBe(true);
       // The proof is not an enablement: Robinhood stays off, free and paid, until the owner's own evidence file is recorded.
       expect(value.store.robinhoodEnablement()).toBeUndefined();
