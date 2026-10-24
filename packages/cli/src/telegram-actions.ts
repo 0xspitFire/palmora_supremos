@@ -7,9 +7,10 @@ import type { IntelligenceRepository } from '@mint-bot/database';
 import type { TelegramActions, TelegramRole } from './telegram-commands.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { checkDrop } from './drop-check.js';
-import { dryRunDrop } from './robinhood-readonly.js';
+import { dryRunDrop, type DryRunReport } from './robinhood-readonly.js';
 import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, recordSimulationAction, watchAcceptAction, type PrepareStore } from './owner-actions.js';
 import { previewLiveRequest, runLiveRequest } from './live-request.js';
+import { ROBINHOOD_DEFAULT_TIP_GWEI, buildRobinhoodPlan, recordRobinhoodSimulationsAction, robinhoodConfirmationPhrase, robinhoodPrepareAction } from './robinhood-live.js';
 import { describeLiveRunResult } from './live-run.js';
 import { planCampaignFunding, renderFundingPlan } from './fleet-funding-cli.js';
 import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
@@ -57,6 +58,9 @@ export interface TelegramActionDeps {
   watchedWallets(chainId: number): string[];
   watcherHealthy(): boolean | undefined;
   intelligence(): IntelligenceRepository;
+  /** Robinhood dry run (default: read the chain). Tests supply their own. */
+  robinhoodDryRun?: (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date) => Promise<DryRunReport>;
+  robinhoodLatestBlock?: () => Promise<{ number: bigint; hash: string }>;
   now?: () => Date;
 }
 
@@ -85,9 +89,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   };
   const evmChain = (text: string): 1 | 8453 => {
     const id = chainFrom(text);
-    if (id === 4663) throw new Error('ROBINHOOD_NOT_SUPPORTED_YET: planning and preparing a live Robinhood campaign is not built yet; Ethereum and Base work');
+    if (id === 4663) throw new Error('INTERNAL_PATH_ERROR: Robinhood is handled before this point');
     return id;
   };
+  const robinhoodDryRun = async (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date): Promise<DryRunReport> => deps.robinhoodDryRun ? deps.robinhoodDryRun(contract, wallets, quantity, at) : dryRunDrop((await client(4663)) as never, contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at });
+  const robinhoodBlock = async (): Promise<{ number: bigint; hash: string }> => deps.robinhoodLatestBlock ? deps.robinhoodLatestBlock() : (async () => { const block = await (await client(4663)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; })();
   const walletsFor = async (text: string): Promise<string[]> => text.toLowerCase() === 'all' ? deps.walletList() : text.split(',').map((item) => item.trim()).filter(Boolean);
 
   return {
@@ -222,6 +228,20 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async plan(chainText, contract, quantityLimit) {
       if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
+      if (chainFrom(chainText) === 4663) {
+        // T-063: Robinhood has no fee planner; the quantity is the one the Turnkey policy pins (default 1).
+        const candidates = await deps.walletList();
+        const quantity = quantityLimit ?? 1;
+        const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantity, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity });
+        return [
+          robinhoodPlan.summary,
+          ...(robinhoodPlan.opensAt ? [`Opens ${minutes(robinhoodPlan.opensAt)} UTC${robinhoodPlan.closesAt ? `, closes ${minutes(robinhoodPlan.closesAt)} UTC` : ''}.`] : []),
+          ...robinhoodPlan.blockers.map((blocker) => `✗ ${blocker}`),
+          ...robinhoodPlan.walletsNotReady.map((item) => `✗ ${short(item.wallet)}: ${item.why}`),
+          ...robinhoodPlan.warnings.map((warning) => `• ${warning}`),
+          ...(robinhoodPlan.verdict === 'ready' ? ['', 'To record the campaign (spends nothing):', `/prepare robinhood ${contract} ${quantity} ${robinhoodConfirmationPhrase(contract, quantity, robinhoodPlan.walletsReady.length, robinhoodPlan.totalMaxExposureEth)}`] : []),
+        ].join('\n');
+      }
       const chainId = evmChain(chainText);
       const planned = await livePlanAction({ chainId, contract, wallets: await deps.walletList(), ...(quantityLimit === undefined ? {} : { quantityLimit }), port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
       const { plan } = planned;
@@ -267,6 +287,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async prepare(chainText, contract, quantityLimit, phrase) {
       if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
+      if (chainFrom(chainText) === 4663) {
+        const candidates = await deps.walletList();
+        const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantityLimit, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity: quantityLimit });
+        const prepared = await robinhoodPrepareAction({ contract, priorityFeeGwei: ROBINHOOD_DEFAULT_TIP_GWEI, confirm: phrase, plan: robinhoodPlan, killFile: deps.killSwitchPath, store: deps.store as never, createCampaign: (input) => deps.application.createCampaign(input), now: now() });
+        return [`Campaign recorded: ${prepared.campaign.id}`, `Sized for ${prepared.walletsSized} wallet(s), ${prepared.quantity} NFT(s) each, the most it can spend is ${prepared.maxExposureEth} ETH. Nothing was sent.`, '', 'When the mint is open:', `/simulate ${prepared.campaign.id}`, 'Then it prints the exact /request line to use (keep the fee ceiling at or below your Turnkey policy limit).'].join('\n');
+      }
       const chainId = evmChain(chainText);
       const wallets = await deps.walletList();
       const planned = await livePlanAction({ chainId, contract, wallets, quantityLimit, port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
@@ -279,7 +305,17 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async simulate(campaignId) {
       const target = campaign(campaignId);
-      if (target.chainId !== 1 && target.chainId !== 8453) throw new Error('ROBINHOOD_NOT_SUPPORTED_YET: recording Robinhood test mints is not built yet');
+      if (target.chainId === 4663) {
+        const report = await robinhoodDryRun(target.contract, await deps.walletList(), target.quantity, now());
+        const recorded = await recordRobinhoodSimulationsAction({ store: deps.store, campaign: target, report, latestBlock: robinhoodBlock });
+        return [
+          `${recorded.recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`,
+          ...recorded.skipped.map((item) => `✗ ${short(item.wallet)}: ${item.why}`),
+          '',
+          'Send the request with a fee ceiling (gwei) at or below your Turnkey policy limit. 0.2 is the limit of the standard policy; use a lower number if yours is lower:',
+          `/request ${target.id} ${recorded.recorded.join(',')} 0.2`,
+        ].join('\n');
+      }
       const reader = await client(target.chainId);
       const ids = await recordSimulationAction({ store: deps.store, campaign: target, wallets: await deps.walletList(), port: await port(target.chainId), latestBlock: async () => { const block = await reader.getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; } });
       return `${ids.length} wallet(s) passed the test mint. The records are good for 30 minutes: send /request soon.`;
