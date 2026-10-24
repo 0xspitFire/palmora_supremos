@@ -1,3 +1,4 @@
+import { titleCaseLabel } from './text-style.js';
 import { HTML_BUDGET, PLAIN_BUDGET, clock, cleanText, dashboardLink, escapeHtml, explorerTxUrl, safe, secondsText, type AlertButton, type RenderContext, type RenderedAlert } from './alert-card.js';
 
 /**
@@ -118,26 +119,29 @@ function dashboardParts(card: SystemCard, ctx: Partial<RenderContext>): { url: s
 
 function htmlOf(card: SystemCard, ctx: RenderContext, lines: readonly SystemLine[], steps: readonly string[]): string {
   const dashboard = dashboardParts(card, ctx);
-  return [
-    `<b>${safe(card.title)}</b> · ${SEVERITY_WORD[card.severity]}`,
-    ...lines.map((entry) => `<b>${safe(entry.label)}:</b> ${entry.strong ? `<b>${safe(entry.value)}</b>` : safe(entry.value)}`),
-    ...(dashboard ? [`<b>Dashboard:</b> <a href="${escapeHtml(dashboard.url)}">Open</a>${dashboard.note ? ` (${dashboard.note})` : ''}`] : []),
-    ...(steps.length > 0 ? [`<b>What to do:</b>`, ...steps.map((step, index) => `${index + 1}. ${safe(step)}`)] : []),
-    ...(card.code ? [`<b>${safe(card.code.label)}:</b> <code>${safe(card.code.value)}</code>`] : []),
-    `<i>${safe(sentLine(card, ctx.now))}</i>`,
-  ].join('\n');
+  // T-071: sections are separated by one blank line: heading, facts, dashboard, steps, code, send time.
+  const groups: string[][] = [
+    [`<b>${safe(card.title)}</b> · ${SEVERITY_WORD[card.severity]}`],
+    lines.map((entry) => `<b>${safe(titleCaseLabel(entry.label))}:</b> ${entry.strong ? `<b>${safe(entry.value)}</b>` : safe(entry.value)}`),
+    dashboard ? [`<b>Dashboard:</b> <a href="${escapeHtml(dashboard.url)}">Open</a>${dashboard.note ? ` (${dashboard.note})` : ''}`] : [],
+    steps.length > 0 ? [`<b>What To Do:</b>`, ...steps.map((step, index) => `${index + 1}. ${safe(step)}`)] : [],
+    card.code ? [`<b>${safe(titleCaseLabel(card.code.label))}:</b> <code>${safe(card.code.value)}</code>`] : [],
+    [`<i>${safe(sentLine(card, ctx.now))}</i>`],
+  ];
+  return groups.filter((group) => group.length > 0).map((group) => group.join('\n')).join('\n\n');
 }
 
 function plainOf(card: SystemCard, ctx: Partial<RenderContext>, lines: readonly SystemLine[], steps: readonly string[]): string {
   const dashboard = dashboardParts(card, ctx);
-  return [
-    `${card.title} · ${SEVERITY_WORD[card.severity]}`,
-    ...lines.map((entry) => `${entry.label}: ${entry.value}`),
-    ...(dashboard ? [`Dashboard: ${dashboard.url}${dashboard.note ? ` (${dashboard.note})` : ''}`] : []),
-    ...(steps.length > 0 ? ['What to do:', ...steps.map((step, index) => `${index + 1}. ${step}`)] : []),
-    ...(card.code ? [`${card.code.label}: ${card.code.value}`] : []),
-    ...(ctx.now ? [sentLine(card, ctx.now)] : []),
-  ].join('\n');
+  const groups: string[][] = [
+    [`${card.title} · ${SEVERITY_WORD[card.severity]}`],
+    lines.map((entry) => `${titleCaseLabel(entry.label)}: ${entry.value}`),
+    dashboard ? [`Dashboard: ${dashboard.url}${dashboard.note ? ` (${dashboard.note})` : ''}`] : [],
+    steps.length > 0 ? ['What To Do:', ...steps.map((step, index) => `${index + 1}. ${step}`)] : [],
+    card.code ? [`${titleCaseLabel(card.code.label)}: ${card.code.value}`] : [],
+    ctx.now ? [sentLine(card, ctx.now)] : [],
+  ];
+  return groups.filter((group) => group.length > 0).map((group) => group.join('\n')).join('\n\n');
 }
 
 /** Plain text of a card without a send time: the stored fallback and what other sinks see. */

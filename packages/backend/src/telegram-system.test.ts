@@ -84,7 +84,7 @@ describe('kill, cap and health events carry system cards (T-030)', () => {
     const { store, sent, alerts } = manager();
     await alerts.kill('KILL_SWITCH_ENGAGED');
     expect(sent[0]!.system).toMatchObject({ kind: 'system', title: 'KILL SWITCH ENGAGED', severity: 'critical', eventAt: NOW.toISOString() });
-    expect(sent[0]!.text).toContain('What happened: the kill switch was engaged [KILL_SWITCH_ENGAGED]');
+    expect(sent[0]!.text).toContain('What Happened: the kill switch was engaged [KILL_SWITCH_ENGAGED]');
     expect(store.snapshot().events.find((entry) => entry.type === 'alert_kill')?.data.system).toMatchObject({ v: 1, kind: 'system' });
   });
 

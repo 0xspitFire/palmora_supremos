@@ -319,7 +319,7 @@ export class TelegramCommandRouter {
         const preview = await a.requestPreview(required(args[0], 'campaign'), required(args[1], 'wallets'), requiredNumber(args[2], 'max gwei'));
         this.prune();
         this.previews.set(preview.phrase, { campaignId: args[0]!, wallets: preview.wallets.join(','), maxFeeGwei: Number(args[2]), at: this.now().getTime() });
-        return reply(`${preview.text}\n\nTo send it, within 15 minutes:\n/confirm ${preview.phrase}`);
+        return reply(`${preview.text}\n\nTo send it, within 15 minutes:\n\n/confirm ${preview.phrase}`);
       }
       case 'fire': {
         const campaignId = required(args[0], 'campaign');
@@ -338,7 +338,7 @@ export class TelegramCommandRouter {
         const preview = await a.schedulePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei, from, until);
         this.prune();
         this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until } });
-        return reply(`${preview.text}\n\nTo store it, within 15 minutes:\n/confirm ${preview.phrase}`);
+        return reply(`${preview.text}\n\nTo store it, within 15 minutes:\n\n/confirm ${preview.phrase}`);
       }
       case 'schedules': return reply(await a.schedules());
       case 'confirm': {

@@ -24,7 +24,7 @@ describe('live-run message templates (T-030, Phase 3, not wired)', () => {
     expect(render(mintSubmittedCard({ ...facts, hash: HASH })).html).toContain('it is not final yet');
     const confirmed = render(mintConfirmedCard({ ...facts, hash: HASH, feePaid: '0.0004 ETH' })).html;
     expect(confirmed).toContain('MINT CONFIRMED</b> · INFO');
-    expect(confirmed).toContain('<b>Network fee paid:</b> <b>0.0004 ETH</b>');
+    expect(confirmed).toContain('<b>Network Fee Paid:</b> <b>0.0004 ETH</b>');
     const failed = render(mintFailedCard({ ...facts, hash: HASH, reason: 'PRICE_ABOVE_LIMIT' })).html;
     expect(failed).toContain('MINT FAILED</b> · CRITICAL');
     expect(failed).toContain('the mint price is above your limit [PRICE_ABOVE_LIMIT]');

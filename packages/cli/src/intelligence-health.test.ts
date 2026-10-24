@@ -55,8 +55,8 @@ describe('health warnings from the running service (T-030)', () => {
     expect(h.sent.filter((text) => text.includes('CHAIN SCAN'))).toEqual([]);
     const checkIn = h.sent.find((text) => text.includes('DAILY CHECK-IN'))!;
     expect(checkIn).toContain('DAILY CHECK-IN · INFO');
-    expect(checkIn).toMatch(/Chain scan: last successful scan 0 s ago, block \d+/);
-    expect(checkIn).toContain('Health warnings: none in 24 h');
+    expect(checkIn).toMatch(/Chain Scan: last successful scan 0 s ago, block \d+/);
+    expect(checkIn).toContain('Health Warnings: none in 24 h');
   });
 
   it('warns when scans keep failing, in words, without any provider text, then says it recovered', async () => {
@@ -68,8 +68,8 @@ describe('health warnings from the running service (T-030)', () => {
     await h.service.runOnce();
     const warning = h.sent.find((text) => text.includes('CHAIN SCAN STALLED'))!;
     expect(warning).toContain('CHAIN SCAN STALLED · ATTENTION');
-    expect(warning).toContain('Likely cause: the chain provider is limiting requests');
-    expect(warning).toContain('Last good scan: 08:00 UTC');
+    expect(warning).toContain('Likely Cause: the chain provider is limiting requests');
+    expect(warning).toContain('Last Good Scan: 08:00 UTC');
     expect(JSON.stringify(h.sent)).not.toMatch(/SECRETKEY|node\.example|pw@/);
     h.port.mode = 'ok';
     h.advance(5);
