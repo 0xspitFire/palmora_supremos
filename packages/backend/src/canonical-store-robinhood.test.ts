@@ -3,7 +3,9 @@ import { CanonicalStoreBridge, hasConfirmedLiveEthereumMint } from './canonical-
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { BackendApplication } from './application.js';
 import { OrchestratorService } from './service-orchestrator.js';
-import { ETHEREUM, OPEN_FLEET_POLICY, ROBINHOOD, WALLET_ONE, WALLET_TWO, armed, campaign, campaignInput, close, fixture } from './canonical-fixtures.js';
+import { EvidenceService } from './evidence.js';
+import { recordWalletSimulations } from './personal-live-readiness.js';
+import { ETHEREUM, NOW, OPEN_FLEET_POLICY, ROBINHOOD, WALLET_ONE, WALLET_TWO, armed, campaign, campaignInput, close, fixture } from './canonical-fixtures.js';
 import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 // The database compares expiry with its own clock, so the enablement times are relative to now (the fixture's NOW is in the past).
@@ -114,6 +116,53 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       const threeWallets = await armed(paidFixture, another, [WALLET_ONE, WALLET_TWO, third], [], '-three');
       await expect(proven.admitExecution(threeWallets.input)).rejects.toThrow('PAID_WALLET_LIMIT_EXCEEDED');
     } finally { proven.close(); await close(value); }
+  });
+
+  describe('the enablement writes the chain evidence a live arm reads (D-065 item 2)', () => {
+    const live = async () => {
+      const value = await fixture(ROBINHOOD);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });
+      await proven.open();
+      proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+      const evidence = proven.snapshot().chainEvidence.find((item) => item.chainId === ROBINHOOD && item.status === 'accepted' && item.executionEnabled)!;
+      const application = new BackendApplication(proven, {} as never);
+      const created = await application.createCampaign({ ...campaignInput(ROBINHOOD), chainVerification: { chainId: ROBINHOOD, status: 'verified', seaDropCompatible: true, evidenceId: evidence.id, checkedAt: evidence.checkedAt, sourceBlock: evidence.sourceBlock, endpointReference: evidence.endpointIdentity } });
+      value.db.prepare('INSERT OR IGNORE INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run('wallet-rh-evidence', 'profile-4663', WALLET_ONE, 'test-key', NOW);
+      value.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(created.id, 'wallet-rh-evidence', NOW);
+      const ids = await recordWalletSimulations(proven, created, [{ wallet: WALLET_ONE, success: true }], { blockNumber: 5n, blockHash: '0xabc' }, () => new Date(REAL));
+      const service = new EvidenceService(proven, () => new Date(REAL));
+      return { value, proven, evidence, created, ids, service };
+    };
+
+    it('carries every fact the arm needs, so a real enablement can pass assertLiveEvidence, and revoking it ends that', async () => {
+      const { value, proven, evidence, created, ids, service } = await live();
+      try {
+        expect(evidence).toMatchObject({ seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true, finalityPassed: true, endpointIdentity: 'robinhood-sequencer', strategyVersion: 'seadrop-v1-public@1', sourceBlock: 1n, acceptedBy: 'owner-cli', expiresAt: PERM });
+        expect(Object.values(evidence.negativeCases)).toEqual(Array(9).fill(true));
+        expect(evidence.approvalProof).toBe(DIGEST);
+        expect(service.assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL })).toEqual(ids);
+        proven.revokeRobinhood({ id: 'rev-1', confirmationDigest: DIGEST });
+        expect(() => new EvidenceService(proven, () => new Date(REAL)).assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+      } finally { proven.close(); await close(value); }
+    });
+
+    it('fails closed when any single fact is missing, or the snapshot no longer matches', async () => {
+      const { value, proven, evidence, created, ids } = await live();
+      try {
+        const check = (changed: Partial<typeof evidence> | { negativeCases: Record<string, boolean> }) => new EvidenceService({ ...proven, snapshot: () => ({ ...proven.snapshot(), chainEvidence: [{ ...evidence, ...changed }] }) } as never, () => new Date(REAL)).assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL });
+        expect(() => check({})).not.toThrow();
+        expect(() => check({ seaDropCompatible: false })).toThrow('SEADROP_EVIDENCE_REQUIRED');
+        expect(() => check({ positiveLivePath: false })).toThrow('SEADROP_EVIDENCE_REQUIRED');
+        expect(() => check({ archiveForkPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
+        expect(() => check({ reconciliationPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
+        expect(() => check({ finalityPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
+        for (const name of Object.keys(evidence.negativeCases)) expect(() => check({ negativeCases: { ...evidence.negativeCases, [name]: false } }), name).toThrow('ROBINHOOD_NEGATIVE_EVIDENCE_INCOMPLETE');
+        expect(() => check({ executionEnabled: false })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+        expect(() => check({ status: 'pending' })).toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
+        expect(() => check({ endpointIdentity: 'another-endpoint' })).toThrow('CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
+        expect(() => check({ checkedAt: '2026-01-01T00:00:00.000Z' })).toThrow('CHAIN_VERIFICATION_SNAPSHOT_MISMATCH');
+      } finally { proven.close(); await close(value); }
+    });
   });
 
   it('lets a free Robinhood run get past the chain checks while enabled, and refuses again once revoked', async () => {

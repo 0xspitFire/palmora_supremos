@@ -529,7 +529,18 @@ export class DurableRepository {
         status: 'verified',
         sequencerEndpointReference: chain.sequencerEndpointReference,
         archiveEndpointReference: chain.archiveEndpointReference,
-        evidence: { finalityPassed: true, robinhoodEnablementId: record.id, expiresAt: record.expiresAt, evidence: record.evidence },
+        // D-065 item 2 (owner-approved 2026-10-24, Option 1): every one of E1 to E7 is attested true here (checked above), so the chain
+        // evidence a live arm reads is built from them, as Base's is: E1 SeaDrop public mints exist; E2 the bot-path rehearsal passed all
+        // nine scenarios on a fork (positive path, archive fork, reconciliation and the nine negative cases); E3 finality matched. The
+        // anchors are owner-attested, not one block. The evidence is only reachable through an enablement that the guards still judge on
+        // every use, so revoking the enablement (or the chain profile being off) ends it.
+        evidence: {
+          finalityPassed: true, seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true,
+          negativeCases: { revert: true, sold_out: true, price_drift: true, insufficient_funds: true, quantity_limit: true, stale_phase: true, fee_recipient: true, kill: true, cap: true },
+          robinhoodEnablementId: record.id, expiresAt: record.expiresAt, evidence: record.evidence, evidenceDigest: record.confirmationDigest,
+          endpointIdentity: 'robinhood-sequencer', archiveEndpointIdentity: 'robinhood-archive', strategyVersion: 'seadrop-v1-public@1',
+          sourceBlock: '1', sourceBlockHash: 'robinhood-owner-attested-anchor',
+        },
         checkedAt: record.approvedAt,
         approvedBy: 'owner-cli',
         approvedAt: record.approvedAt,
