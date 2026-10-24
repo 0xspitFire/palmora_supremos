@@ -197,6 +197,27 @@ describe('phase 2 operations', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it('the backup readiness flag follows the backup status check (T-070)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mintbot-backup-flag-'));
+    try {
+      const statusPath = join(root, 'status.json');
+      await writeFile(statusPath, JSON.stringify({ status: 'ok', recordedAt: '2025-12-31T15:00:00.000Z', offHost: true, remoteVerified: true }));
+      const store = new DurableStore();
+      await store.open();
+      await store.transaction((state) => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+      const orchestrator = new OrchestratorService(store, {} as BackendApplication, { start: async () => undefined, reconcile: async () => undefined }, { jobs: new JsonJobStore(join(root, 'jobs.json')), dryRunOnly: true, backupStatusPath: statusPath, requireOffHostBackup: true, now: () => new Date('2026-01-01T00:00:00.000Z'), logger: new RedactedLogger({ stdout: false }) });
+      await orchestrator.start();
+      expect(store.snapshot().runtime.dependencies.backup).toBe(false);
+      await writeFile(statusPath, JSON.stringify({ status: 'ok', recordedAt: '2025-12-31T23:59:00.000Z', offHost: true, remoteVerified: true }));
+      await orchestrator.tick();
+      expect(store.snapshot().runtime.dependencies.backup).toBe(true);
+      await writeFile(statusPath, JSON.stringify({ status: 'failed', recordedAt: '2025-12-31T23:59:30.000Z' }));
+      await orchestrator.tick();
+      expect(store.snapshot().runtime.dependencies.backup).toBe(false);
+      await orchestrator.stop();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   describe('releasing the kill file (T-060)', () => {
     const setup = async (initial: { killed?: boolean; reasons?: string[]; activeRun?: boolean; staleKillReads?: boolean } = {}) => {
       const root = await mkdtemp(join(tmpdir(), 'mintbot-kill-release-'));

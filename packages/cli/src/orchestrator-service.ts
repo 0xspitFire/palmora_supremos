@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -36,7 +36,8 @@ import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './f
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
-import { chainRpcSecretNames, failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
+import { chainRpcSecretNames, failoverTransport, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
+import { startDependencyFlags } from './dependency-flags.js';
 import { createPublicClient, formatGwei } from 'viem';
 import { startGasAlerts } from './gas-alert-service.js';
 import { startLiveRequestPoller } from './live-request.js';
@@ -211,7 +212,30 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   // T-058: in host mode the service runs the owner's live requests. It uses its own application, not the read-only one above, so
   // `arm` and `run` go through every gate exactly as a guided live run does (approval, simulation, caps, custody, watcher, kill switch).
   let liveRequests: { stop(): void; tick(): Promise<void> } | undefined;
+  let dependencyFlags: { stop(): void } | undefined;
   if (config.mode === 'host') {
+    // T-070 (D-068): the service sets engine, chain and notifications readiness from real checks (backup follows its status check in the tick).
+    const flagSecretRoot = configuredSecretRoot(config.projectRoot);
+    const flagClients = new Map<number, ReturnType<typeof createPublicClient>>();
+    dependencyFlags = startDependencyFlags({
+      store: runtime.store,
+      engineReady: async () => { await readTurnkeySecretConfig(flagSecretRoot); return true; },
+      notificationsReady: async () => (await notifier?.health())?.status === 'ok',
+      chainsToProbe: () => [...new Set(runtime.store.snapshot().chainEvidence.filter((evidence) => evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now()).map((evidence) => evidence.chainId as number))],
+      latestBlockTime: async (chainId) => {
+        let reader = flagClients.get(chainId);
+        if (!reader) {
+          const endpoints = [...(await resolveChainConfigFromSecrets(chainId as 1 | 8453 | 4663, 'mainnet', flagSecretRoot)).rpcEndpoints];
+          if (endpoints.length === 0) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
+          reader = createPublicClient({ transport: failoverTransport(endpoints) });
+          flagClients.set(chainId, reader);
+        }
+        return new Date(Number((await reader.getBlock({ blockTag: 'latest' })).timestamp) * 1000);
+      },
+      killSwitchOn: async () => existsSync(config.killSwitchPath) || runtime.store.snapshot().killed,
+      now: () => new Date(),
+      log: (event, fields) => logger.info({ event, ...fields }, 'deployment readiness flags changed'),
+    }, { onError: (error) => logger.warn({ event: 'dependency_flags_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'DEPENDENCY_FLAGS_FAILED' }, 'dependency flag pass failed') });
     const bridge = runtime.store as CanonicalStoreBridge;
     const liveApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
     liveRequests = startLiveRequestPoller({
@@ -396,6 +420,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     liveness?.stop();
     fleetWatcher?.stop();
     liveRequests?.stop();
+    dependencyFlags?.stop();
     fireScheduler?.stop();
     telegramCommands?.stop();
     gasAlertChecker?.stop();
