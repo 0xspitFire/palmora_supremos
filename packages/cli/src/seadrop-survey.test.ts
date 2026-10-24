@@ -108,6 +108,10 @@ describe('surveySeaDropMints (T-013)', () => {
     expect(surveyErrorMessage(new Error('SURVEY_RATE_LIMITED: HTTP 429: Too Many Requests'))).toBe('SURVEY_RATE_LIMITED: HTTP 429: Too Many Requests');
     expect(surveyErrorMessage(new Error('RPC_MUST_BE_HTTPS'))).toBe('RPC_MUST_BE_HTTPS');
     expect(surveyErrorMessage(new Error('ROBINHOOD_RPC_UNAVAILABLE'))).toBe('ROBINHOOD_RPC_UNAVAILABLE');
+    // A long fixed code is shown as it is (it used to be hidden as a token); a link or key after it is still removed.
+    expect(surveyErrorMessage(new Error('TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED'))).toBe('TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED');
+    expect(surveyErrorMessage(new Error('TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED: see https://secret.example/x'))).toMatch(/^SURVEY_FAILED/);
+    expect(commandErrorMessage(new Error('TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED'))).toBe('TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED');
     expect(surveyErrorMessage(new Error('URL: https://secret.example/key1234567890123456789012345678901234'))).toMatch(/^SURVEY_FAILED/);
   });
 

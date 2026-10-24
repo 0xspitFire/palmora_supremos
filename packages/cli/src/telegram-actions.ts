@@ -468,7 +468,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const provider = deps.portfolio;
       const wallets = (await deps.walletList()).slice(0, 10);
       if (wallets.length === 0) return 'No wallets are set up, so there is nothing to show.';
-      const lines = [`Everything your ${wallets.length} wallet(s) hold, from Blockscout (it can lag the chain by a minute or two; /holdings reads MintBot's own mints straight from the chain):`];
+      const lines = [`Everything your ${wallets.length} signing wallet(s) hold (the wallets in your Turnkey wallet map; /wallets also lists watched wallets), from Blockscout (it can lag the chain by a minute or two; /holdings reads MintBot's own mints straight from the chain):`];
       let asOf: Date | undefined;
       for (const chainId of PORTFOLIO_CHAINS) {
         const rows = await Promise.all(wallets.map(async (wallet) => { try { return { wallet, ...(await provider.list(chainId, wallet)) }; } catch (error) { return { wallet, failed: (error instanceof Error ? error.message : '').split(':')[0] ?? 'PORTFOLIO_UNAVAILABLE' }; } }));
