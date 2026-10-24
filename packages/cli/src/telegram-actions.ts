@@ -3,7 +3,7 @@ import { existsSync, statSync } from 'node:fs';
 import { createPublicClient, formatEther, formatGwei, http as httpTransport, parseAbi, type Address } from 'viem';
 import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
-import type { GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
+import type { FireScheduleRepository, GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
 import { cleanName, describeActivity, describeHistory, describeLimits } from './owner-reports.js';
 import { gasAlertSentence } from './gas-alert-service.js';
 import type { TelegramActions, TelegramRole } from './telegram-commands.js';
@@ -19,6 +19,7 @@ import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion } from './host-facts.js';
+import { scheduleConfirmationDigest, type FireWiring } from './fire-wiring.js';
 
 /**
  * T-061 (D-063 item 9): the work behind each Telegram command, built on the same functions as the host commands. Replies are
@@ -64,6 +65,9 @@ export interface TelegramActionDeps {
   intelligence(): IntelligenceRepository;
   /** T-066: the owner's fee alerts. */
   gasAlerts(): GasAlertRepository;
+  /** T-067: `/fire` and `/schedule`. Absent in practice mode, where nothing would run them. */
+  fire?: FireWiring;
+  fireSchedulesRepository?: () => FireScheduleRepository;
   /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
   nftBalance?: (chainId: number, contract: string, wallet: string) => Promise<bigint>;
   nftName?: (chainId: number, contract: string) => Promise<string | undefined>;
@@ -106,6 +110,18 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   const robinhoodDryRun = async (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date): Promise<DryRunReport> => deps.robinhoodDryRun ? deps.robinhoodDryRun(contract, wallets, quantity, at) : dryRunDrop((await client(4663)) as never, contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at });
   const robinhoodBlock = async (): Promise<{ number: bigint; hash: string }> => deps.robinhoodLatestBlock ? deps.robinhoodLatestBlock() : (async () => { const block = await (await client(4663)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; })();
   const walletsFor = async (text: string): Promise<string[]> => text.toLowerCase() === 'all' ? deps.walletList() : text.split(',').map((item) => item.trim()).filter(Boolean);
+
+  const fireWiring = (): FireWiring => {
+    if (deps.mode !== 'host' || !deps.fire || !deps.fireSchedulesRepository) throw new Error('LIVE_MODE_REQUIRED: the service is in practice mode, so nothing would run this');
+    return deps.fire;
+  };
+  const fireCampaign = (campaignId: string, maxFeeGwei: number) => {
+    if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500 || !/^\d+(\.\d+)?$/.test(String(maxFeeGwei))) throw new Error('MAX_FEE_GWEI_REQUIRED: use more than 0 and at most 500, as a plain number such as 0.2');
+    const target = campaign(campaignId);
+    if (target.dryRun) throw new Error('LIVE_REQUIRES_NON_DRY_CAMPAIGN');
+    if (existsSync(deps.killSwitchPath) || deps.store.snapshot().killed) throw new Error('KILL_SWITCH_ON: release it first (/unlock, then /release)');
+    return target;
+  };
 
   const actions: TelegramActions = {
     async status(role: TelegramRole) {
@@ -269,6 +285,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async requestCreate(campaignId, walletsText, maxFeeGwei, phrase) {
       if (deps.mode !== 'host') throw new Error('LIVE_MODE_REQUIRED: the service is in practice mode, so nothing would run this request');
+      if (deps.fireSchedulesRepository?.().open(campaignId).length) throw new Error('FIRE_CONFLICT: a scheduled mint is open for this campaign; cancel it first with /schedules and /cancel');
       const result = await runLiveRequest({ action: 'create', campaignId, wallets: await walletsFor(walletsText), maxFeeGwei, confirm: phrase, now: now(), store: deps.store as never, approve: (validated) => deps.application.command('approve', { validated }) });
       return `Request ${String(result.requestId)} sent. The service starts it within a few seconds; follow it with /requests and /runs. /kill stops everything.`;
     },
@@ -331,7 +348,49 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const ids = await recordSimulationAction({ store: deps.store, campaign: target, wallets: await deps.walletList(), port: await port(target.chainId), latestBlock: async () => { const block = await reader.getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; } });
       return `${ids.length} wallet(s) passed the test mint. The records are good for 30 minutes: send /request soon.`;
     },
+    async firePreview(campaignId, walletsText, maxFeeGwei) {
+      const wiring = fireWiring();
+      const target = fireCampaign(campaignId, maxFeeGwei);
+      const state = await wiring.mintState(target);
+      if (state !== 'open') throw new Error(`MINT_NOT_OPEN: the mint is ${state === 'unknown' ? 'not readable right now' : state}. Test mints only pass once it is open; use /schedule to fire it when it opens`);
+      const wallets = await wiring.wallets(walletsText);
+      const conflict = wiring.conflict(campaignId);
+      if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
+      return { wallets, digest: wiring.campaignDigest(target), text: `The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.\n${wiring.describe(target, wallets, maxFeeGwei)}` };
+    },
+    async fireNow(campaignId, walletsText, maxFeeGwei, digest) {
+      if (digest !== undefined && fireWiring().campaignDigest(campaign(campaignId)) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; send /fire again');
+      const result = await fireWiring().fireNow(campaignId, await fireWiring().wallets(walletsText), maxFeeGwei);
+      return [`Request ${result.requestId} sent for ${result.wallets.length} wallet(s); the service arms and runs it within seconds. Follow it with /requests and /runs. /kill stops everything.`, ...result.skipped.map((item) => `✗ ${short(item.wallet)} skipped: ${item.why}`)].join('\n');
+    },
+    async schedulePreview(campaignId, walletsText, maxFeeGwei, fromText, untilText) {
+      const wiring = fireWiring();
+      const target = fireCampaign(campaignId, maxFeeGwei);
+      const { from, until } = wiring.parseWindow(fromText, untilText);
+      const wallets = await wiring.wallets(walletsText);
+      const conflict = wiring.conflict(campaignId);
+      if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
+      return { wallets, from: from.toISOString(), until: until.toISOString(), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
+    },
+    async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase) {
+      const wiring = fireWiring();
+      const target = fireCampaign(campaignId, maxFeeGwei);
+      const { from, until } = wiring.parseWindow(fromText, untilText);
+      const wallets = await wiring.wallets(walletsText);
+      if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: send /schedule again and copy the /confirm line it prints');
+      const conflict = wiring.conflict(campaignId);
+      if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
+      const record = deps.fireSchedulesRepository!().create({ campaignId, campaignDigest: wiring.campaignDigest(target), wallets, maxFeeGwei: String(maxFeeGwei), windowFrom: from.toISOString(), windowUntil: until.toISOString(), confirmationDigest: scheduleConfirmationDigest(phrase, campaignId, wallets, from, until) });
+      return `Scheduled mint ${record.id.slice(-6)} stored. It fires once, when the mint opens between ${minutes(record.windowFrom)} and ${minutes(record.windowUntil)} UTC. Cancel with /cancel ${record.id.slice(-6)}. Keep the kill switch off until then.`;
+    },
+    async schedules() {
+      const rows = deps.fireSchedulesRepository ? deps.fireSchedulesRepository().recent(10) : [];
+      if (rows.length === 0) return 'No scheduled mints yet.';
+      const nowMs = now().getTime();
+      return ['Scheduled mints (newest first):', ...rows.map((row) => `• ${row.id.slice(-6)} — ${row.outcome ?? (Date.parse(row.windowUntil) <= nowMs ? 'expired (not claimed)' : Date.parse(row.windowFrom) > nowMs ? 'waiting for its window' : 'watching for the mint to open')} — ${row.wallets.length} wallet(s), ≤${row.maxFeeGwei} gwei, ${minutes(row.windowFrom)} to ${minutes(row.windowUntil)} UTC`)].join('\n');
+    },
     async cancel(requestId) {
+      if (/^fire_schedule_|^[0-9a-f]{4,12}$/i.test(requestId) && deps.fireSchedulesRepository?.().cancel(requestId)) return `Scheduled mint ${requestId.slice(-6)} cancelled; the service will not fire it.`;
       if (!bridge.claimLiveRunRequest) throw new Error('CANONICAL_STORE_REQUIRED');
       return bridge.claimLiveRunRequest(requestId, 'cancelled') ? `Request ${requestId} cancelled; the service will not start it.` : 'Not cancelled: that request is unknown, or the service already started, expired or cancelled it. See /requests.';
     },
@@ -339,7 +398,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       // Both are attempted on their own, as the watcher does: the kill file and the coordinator. One is enough to stop new work.
       const outcomes = await Promise.allSettled([engageKillSwitchFile(deps.killSwitchPath, 'owner Telegram /kill'), deps.coordinator.kill('owner Telegram /kill')]);
       if (outcomes.every((outcome) => outcome.status === 'rejected')) throw new Error('KILL_SWITCH_NOT_ENGAGED');
-      return 'The kill switch is ON. Nothing new can be spent. Release it with /unlock then /release when you are ready.';
+      // A kill ends every scheduled mint too (D-067); a failure here never hides that the kill switch is on.
+      let cancelled = 0;
+      let scheduleFailed = false;
+      try { cancelled = deps.fireSchedulesRepository?.().cancelAllOpen() ?? 0; } catch { scheduleFailed = true; /* the kill switch itself is what stops a fire */ }
+      const scheduleNote = scheduleFailed ? ' Scheduled mints could not be cancelled; check /schedules (the kill switch still stops them).' : cancelled > 0 ? ` ${cancelled} scheduled mint(s) cancelled.` : '';
+      return `The kill switch is ON.${scheduleNote} Nothing new can be spent. Release it with /unlock then /release when you are ready.`;
     },
     async revoke(chainText, phrase) {
       const chainId = chainFrom(chainText);

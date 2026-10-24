@@ -35,6 +35,9 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
     requestCreate: ok('requestCreate'), requests: ok('requests'), runs: ok('runs'), run: ok('run'), watchlist: ok('watchlist'), track: ok('track'), untrack: ok('untrack'),
     limits: ok('limits'), history: ok('history'), eligible: ok('eligible'), activity: ok('activity'), holdings: ok('holdings'), gasAlerts: ok('gasAlerts'), gasAlertSet: ok('gasAlertSet'), gasAlertRemove: ok('gasAlertRemove'),
     prepare: ok('prepare'), simulate: ok('simulate'), cancel: ok('cancel'), kill: ok('kill'), revoke: ok('revoke'), release: ok('release'), watchAccept: ok('watchAccept'),
+    firePreview: async (campaignId, wallets, gwei) => { calls.push(`firePreview(${campaignId}|${wallets}|${gwei})`); return { text: 'fire preview', wallets: ['0x1111111111111111111111111111111111111111'] }; },
+    fireNow: ok('fireNow'), schedules: ok('schedules'), scheduleCreate: ok('scheduleCreate'),
+    schedulePreview: async (campaignId, wallets, gwei, from, until) => { calls.push(`schedulePreview(${campaignId}|${wallets}|${gwei}|${from}|${until})`); return { text: 'schedule preview', phrase: 'SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI', wallets: ['0x1111111111111111111111111111111111111111'], from, until };  },
     killEngagedSince: (openedAt) => killedAfter !== undefined && killedAfter > openedAt,
   };
   const records: Array<{ role: string; userId: string; command: string; outcome: string }> = [];
@@ -416,5 +419,72 @@ describe('stop and request commands', () => {
     expect(t.sent.at(-1)!.text).toMatch(/^Not done: RPC_FAILED/);
     expect(t.sent.at(-1)!.text).not.toContain('rpc.example');
     expect(t.sent.at(-1)!.text).not.toContain('a'.repeat(64));
+  });
+});
+
+describe('/fire and /schedule (D-067)', () => {
+  const unlocked = async (t: ReturnType<typeof setup>) => { await t.send(t.message(OWNER, `/unlock ${t.code()}`)); };
+
+  it('/fire needs an unlocked session, shows a preview with one button, and mints only on the owner\'s tap', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, '/fire camp1 all 0.2'));
+    expect(t.lastTo(OWNER)).toMatch(/unlocked session/);
+    expect(t.calls).toEqual([]);
+    await unlocked(t);
+    await t.send(t.message(OWNER, '/fire camp1 all 0.2'));
+    expect(t.calls).toContain('firePreview(camp1|all|0.2)');
+    const button = t.sent.at(-1)!.buttons![0]![0]!;
+    expect(button.callback_data).toMatch(/^\/tap_fire_[0-9a-f]{18}$/);
+    expect(t.calls.some((call) => call.startsWith('fireNow'))).toBe(false);
+    await t.send(t.tap(OWNER, button.callback_data));
+    expect(t.calls).toContain('fireNow(camp1|0x1111111111111111111111111111111111111111|0.2)');
+    // A second tap on the same button does nothing more.
+    await t.send(t.tap(OWNER, button.callback_data));
+    expect(t.calls.filter((call) => call.startsWith('fireNow'))).toHaveLength(1);
+    expect(t.lastTo(OWNER)).toMatch(/expired/);
+  });
+
+  it('a fire button expires after 2 minutes, and a locked session or a viewer cannot use it', async () => {
+    const t = setup();
+    await unlocked(t);
+    await t.send(t.message(OWNER, '/fire camp1 all 0.2'));
+    const data = t.sent.at(-1)!.buttons![0]![0]!.callback_data;
+    t.advance(3 * 60_000);
+    await t.send(t.tap(OWNER, data));
+    expect(t.calls.some((call) => call.startsWith('fireNow'))).toBe(false);
+    await t.send(t.message(OWNER, '/fire camp1 all 0.2'));
+    const fresh = t.sent.at(-1)!.buttons![0]![0]!.callback_data;
+    await t.send(t.message(OWNER, '/lock'));
+    await t.send(t.tap(OWNER, fresh));
+    expect(t.lastTo(OWNER)).toMatch(/unlocked session/);
+    expect(t.calls.some((call) => call.startsWith('fireNow'))).toBe(false);
+    await admitViewer(t);
+    await t.send(t.message(VIEWER, '/fire camp1 all 0.2'));
+    await t.send(t.tap(VIEWER, fresh));
+    expect(t.calls.some((call) => call.startsWith('fireNow'))).toBe(false);
+  });
+
+  it('/schedule stores nothing until the typed phrase is confirmed, and the phrase works once', async () => {
+    const t = setup();
+    await unlocked(t);
+    await t.send(t.message(OWNER, '/schedule camp1 all 0.2 2026-10-25T18:00 2026-10-25T20:00'));
+    expect(t.lastTo(OWNER)).toContain('/confirm SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI');
+    expect(t.calls.some((call) => call.startsWith('scheduleCreate'))).toBe(false);
+    await t.send(t.message(OWNER, '/confirm SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI'));
+    expect(t.calls).toContain('scheduleCreate(camp1|0x1111111111111111111111111111111111111111|0.2|2026-10-25T18:00|2026-10-25T20:00|SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI)');
+    await t.send(t.message(OWNER, '/confirm SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI'));
+    expect(t.calls.filter((call) => call.startsWith('scheduleCreate'))).toHaveLength(1);
+    expect(t.lastTo(OWNER)).toMatch(/PREVIEW_NOT_FOUND|Not done/);
+  });
+
+  it('viewers cannot see or use /fire, /schedule or /schedules, and the owner menu lists them', async () => {
+    const t = setup();
+    await admitViewer(t);
+    for (const text of ['/fire c all 0.2', '/schedule c all 0.2 now +1h', '/schedules']) {
+      await t.send(t.message(VIEWER, text));
+      expect(t.lastTo(VIEWER)).toMatch(/not available/);
+    }
+    expect(menuFor('viewer').map((item) => item.command)).not.toEqual(expect.arrayContaining(['fire']));
+    expect(menuFor('owner').map((item) => item.command)).toEqual(expect.arrayContaining(['fire', 'schedule', 'schedules']));
   });
 });

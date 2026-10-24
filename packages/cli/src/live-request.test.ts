@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Campaign, SimulationEvidenceRecord } from '@mint-bot/backend';
-import { LIVE_REQUEST_LIFETIME_MS, previewLiveRequest, processLiveRunRequests, runLiveRequest, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
+import { LIVE_REQUEST_LIFETIME_MS, previewLiveRequest, processLiveRunRequests, runLiveRequest, startLiveRequestPoller, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
 
 const NOW = new Date('2026-10-24T10:00:00.000Z');
 const WALLET_A = '0x1111111111111111111111111111111111111111';
@@ -171,5 +171,27 @@ describe('live-request processing in the host service (T-058)', () => {
     await processLiveRunRequests(value);
     expect(ceilings.at(-1)).toEqual(['cmp_0000000000000000abcdef12', undefined]);
     expect(events).toEqual([{ requestId: 'request-1', runId: 'run-1', state: 'stopped', code: 'KILL_SWITCH_ACTIVE' }]);
+  });
+});
+
+describe('the request poller keeps every nudge (T-067)', () => {
+  it('a tick that arrives while a pass is running makes one more pass instead of being lost', async () => {
+    let passes = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const now = new Date();
+    const request = { id: 'live_request_1', campaignId: 'c', wallets: ['0x1111111111111111111111111111111111111111'], simulationIds: ['s'], approvalId: 'a', evidenceAt: now.toISOString(), maxFeeGwei: '0.2', requestedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+    const poller = startLiveRequestPoller({
+      unclaimed: () => { passes += 1; return passes === 1 ? [request] : []; },
+      claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async () => { await gate; return { id: 'run', state: 'Completed' }; }, setFeeCeiling: () => undefined, record: async () => undefined, now: () => new Date(),
+    }, { intervalMs: 3_600_000 });
+    const first = poller.tick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await poller.tick();
+    expect(passes).toBe(1);
+    release();
+    await first;
+    expect(passes).toBe(2);
+    poller.stop();
   });
 });

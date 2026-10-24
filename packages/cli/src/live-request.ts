@@ -173,10 +173,12 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
 /** Host service only: looks for requests every few seconds. One pass at a time, so a long run never overlaps the next pass. */
 export function startLiveRequestPoller(deps: LiveRequestProcessorDeps, options: { intervalMs?: number; onError?: (error: unknown) => void } = {}): { stop(): void; tick(): Promise<void> } {
   let busy = false;
+  let again = false;
   const tick = async (): Promise<void> => {
-    if (busy) return;
+    // A nudge that arrives while a pass is running (a `/fire` request) is not lost: the pass runs once more as soon as it ends.
+    if (busy) { again = true; return; }
     busy = true;
-    try { await processLiveRunRequests(deps); } catch (error) { options.onError?.(error); } finally { busy = false; }
+    try { do { again = false; await processLiveRunRequests(deps); } while (again); } catch (error) { options.onError?.(error); } finally { busy = false; }
   };
   const timer = setInterval(() => { void tick(); }, options.intervalMs ?? 5_000);
   timer.unref?.();

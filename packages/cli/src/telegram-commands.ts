@@ -59,7 +59,16 @@ export interface TelegramActions {
   untrack(address: string): Promise<string>;
   prepare(chain: string, contract: string, quantityLimit: number, phrase: string): Promise<string>;
   simulate(campaignId: string): Promise<string>;
+  /** Cancels a request the service has not started, or a scheduled mint (id starting `fire_schedule_` or its short form). */
   cancel(requestId: string): Promise<string>;
+  /** T-067 (D-067): the preview of an attended fire; throws when the mint is not open or anything is not ready. */
+  firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[]; digest?: string }>;
+  /** `digest` is the campaign's digest at the preview; the tap is refused if the campaign changed since. */
+  fireNow(campaignId: string, wallets: string, maxFeeGwei: number, digest?: string): Promise<string>;
+  /** `from` and `until` are the resolved ISO times, so a relative time such as `+2h` means the same at `/confirm`. */
+  schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[]; from: string; until: string }>;
+  scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string): Promise<string>;
+  schedules(): Promise<string>;
   kill(): Promise<string>;
   revoke(chain: string, phrase: string | undefined): Promise<string>;
   release(phrase: string | undefined): Promise<string>;
@@ -133,13 +142,16 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   untrack: { tier: 'change', roles: OWNER, usage: '/untrack <address>', help: 'Stop tracking a wallet' },
   prepare: { tier: 'change', roles: OWNER, usage: '/prepare <chain> <contract> <quantity> <phrase from /plan>', help: 'Record a live campaign (spends nothing)' },
   simulate: { tier: 'change', roles: OWNER, usage: '/simulate <campaign>', help: 'Record fresh test mints (good 30 minutes)' },
-  cancel: { tier: 'change', roles: OWNER, usage: '/cancel <request id>', help: 'Cancel a request the service has not started' },
+  cancel: { tier: 'change', roles: OWNER, usage: '/cancel <request or schedule id>', help: 'Cancel a request or scheduled mint the service has not started' },
   kill: { tier: 'stop', roles: OWNER, usage: '/kill', help: 'Stop everything at once (one tap to confirm)' },
   revoke: { tier: 'stop', roles: OWNER, usage: '/revoke <base|robinhood> [phrase]', help: 'Switch a chain off' },
   lock: { tier: 'stop', roles: OWNER, usage: '/lock', help: 'End the unlocked session now' },
   unlock: { tier: 'session', roles: OWNER, usage: '/unlock <6-digit code>', help: 'Unlock start commands for 12 hours' },
   release: { tier: 'start', roles: OWNER, usage: '/release [phrase]', help: 'Turn the kill switch off' },
-  confirm: { tier: 'start', roles: OWNER, usage: '/confirm <phrase from /request>', help: 'Send a live request to the service' },
+  confirm: { tier: 'start', roles: OWNER, usage: '/confirm <phrase from /request or /schedule>', help: 'Send a live request, or store a scheduled mint' },
+  fire: { tier: 'start', roles: OWNER, usage: '/fire <campaign> <wallets|all> <max gwei>', help: 'Mint now: test, approve and run a prepared campaign (one tap)' },
+  schedule: { tier: 'start', roles: OWNER, usage: '/schedule <campaign> <wallets|all> <max gwei> <from> <until>', help: 'Fire a prepared mint when it opens, inside a window (UTC)' },
+  schedules: { tier: 'read', roles: OWNER, usage: '/schedules', help: 'Scheduled mints and what became of them' },
   watchaccept: { tier: 'start', roles: OWNER, usage: '/watchaccept <chain> <address> [phrase]', help: 'Accept a wallet change the watcher flagged' },
   limits: { tier: 'read', roles: OWNER, usage: '/limits', help: 'How much of each daily limit is used and left' },
   history: { tier: 'read', roles: OWNER, usage: '/history', help: 'Past live mints: totals per chain and newest runs' },
@@ -177,7 +189,8 @@ export class TelegramCommandRouter {
   private readonly sessionLifetimeMs: number;
   private readonly inviteLifetimeMs: number;
   private readonly confirmTaps = new Map<string, number>();
-  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number }>();
+  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string } }>();
+  private readonly fireTaps = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; digest?: string }>();
   private readonly joinAttempts = new Map<string, number[]>();
 
   public constructor(private readonly options: TelegramRouterOptions) {
@@ -238,6 +251,7 @@ export class TelegramCommandRouter {
       return;
     }
     if (command.startsWith('tap_kill_')) { await this.confirmKill(incoming, command.slice('tap_kill_'.length)); return; }
+    if (command.startsWith('tap_fire_')) { await this.confirmFire(incoming, command.slice('tap_fire_'.length)); return; }
     const spec = COMMANDS[command];
     if (!spec || !spec.roles.includes(role)) {
       await this.reply(incoming, role === 'owner' ? 'Unknown command. Send /help for the list.' : 'That command is not available to you. Send /help for the list.');
@@ -265,8 +279,8 @@ export class TelegramCommandRouter {
       const query = update.callback_query;
       const message = query.message;
       if (!message || message.chat.type !== 'private' || message.chat.id !== query.from.id || query.from.is_bot || typeof query.data !== 'string') return undefined;
-      // Only the bot's own buttons: a menu command without arguments, or a kill confirmation.
-      if (!/^\/(?:tap_kill_[0-9a-f]{18}|[a-z]{2,16})$/.test(query.data)) return undefined;
+      // Only the bot's own buttons: a menu command without arguments, or a kill or fire confirmation.
+      if (!/^\/(?:tap_kill_[0-9a-f]{18}|tap_fire_[0-9a-f]{18}|[a-z]{2,16})$/.test(query.data)) return undefined;
       // A tap counts from the moment it was made, not when its message was sent.
       return { userId: String(query.from.id), chatId: message.chat.id, text: query.data, callbackId: query.id, sentAt: this.now().getTime() };
     }
@@ -304,12 +318,33 @@ export class TelegramCommandRouter {
         this.previews.set(preview.phrase, { campaignId: args[0]!, wallets: preview.wallets.join(','), maxFeeGwei: Number(args[2]), at: this.now().getTime() });
         return reply(`${preview.text}\n\nTo send it, within 15 minutes:\n/confirm ${preview.phrase}`);
       }
+      case 'fire': {
+        const campaignId = required(args[0], 'campaign');
+        const maxFeeGwei = requiredNumber(args[2], 'max gwei');
+        const preview = await a.firePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei);
+        this.prune();
+        const nonce = randomBytes(9).toString('hex');
+        this.fireTaps.set(nonce, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), ...(preview.digest ? { digest: preview.digest } : {}) });
+        return reply(`${preview.text}\n\nTap within 2 minutes to test, approve and mint now.`, [[{ text: 'Yes, mint now', callback_data: `/tap_fire_${nonce}` }]]);
+      }
+      case 'schedule': {
+        const campaignId = required(args[0], 'campaign');
+        const maxFeeGwei = requiredNumber(args[2], 'max gwei');
+        const from = required(args[3], 'from');
+        const until = required(args[4], 'until');
+        const preview = await a.schedulePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei, from, until);
+        this.prune();
+        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until } });
+        return reply(`${preview.text}\n\nTo store it, within 15 minutes:\n/confirm ${preview.phrase}`);
+      }
+      case 'schedules': return reply(await a.schedules());
       case 'confirm': {
         const phrase = args.join(' ');
         this.prune();
         const preview = this.previews.get(phrase);
-        if (!preview) throw new Error('PREVIEW_NOT_FOUND: send /request again and copy the /confirm line it prints');
+        if (!preview) throw new Error('PREVIEW_NOT_FOUND: send /request or /schedule again and copy the /confirm line it prints');
         this.previews.delete(phrase);
+        if (preview.schedule) return reply(await a.scheduleCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, preview.schedule.from, preview.schedule.until, phrase));
         return reply(await a.requestCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, phrase));
       }
       case 'requests': return reply(await a.requests());
@@ -393,6 +428,32 @@ export class TelegramCommandRouter {
     }
   }
 
+  /** The owner's tap on a `/fire` preview is the approval (D-067). It needs the owner, an unlocked session and a tap under 2 minutes old. */
+  private async confirmFire(incoming: Incoming, nonce: string): Promise<void> {
+    if (incoming.userId !== this.options.ownerUserId) return;
+    this.prune();
+    const tap = incoming.callbackId ? this.fireTaps.get(nonce) : undefined;
+    if (!tap) {
+      await this.reply(incoming, 'That button has expired. Send /fire again.');
+      await this.record('owner', incoming, 'fire', 'refused:TAP_EXPIRED');
+      return;
+    }
+    try {
+      if (!(await this.currentSession())) {
+        await this.reply(incoming, 'This needs an unlocked session. Send /unlock followed by the 6-digit code, then send /fire again.');
+        await this.record('owner', incoming, 'fire', 'refused:SESSION_REQUIRED');
+        return;
+      }
+      this.fireTaps.delete(nonce);
+      await this.reply(incoming, await this.options.actions.fireNow(tap.campaignId, tap.wallets, tap.maxFeeGwei, tap.digest));
+      await this.record('owner', incoming, 'fire', 'ok');
+    } catch (error) {
+      this.fireTaps.delete(nonce);
+      await this.reply(incoming, `Not done: ${plainError(error)}`);
+      await this.record('owner', incoming, 'fire', `refused:${errorCode(error)}`);
+    }
+  }
+
   private async unlock(incoming: Incoming, code: string | undefined): Promise<void> {
     // The code is taken out of the chat history at once, whatever happens next.
     if (incoming.messageId !== undefined) await this.options.api.deleteMessage(incoming.chatId, incoming.messageId).catch(() => undefined);
@@ -410,7 +471,7 @@ export class TelegramCommandRouter {
       if (count >= UNLOCK_FAILURE_LIMIT) await this.options.alert('Five wrong unlock codes were sent to the Telegram bot in the last hour. Unlocking is blocked for an hour. If this was not you, send /kill and secure your Telegram account.', `telegram-unlock-locked:${Math.floor(now.getTime() / UNLOCK_WINDOW_MS)}`).catch(() => undefined);
       throw new Error(`UNLOCK_CODE_WRONG: that code did not work (codes work once and change every 30 seconds). ${Math.max(0, UNLOCK_FAILURE_LIMIT - count)} attempt(s) left this hour`);
     }
-    await this.reply(incoming, `Unlocked until ${session.expiresAt.slice(0, 16).replace('T', ' ')} UTC. Start commands (/release, /confirm, /watchaccept) now need only their phrase. Send /lock when you are done.`);
+    await this.reply(incoming, `Unlocked until ${session.expiresAt.slice(0, 16).replace('T', ' ')} UTC. Start commands (/release, /confirm, /fire, /schedule, /watchaccept) now need only their phrase. Send /lock when you are done.`);
   }
 
   private async join(incoming: Incoming, args: string[]): Promise<void> {
@@ -467,13 +528,14 @@ export class TelegramCommandRouter {
 
   private helpText(role: TelegramRole): string {
     const lines = Object.values(COMMANDS).filter((spec) => spec.roles.includes(role) && spec.usage !== '/start').map((spec) => `${spec.usage} — ${spec.help}`);
-    const note = role === 'owner' ? '\n\nStart commands (/release, /confirm, /watchaccept) need /unlock first; /kill never does.' : '';
+    const note = role === 'owner' ? '\n\nStart commands (/release, /confirm, /fire, /schedule, /watchaccept) need /unlock first; /kill never does.' : '';
     return `Commands:\n${lines.join('\n')}${note}`;
   }
 
   private prune(): void {
     const now = this.now().getTime();
     for (const [nonce, at] of this.confirmTaps) if (now - at > CONFIRM_TAP_LIFETIME_MS) this.confirmTaps.delete(nonce);
+    for (const [nonce, tap] of this.fireTaps) if (now - tap.at > CONFIRM_TAP_LIFETIME_MS) this.fireTaps.delete(nonce);
     for (const [phrase, preview] of this.previews) if (now - preview.at > PREVIEW_LIFETIME_MS) this.previews.delete(phrase);
   }
 
