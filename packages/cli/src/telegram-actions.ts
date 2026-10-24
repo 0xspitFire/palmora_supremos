@@ -7,12 +7,13 @@ import type { FireScheduleRepository, GasAlertRepository, IntelligenceRepository
 import { cleanName, describeActivity, describeHistory, describeLimits } from './owner-reports.js';
 import { gasAlertSentence } from './gas-alert-service.js';
 import type { TelegramActions, TelegramRole } from './telegram-commands.js';
+import type { LivePlanResult } from './owner-actions.js';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { checkDrop } from './drop-check.js';
 import { dryRunDrop, type DryRunReport } from './robinhood-readonly.js';
 import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, recordSimulationAction, watchAcceptAction, type PrepareStore } from './owner-actions.js';
 import { previewLiveRequest, runLiveRequest } from './live-request.js';
-import { ROBINHOOD_DEFAULT_TIP_GWEI, buildRobinhoodPlan, recordRobinhoodSimulationsAction, robinhoodConfirmationPhrase, robinhoodPrepareAction } from './robinhood-live.js';
+import { ROBINHOOD_DEFAULT_TIP_GWEI, buildRobinhoodPlan, type RobinhoodPlan, recordRobinhoodSimulationsAction, robinhoodConfirmationPhrase, robinhoodPrepareAction } from './robinhood-live.js';
 import { describeLiveRunResult } from './live-run.js';
 import { planCampaignFunding, renderFundingPlan } from './fleet-funding-cli.js';
 import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
@@ -77,6 +78,8 @@ export interface TelegramActionDeps {
   /** T-072: OpenSea collection floor prices, for the value shown by `/portfolio`. Absent when no key is stored. */
   floors?: OpenSeaFloors;
   fire?: FireWiring;
+  /** T-073: the Turnkey policy's fee limit for Robinhood, in gwei (default 0.2, the standard policy). Used to check a custom fee ceiling. */
+  policyFeeLimitGwei?: number;
   fireSchedulesRepository?: () => FireScheduleRepository;
   /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
   nftBalance?: (chainId: number, contract: string, wallet: string) => Promise<bigint>;
@@ -132,6 +135,68 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     if (existsSync(deps.killSwitchPath) || deps.store.snapshot().killed) throw new Error('KILL_SWITCH_ON: release it first (/unlock, then /release)');
     return target;
   };
+
+
+  // T-073: the plan and the prepare, shared by the typed commands and the guided flows. `only` narrows the wallets (a campaign sized for
+  // fewer wallets); it can only narrow: the wallets must still be ready, and a fire can never use more wallets than the campaign was sized for.
+  type PlanFacts =
+    | { kind: 'robinhood'; plan: RobinhoodPlan; quantity: number; maxQuantity: number }
+    | { kind: 'evm'; planned: LivePlanResult; quantity: number; maxQuantity: number };
+  const planFor = async (chainText: string, contract: string, quantityLimit: number | undefined, only?: readonly string[]): Promise<PlanFacts> => {
+    if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
+    if (chainFrom(chainText) === 4663) {
+      // T-063: Robinhood has no fee planner; the quantity is the one the Turnkey policy pins (default 1).
+      const candidates = only ? [...only] : await deps.walletList();
+      const quantity = quantityLimit ?? 1;
+      const report = await robinhoodDryRun(contract, candidates, quantity, now());
+      return { kind: 'robinhood', plan: buildRobinhoodPlan(report, { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity }), quantity, maxQuantity: report.drop?.maxPerWallet ?? 1 };
+    }
+    const chainId = evmChain(chainText);
+    const planned = await livePlanAction({ chainId, contract, wallets: only ? [...only] : await deps.walletList(), ...(quantityLimit === undefined ? {} : { quantityLimit }), port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
+    return { kind: 'evm', planned, quantity: planned.plan.quantity, maxQuantity: planned.report.drop?.maxPerWallet ?? planned.plan.quantity };
+  };
+  const readyOf = (facts: PlanFacts): string[] => (facts.kind === 'robinhood' ? facts.plan.walletsReady : facts.planned.plan.walletsReady);
+  const phraseOf = (facts: PlanFacts, contract: string): string | undefined => (facts.kind === 'robinhood' ? (facts.plan.verdict === 'ready' ? robinhoodConfirmationPhrase(contract, facts.quantity, facts.plan.walletsReady.length, facts.plan.totalMaxExposureEth) : undefined) : facts.planned.phrase);
+  const isReady = (facts: PlanFacts): boolean => (facts.kind === 'robinhood' ? facts.plan.verdict === 'ready' : facts.planned.plan.verdict === 'ready');
+  const renderPlan = (facts: PlanFacts, chainText: string, contract: string, quantityLimit: number | undefined, withCommand: boolean): string => {
+    if (facts.kind === 'robinhood') {
+      const plan = facts.plan;
+      return sections(
+        [plan.summary],
+        plan.opensAt ? [`Opens ${minutes(plan.opensAt)} UTC${plan.closesAt ? `, closes ${minutes(plan.closesAt)} UTC` : ''}.`] : [],
+        [...plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`), ...plan.walletsNotReady.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`)],
+        plan.warnings.map((warning) => `• ${warning}`),
+        withCommand && plan.verdict === 'ready' ? ['To record the campaign (spends nothing):', '', `/prepare robinhood ${contract} ${facts.quantity} ${robinhoodConfirmationPhrase(contract, facts.quantity, plan.walletsReady.length, plan.totalMaxExposureEth)}`] : [],
+      );
+    }
+    const { plan } = facts.planned;
+    return sections(
+      [plan.summary],
+      plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`),
+      plan.warnings.map((warning) => `• ${warning}`),
+      facts.planned.phrase ? (withCommand ? [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei. To record the campaign (spends nothing):`, '', `/prepare ${chainText.toLowerCase()} ${contract} ${quantityLimit ?? plan.quantity} ${facts.planned.phrase}`] : [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei.`]) : [],
+    );
+  };
+  const prepareFor = async (chainText: string, contract: string, quantityLimit: number | undefined, phrase: string, only?: readonly string[]): Promise<string> => {
+    if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
+    if (chainFrom(chainText) === 4663) {
+      const candidates = only ? [...only] : await deps.walletList();
+      const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantityLimit, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity: quantityLimit ?? 1 });
+      const prepared = await robinhoodPrepareAction({ contract, priorityFeeGwei: ROBINHOOD_DEFAULT_TIP_GWEI, confirm: phrase, plan: robinhoodPlan, killFile: deps.killSwitchPath, store: deps.store as never, createCampaign: (input) => deps.application.createCampaign(input), now: now() });
+      return sections([`Campaign recorded: ${prepared.campaign.id}`], [`Sized for ${prepared.walletsSized} wallet(s), ${prepared.quantity} NFT(s) each, the most it can spend is ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['When the mint is open:', '', `/simulate ${prepared.campaign.id}`], ['Then it prints the exact /request line to use (keep the fee ceiling at or below your Turnkey policy limit).']);
+    }
+    const chainId = evmChain(chainText);
+    const wallets = only ? [...only] : await deps.walletList();
+    const planned = await livePlanAction({ chainId, contract, wallets, quantityLimit, port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
+    // The tip is the one the stored Ethereum fee policy uses (live-prepare refuses any other); Base uses the host default.
+    const policy = chainId === 1 ? (deps.store as unknown as PrepareStore).ethereumFeePolicyStatus?.() : undefined;
+    const tipWei = policy?.stored?.tipWei ?? policy?.approved?.tipWei;
+    const priorityFeeGwei = tipWei === undefined ? 0.1 : Number(formatGwei(BigInt(tipWei)));
+    const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
+    return sections([`Campaign recorded: ${prepared.campaign.id}`], [`${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['Next, close to the mint:', '', `/simulate ${prepared.campaign.id}`, `/request ${prepared.campaign.id} all ${prepared.planningMaxFeeGwei ?? '<max gwei>'}`]);
+  };
+  const releaseResult = (outcome: { state: string; message: string; phrase?: string }): string =>
+    outcome.state === 'Released' ? `${outcome.message} The service accepts live work again within a few seconds if nothing else blocks it. /kill stops everything at any time.` : outcome.message;
 
   const actions: TelegramActions = {
     async status(role: TelegramRole) {
@@ -266,29 +331,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       ].join('\n');
     },
     async plan(chainText, contract, quantityLimit) {
-      if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
-      if (chainFrom(chainText) === 4663) {
-        // T-063: Robinhood has no fee planner; the quantity is the one the Turnkey policy pins (default 1).
-        const candidates = await deps.walletList();
-        const quantity = quantityLimit ?? 1;
-        const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantity, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity });
-        return sections(
-          [robinhoodPlan.summary],
-          robinhoodPlan.opensAt ? [`Opens ${minutes(robinhoodPlan.opensAt)} UTC${robinhoodPlan.closesAt ? `, closes ${minutes(robinhoodPlan.closesAt)} UTC` : ''}.`] : [],
-          [...robinhoodPlan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`), ...robinhoodPlan.walletsNotReady.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`)],
-          robinhoodPlan.warnings.map((warning) => `• ${warning}`),
-          robinhoodPlan.verdict === 'ready' ? ['To record the campaign (spends nothing):', '', `/prepare robinhood ${contract} ${quantity} ${robinhoodConfirmationPhrase(contract, quantity, robinhoodPlan.walletsReady.length, robinhoodPlan.totalMaxExposureEth)}`] : [],
-        );
-      }
-      const chainId = evmChain(chainText);
-      const planned = await livePlanAction({ chainId, contract, wallets: await deps.walletList(), ...(quantityLimit === undefined ? {} : { quantityLimit }), port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
-      const { plan } = planned;
-      return sections(
-        [plan.summary],
-        plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`),
-        plan.warnings.map((warning) => `• ${warning}`),
-        planned.phrase ? [`Planning fee: ${planned.planningMaxFeeGwei ?? '?'} gwei. To record the campaign (spends nothing):`, '', `/prepare ${chainText.toLowerCase()} ${contract} ${quantityLimit ?? plan.quantity} ${planned.phrase}`] : [],
-      );
+      return renderPlan(await planFor(chainText, contract, quantityLimit), chainText, contract, quantityLimit, true);
     },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
@@ -325,22 +368,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       return deps.intelligence().disableObservedAddress(1, address.toLowerCase()) ? `Stopped tracking ${address.toLowerCase()}.` : 'That wallet was not tracked.';
     },
     async prepare(chainText, contract, quantityLimit, phrase) {
-      if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
-      if (chainFrom(chainText) === 4663) {
-        const candidates = await deps.walletList();
-        const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantityLimit, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity: quantityLimit });
-        const prepared = await robinhoodPrepareAction({ contract, priorityFeeGwei: ROBINHOOD_DEFAULT_TIP_GWEI, confirm: phrase, plan: robinhoodPlan, killFile: deps.killSwitchPath, store: deps.store as never, createCampaign: (input) => deps.application.createCampaign(input), now: now() });
-        return sections([`Campaign recorded: ${prepared.campaign.id}`], [`Sized for ${prepared.walletsSized} wallet(s), ${prepared.quantity} NFT(s) each, the most it can spend is ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['When the mint is open:', '', `/simulate ${prepared.campaign.id}`], ['Then it prints the exact /request line to use (keep the fee ceiling at or below your Turnkey policy limit).']);
-      }
-      const chainId = evmChain(chainText);
-      const wallets = await deps.walletList();
-      const planned = await livePlanAction({ chainId, contract, wallets, quantityLimit, port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
-      // The tip is the one the stored Ethereum fee policy uses (live-prepare refuses any other); Base uses the host default.
-      const policy = chainId === 1 ? (deps.store as unknown as PrepareStore).ethereumFeePolicyStatus?.() : undefined;
-      const tipWei = policy?.stored?.tipWei ?? policy?.approved?.tipWei;
-      const priorityFeeGwei = tipWei === undefined ? 0.1 : Number(formatGwei(BigInt(tipWei)));
-      const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
-      return sections([`Campaign recorded: ${prepared.campaign.id}`], [`${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['Next, close to the mint:', '', `/simulate ${prepared.campaign.id}`, `/request ${prepared.campaign.id} all ${prepared.planningMaxFeeGwei ?? '<max gwei>'}`]);
+      return prepareFor(chainText, contract, quantityLimit, phrase);
     },
     async simulate(campaignId) {
       const target = campaign(campaignId);
@@ -379,11 +407,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const wallets = await wiring.wallets(walletsText);
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, from: from.toISOString(), until: until.toISOString(), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
+      return { wallets, from: from.toISOString(), until: until.toISOString(), digest: wiring.campaignDigest(target), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
     },
-    async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase) {
+    async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase, digest) {
       const wiring = fireWiring();
       const target = fireCampaign(campaignId, maxFeeGwei);
+      if (digest !== undefined && wiring.campaignDigest(target) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; start the schedule again');
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
       if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: send /schedule again and copy the /confirm line it prints');
@@ -436,6 +465,56 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const chainId = chainFrom(chainText);
       const outcome = await watchAcceptAction({ chainId, address, confirm: phrase, client: await client(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
       return outcome.state === 'Preview' ? `${outcome.message}\n\nTo accept, send:\n/watchaccept ${chainText.toLowerCase()} ${address} ${outcome.phrase}` : outcome.message;
+    },
+    async guidedChains() {
+      const at = now();
+      const robinhood = validRobinhoodEnablement((deps.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), at);
+      const base = validBaseEnablement((deps.store as { baseEnablement?: () => unknown }).baseEnablement?.(), at);
+      return [{ key: 'ethereum' as const, name: 'Ethereum' }, ...(base ? [{ key: 'base' as const, name: 'Base' }] : []), ...(robinhood ? [{ key: 'robinhood' as const, name: 'Robinhood' }] : [])];
+    },
+    async guidedPlan(chainText, contract, quantity, walletCount) {
+      let facts = await planFor(chainText, contract, quantity);
+      const all = readyOf(facts);
+      if (walletCount !== undefined && isReady(facts) && walletCount < all.length) facts = await planFor(chainText, contract, quantity, all.slice(0, walletCount));
+      return { text: renderPlan(facts, chainText, contract, quantity, false), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity, ...(isReady(facts) && phraseOf(facts, contract) ? { phrase: phraseOf(facts, contract)! } : {}) };
+    },
+    async guidedPrepare(chainText, contract, quantity, wallets, expectedPhrase) {
+      const facts = await planFor(chainText, contract, quantity, wallets);
+      const ready = readyOf(facts);
+      if (!isReady(facts) || ready.length !== wallets.length) throw new Error('WALLETS_CHANGED: the plan changed since you looked at it (a wallet is no longer ready). Start the guide again.');
+      const phrase = phraseOf(facts, contract);
+      if (!phrase) throw new Error('LIVE_PLAN_NOT_READY: the plan is not ready');
+      // The phrase names the contract, quantity, number of wallets and the most that can be spent: it must be the one that was reviewed.
+      if (expectedPhrase !== undefined && phrase !== expectedPhrase) throw new Error('PLAN_CHANGED: the plan changed since you reviewed it (the amount that can be spent or the wallets differ). Start the guide again.');
+      return prepareFor(chainText, contract, quantity, phrase, wallets);
+    },
+    async releaseStatus() {
+      const outcome = await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: undefined, actor: 'owner-telegram' });
+      const phrase = outcome.state === 'On' ? outcome.phrase : undefined;
+      return { text: outcome.message, canRelease: Boolean(phrase), ...(phrase ? { phrase } : {}) };
+    },
+    async releaseNow(expectedPhrase) {
+      // The phrase is built here from the current state (never taken from the button), then the same release action runs as for the typed phrase.
+      const first = await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: undefined, actor: 'owner-telegram' });
+      if (first.state !== 'On' || !first.phrase) return releaseResult(first);
+      // The phrase names this engagement of the kill switch; if it was engaged again since the owner looked, the old button does not release the new one.
+      if (expectedPhrase !== undefined && first.phrase !== expectedPhrase) throw new Error('KILL_STATE_CHANGED: the kill switch was engaged again since you looked. Send /release to see the current state.');
+      return releaseResult(await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: first.phrase, actor: 'owner-telegram' }));
+    },
+    async guidedCampaigns() {
+      const live = deps.store.snapshot().campaigns.filter((item) => !item.dryRun).slice(-6).reverse();
+      const wiring = deps.fire;
+      return Promise.all(live.map(async (item) => {
+        const state = wiring ? await Promise.race([wiring.mintState(item), new Promise<'unknown'>((resolve) => { const timer = setTimeout(() => resolve('unknown'), 5_000); timer.unref?.(); })]).catch(() => 'unknown' as const) : 'unknown';
+        const conflict = wiring?.conflict(item.id);
+        const mint = state === 'open' ? 'mint is open' : state === 'upcoming' ? 'mint not open yet' : state === 'ended' ? 'mint ended' : 'mint state unknown';
+        return { id: item.id, label: `${chainName(item.chainId)} ${short(item.contract)} · ${item.quantity} NFT`, note: `${mint}${conflict ? `; busy: ${conflict}` : ''}` };
+      }));
+    },
+    async signingWallets() { return (await deps.walletList()).map((wallet) => wallet.toLowerCase()); },
+    async feeOptions(campaignId) {
+      // Robinhood's Turnkey policy pins the fee limit (the standard policy: 0.2 gwei). Other chains have no fixed limit here; the spend caps bound them.
+      return campaign(campaignId).chainId === 4663 ? { presets: [0.1, 0.2], limit: deps.policyFeeLimitGwei ?? 0.2, unit: 'gwei' } : { presets: [5, 10, 25], limit: undefined, unit: 'gwei' };
     },
     killEngagedSince(openedAt) {
       const since = Date.parse(openedAt);

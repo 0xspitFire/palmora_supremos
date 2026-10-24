@@ -93,3 +93,32 @@ describe('kill-release command wiring', () => {
     expect(source).toContain("throw new Error('KILL_SWITCH_RESET_REQUIRES_RECOVERY_APPROVAL')");
   });
 });
+
+describe('the guided release tap is bound to the engagement that was shown (T-073, D-069)', () => {
+  it('releases when the kill switch is the one the owner looked at, and refuses (releasing nothing) when it was engaged again since', async () => withKillFile(async (file) => {
+    const { createTelegramActions } = await import('./telegram-actions.js');
+    const status = { ...STATUS };
+    const calls: string[] = [];
+    const store = {
+      killSwitchStatus: () => status,
+      snapshot: () => ({ killed: true, events: [], runs: [], attempts: [], reconciliations: [], campaigns: [], receipts: [], simulations: [] }) as never,
+      releaseKillSwitch: async (actor: string) => { calls.push(`release:${actor}`); return { released: true }; },
+    };
+    const actions = createTelegramActions({
+      mode: 'host', custody: 'turnkey', store: store as never, application: {} as never, coordinator: { kill: async () => undefined }, projectRoot: '/nonexistent', secretRoot: '/nonexistent',
+      killSwitchPath: file, backupStatusPath: '/nonexistent/status.json', startedAt: new Date(), walletList: async () => [], watchedWallets: () => [], watcherHealthy: () => undefined,
+      intelligence: () => ({}) as never, gasAlerts: () => ({}) as never,
+    });
+    const shown = await actions.releaseStatus();
+    expect(shown).toMatchObject({ canRelease: true, phrase: killReleasePhrase(STATUS) });
+    // The kill switch is engaged again after the owner looked (a newer engagement time): the old button must not release it.
+    status.changedAt = '2026-10-24T11:30:00.000Z';
+    await expect(actions.releaseNow(shown.phrase)).rejects.toThrow('KILL_STATE_CHANGED');
+    expect(calls).toEqual([]);
+    expect(existsSync(file)).toBe(true);
+    // Looking again and tapping releases it.
+    const again = await actions.releaseStatus();
+    await expect(actions.releaseNow(again.phrase)).resolves.toContain('The kill switch is off');
+    expect(calls).toEqual(['release:owner-telegram']);
+  }));
+});

@@ -226,6 +226,53 @@ describe('Telegram actions', () => {
       } finally { await Promise.all([ended, paid].map((item) => rm(item.directory, { recursive: true, force: true }))); }
     });
 
+    it('guided plan: sized for the number of signing accounts chosen (only the first ready ones), without the typed /prepare line (D-069)', async () => {
+      const { actions, directory } = await robinhood();
+      try {
+        const all = await actions.guidedPlan('robinhood', CONTRACT, undefined, undefined);
+        expect(all).toMatchObject({ ok: true, ready: [A, B], quantity: 1, maxQuantity: 5 });
+        const one = await actions.guidedPlan('robinhood', CONTRACT, 1, 1);
+        expect(one.ready).toEqual([A]);
+        expect(one.text).toContain('up to 1 wallet(s)');
+        expect(one.text).not.toContain('/prepare');
+        const blocked = await actions.guidedPlan('robinhood', CONTRACT, 9, undefined);
+        expect(blocked.ok).toBe(false);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('guided prepare builds the confirmation phrase itself and records a campaign sized for the chosen accounts only; it refuses when one is no longer ready', async () => {
+      const { actions, directory, created } = await robinhood();
+      try {
+        const text = await actions.guidedPrepare('robinhood', CONTRACT, 1, [A]);
+        expect(text).toContain('Campaign recorded: cmp_new');
+        expect(text).toContain('Sized for 1 wallet(s)');
+        expect(created).toHaveLength(1);
+        await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A, '0x9999999999999999999999999999999999999999'])).rejects.toThrow('WALLETS_CHANGED');
+        expect(created).toHaveLength(1);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('guided prepare refuses when the plan differs from the reviewed one (the amount or wallets changed)', async () => {
+      const { actions, directory, created } = await robinhood();
+      try {
+        const reviewed = await actions.guidedPlan('robinhood', CONTRACT, 1, 1);
+        expect(reviewed.phrase).toContain('QTY-1 1-WALLETS');
+        await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A], 'PREPARE-LIVE-ROBINHOOD 94db QTY-1 2-WALLETS 0.0004')).rejects.toThrow('PLAN_CHANGED');
+        expect(created).toEqual([]);
+        await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A], reviewed.phrase)).resolves.toContain('Campaign recorded');
+        expect(created).toHaveLength(1);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('guided chains lists Ethereum always and the others only when switched on; fee presets follow the chain', async () => {
+      const { actions, directory } = await robinhood();
+      try {
+        expect((await actions.guidedChains()).map((chain) => chain.key)).toEqual(['ethereum']);
+        expect(await actions.feeOptions('cmp_1')).toEqual({ presets: [0.1, 0.2], limit: 0.2, unit: 'gwei' });
+        expect(await actions.signingWallets()).toEqual([A, B]);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
     it('/simulate records a test mint for each wallet that passed and prints the /request line with those wallets', async () => {
       const { actions, directory, simulations } = await robinhood({ robinhoodDryRun: dryRun('open', [A]) });
       try {

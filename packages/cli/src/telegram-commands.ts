@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { redactText } from '@mint-bot/backend';
 import type { TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } from '@mint-bot/database';
 import type { BotCommand, InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
+import { GuidedFlows, flowNeedsSession, type FlowKind, type FlowResult, type GuidedActions } from './guided-flows.js';
 import { base32Encode, matchTotp } from './totp.js';
 
 /**
@@ -35,7 +36,7 @@ export interface TelegramAccess {
 export interface ActionReply { text: string; buttons?: InlineButton[][] }
 
 /** The work behind each command. Every method throws a plain error (`CODE: words`) when the action is refused. */
-export interface TelegramActions {
+export interface TelegramActions extends GuidedActions {
   status(role: TelegramRole): Promise<string>;
   health(): Promise<string>;
   rpc(): Promise<string>;
@@ -61,13 +62,6 @@ export interface TelegramActions {
   simulate(campaignId: string): Promise<string>;
   /** Cancels a request the service has not started, or a scheduled mint (id starting `fire_schedule_` or its short form). */
   cancel(requestId: string): Promise<string>;
-  /** T-067 (D-067): the preview of an attended fire; throws when the mint is not open or anything is not ready. */
-  firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[]; digest?: string }>;
-  /** `digest` is the campaign's digest at the preview; the tap is refused if the campaign changed since. */
-  fireNow(campaignId: string, wallets: string, maxFeeGwei: number, digest?: string): Promise<string>;
-  /** `from` and `until` are the resolved ISO times, so a relative time such as `+2h` means the same at `/confirm`. */
-  schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[]; from: string; until: string }>;
-  scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string): Promise<string>;
   schedules(): Promise<string>;
   kill(): Promise<string>;
   revoke(chain: string, phrase: string | undefined): Promise<string>;
@@ -185,16 +179,17 @@ const errorCode = (error: unknown): string => {
   return /^[A-Z][A-Z0-9_]{2,80}$/.test(code) ? code : 'FAILED';
 };
 
-interface Incoming { userId: string; chatId: number; text: string; messageId?: number; callbackId?: string; sentAt: number }
+interface Incoming { userId: string; chatId: number; text: string; messageId?: number; callbackId?: string; sentAt: number; /** Plain text that is not a command: only the owner's answer to a guided flow uses it. */ plain?: boolean }
 
 export class TelegramCommandRouter {
   private readonly now: () => Date;
   private readonly sessionLifetimeMs: number;
   private readonly inviteLifetimeMs: number;
   private readonly confirmTaps = new Map<string, number>();
-  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string } }>();
+  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string; digest?: string } }>();
   private readonly fireTaps = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; digest?: string }>();
   private readonly joinAttempts = new Map<string, number[]>();
+  private readonly flows: GuidedFlows;
 
   public constructor(private readonly options: TelegramRouterOptions) {
     if (!/^\d{1,20}$/.test(options.ownerUserId)) throw new Error('TELEGRAM_OWNER_USER_ID_INVALID');
@@ -202,6 +197,7 @@ export class TelegramCommandRouter {
     this.sessionLifetimeMs = options.sessionLifetimeMs ?? SESSION_LIFETIME_MS;
     this.inviteLifetimeMs = options.inviteLifetimeMs ?? INVITE_LIFETIME_MS;
     this.startedAt = this.now().getTime();
+    this.flows = new GuidedFlows({ actions: options.actions, now: this.now, explain: plainError });
   }
   private readonly startedAt: number;
   private readonly viewerUse = new Map<string, number[]>();
@@ -234,6 +230,8 @@ export class TelegramCommandRouter {
     if (!incoming) return;
     if (incoming.callbackId) await this.options.api.answerCallback(incoming.callbackId).catch(() => undefined);
     const role = this.roleOf(incoming.userId);
+    // Plain text (not a command) is only ever the owner's answer to a guided flow; anyone else's is ignored without a reply.
+    if (incoming.plain) { if (role === 'owner') await this.flowText(incoming); return; }
     const [rawCommand = '', ...args] = incoming.text.trim().split(/\s+/);
     const command = rawCommand.replace(/^\//, '').replace(/@.*$/, '').toLowerCase();
     if (!role) {
@@ -255,12 +253,15 @@ export class TelegramCommandRouter {
     }
     if (command.startsWith('tap_kill_')) { await this.confirmKill(incoming, command.slice('tap_kill_'.length)); return; }
     if (command.startsWith('tap_fire_')) { await this.confirmFire(incoming, command.slice('tap_fire_'.length)); return; }
+    if (command.startsWith('f_')) { await this.flowButton(incoming, command); return; }
     const spec = COMMANDS[command];
     if (!spec || !spec.roles.includes(role)) {
       await this.reply(incoming, role === 'owner' ? 'Unknown command. Send /help for the list.' : 'That command is not available to you. Send /help for the list.');
       await this.record(role, incoming, 'unknown', 'refused:UNKNOWN_COMMAND');
       return;
     }
+    // Another command ends any wait for typed text in a guided flow (its buttons still work).
+    if (role === 'owner') this.flows.interrupt();
     try {
       if (spec.tier === 'start' && !(await this.currentSession())) {
         await this.reply(incoming, 'This needs an unlocked session. Send /unlock followed by the 6-digit code from your authenticator app, then send the command again.');
@@ -283,12 +284,13 @@ export class TelegramCommandRouter {
       const message = query.message;
       if (!message || message.chat.type !== 'private' || message.chat.id !== query.from.id || query.from.is_bot || typeof query.data !== 'string') return undefined;
       // Only the bot's own buttons: a menu command without arguments, or a kill or fire confirmation.
-      if (!/^\/(?:tap_kill_[0-9a-f]{18}|tap_fire_[0-9a-f]{18}|[a-z]{2,16})$/.test(query.data)) return undefined;
+      if (!/^\/(?:tap_kill_[0-9a-f]{18}|tap_fire_[0-9a-f]{18}|f_[0-9a-f]{8}_[0-9][a-z0-9]{1,12}|[a-z]{2,16})$/.test(query.data)) return undefined;
       // A tap counts from the moment it was made, not when its message was sent.
       return { userId: String(query.from.id), chatId: message.chat.id, text: query.data, callbackId: query.id, sentAt: this.now().getTime() };
     }
     const message = update.message;
-    if (!message || !message.from || message.from.is_bot || message.chat.type !== 'private' || message.chat.id !== message.from.id || typeof message.text !== 'string' || !message.text.startsWith('/')) return undefined;
+    if (!message || !message.from || message.from.is_bot || message.chat.type !== 'private' || message.chat.id !== message.from.id || typeof message.text !== 'string') return undefined;
+    if (!message.text.startsWith('/')) return { userId: String(message.from.id), chatId: message.chat.id, text: message.text.slice(0, 500), messageId: message.message_id, sentAt: message.date * 1000, plain: true };
     return { userId: String(message.from.id), chatId: message.chat.id, text: message.text, messageId: message.message_id, sentAt: message.date * 1000 };
   }
 
@@ -322,6 +324,7 @@ export class TelegramCommandRouter {
         return reply(`${preview.text}\n\nTo send it, within 15 minutes:\n\n/confirm ${preview.phrase}`);
       }
       case 'fire': {
+        if (args.length === 0) return this.startFlow(incoming, 'fire');
         const campaignId = required(args[0], 'campaign');
         const maxFeeGwei = requiredNumber(args[2], 'max gwei');
         const preview = await a.firePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei);
@@ -331,13 +334,14 @@ export class TelegramCommandRouter {
         return reply(`${preview.text}\n\nTap within 2 minutes to test, approve and mint now.`, [[{ text: 'Yes, mint now', callback_data: `/tap_fire_${nonce}` }]]);
       }
       case 'schedule': {
+        if (args.length === 0) return this.startFlow(incoming, 'schedule');
         const campaignId = required(args[0], 'campaign');
         const maxFeeGwei = requiredNumber(args[2], 'max gwei');
         const from = required(args[3], 'from');
         const until = required(args[4], 'until');
         const preview = await a.schedulePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei, from, until);
         this.prune();
-        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until } });
+        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until, ...(preview.digest ? { digest: preview.digest } : {}) } });
         return reply(`${preview.text}\n\nTo store it, within 15 minutes:\n\n/confirm ${preview.phrase}`);
       }
       case 'schedules': return reply(await a.schedules());
@@ -347,7 +351,7 @@ export class TelegramCommandRouter {
         const preview = this.previews.get(phrase);
         if (!preview) throw new Error('PREVIEW_NOT_FOUND: send /request or /schedule again and copy the /confirm line it prints');
         this.previews.delete(phrase);
-        if (preview.schedule) return reply(await a.scheduleCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, preview.schedule.from, preview.schedule.until, phrase));
+        if (preview.schedule) return reply(await a.scheduleCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, preview.schedule.from, preview.schedule.until, phrase, preview.schedule.digest));
         return reply(await a.requestCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, phrase));
       }
       case 'requests': return reply(await a.requests());
@@ -364,7 +368,7 @@ export class TelegramCommandRouter {
       case 'gasalert': return reply(args[0]?.toLowerCase() === 'remove' ? await a.gasAlertRemove(required(args[1], 'alert id')) : await a.gasAlertSet(required(args[0], 'chain'), required(args[1], 'below or above'), requiredNumber(args[2], 'gwei')));
       case 'track': return reply(await a.track(required(args[0], 'address'), args.slice(1).join(' ') || undefined));
       case 'untrack': return reply(await a.untrack(required(args[0], 'address')));
-      case 'prepare': return reply(await a.prepare(required(args[0], 'chain'), required(args[1], 'contract'), requiredNumber(args[2], 'quantity'), required(args.slice(3).join(' ') || undefined, 'phrase from /plan')));
+      case 'prepare': if (args.length === 0) return this.startFlow(incoming, 'prepare'); return reply(await a.prepare(required(args[0], 'chain'), required(args[1], 'contract'), requiredNumber(args[2], 'quantity'), required(args.slice(3).join(' ') || undefined, 'phrase from /plan')));
       case 'simulate': return reply(await a.simulate(required(args[0], 'campaign')));
       case 'cancel': return reply(await a.cancel(required(args[0], 'request id')));
       case 'kill': {
@@ -379,7 +383,7 @@ export class TelegramCommandRouter {
         return reply(closed ? 'Locked. Start commands need /unlock again.' : 'There was no unlocked session.');
       }
       case 'unlock': return this.unlock(incoming, args.length > 0 ? args.join('') : undefined);
-      case 'release': return reply(await a.release(args.join(' ') || undefined));
+      case 'release': return args.length === 0 ? this.startFlow(incoming, 'release') : reply(await a.release(args.join(' ')));
       case 'watchaccept': return reply(await a.watchAccept(required(args[0], 'chain'), required(args[1], 'address'), args.slice(2).join(' ') || undefined));
       case 'invite': {
         const code = base32Encode(randomBytes(10));
@@ -411,6 +415,47 @@ export class TelegramCommandRouter {
     }
   }
 
+  // ── guided flows (T-073, D-069) ─────────────────────────────────────────────────────────────────
+
+  private async startFlow(incoming: Incoming, kind: FlowKind): Promise<void> {
+    const result = await this.flows.start(kind);
+    await this.reply(incoming, result.reply.text, result.reply.buttons);
+  }
+
+  private async showFlow(incoming: Incoming, result: FlowResult): Promise<void> {
+    await this.reply(incoming, result.reply.text, result.reply.buttons);
+    if (result.done) await this.record('owner', incoming, result.done.command, result.done.outcome);
+  }
+
+  private async flowButton(incoming: Incoming, command: string): Promise<void> {
+    if (incoming.userId !== this.options.ownerUserId || !incoming.callbackId) return;
+    const match = /^f_([0-9a-f]{8})_(.+)$/.exec(command);
+    if (!match) return;
+    try {
+      const kind = this.flows.kind(match[1]!);
+      // A flow that releases, fires or schedules needs the unlocked session at every tap, as the typed commands do.
+      if (kind && flowNeedsSession(kind) && match[2] !== 'x' && !(await this.currentSession())) {
+        await this.reply(incoming, 'This needs an unlocked session. Send /unlock followed by the 6-digit code, then tap the button again.');
+        await this.record('owner', incoming, kind, 'refused:SESSION_REQUIRED');
+        return;
+      }
+      await this.showFlow(incoming, await this.flows.onButton(match[1]!, match[2]!));
+    } catch (error) {
+      await this.reply(incoming, `Not done: ${plainError(error)}`);
+    }
+  }
+
+  private async flowText(incoming: Incoming): Promise<void> {
+    // An answer that is more than 5 minutes old is not used, as for commands.
+    if (this.now().getTime() - incoming.sentAt > MAX_MESSAGE_AGE_MS) { await this.reply(incoming, 'That message is more than 5 minutes old, so it was not used. Send it again if you still want it.'); return; }
+    try {
+      const result = await this.flows.onText(incoming.text);
+      if (result) await this.showFlow(incoming, result);
+    } catch (error) {
+      await this.reply(incoming, `Not done: ${plainError(error)}`);
+    }
+  }
+
   private async confirmKill(incoming: Incoming, nonce: string): Promise<void> {
     if (incoming.userId !== this.options.ownerUserId) return;
     this.prune();
@@ -419,6 +464,8 @@ export class TelegramCommandRouter {
       await this.record('owner', incoming, 'kill', 'refused:TAP_EXPIRED');
       return;
     }
+    // A kill ends any open guided flow, so an old button cannot act after it.
+    this.flows.cancel();
     try {
       const text = await this.options.actions.kill();
       this.options.access.closeSession('kill');
@@ -525,6 +572,7 @@ export class TelegramCommandRouter {
       [button('status', 'Status'), button('health', 'Health'), button('rpc', 'RPC')],
       [button('drops', 'Drops'), button('calendar', 'Calendar'), button('gas', 'Fees')],
       [button('wallets', 'Wallets'), button('requests', 'Requests'), button('runs', 'Runs')],
+      [button('prepare', 'Prepare'), button('release', 'Release'), button('fire', 'Fire')],
       [button('enablement', 'Chains'), button('backup', 'Backup'), button('users', 'Users')],
       [button('kill', 'STOP (kill)'), button('lock', 'Lock')],
     ];
