@@ -29,6 +29,7 @@ import { assertLivePrepareAllowed, buildLivePlan, liveConfirmationPhrase, liveFr
 import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { refreshFinalityEvidence } from './robinhood-evidence-refresh.js';
 import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
+import { runLiveRequest, type LiveRequestStore } from './live-request.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
 import { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds, type KillSwitchStatus } from '@mint-bot/backend';
@@ -886,6 +887,21 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const store = runtime.store as unknown as Partial<EnableStore>;
         if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function' || typeof store.robinhoodEnablement !== 'function' || typeof store.revokeRobinhood !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
         process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), paid: args.paid, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
+  .command('live-request <action>', 'Owner-run: ask the host service to arm and run one live mint (status | create). Every guard still applies', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'create'] as const, demandOption: true })
+    .option('campaign-id', { type: 'string', demandOption: true })
+    .option('wallets', { type: 'string', demandOption: true, describe: 'Comma-separated wallet addresses, each with a fresh passing simulation' })
+    .option('max-fee-gwei', { type: 'number', demandOption: true, describe: 'Highest fee per gas the service may sign with for this run' })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed' }), async (args) => {
+      try {
+        // The request is written to the service's database; nothing here reads custody secrets or can sign.
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false, allowTurnkey: false });
+        const store = runtime.store as unknown as Partial<LiveRequestStore>;
+        if (typeof store.recordLiveRunRequest !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
+        const wallets = args.wallets.split(',').map((wallet) => wallet.trim()).filter((wallet) => wallet.length > 0);
+        process.stdout.write(`${json(await runLiveRequest({ action: args.action, campaignId: args.campaignId, wallets, maxFeeGwei: args.maxFeeGwei, confirm: args.confirm, now: new Date(), store: store as LiveRequestStore, approve: (validated) => runtime.application.command('approve', { validated }) }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('base-enable <action>', 'Owner-run: record Base free attended enablement until you revoke it (status | record | revoke)', (args) => args
