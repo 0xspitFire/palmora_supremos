@@ -42,6 +42,7 @@ import { startGasAlerts } from './gas-alert-service.js';
 import { startLiveRequestPoller } from './live-request.js';
 import { createFireWiring, type FireWiring } from './fire-wiring.js';
 import { dryRunDrop } from './robinhood-readonly.js';
+import { createBlockscoutPortfolio, type PortfolioProvider } from './portfolio-provider.js';
 import { startFireScheduler } from './fire.js';
 
 export interface RunningOrchestratorService {
@@ -236,6 +237,12 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const { api, access, ownerUserId, totpKey } = telegramCommandSetup;
     const bridge = runtime.store as CanonicalStoreBridge;
     const secretRoot = configuredSecretRoot(config.projectRoot);
+    // T-068: /portfolio needs the owner's Blockscout key in the secret store (BLOCKSCOUT_API_KEY); without it the command says it is off.
+    let portfolioProvider: PortfolioProvider | undefined;
+    if (config.secretStorePath) {
+      const portfolioKey = (await loadHostSecretStore(config.secretStorePath)).get('BLOCKSCOUT_API_KEY');
+      if (portfolioKey) { logger.registerSecret(portfolioKey); portfolioProvider = createBlockscoutPortfolio({ apiKey: portfolioKey }); }
+    }
     const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
     // T-067 (D-067): `/fire` and `/schedule`, in host mode only. Both end in the same pipeline and the same request processor.
     const reader = async (chainId: 1 | 8453 | 4663) => createPublicClient({ transport: failoverTransport([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]) });
@@ -296,6 +303,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       watcherHealthy: () => watcherHandle?.isHealthy(new Date()),
       intelligence: () => bridge.intelligenceRepository(),
       gasAlerts: () => bridge.gasAlertRepository(),
+      ...(portfolioProvider ? { portfolio: portfolioProvider } : {}),
       ...(fire ? { fire, fireSchedulesRepository: () => bridge.fireScheduleRepository() } : {}),
     });
     const router = new TelegramCommandRouter({

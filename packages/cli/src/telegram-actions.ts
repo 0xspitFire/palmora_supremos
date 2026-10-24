@@ -19,6 +19,7 @@ import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion } from './host-facts.js';
+import { PORTFOLIO_CHAINS, type PortfolioProvider } from './portfolio-provider.js';
 import { scheduleConfirmationDigest, type FireWiring } from './fire-wiring.js';
 
 /**
@@ -66,6 +67,8 @@ export interface TelegramActionDeps {
   /** T-066: the owner's fee alerts. */
   gasAlerts(): GasAlertRepository;
   /** T-067: `/fire` and `/schedule`. Absent in practice mode, where nothing would run them. */
+  /** T-068: the outside NFT data service (Blockscout). Absent when no key is stored. */
+  portfolio?: PortfolioProvider;
   fire?: FireWiring;
   fireSchedulesRepository?: () => FireScheduleRepository;
   /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
@@ -459,6 +462,37 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         blocks.push(`${entry.openingAt ? `${minutes(entry.openingAt)} UTC — ` : ''}${cleanName(entry.project.name) || 'Unnamed'}\n${text}`);
       }
       return blocks.length === 0 ? 'No drop on the calendar is on a chain MintBot can check.' : ['Upcoming drops against your wallets:', ...blocks].join('\n\n');
+    },
+    async portfolio() {
+      if (!deps.portfolio) throw new Error('PORTFOLIO_NOT_SET_UP: no Blockscout key is stored on the host, so /portfolio is off. /holdings still shows MintBot\'s own mints');
+      const provider = deps.portfolio;
+      const wallets = (await deps.walletList()).slice(0, 10);
+      if (wallets.length === 0) return 'No wallets are set up, so there is nothing to show.';
+      const lines = [`Everything your ${wallets.length} wallet(s) hold, from Blockscout (it can lag the chain by a minute or two; /holdings reads MintBot's own mints straight from the chain):`];
+      let asOf: Date | undefined;
+      for (const chainId of PORTFOLIO_CHAINS) {
+        const rows = await Promise.all(wallets.map(async (wallet) => { try { return { wallet, ...(await provider.list(chainId, wallet)) }; } catch (error) { return { wallet, failed: (error instanceof Error ? error.message : '').split(':')[0] ?? 'PORTFOLIO_UNAVAILABLE' }; } }));
+        const total = rows.reduce((sum, row) => sum + ('items' in row ? row.items.reduce((count, item) => count + item.amount, 0n) : 0n), 0n);
+        lines.push('', `${chainName(chainId)}: ${total} NFT(s)`);
+        const grouped = new Map<string, { name: string; count: bigint }>();
+        for (const row of rows) {
+          if ('failed' in row) { lines.push(`• ${short(row.wallet)} could not be read (${row.failed})`); continue; }
+          asOf = asOf && asOf > row.asOf ? asOf : row.asOf;
+          if (row.truncated) lines.push(`• ${short(row.wallet)}: only the first pages were read, so its list is partial`);
+          for (const item of row.items) {
+            const key = item.contract ?? 'unknown';
+            const entry = grouped.get(key) ?? { name: cleanName(item.name) ?? (item.contract ? short(item.contract) : 'unknown collection'), count: 0n };
+            entry.count += item.amount;
+            grouped.set(key, entry);
+          }
+        }
+        const top = [...grouped.values()].sort((left, right) => (right.count > left.count ? 1 : right.count < left.count ? -1 : 0)).slice(0, 12);
+        lines.push(...top.map((entry) => `  ${entry.name} × ${entry.count}`));
+        if (grouped.size > top.length) lines.push(`  …and ${grouped.size - top.length} more collection(s)`);
+      }
+      lines.push('', 'Base is not covered by the free Blockscout plan; /holdings shows MintBot\'s Base mints from the chain.');
+      if (asOf) lines.push(`As of ${minutes(asOf.toISOString())} UTC (results are kept 5 minutes).`);
+      return lines.join('\n');
     },
     async holdings() {
       const state = deps.store.snapshot();

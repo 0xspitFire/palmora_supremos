@@ -78,6 +78,8 @@ export interface TelegramActions {
   eligible(): Promise<string>;
   activity(): Promise<string>;
   holdings(): Promise<string>;
+  /** T-068: every NFT the owner's wallets hold on Ethereum and Robinhood, from the outside data service. */
+  portfolio(): Promise<string>;
   gasAlerts(): Promise<string>;
   gasAlertSet(chain: string, direction: string, gwei: number): Promise<string>;
   gasAlertRemove(id: string): Promise<string>;
@@ -158,6 +160,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   eligible: { tier: 'read', roles: OWNER, usage: '/eligible', help: 'Upcoming drops against your wallets' },
   activity: { tier: 'read', roles: OWNER, usage: '/activity', help: 'Recent mints by wallets you track' },
   holdings: { tier: 'read', roles: OWNER, usage: '/holdings', help: 'NFTs your wallets hold from MintBot mints' },
+  portfolio: { tier: 'read', roles: OWNER, usage: '/portfolio', help: 'Every NFT your wallets hold (Ethereum, Robinhood)' },
   gasalerts: { tier: 'read', roles: OWNER, usage: '/gasalerts', help: 'Your fee alerts' },
   gasalert: { tier: 'change', roles: OWNER, usage: '/gasalert <chain> <below|above> <gwei>  or  /gasalert remove <id>', help: 'Add or remove a fee alert' },
   invite: { tier: 'admin', roles: OWNER, usage: '/invite', help: 'One-time code for a friend (viewer, 24 hours)' },
@@ -356,6 +359,7 @@ export class TelegramCommandRouter {
       case 'eligible': return reply(await a.eligible());
       case 'activity': return reply(await a.activity());
       case 'holdings': return reply(await a.holdings());
+      case 'portfolio': return reply(await a.portfolio());
       case 'gasalerts': return reply(await a.gasAlerts());
       case 'gasalert': return reply(args[0]?.toLowerCase() === 'remove' ? await a.gasAlertRemove(required(args[1], 'alert id')) : await a.gasAlertSet(required(args[0], 'chain'), required(args[1], 'below or above'), requiredNumber(args[2], 'gwei')));
       case 'track': return reply(await a.track(required(args[0], 'address'), args.slice(1).join(' ') || undefined));
