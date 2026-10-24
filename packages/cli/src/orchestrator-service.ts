@@ -36,7 +36,9 @@ import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './f
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
-import { chainRpcSecretNames } from '@mint-bot/engine';
+import { chainRpcSecretNames, failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
+import { createPublicClient, formatGwei } from 'viem';
+import { startGasAlerts } from './gas-alert-service.js';
 import { startLiveRequestPoller } from './live-request.js';
 
 export interface RunningOrchestratorService {
@@ -225,6 +227,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   // T-061: the command router, once the watcher (read by /wallets and the coordinator) exists. Its application is not the read-only
   // one, so /confirm records the owner's approval exactly as `live-request create` does; only the owner's commands reach it.
   let telegramCommands: { stop(): void } | undefined;
+  let gasAlertChecker: { stop(): void } | undefined;
   if (telegramCommandSetup) {
     const { api, access, ownerUserId, totpKey } = telegramCommandSetup;
     const bridge = runtime.store as CanonicalStoreBridge;
@@ -245,6 +248,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       watchedWallets: (chainId) => watchConfig?.targets.filter((target) => target.chainId === chainId).map((target) => target.address) ?? [],
       watcherHealthy: () => watcherHandle?.isHealthy(new Date()),
       intelligence: () => bridge.intelligenceRepository(),
+      gasAlerts: () => bridge.gasAlertRepository(),
     });
     const router = new TelegramCommandRouter({
       api,
@@ -257,6 +261,23 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       log: (event, fields) => logger.warn({ event, ...fields }, event),
     });
     telegramCommands = startTelegramCommands({ api, offsets: access, router, log: (event, fields) => logger.warn({ event, ...fields }, event) });
+    // T-066: the owner's fee alerts. It only reads each chain's gas price and messages the owner when it crosses a threshold.
+    const gasClients = new Map<number, ReturnType<typeof createPublicClient>>();
+    gasAlertChecker = startGasAlerts({
+      alerts: () => bridge.gasAlertRepository().active(),
+      gasGwei: async (chainId) => {
+        let reader = gasClients.get(chainId);
+        if (!reader) {
+          const endpoints = [...(await resolveChainConfigFromSecrets(chainId as 1 | 8453 | 4663, 'mainnet', secretRoot)).rpcEndpoints];
+          if (endpoints.length === 0) return undefined;
+          reader = createPublicClient({ transport: failoverTransport(endpoints) });
+          gasClients.set(chainId, reader);
+        }
+        return Number(formatGwei(await reader.getGasPrice()));
+      },
+      alert: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },
+      log: (event, fields) => logger.warn({ event, ...fields }, event),
+    });
     logger.info({ event: 'telegram_commands_started', viewers: access.activeUsers().length }, 'owner commands over Telegram started');
   }
   // Scheduled encrypted backups, only when the owner has put BACKUP_ENCRYPTION_KEY in the secret store.
@@ -318,6 +339,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     fleetWatcher?.stop();
     liveRequests?.stop();
     telegramCommands?.stop();
+    gasAlertChecker?.stop();
     backups?.stop();
     await orchestrator.stop();
     await http.stop();

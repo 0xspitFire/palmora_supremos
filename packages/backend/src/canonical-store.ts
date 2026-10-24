@@ -14,7 +14,7 @@ import type {
   SqliteDatabase,
   TransactionIntentRecord,
 } from '@mint-bot/database';
-import { IntelligenceRepository, TelegramAccessRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
+import { GasAlertRepository, IntelligenceRepository, TelegramAccessRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
 import type {
   AttemptRecord,
   BackendState,
@@ -481,6 +481,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   /** Watched addresses and discovery cursors (migration 022); never custody data. */
   public intelligenceRepository(): IntelligenceRepository {
     return new IntelligenceRepository(this.db, this.now);
+  }
+
+  /** T-066: the owner's fee alerts (migration 035). */
+  public gasAlertRepository(): GasAlertRepository {
+    return new GasAlertRepository(this.db, this.now);
   }
 
   /** T-061 (D-063): Telegram viewers, invites, the owner's unlocked session and the polling position (migration 033). */

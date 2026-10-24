@@ -60,6 +60,17 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(service).toContain('telegramCommands?.stop()');
   });
 
+  it('the fee-alert checker and the Telegram menu start only with the owner commands, and stop with the service (T-066)', () => {
+    const wiring = service.slice(service.indexOf('if (telegramCommandSetup) {'), service.indexOf('// Scheduled encrypted backups'));
+    expect(wiring).toContain('gasAlertChecker = startGasAlerts({');
+    expect(wiring).toContain("alerts: () => bridge.gasAlertRepository().active()");
+    expect(wiring).toContain("kind: 'status'");
+    expect(service).toContain('gasAlertChecker?.stop()');
+    expect(service.indexOf('gasAlertChecker = startGasAlerts')).toBeGreaterThan(service.indexOf('if (telegramCommandSetup) {'));
+    const loop = readFileSync(join(here, 'telegram-command-service.ts'), 'utf8');
+    expect(loop).toContain('await options.router.registerMenus?.()');
+  });
+
   it('a dry-run service never builds it', () => {
     const block = service.slice(service.indexOf('const runtime = await createCliRuntime'), service.indexOf('const metrics = new MetricsRegistry()'));
     expect(block).toContain("config.mode === 'host'");
