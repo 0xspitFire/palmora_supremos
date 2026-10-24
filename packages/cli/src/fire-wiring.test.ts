@@ -76,6 +76,17 @@ describe('/fire', () => {
     } finally { await cleanup(t.directory); }
   });
 
+  it('a tap is refused when the campaign changed since the preview', async () => {
+    const t = await setup();
+    try {
+      const preview = await t.actions.firePreview('campaign_abcdef12', 'all', 0.2);
+      expect(preview.digest).toMatch(/^[0-9a-f]{64}$/);
+      await expect(t.actions.fireNow('campaign_abcdef12', A, 0.2, 'f'.repeat(64))).rejects.toThrow('CAMPAIGN_CHANGED');
+      expect(t.requests).toEqual([]);
+      await expect(t.actions.fireNow('campaign_abcdef12', A, 0.2, preview.digest)).resolves.toContain('sent');
+    } finally { await cleanup(t.directory); }
+  });
+
   it('a wallet that fails its test mint is left out and named; the others still go', async () => {
     const t = await setup({ failing: [B] });
     try {

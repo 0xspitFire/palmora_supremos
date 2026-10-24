@@ -356,9 +356,10 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const wallets = await wiring.wallets(walletsText);
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, text: `The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.\n${wiring.describe(target, wallets, maxFeeGwei)}` };
+      return { wallets, digest: wiring.campaignDigest(target), text: `The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.\n${wiring.describe(target, wallets, maxFeeGwei)}` };
     },
-    async fireNow(campaignId, walletsText, maxFeeGwei) {
+    async fireNow(campaignId, walletsText, maxFeeGwei, digest) {
+      if (digest !== undefined && fireWiring().campaignDigest(campaign(campaignId)) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; send /fire again');
       const result = await fireWiring().fireNow(campaignId, await fireWiring().wallets(walletsText), maxFeeGwei);
       return [`Request ${result.requestId} sent for ${result.wallets.length} wallet(s); the service arms and runs it within seconds. Follow it with /requests and /runs. /kill stops everything.`, ...result.skipped.map((item) => `✗ ${short(item.wallet)} skipped: ${item.why}`)].join('\n');
     },

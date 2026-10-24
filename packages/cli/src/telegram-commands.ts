@@ -62,8 +62,9 @@ export interface TelegramActions {
   /** Cancels a request the service has not started, or a scheduled mint (id starting `fire_schedule_` or its short form). */
   cancel(requestId: string): Promise<string>;
   /** T-067 (D-067): the preview of an attended fire; throws when the mint is not open or anything is not ready. */
-  firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[] }>;
-  fireNow(campaignId: string, wallets: string, maxFeeGwei: number): Promise<string>;
+  firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[]; digest?: string }>;
+  /** `digest` is the campaign's digest at the preview; the tap is refused if the campaign changed since. */
+  fireNow(campaignId: string, wallets: string, maxFeeGwei: number, digest?: string): Promise<string>;
   /** `from` and `until` are the resolved ISO times, so a relative time such as `+2h` means the same at `/confirm`. */
   schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[]; from: string; until: string }>;
   scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string): Promise<string>;
@@ -189,7 +190,7 @@ export class TelegramCommandRouter {
   private readonly inviteLifetimeMs: number;
   private readonly confirmTaps = new Map<string, number>();
   private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string } }>();
-  private readonly fireTaps = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number }>();
+  private readonly fireTaps = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; digest?: string }>();
   private readonly joinAttempts = new Map<string, number[]>();
 
   public constructor(private readonly options: TelegramRouterOptions) {
@@ -323,7 +324,7 @@ export class TelegramCommandRouter {
         const preview = await a.firePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei);
         this.prune();
         const nonce = randomBytes(9).toString('hex');
-        this.fireTaps.set(nonce, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime() });
+        this.fireTaps.set(nonce, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), ...(preview.digest ? { digest: preview.digest } : {}) });
         return reply(`${preview.text}\n\nTap within 2 minutes to test, approve and mint now.`, [[{ text: 'Yes, mint now', callback_data: `/tap_fire_${nonce}` }]]);
       }
       case 'schedule': {
@@ -444,7 +445,7 @@ export class TelegramCommandRouter {
         return;
       }
       this.fireTaps.delete(nonce);
-      await this.reply(incoming, await this.options.actions.fireNow(tap.campaignId, tap.wallets, tap.maxFeeGwei));
+      await this.reply(incoming, await this.options.actions.fireNow(tap.campaignId, tap.wallets, tap.maxFeeGwei, tap.digest));
       await this.record('owner', incoming, 'fire', 'ok');
     } catch (error) {
       this.fireTaps.delete(nonce);

@@ -256,6 +256,14 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       kick: () => { void liveRequests?.tick(); },
     }) : undefined;
     if (fire) {
+      // A schedule claimed before a crash may never have reached the request: tell the owner once at start (D-067 review).
+      try {
+        const results = new Set(runtime.store.snapshot().events.filter((event) => event.type === 'fire_schedule_result' && (event.data['state'] === 'fired' || event.data['state'] === 'failed')).map((event) => String(event.data['scheduleId'])));
+        const dayAgo = Date.now() - 24 * 3_600_000;
+        for (const row of bridge.fireScheduleRepository().recent(10)) {
+          if (row.outcome === 'started' && Date.parse(row.claimedAt ?? '') > dayAgo && !results.has(row.id)) void alerts.intelligence({ kind: 'status', dedupe: `fire-schedule-unknown:${row.id}`, text: `Scheduled mint ${row.id.slice(-6)} was started but the service stopped before it reported. Check /requests and /runs before doing anything else.`, priority: 'immediate' }).catch(() => undefined);
+        }
+      } catch { /* a failed check never stops the service */ }
       fireScheduler = startFireScheduler({
         schedules: () => bridge.fireScheduleRepository().unclaimed(),
         claim: (scheduleId, outcome) => bridge.fireScheduleRepository().claim(scheduleId, outcome),
