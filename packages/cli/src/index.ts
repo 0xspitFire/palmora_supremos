@@ -1020,7 +1020,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         process.stdout.write(`${json(outcome.recorded ? { state: 'Recorded', message: `Live readiness recorded. It is good until ${outcome.expiresAt}; approve, arm and run before then, or record it again.`, expiresAt: outcome.expiresAt } : { state: 'NotReady', message: `${outcome.failures.length} check(s) failed, so nothing was recorded.`, failures: outcome.failures })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
-  .command('live-plan','Read-only: is a FREE Ethereum or Base mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
+  .command('live-plan','Read-only: is a FREE Ethereum, Base or Robinhood mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'base', 'robinhood'] as const, default: 'ethereum' })
     .option('contract', { type: 'string', demandOption: true })
     .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS; for Robinhood, the Turnkey wallets)' })
@@ -1043,7 +1043,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         process.stdout.write(`${json({ ...planned.plan, ...(planned.phrase ? { confirmationPhrase: planned.phrase, planningMaxFeeGwei: planned.planningMaxFeeGwei } : {}) })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
-  .command('live-prepare', 'Record a live FREE Ethereum or Base campaign from a ready live-plan. Spends nothing; approve, arm and run are still separate steps', (args) => args
+  .command('live-prepare', 'Record a live FREE Ethereum, Base or Robinhood campaign from a ready live-plan. Spends nothing; approve, arm and run are still separate steps', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'base', 'robinhood'] as const, default: 'ethereum' })
     .option('contract', { type: 'string', demandOption: true })
     .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS; for Robinhood, the Turnkey wallets)' })

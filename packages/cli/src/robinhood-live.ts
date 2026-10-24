@@ -31,8 +31,10 @@ export interface RobinhoodPlan {
 
 const walletReady = (wallet: DryRunWallet): { ok: boolean; why: string } => {
   if (wallet.simulation !== 'passed') return { ok: false, why: wallet.reason ?? 'the test mint failed' };
+  // Unknown is not ready: a balance or a gas cost that could not be read must not count as fine.
+  if (wallet.hasEnoughForGas === null) return { ok: false, why: 'its ETH balance or gas cost on Robinhood could not be read' };
   if (wallet.hasEnoughForGas === false) return { ok: false, why: `it holds too little ETH on Robinhood (${wallet.balanceEth ?? '?'} ETH)` };
-  if (wallet.withinPerWalletCap === false) return { ok: false, why: `its gas cost (${wallet.estimatedCostEth ?? '?'} ETH) is above the 0.0002 ETH per-wallet cap` };
+  if (wallet.withinPerWalletCap !== true) return { ok: false, why: wallet.withinPerWalletCap === null ? 'its gas cost on Robinhood could not be estimated' : `its gas cost (${wallet.estimatedCostEth ?? '?'} ETH) is above the 0.0002 ETH per-wallet cap` };
   return { ok: true, why: '' };
 };
 
@@ -52,6 +54,8 @@ export function buildRobinhoodPlan(report: DryRunReport, context: { candidates: 
     if (Number(drop.priceEth) > 0) blockers.push('This drop is paid. Paid Robinhood mints are blocked, so only free drops can be prepared.');
     if (drop.status === 'ended') blockers.push('This mint has ended.');
     if (context.quantity > drop.maxPerWallet && drop.maxPerWallet > 0) blockers.push(`The drop allows at most ${drop.maxPerWallet} per wallet; ${context.quantity} was asked for.`);
+    // The dry run never tests more than the drop allows (and at least 1): a plan for a different quantity would pass here and fail later.
+    else if (report.quantity !== context.quantity) blockers.push(`The drop's limit leaves room for ${report.quantity} per wallet, not the ${context.quantity} asked for.`);
   }
   const open = drop?.status === 'open';
   const notReady: Array<{ wallet: string; why: string }> = [];

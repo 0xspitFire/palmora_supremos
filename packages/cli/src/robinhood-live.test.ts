@@ -55,6 +55,22 @@ describe('Robinhood plan', () => {
     expect(plan(report({}, [wallet(A, { withinPerWalletCap: false })])).walletsNotReady[0]!.why).toContain('above the 0.0002 ETH');
   });
 
+  it('does not count a wallet whose balance or gas cost could not be read as ready (fail closed)', () => {
+    const unknownBalance = plan(report({}, [wallet(A, { hasEnoughForGas: null, balanceEth: null })]));
+    expect(unknownBalance.verdict).toBe('not_ready');
+    expect(unknownBalance.walletsNotReady[0]!.why).toContain('could not be read');
+    const unknownCost = plan(report({}, [wallet(A, { withinPerWalletCap: null, estimatedCostEth: null })]));
+    expect(unknownCost.verdict).toBe('not_ready');
+    expect(unknownCost.walletsNotReady[0]!.why).toContain('could not be estimated');
+  });
+
+  it('blocks a quantity the drop cannot allow, instead of failing later at the test mint', () => {
+    const open = report().drop!;
+    const clamped = plan(report({ quantity: 1, drop: { ...open, maxPerWallet: 0 } }), { quantity: 2 });
+    expect(clamped.verdict).toBe('not_ready');
+    expect(clamped.blockers.join(' ')).toContain('leaves room for 1 per wallet, not the 2');
+  });
+
   it('refuses more wallets than the Robinhood free budget allows', () => {
     const many = Array.from({ length: 11 }, (_, index) => `0x${(index + 1).toString(16).padStart(40, '0')}`);
     const result = buildRobinhoodPlan(report({}, many.map((address) => wallet(address))), { candidates: many, killSwitchPresent: true, quantity: 1 });
