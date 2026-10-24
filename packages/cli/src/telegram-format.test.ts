@@ -9,12 +9,22 @@ const CAMPAIGN = 'cmp_7f3a1c2e-1111-4222-8333-444455556666';
 describe('copy formatting', () => {
   it('wraps ids, addresses and whole command lines, and leaves other text alone', () => {
     const text = toCopyableHtml(`Campaign recorded: ${CAMPAIGN}\nWallet ${ADDRESS} holds 1\nTo send it, within 15 minutes:\n/confirm LIVE-REQUEST abc12345 1-WALLETS 0.0002 0.2-GWEI\nRun run_0a1b2c3d-aaaa-bbbb-cccc-ddddeeeeffff and live_request_0123456789abcdef`);
-    expect(text).toContain(`Campaign recorded: <code>${CAMPAIGN}</code>`);
+    expect(text).toContain(`<b>Campaign Recorded:</b> <code>${CAMPAIGN}</code>`);
     expect(text).toContain(`Wallet <code>${ADDRESS}</code> holds 1`);
     expect(text).toContain('\n<code>/confirm LIVE-REQUEST abc12345 1-WALLETS 0.0002 0.2-GWEI</code>\n');
     expect(text).toContain('<code>run_0a1b2c3d-aaaa-bbbb-cccc-ddddeeeeffff</code>');
     expect(text).toContain('<code>live_request_0123456789abcdef</code>');
     expect(text).toContain('To send it, within 15 minutes:');
+  });
+
+  it('bolds and capitalises the words before a colon, and leaves sentences, times and links alone (T-071)', () => {
+    expect(toCopyableHtml('Mode: LIVE (host)\nKill switch: ON (nothing can be spent)\nLive requests waiting: 0\nWhat to do:')).toBe('<b>Mode:</b> LIVE (host)\n<b>Kill Switch:</b> ON (nothing can be spent)\n<b>Live Requests Waiting:</b> 0\n<b>What To Do:</b>');
+    expect(toCopyableHtml('Ethereum:')).toBe('<b>Ethereum:</b>');
+    expect(toCopyableHtml('Not done: <b>x</b>')).toBe('<b>Not Done:</b> &lt;b&gt;x&lt;/b&gt;');
+    // Not labels: a sentence, a time, a link, a bullet, a line with digits before the colon.
+    for (const plain of ['Drop and wallets are ready: up to 2 wallets can mint', 'Sent 18:49:52 UTC, 0 s after it was blocked', 'See https://example.org/x', '• 0x3659…061e: it holds too little ETH', 'To send it, within 15 minutes:', 'Everything your 3 signing wallet(s) hold (x): y']) {
+      expect(toCopyableHtml(plain), plain).not.toContain('<b>');
+    }
   });
 
   it('does not wrap help lines or inline command mentions', () => {

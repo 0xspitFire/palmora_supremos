@@ -111,3 +111,4 @@ export { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereu
 export type { PersonalLiveProbes, ReadinessFailure, ReadinessOutcome } from './personal-live-readiness.js';
 export { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds } from './kill-switch-release.js';
 export type { KillSwitchStatus } from './kill-switch-release.js';
+export { titleCaseLabel } from './text-style.js';

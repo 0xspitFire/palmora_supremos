@@ -193,6 +193,8 @@ describe('Telegram actions', () => {
       try {
         const text = await actions.plan('robinhood', CONTRACT, undefined);
         expect(text).toContain('Drop and wallets are ready');
+        // Spaced into blocks (T-071): summary, window, wallets, notes, the command.
+        expect(text.split('\n\n').length).toBeGreaterThanOrEqual(3);
         expect(text).toContain(`/prepare robinhood ${CONTRACT} 1 PREPARE-LIVE-ROBINHOOD 2f7b94db QTY-1 2-WALLETS 0.0004`);
       } finally { await rm(directory, { recursive: true, force: true }); }
     });

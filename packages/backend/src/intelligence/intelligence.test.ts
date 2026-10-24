@@ -135,7 +135,7 @@ describe('DiscoveryService', () => {
     expect(result.calendarWritten).toBe(2);
     expect(events(t.store, 'alert_opening_soon')[0]?.data).toMatchObject({ priority: 'grouped' });
     expect(String(events(t.store, 'alert_opening_soon')[0]?.data.text)).toContain('Opens: Tue 29 Sep 12:20 UTC, in 20 min');
-    expect(String(events(t.store, 'alert_price_above_limit')[0]?.data.text)).toContain('Your limit: 0.0037 ETH per NFT');
+    expect(String(events(t.store, 'alert_price_above_limit')[0]?.data.text)).toContain('Your Limit: 0.0037 ETH per NFT');
     await t.discovery.tick();
     expect(events(t.store, 'alert_opening_soon')).toHaveLength(1);
   });
@@ -197,7 +197,7 @@ describe('ReadinessSweep', () => {
       expect.objectContaining({ wallet: W2, state: 'unfunded', topUpWei: '300000000000000' }),
     ]);
     const underfunded = String(events(t.store, 'alert_underfunded')[0]?.data.text);
-    expect(underfunded).toContain(`Top up: 0.0003 ETH to ${W2}`);
+    expect(underfunded).toContain(`Top Up: 0.0003 ETH to ${W2}`);
     expect(String(events(t.store, 'alert_eligible_ready')[0]?.data.text)).toContain('You asked for at least 4 wallets');
   });
 

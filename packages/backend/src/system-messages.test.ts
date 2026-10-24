@@ -30,7 +30,7 @@ describe('system messages (T-030)', () => {
 
   it('spend cap: names the limit in words and the run, and says limits change only by the owner', () => {
     const { html } = render(spendCapCard({ notice: 'DAILY_SPEND_CAP_EXCEEDED', runId: 'run_9', at }));
-    expect(html).toContain('<b>Which limit:</b> <b>daily, per wallet</b>');
+    expect(html).toContain('<b>Which Limit:</b> <b>daily, per wallet</b>');
     expect(html).toContain('it would exceed your daily limit for one wallet [DAILY_SPEND_CAP_EXCEEDED]');
     expect(html).toContain('Limits change only by your own decision.');
     expect(render(spendCapCard({ at })).html).toContain('a spending limit was reached');
@@ -39,7 +39,7 @@ describe('system messages (T-030)', () => {
   it('kill switch released: attention, and tells the owner what to do if they did not do it', () => {
     const { html } = render(killReleasedCard());
     expect(html).toContain('KILL SWITCH RELEASED</b> · ATTENTION');
-    expect(html).toContain('<b>If you did not do this:</b> <b>engage the kill switch and check the host.</b>');
+    expect(html).toContain('<b>If You Did Not Do This:</b> <b>engage the kill switch and check the host.</b>');
   });
 
   it('blocked and failed run alerts say whether anything was sent', () => {
@@ -57,7 +57,7 @@ describe('system messages (T-030)', () => {
     expect(first).toContain('<b>MINTBOT STARTED</b> · INFO');
     expect(first).toContain('<b>Mode:</b> <b>read-only. Nothing will be bought or sent.</b>');
     expect(first).toContain('<b>Watching:</b> <b>90 watched wallets on ETHEREUM SeaDrop mints</b>');
-    expect(first).toContain('<b>Your wallets checked:</b> <b>4 wallets for mint readiness</b>');
+    expect(first).toContain('<b>Your Wallets Checked:</b> <b>4 wallets for mint readiness</b>');
     expect(first).toContain('<b>Start:</b> first start');
     expect(render(startCard({ mode: 'read-only', watched: 1, ownWallets: 1, at: NOW })).html).toContain('1 watched wallet on ETHEREUM');
     expect(first).toContain('<b>Version:</b> a1b2c3d4');
@@ -79,12 +79,12 @@ describe('system messages (T-030)', () => {
   it('daily check-in: uptime, counts, last good scan with its block, delivery state and the latest alert', () => {
     const { html } = render(checkIn());
     expect(html).toContain('<b>DAILY CHECK-IN</b> · INFO');
-    expect(html).toContain('<b>Running since:</b> Thu 1 Oct 11:02 UTC (2 days 3 h)');
-    expect(html).toContain('<b>Last 24 hours:</b> <b>12 mints scored · 3 upcoming mints on the calendar · 5 alerts</b>');
-    expect(html).toContain('<b>Chain scan:</b> last successful scan 2 min ago, block 24,631,002');
+    expect(html).toContain('<b>Running Since:</b> Thu 1 Oct 11:02 UTC (2 days 3 h)');
+    expect(html).toContain('<b>Last 24 Hours:</b> <b>12 mints scored · 3 upcoming mints on the calendar · 5 alerts</b>');
+    expect(html).toContain('<b>Chain Scan:</b> last successful scan 2 min ago, block 24,631,002');
     expect(html).toContain('<b>Telegram:</b> delivering · failed deliveries in 24 h: 0');
-    expect(html).toContain('<b>Health warnings:</b> none in 24 h');
-    expect(html).toContain('<b>Latest alert:</b> WORTH A LOOK · Pudgy Example, 2 h 0 min ago');
+    expect(html).toContain('<b>Health Warnings:</b> none in 24 h');
+    expect(html).toContain('<b>Latest Alert:</b> WORTH A LOOK · Pudgy Example, 2 h 0 min ago');
     expect(html).not.toContain('What to do');
   });
 
@@ -113,6 +113,6 @@ describe('system messages (T-030)', () => {
   it('recovered message: info, with how long it lasted', () => {
     const { html } = render(recoveredCard('scan_stalled', { since: new Date(NOW.getTime() - 47 * 60_000), now: NOW }));
     expect(html).toContain('<b>RECOVERED · CHAIN SCAN STALLED</b> · INFO');
-    expect(html).toContain('<b>It lasted:</b> <b>47 min</b>');
+    expect(html).toContain('<b>It Lasted:</b> <b>47 min</b>');
   });
 });
