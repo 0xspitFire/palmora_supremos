@@ -15,7 +15,7 @@ const B = '0x81c104dcb898416fd4f81ead091dba5b8f46f37a';
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean } = {}) {
+async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -30,7 +30,7 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
   const requests: Array<Record<string, unknown>> = [];
   const approvals: unknown[] = [];
   const evidence = { id: 'verification_abc', chainId: 4663, status: 'accepted', executionEnabled: true, checkedAt: '2026-10-25T11:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', sourceBlock: 1n, endpointIdentity: 'robinhood-sequencer' };
-  const campaigns = [{ id: 'campaign_abcdef12', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n, spendPolicy: { maxRunWei: 10n ** 18n, dailyCapWei: 10n ** 18n, gasCeilingWei: 10n ** 18n }, chainVerification: { chainId: 4663, status: 'verified', seaDropCompatible: true }, state: 'draft', createdAt: 'x', updatedAt: 'x', broadcastMode: 'sequencer' }];
+  const campaigns = [{ id: 'campaign_abcdef12', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n, spendPolicy: { maxRunWei: options.maxRunWei ?? 10n ** 18n, dailyCapWei: 10n ** 18n, gasCeilingWei: 10n ** 18n }, chainVerification: { chainId: 4663, status: 'verified', seaDropCompatible: true }, state: 'draft', createdAt: 'x', updatedAt: 'x', broadcastMode: 'sequencer' }];
   const store = {
     snapshot: () => ({ events: [], campaigns, simulations, chainEvidence: [evidence], runs: [], killed: false }),
     transaction: async (mutate: (state: { simulations: unknown[] }) => void) => { mutate({ simulations }); },
@@ -49,9 +49,9 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
     robinhoodDryRun, robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }), kick: () => { kicks.push('kick'); }, now: () => NOW,
   });
   const base: TelegramActionDeps = {
-    mode: 'host', custody: 'turnkey', store: store as never, application: {} as never, coordinator: { kill: async () => undefined }, projectRoot: '/nonexistent', secretRoot: '/nonexistent', killSwitchPath,
+    mode: 'host', custody: 'turnkey', store: store as never, application: { command: async () => ({ id: 'approval_1' }) } as never, coordinator: { kill: async () => undefined }, projectRoot: '/nonexistent', secretRoot: '/nonexistent', killSwitchPath,
     backupStatusPath: '/nonexistent/status.json', startedAt: NOW, walletList: async () => [A, B], watchedWallets: () => [], watcherHealthy: () => undefined, intelligence: () => ({}) as never, gasAlerts: () => ({}) as never,
-    fire, fireSchedulesRepository: () => schedules, now: () => NOW,
+    fire, fireSchedulesRepository: () => schedules, now: () => NOW, robinhoodDryRun, robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }),
   };
   return { actions: createTelegramActions(base), fire, schedules, simulations, requests, approvals, kicks, directory, practice: createTelegramActions({ ...base, mode: 'dry-run' }) };
 }
@@ -116,6 +116,55 @@ describe('/fire', () => {
       expect(open.requests).toHaveLength(1);
       expect([early, ended, killed].flatMap((item) => item.requests)).toEqual([]);
     } finally { await Promise.all([early, ended, killed, open].map((item) => cleanup(item.directory))); }
+  });
+});
+
+describe('a campaign sized for fewer wallets than pass (the screenshot bug)', () => {
+  const ONE = 200_000_000_000_000n;
+
+  it('/fire uses only as many wallets as the campaign was sized for and says the others were left out, instead of failing', async () => {
+    const t = await setup({ maxRunWei: ONE });
+    try {
+      const preview = await t.actions.firePreview('campaign_abcdef12', 'all', 0.2);
+      expect(preview.wallets).toEqual([A]);
+      expect(preview.text).toContain('sized for 1 wallet(s), so only the first 1 are used');
+      const text = await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(text).toContain('Request');
+      expect(text).toContain('sized for fewer wallets');
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [A] })]);
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('simulate then request: the test mints, the wallet list (at most the sized number), a clear refusal for too many, a request only with the reviewed phrase', async () => {
+    const t = await setup({ maxRunWei: ONE });
+    try {
+      const simulated = await t.actions.simulateCampaign('campaign_abcdef12');
+      expect(simulated).toMatchObject({ recorded: [A, B], sized: 1 });
+      expect(simulated.text).toContain('2 wallet(s) passed the test mint');
+      expect(simulated.text).toContain('sized for 1 wallet(s), so a request uses at most 1');
+      expect(simulated.text).not.toContain('/request');
+      expect((await t.actions.requestCandidates()).map((item) => item.id)).toEqual(['campaign_abcdef12']);
+      expect(await t.actions.requestWallets('campaign_abcdef12')).toEqual({ wallets: [A, B], sized: 1 });
+      await expect(t.actions.requestPreview('campaign_abcdef12', `${A},${B}`, 0.2)).rejects.toThrow(/PLANNED_EXPOSURE_INVALID: this campaign was sized for 1 wallet\(s\); you chose 2/);
+      const preview = await t.actions.requestPreview('campaign_abcdef12', A, 0.2);
+      await expect(t.actions.requestSend('campaign_abcdef12', A, 0.2, 'LIVE-REQUEST wrong')).rejects.toThrow('PLAN_CHANGED');
+      expect(t.requests).toEqual([]);
+      await expect(t.actions.requestSend('campaign_abcdef12', A, 0.2, preview.phrase)).resolves.toContain('Request');
+      expect(t.requests).toEqual([expect.objectContaining({ campaignId: 'campaign_abcdef12', wallets: [A] })]);
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('what can be cancelled lists open schedules and unclaimed requests, and cancels one by its id', async () => {
+    const t = await setup({ maxRunWei: ONE, status: 'upcoming' });
+    try {
+      expect(await t.actions.cancellables()).toEqual([]);
+      const preview = await t.actions.schedulePreview('campaign_abcdef12', A, 0.2, ...WINDOW);
+      await t.actions.scheduleCreate('campaign_abcdef12', A, 0.2, ...WINDOW, preview.phrase);
+      const [item] = await t.actions.cancellables();
+      expect(item!.label).toContain('Schedule');
+      expect(await t.actions.cancel(item!.id)).toContain('cancelled');
+      expect(await t.actions.cancellables()).toEqual([]);
+    } finally { await cleanup(t.directory); }
   });
 });
 

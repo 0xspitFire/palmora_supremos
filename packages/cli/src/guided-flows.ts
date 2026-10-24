@@ -2,13 +2,15 @@ import { randomBytes } from 'node:crypto';
 import type { InlineButton } from './telegram-api.js';
 
 /**
- * T-073 (D-069): guided flows for the mint steps, driven by buttons, with a typed "Custom" entry wherever there are presets.
- * Orders follow how the commands work today: prepare (kill switch ON, no unlock) → release (unlock) → fire or schedule (kill switch OFF, unlock).
+ * T-073/T-074 (D-069): guided flows for the mint steps, driven by buttons, with a typed "Custom" entry wherever there are presets.
+ * Orders follow how the commands work today: prepare (kill switch ON, no unlock) → test mints when the mint is open → release (unlock)
+ * → fire, or send a request, or schedule (kill switch OFF, unlock). Nothing has to be copied from one message into the next.
  *
- * Every button is the owner's, expires after 15 minutes, and carries only a one-time flow id, a step number and a short key:
+ * Every button is the owner's, expires after 15 minutes idle, and carries only a one-time flow id, a step number and a short key:
  * the values (a campaign, a wallet, a fee) live in memory here and are rebuilt by the server at the final tap. The final tap
- * calls the same action as the typed command, with the confirmation phrase built by the server from a fresh plan. A custom
- * entry is checked before it is used; a wrong one is refused in plain words and the flow stays where it was.
+ * calls the same action as the typed command, with the confirmation phrase built by the server from a fresh plan and compared with
+ * the one the owner reviewed. A custom entry is checked before it is used; a wrong one is refused in plain words and the flow stays
+ * where it was.
  */
 export type ChainKey = 'ethereum' | 'base' | 'robinhood';
 /** `phrase` is the confirmation phrase the server built for exactly these figures; the final tap must still produce the same one. */
@@ -21,24 +23,56 @@ export interface GuidedActions {
   guidedChains(): Promise<Array<{ key: ChainKey; name: string }>>;
   guidedPlan(chain: string, contract: string, quantity: number | undefined, walletCount: number | undefined): Promise<GuidedPlan>;
   /** `expectedPhrase` is the phrase of the plan the owner reviewed; a changed plan is refused. */
-  guidedPrepare(chain: string, contract: string, quantity: number, wallets: string[], expectedPhrase?: string): Promise<string>;
+  guidedPrepare(chain: string, contract: string, quantity: number, wallets: string[], expectedPhrase?: string): Promise<{ text: string; campaignId: string | undefined }>;
   /** `phrase` names the kill engagement being looked at (its time); the release tap is refused if the switch was engaged again since. */
   releaseStatus(): Promise<{ text: string; canRelease: boolean; phrase?: string }>;
   releaseNow(expectedPhrase?: string): Promise<string>;
   guidedCampaigns(): Promise<GuidedCampaign[]>;
   signingWallets(): Promise<string[]>;
   feeOptions(campaignId: string): Promise<FeeOptions>;
+  /** Records the test mints; says which wallets passed and how many wallets the campaign was sized for. */
+  simulateCampaign(campaignId: string): Promise<{ text: string; recorded: string[]; sized: number }>;
+  requestCandidates(): Promise<GuidedCampaign[]>;
+  requestWallets(campaignId: string): Promise<{ wallets: string[]; sized: number }>;
+  requestPreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; phrase: string; wallets: string[] }>;
+  /** `expectedPhrase` is the phrase of the preview the owner saw; a changed request is refused. */
+  requestSend(campaignId: string, wallets: string, maxFeeGwei: number, expectedPhrase: string): Promise<string>;
+  cancellables(): Promise<Array<{ id: string; label: string }>>;
+  cancel(id: string): Promise<string>;
+  funding(campaignId: string | undefined): Promise<string>;
+  recentRuns(): Promise<Array<{ id: string; label: string }>>;
+  run(runId: string): Promise<string>;
   firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[]; digest?: string }>;
   fireNow(campaignId: string, wallets: string, maxFeeGwei: number, digest?: string): Promise<string>;
   schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[]; from: string; until: string; digest?: string }>;
   scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string, digest?: string): Promise<string>;
 }
 
-export type FlowKind = 'prepare' | 'release' | 'fire' | 'schedule';
+export type FlowKind = 'prepare' | 'simulate' | 'release' | 'request' | 'fire' | 'schedule' | 'cancel' | 'funding' | 'run';
 export interface FlowReply { text: string; buttons?: InlineButton[][] }
 /** What the router records after a flow finishes its last action: the command name and `ok` or `refused:CODE`. */
 export interface FlowDone { command: FlowKind; outcome: string }
 export interface FlowResult { reply: FlowReply; done?: FlowDone }
+
+/** Values a command typed with all its arguments hands to a flow, so it shows the summary and its button instead of a phrase to copy. */
+export interface FlowPreset {
+  chain?: string; contract?: string;
+  campaign?: string; wallets?: string[] | 'all'; fee?: number; from?: string; until?: string;
+}
+
+type StepName = 'chain' | 'contract' | 'quantity' | 'count' | 'campaign' | 'wallets' | 'fee' | 'window' | 'pick' | 'review';
+const PLAN: Readonly<Record<FlowKind, readonly StepName[]>> = {
+  prepare: ['chain', 'contract', 'quantity', 'count', 'review'],
+  simulate: ['campaign', 'review'],
+  release: ['review'],
+  request: ['campaign', 'wallets', 'fee', 'review'],
+  fire: ['campaign', 'wallets', 'fee', 'review'],
+  schedule: ['campaign', 'wallets', 'fee', 'window', 'review'],
+  cancel: ['pick'],
+  funding: ['pick'],
+  run: ['pick'],
+};
+const NAMES: Readonly<Record<FlowKind, string>> = { prepare: 'Prepare A Live Campaign', simulate: 'Record Test Mints', release: 'Release The Kill Switch', request: 'Send A Live Request', fire: 'Fire A Campaign', schedule: 'Schedule A Mint', cancel: 'Cancel A Request Or Schedule', funding: 'Funding For A Campaign', run: 'Look At A Run' };
 
 interface Awaiting { field: 'contract' | 'quantity' | 'count' | 'wallets' | 'fee' | 'window' }
 interface Flow {
@@ -57,13 +91,13 @@ interface Flow {
 }
 
 export const FLOW_LIFETIME_MS = 15 * 60_000;
-/** The last tap (Release, Prepare, Fire Now, Store Schedule) is good for 2 minutes from the moment its summary is shown, like the kill and fire buttons. */
+/** The last tap (Release, Prepare, Record, Send Request, Fire Now, Store Schedule) is good for 2 minutes from the moment its summary is shown, like the kill and fire buttons. */
 export const CONFIRM_LIFETIME_MS = 2 * 60_000;
 const MAX_WRONG = 3;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const short = (address: string): string => `${address.slice(0, 6)}…${address.slice(-4)}`;
-const STEPS: Readonly<Record<FlowKind, number>> = { prepare: 5, release: 1, fire: 4, schedule: 5 };
-export const flowNeedsSession = (kind: FlowKind): boolean => kind !== 'prepare';
+/** Whether a tap needs the unlocked session: release, fire and schedule at every tap; a request only at its last tap (it is a read until then). */
+export const flowNeedsSession = (kind: FlowKind, key?: string): boolean => (kind === 'release' || kind === 'fire' || kind === 'schedule') || (kind === 'request' && key === 'go');
 
 export interface GuidedDeps {
   actions: GuidedActions;
@@ -74,6 +108,7 @@ export interface GuidedDeps {
 }
 
 type Choice = { label: string; value: unknown };
+const NO_LONGER_VALID = 'That button is no longer valid. Use the buttons on the latest message, or send the command again.';
 
 export class GuidedFlows {
   private flow: Flow | undefined;
@@ -94,10 +129,50 @@ export class GuidedFlows {
   /** Another command was sent: a flow no longer waits for typed text (its buttons still work). */
   public interrupt(): void { const flow = this.live(); if (flow) delete flow.awaiting; }
 
-  public async start(kind: FlowKind): Promise<FlowResult> {
-    const flow: Flow = { id: (this.deps.newId ?? (() => randomBytes(4).toString('hex')))(), kind, step: 0, touchedAt: this.deps.now().getTime(), wrong: 0, options: new Map(), data: {} };
+  private make(kind: FlowKind, step = 0, data: Record<string, unknown> = {}): Flow {
+    const flow: Flow = { id: (this.deps.newId ?? (() => randomBytes(4).toString('hex')))(), kind, step, touchedAt: this.deps.now().getTime(), wrong: 0, options: new Map(), data };
     this.flow = flow;
-    return this.render(flow);
+    return flow;
+  }
+
+  private name(flow: Flow): StepName { return PLAN[flow.kind][flow.step]!; }
+
+  public start(kind: FlowKind, preset?: FlowPreset): Promise<FlowResult> { return this.serial(() => this.begin(kind, preset)); }
+
+  private async begin(kind: FlowKind, preset?: FlowPreset): Promise<FlowResult> {
+    const flow = this.make(kind);
+    const d = flow.data as Record<string, any>;
+    try {
+      if (preset && kind === 'prepare' && preset.chain && preset.contract) {
+        d.chain = preset.chain;
+        flow.step = 1;
+        return await this.typed(flow, 'contract', preset.contract);
+      }
+      if (preset && kind === 'simulate' && preset.campaign) {
+        d.campaign = preset.campaign; d.campaignLabel = `campaign ${preset.campaign}`;
+        flow.step = 1;
+        return await this.render(flow);
+      }
+      if (preset && (kind === 'request' || kind === 'fire') && preset.campaign && preset.wallets && preset.fee !== undefined) {
+        d.campaign = preset.campaign; d.wallets = preset.wallets;
+        flow.step = 2;
+        return await this.takeFee(flow, preset.fee);
+      }
+      if (preset && kind === 'schedule' && preset.campaign && preset.wallets && preset.fee !== undefined && preset.from && preset.until) {
+        d.campaign = preset.campaign; d.wallets = preset.wallets; d.fee = preset.fee;
+        flow.step = 3;
+        return await this.takeWindow(flow, preset.from, preset.until);
+      }
+      return await this.render(flow);
+    } catch (error) { return this.failed(flow, error); }
+  }
+
+  /** `/simulate <campaign>` typed in full: record the test mints now, then go straight on to choosing the wallets for the request. */
+  public runSimulate(campaignId: string): Promise<FlowResult> {
+    return this.serial(async () => {
+      const flow = this.make('simulate', 1, { campaign: campaignId });
+      try { return await this.recordTestMints(campaignId); } catch (error) { return this.failed(flow, error); }
+    });
   }
 
   public cancel(): FlowResult { this.flow = undefined; return { reply: { text: 'Cancelled. Nothing was changed.' } }; }
@@ -136,8 +211,8 @@ export class GuidedFlows {
   private cb(flow: Flow, key: string): string { return `/f_${flow.id}_${flow.step}${key}`; }
   private cancelRow(flow: Flow): InlineButton[] { return [{ text: 'Cancel', callback_data: `/f_${flow.id}_${flow.step}x` }]; }
   private title(flow: Flow): string {
-    const names: Record<FlowKind, string> = { prepare: 'Prepare A Live Campaign', release: 'Release The Kill Switch', fire: 'Fire A Campaign', schedule: 'Schedule A Mint' };
-    return flow.kind === 'release' ? names.release : `${names[flow.kind]} · Step ${flow.step + 1} Of ${STEPS[flow.kind]}`;
+    const steps = PLAN[flow.kind].length;
+    return steps === 1 ? NAMES[flow.kind] : `${NAMES[flow.kind]} · Step ${flow.step + 1} Of ${steps}`;
   }
 
   /** Buttons for a list of choices (two per row), plus Custom when allowed, plus Cancel. Values stay here; the buttons carry only keys. */
@@ -157,68 +232,92 @@ export class GuidedFlows {
     return { reply: { text, buttons: [[{ text: 'Back To Choices', callback_data: this.cb(flow, 'bk') }, ...this.cancelRow(flow)]] } };
   }
 
+  private campaignChoices(flow: Flow, head: string, campaigns: GuidedCampaign[], none: string): FlowResult {
+    if (campaigns.length === 0) { this.flow = undefined; return { reply: { text: none } }; }
+    (flow.data as Record<string, unknown>).labels = Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign.label]));
+    const list = campaigns.map((campaign) => `• ${campaign.label} — ${campaign.note}`).join('\n');
+    return { reply: { text: `${head}\n\nChoose the campaign.\n\n${list}`, buttons: this.choices(flow, campaigns.map((campaign) => ({ label: campaign.label, value: campaign.id })), false) } };
+  }
+
   private async render(flow: Flow): Promise<FlowResult> {
     delete flow.awaiting;
     flow.customOk = false;
     delete flow.confirmAt;
     const head = this.title(flow);
     const d = flow.data as Record<string, any>;
-    if (flow.kind === 'release') {
-      const status = await this.deps.actions.releaseStatus();
-      d.releasePhrase = status.phrase;
-      flow.options.clear();
-      flow.confirmAt = this.deps.now().getTime();
-      const rows: InlineButton[][] = status.canRelease ? [[{ text: 'Release The Kill Switch', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] : [this.cancelRow(flow)];
-      return { reply: { text: `${head}\n\n${status.text}`, buttons: rows } };
-    }
-    if (flow.kind === 'prepare') {
-      if (flow.step === 0) {
-        const chains = await this.deps.actions.guidedChains();
+    const a = this.deps.actions;
+    switch (this.name(flow)) {
+      case 'chain': {
+        const chains = await a.guidedChains();
         return { reply: { text: `${head}\n\nChoose the chain. Only chains that are switched on are listed.`, buttons: this.choices(flow, chains.map((chain) => ({ label: chain.name, value: chain.key })), false) } };
       }
-      if (flow.step === 1) return this.ask(flow, 'contract', `${head}\n\nSend the contract address as a message (0x followed by 40 letters or digits).`);
-      if (flow.step === 2) {
+      case 'contract': return this.ask(flow, 'contract', `${head}\n\nSend the contract address as a message (0x followed by 40 letters or digits).`);
+      case 'quantity': {
         const plan = d.plan as GuidedPlan;
         const max = Math.max(1, plan.maxQuantity);
         const presets = Array.from({ length: Math.min(3, max) }, (_unused, index) => index + 1);
         return { reply: { text: `${head}\n\n${plan.text}\n\nHow many NFTs per wallet? The drop allows up to ${max}.`, buttons: this.choices(flow, presets.map((value) => ({ label: String(value), value })), true) } };
       }
-      if (flow.step === 3) {
-        const plan = d.plan as GuidedPlan;
-        const ready = plan.ready.length;
+      case 'count': {
+        const ready = (d.plan as GuidedPlan).ready.length;
         const presets: Choice[] = [...[1, 2].filter((value) => value < ready).map((value) => ({ label: `${value} wallet${value === 1 ? '' : 's'}`, value })), { label: `All ready (${ready})`, value: ready }];
-        return { reply: { text: `${head}\n\n${ready} wallet(s) are ready. How many should this campaign be sized for? (The campaign can never fire more wallets than this.)`, buttons: this.choices(flow, presets, ready > 1) } };
+        return { reply: { text: `${head}\n\n${ready} wallet(s) are ready. How many should this campaign be sized for? (The campaign can never use more wallets than this.)`, buttons: this.choices(flow, presets, ready > 1) } };
       }
-      const plan = d.plan as GuidedPlan;
-      flow.options.clear();
-      flow.confirmAt = this.deps.now().getTime();
-      return { reply: { text: `${head}\n\nReview. This only records a campaign; it spends nothing.\n\n${plan.text}`, buttons: [[{ text: 'Prepare (Spends Nothing)', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
+      case 'campaign': {
+        if (flow.kind === 'request') return this.campaignChoices(flow, head, await a.requestCandidates(), 'No campaign has fresh test mints. Record them when the mint is open: send /simulate.');
+        return this.campaignChoices(flow, head, await a.guidedCampaigns(), 'No live campaign is prepared yet. Use /prepare first, then come back.');
+      }
+      case 'wallets': {
+        if (flow.kind === 'request') {
+          const { wallets, sized } = await a.requestWallets(String(d.campaign));
+          d.tested = wallets; d.sized = sized;
+          const usable = Math.min(wallets.length, sized);
+          const choices: Choice[] = [{ label: `All Tested (${usable})`, value: 'all' }, ...wallets.slice(0, 6).map((wallet) => ({ label: short(wallet), value: wallet }))];
+          const note = wallets.length > sized ? ` This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized}.` : '';
+          return { reply: { text: `${head}\n\nWhich wallets? ${wallets.length} wallet(s) have fresh test mints.${note}`, buttons: this.choices(flow, choices, true) } };
+        }
+        const wallets = await a.signingWallets();
+        const choices: Choice[] = [{ label: `All Signing Wallets (${wallets.length})`, value: 'all' }, ...wallets.slice(0, 6).map((wallet) => ({ label: short(wallet), value: wallet }))];
+        return { reply: { text: `${head}\n\nWhich wallets? A wallet that fails its test mint is left out and named.`, buttons: this.choices(flow, choices, true) } };
+      }
+      case 'fee': {
+        const fees = await a.feeOptions(String(d.campaign));
+        const limitNote = fees.limit !== undefined ? ` Your Turnkey policy allows at most ${fees.limit} ${fees.unit}.` : '';
+        return { reply: { text: `${head}\n\nChoose the fee ceiling (${fees.unit}). The service never signs above it.${limitNote}`, buttons: this.choices(flow, fees.presets.map((value) => ({ label: `${value} ${fees.unit}`, value })), true) } };
+      }
+      case 'window': {
+        const windows: Choice[] = [['now', '+1h', 'Now To +1 H'], ['now', '+2h', 'Now To +2 H'], ['now', '+3h', 'Now To +3 H'], ['now', '+6h', 'Now To +6 H']].map(([from, until, label]) => ({ label: label!, value: { from, until } }));
+        return { reply: { text: `${head}\n\nChoose the window in which the service may fire when the mint opens (at most 6 hours).`, buttons: this.choices(flow, windows, true) } };
+      }
+      case 'pick': {
+        if (flow.kind === 'cancel') {
+          const items = await a.cancellables();
+          if (items.length === 0) { this.flow = undefined; return { reply: { text: 'Nothing is waiting: no request the service has not started, and no open scheduled mint.' } }; }
+          return { reply: { text: `${head}\n\nChoose what to cancel. The service has not started any of these.`, buttons: this.choices(flow, items.map((item) => ({ label: item.label, value: item.id })), false) } };
+        }
+        if (flow.kind === 'run') {
+          const runs = await a.recentRuns();
+          if (runs.length === 0) { this.flow = undefined; return { reply: { text: 'No runs yet.' } }; }
+          return { reply: { text: `${head}\n\nChoose a run (newest first).`, buttons: this.choices(flow, runs.map((item) => ({ label: item.label, value: item.id })), false) } };
+        }
+        return this.campaignChoices(flow, head, await a.guidedCampaigns(), 'No live campaign is recorded. Prepare one with /prepare.');
+      }
+      case 'review': break;
     }
-    // fire and schedule
-    if (flow.step === 0) {
-      const campaigns = await this.deps.actions.guidedCampaigns();
-      if (campaigns.length === 0) { this.flow = undefined; return { reply: { text: 'No live campaign is prepared yet. Use /prepare first, then come back.' } }; }
-      const list = campaigns.map((campaign) => `• ${campaign.label} — ${campaign.note}`).join('\n');
-      return { reply: { text: `${head}\n\nChoose the campaign.\n\n${list}`, buttons: this.choices(flow, campaigns.map((campaign) => ({ label: campaign.label, value: campaign.id })), false) } };
-    }
-    if (flow.step === 1) {
-      const wallets = await this.deps.actions.signingWallets();
-      const choices: Choice[] = [{ label: `All Signing Wallets (${wallets.length})`, value: 'all' }, ...wallets.slice(0, 6).map((wallet) => ({ label: short(wallet), value: wallet }))];
-      return { reply: { text: `${head}\n\nWhich wallets? A wallet that fails its test mint is left out and named.`, buttons: this.choices(flow, choices, true) } };
-    }
-    if (flow.step === 2) {
-      const fees = await this.deps.actions.feeOptions(String(d.campaign));
-      const limitNote = fees.limit !== undefined ? ` Your Turnkey policy allows at most ${fees.limit} ${fees.unit}.` : '';
-      return { reply: { text: `${head}\n\nChoose the fee ceiling (${fees.unit}). The service never signs above it.${limitNote}`, buttons: this.choices(flow, fees.presets.map((value) => ({ label: `${value} ${fees.unit}`, value })), true) } };
-    }
-    if (flow.kind === 'schedule' && flow.step === 3) {
-      const windows: Choice[] = [['now', '+1h', 'Now To +1 H'], ['now', '+2h', 'Now To +2 H'], ['now', '+3h', 'Now To +3 H'], ['now', '+6h', 'Now To +6 H']].map(([from, until, label]) => ({ label: label!, value: { from, until } }));
-      return { reply: { text: `${head}\n\nChoose the window in which the service may fire when the mint opens (at most 6 hours).`, buttons: this.choices(flow, windows, true) } };
-    }
-    // final summary step
+    // The last step of each flow: a summary and one button. The tap is good for 2 minutes from now.
     flow.options.clear();
     flow.confirmAt = this.deps.now().getTime();
-    const label = flow.kind === 'fire' ? 'Fire Now' : 'Store Schedule';
+    if (flow.kind === 'release') {
+      const status = await a.releaseStatus();
+      d.releasePhrase = status.phrase;
+      return { reply: { text: `${head}\n\n${status.text}`, buttons: status.canRelease ? [[{ text: 'Release The Kill Switch', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] : [this.cancelRow(flow)] } };
+    }
+    if (flow.kind === 'simulate') {
+      const label = String(((d.labels as Record<string, string> | undefined)?.[String(d.campaign)]) ?? (d.campaignLabel as string | undefined) ?? 'the campaign');
+      return { reply: { text: `${head}\n\nRecord a test mint for each wallet on ${label}. Test mints only pass once the mint is open, and each record is good for 30 minutes. Nothing is sent or spent.`, buttons: [[{ text: 'Record Test Mints', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
+    }
+    if (flow.kind === 'prepare') return { reply: { text: `${head}\n\nReview. This only records a campaign; it spends nothing.\n\n${(d.plan as GuidedPlan).text}`, buttons: [[{ text: 'Prepare (Spends Nothing)', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
+    const label = flow.kind === 'fire' ? 'Fire Now' : flow.kind === 'request' ? 'Send Request' : 'Store Schedule';
     return { reply: { text: `${head}\n\n${String(d.summary)}`, buttons: [[{ text: label, callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
   }
 
@@ -229,30 +328,32 @@ export class GuidedFlows {
   private async press(flow: Flow, key: string): Promise<FlowResult> {
     const d = flow.data as Record<string, any>;
     if (key === 'bk') return this.render(flow);
-    if (key === 'cu') return flow.customOk ? this.custom(flow) : { reply: { text: 'That button is no longer valid. Use the buttons on the latest message, or send the command again.' } };
+    if (key === 'cu') return flow.customOk ? this.custom(flow) : { reply: { text: NO_LONGER_VALID } };
     if (key === 'go') return this.finish(flow);
-    if (!flow.options.has(key)) return { reply: { text: 'That button is no longer valid. Use the buttons on the latest message, or send the command again.' } };
+    if (!flow.options.has(key)) return { reply: { text: NO_LONGER_VALID } };
     const value = flow.options.get(key);
-    if (flow.kind === 'prepare') {
-      if (flow.step === 0) { d.chain = value; return this.advance(flow); }
-      if (flow.step === 2) return this.takeQuantity(flow, Number(value));
-      if (flow.step === 3) return this.takeCount(flow, Number(value));
-    } else if (flow.kind === 'fire' || flow.kind === 'schedule') {
-      if (flow.step === 0) { d.campaign = value; return this.advance(flow); }
-      if (flow.step === 1) { d.wallets = value === 'all' ? 'all' : [String(value)]; return this.advance(flow); }
-      if (flow.step === 2) return this.takeFee(flow, Number(value));
-      if (flow.kind === 'schedule' && flow.step === 3) { const window = value as { from: string; until: string }; return this.takeWindow(flow, window.from, window.until); }
+    switch (this.name(flow)) {
+      case 'chain': d.chain = value; return this.advance(flow);
+      case 'quantity': return this.takeQuantity(flow, Number(value));
+      case 'count': return this.takeCount(flow, Number(value));
+      case 'campaign': d.campaign = value; return this.advance(flow);
+      case 'wallets': d.wallets = value === 'all' ? 'all' : [String(value)]; return this.advance(flow);
+      case 'fee': return this.takeFee(flow, Number(value));
+      case 'window': { const window = value as { from: string; until: string }; return this.takeWindow(flow, window.from, window.until); }
+      case 'pick': return this.pick(flow, String(value));
+      default: return { reply: { text: NO_LONGER_VALID } };
     }
-    return { reply: { text: 'That button is no longer valid. Send the command again.' } };
   }
 
   private custom(flow: Flow): FlowResult {
     const d = flow.data as Record<string, any>;
-    if (flow.kind === 'prepare' && flow.step === 2) return this.ask(flow, 'quantity', `Type the number of NFTs per wallet (a whole number from 1 to ${Math.max(1, (d.plan as GuidedPlan).maxQuantity)}).`);
-    if (flow.kind === 'prepare' && flow.step === 3) return this.ask(flow, 'count', `Type how many wallets to size the campaign for (a whole number from 1 to ${(d.plan as GuidedPlan).ready.length}).`);
-    if (flow.step === 1) return this.ask(flow, 'wallets', 'Type the wallet addresses, separated by commas. Each must be one of your signing wallets.');
-    if (flow.step === 2) return this.ask(flow, 'fee', 'Type the fee ceiling as a plain number, for example 0.15.');
-    return this.ask(flow, 'window', 'Type the window as two times separated by a space, in UTC: for example "now +90m" or "2026-10-25T18:00 2026-10-25T20:00". At most 6 hours, starting within 7 days.');
+    switch (this.name(flow)) {
+      case 'quantity': return this.ask(flow, 'quantity', `Type the number of NFTs per wallet (a whole number from 1 to ${Math.max(1, (d.plan as GuidedPlan).maxQuantity)}).`);
+      case 'count': return this.ask(flow, 'count', `Type how many wallets to size the campaign for (a whole number from 1 to ${(d.plan as GuidedPlan).ready.length}).`);
+      case 'wallets': return this.ask(flow, 'wallets', flow.kind === 'request' ? 'Type the wallet addresses, separated by commas. Each must be one of the wallets that have fresh test mints.' : 'Type the wallet addresses, separated by commas. Each must be one of your signing wallets.');
+      case 'fee': return this.ask(flow, 'fee', 'Type the fee ceiling as a plain number, for example 0.15.');
+      default: return this.ask(flow, 'window', 'Type the window as two times separated by a space, in UTC: for example "now +90m" or "2026-10-25T18:00 2026-10-25T20:00". At most 6 hours, starting within 7 days.');
+    }
   }
 
   // ── typed entries ─────────────────────────────────────────────────────────────────────────────────
@@ -283,7 +384,8 @@ export class GuidedFlows {
         d.contract = text.toLowerCase();
         d.plan = await this.deps.actions.guidedPlan(String(d.chain), String(d.contract), undefined, undefined);
         const plan = d.plan as GuidedPlan;
-        if (!plan.ok) { flow.awaiting = { field: 'contract' }; flow.wrong = 0; return { reply: { text: `${plan.text}\n\nFix the points above, then send another contract address, or cancel.`, buttons: [this.cancelRow(flow)] } }; }
+        if (!plan.ok) { flow.step = 1; flow.awaiting = { field: 'contract' }; flow.wrong = 0; return { reply: { text: `${plan.text}\n\nFix the points above, then send another contract address, or cancel.`, buttons: [this.cancelRow(flow)] } }; }
+        flow.step = 1;
         return this.advance(flow);
       }
       case 'quantity': {
@@ -299,15 +401,17 @@ export class GuidedFlows {
       case 'wallets': {
         const parts = text.split(/[\s,]+/).filter(Boolean);
         if (parts.length === 0) return bad('send at least one wallet address.');
-        const signing = new Set((await this.deps.actions.signingWallets()).map((wallet) => wallet.toLowerCase()));
+        const request = flow.kind === 'request';
+        const allowed = new Set((request ? (d.tested as string[]) : await this.deps.actions.signingWallets()).map((wallet) => wallet.toLowerCase()));
         const seen = new Set<string>();
         for (const part of parts) {
           if (!ADDRESS.test(part)) return bad(`"${part.slice(0, 50)}" is not a wallet address (0x followed by 40 letters or digits).`);
           const lower = part.toLowerCase();
-          if (!signing.has(lower)) return bad(`${short(part)} is not one of your signing wallets, so it cannot mint. /wallets shows the signing wallets.`);
+          if (!allowed.has(lower)) return bad(request ? `${short(part)} has no fresh test mint on this campaign, so it cannot be in the request.` : `${short(part)} is not one of your signing wallets, so it cannot mint. /wallets shows the signing wallets.`);
           if (seen.has(lower)) return bad(`${short(part)} is listed twice.`);
           seen.add(lower);
         }
+        if (request && seen.size > Number(d.sized)) return bad(`this campaign was sized for ${String(d.sized)} wallet(s); you chose ${seen.size}.`);
         d.wallets = [...seen];
         return this.advance(flow);
       }
@@ -347,16 +451,34 @@ export class GuidedFlows {
     return this.advance(flow);
   }
 
+  /** The wallets as the actions take them: `all` or a comma list. A request's `all` is the tested wallets, at most as many as the campaign was sized for. */
+  private walletsText(flow: Flow): string {
+    const d = flow.data as Record<string, any>;
+    if (d.wallets === 'all') return flow.kind === 'request' ? (d.tested as string[]).slice(0, Number(d.sized)).join(',') : 'all';
+    return (d.wallets as string[]).join(',');
+  }
+
   private async takeFee(flow: Flow, fee: number): Promise<FlowResult> {
     const d = flow.data as Record<string, any>;
     d.fee = fee;
-    const walletsText = d.wallets === 'all' ? 'all' : (d.wallets as string[]).join(',');
     if (flow.kind === 'fire') {
-      const preview = await this.deps.actions.firePreview(String(d.campaign), walletsText, fee);
+      const preview = await this.deps.actions.firePreview(String(d.campaign), this.walletsText(flow), fee);
       d.walletsText = preview.wallets.join(',');
       d.digest = preview.digest;
       d.summary = preview.text;
-      return this.advance(flow);
+      flow.step = 3;
+      flow.wrong = 0;
+      return this.render(flow);
+    }
+    if (flow.kind === 'request') {
+      if (d.wallets === 'all' && d.tested === undefined) { const found = await this.deps.actions.requestWallets(String(d.campaign)); d.tested = found.wallets; d.sized = found.sized; }
+      const preview = await this.deps.actions.requestPreview(String(d.campaign), this.walletsText(flow), fee);
+      d.walletsText = preview.wallets.join(',');
+      d.phrase = preview.phrase;
+      d.summary = preview.text;
+      flow.step = 3;
+      flow.wrong = 0;
+      return this.render(flow);
     }
     // schedule: the window comes next
     return this.advance(flow);
@@ -364,33 +486,65 @@ export class GuidedFlows {
 
   private async takeWindow(flow: Flow, from: string, until: string): Promise<FlowResult> {
     const d = flow.data as Record<string, any>;
-    const walletsText = d.wallets === 'all' ? 'all' : (d.wallets as string[]).join(',');
-    const preview = await this.deps.actions.schedulePreview(String(d.campaign), walletsText, Number(d.fee), from, until);
+    const preview = await this.deps.actions.schedulePreview(String(d.campaign), this.walletsText(flow), Number(d.fee), from, until);
     d.walletsText = preview.wallets.join(',');
     d.phrase = preview.phrase;
     d.digest = preview.digest;
     d.from = preview.from;
     d.until = preview.until;
     d.summary = preview.text;
-    return this.advance(flow);
+    flow.step = 4;
+    flow.wrong = 0;
+    return this.render(flow);
+  }
+
+  /** A one-step flow's pick: cancel the chosen request or schedule, or show a campaign's funding. Neither needs a second confirmation. */
+  private async pick(flow: Flow, id: string): Promise<FlowResult> {
+    this.flow = undefined;
+    const code = (error: unknown): string => { const first = (error instanceof Error ? error.message : '').split(':')[0] ?? ''; return /^[A-Z][A-Z0-9_]{2,80}$/.test(first) ? first : 'FAILED'; };
+    try {
+      const text = flow.kind === 'cancel' ? await this.deps.actions.cancel(id) : flow.kind === 'run' ? await this.deps.actions.run(id) : await this.deps.actions.funding(id);
+      return { reply: { text }, done: { command: flow.kind, outcome: 'ok' } };
+    } catch (error) {
+      return { reply: { text: `Not done: ${this.deps.explain(error)}` }, done: { command: flow.kind, outcome: `refused:${code(error)}` } };
+    }
+  }
+
+  /** Records the test mints, then goes straight on to choosing the wallets for the request (nothing to copy). */
+  private async recordTestMints(campaignId: string): Promise<FlowResult> {
+    const result = await this.deps.actions.simulateCampaign(campaignId);
+    const next = this.make('request', 1, { campaign: campaignId });
+    const step = await this.render(next);
+    return { reply: { text: `${result.text}\n\n${step.reply.text}`, ...(step.reply.buttons ? { buttons: step.reply.buttons } : {}) }, done: { command: 'simulate', outcome: 'ok' } };
   }
 
   // ── the final tap ─────────────────────────────────────────────────────────────────────────────────
 
   private async finish(flow: Flow): Promise<FlowResult> {
     const d = flow.data as Record<string, any>;
-    const isFinal = (flow.kind === 'release' && flow.step === 0) || (flow.kind === 'prepare' && flow.step === 4) || (flow.kind === 'fire' && flow.step === 3) || (flow.kind === 'schedule' && flow.step === 4);
-    if (!isFinal) return { reply: { text: 'That button is no longer valid. Send the command again.' } };
+    if (this.name(flow) !== 'review') return { reply: { text: 'That button is no longer valid. Send the command again.' } };
     // The flow ends with this tap, so the same button can never act twice; a confirmation older than 2 minutes is not acted on.
     this.flow = undefined;
     if (flow.confirmAt === undefined || this.deps.now().getTime() - flow.confirmAt > CONFIRM_LIFETIME_MS) return { reply: { text: 'That confirmation expired (it is good for 2 minutes). Nothing was changed. Send the command again.' } };
     const code = (error: unknown): string => { const first = (error instanceof Error ? error.message : '').split(':')[0] ?? ''; return /^[A-Z][A-Z0-9_]{2,80}$/.test(first) ? first : 'FAILED'; };
+    const a = this.deps.actions;
     try {
+      if (flow.kind === 'simulate') {
+        return await this.recordTestMints(String(d.campaign));
+      }
+      if (flow.kind === 'prepare') {
+        const prepared = await a.guidedPrepare(String(d.chain), String(d.contract), Number(d.quantity), d.selected as string[], (d.plan as GuidedPlan).phrase);
+        if (!prepared.campaignId) return { reply: { text: prepared.text }, done: { command: 'prepare', outcome: 'ok' } };
+        // Straight on to the next step: the test mints (they can only pass once the mint is open).
+        const next = this.make('simulate', 1, { campaign: prepared.campaignId, campaignLabel: `campaign ${prepared.campaignId}` });
+        const step = await this.render(next);
+        return { reply: { text: `${prepared.text}\n\n${step.reply.text}`, ...(step.reply.buttons ? { buttons: step.reply.buttons } : {}) }, done: { command: 'prepare', outcome: 'ok' } };
+      }
       let text: string;
-      if (flow.kind === 'release') text = await this.deps.actions.releaseNow(d.releasePhrase as string | undefined);
-      else if (flow.kind === 'prepare') text = await this.deps.actions.guidedPrepare(String(d.chain), String(d.contract), Number(d.quantity), d.selected as string[], (d.plan as GuidedPlan).phrase);
-      else if (flow.kind === 'fire') text = await this.deps.actions.fireNow(String(d.campaign), String(d.walletsText), Number(d.fee), d.digest as string | undefined);
-      else text = await this.deps.actions.scheduleCreate(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.from), String(d.until), String(d.phrase), d.digest as string | undefined);
+      if (flow.kind === 'release') text = await a.releaseNow(d.releasePhrase as string | undefined);
+      else if (flow.kind === 'fire') text = await a.fireNow(String(d.campaign), String(d.walletsText), Number(d.fee), d.digest as string | undefined);
+      else if (flow.kind === 'request') text = await a.requestSend(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.phrase));
+      else text = await a.scheduleCreate(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.from), String(d.until), String(d.phrase), d.digest as string | undefined);
       return { reply: { text }, done: { command: flow.kind, outcome: 'ok' } };
     } catch (error) {
       return { reply: { text: `Not done: ${this.deps.explain(error)}` }, done: { command: flow.kind, outcome: `refused:${code(error)}` } };

@@ -36,6 +36,14 @@ export function liveRequestPhrase(campaignId: string, walletCount: number, maxEx
   return `LIVE-REQUEST ${campaignId.slice(-8)} ${walletCount}-WALLETS ${maxExposureEth} ${maxFeeGwei}-GWEI`;
 }
 
+/** How many wallets a campaign was sized for: the most one run may spend, divided by the most one wallet can spend. */
+export function sizedWalletCount(campaign: Pick<Campaign, 'mintPriceWei' | 'quantity' | 'feePolicy' | 'spendPolicy'>): number {
+  const fee = campaign.feePolicy.totalFeeBudgetWei;
+  if (fee === undefined) return 0;
+  const perWallet = campaign.mintPriceWei * BigInt(campaign.quantity) + fee;
+  return perWallet <= 0n ? 0 : Number(campaign.spendPolicy.maxRunWei / perWallet);
+}
+
 export function previewLiveRequest(state: RequestState, campaignId: string, wallets: readonly string[], maxFeeGwei: number, now: Date): LiveRequestPreview {
   if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500) throw new Error('MAX_FEE_GWEI_REQUIRED: pass --max-fee-gwei (above 0, at most 500)');
   const campaign = state.campaigns.find((item) => item.id === campaignId);
@@ -56,7 +64,7 @@ export function previewLiveRequest(state: RequestState, campaignId: string, wall
   if (fee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
   const perWallet = campaign.mintPriceWei * BigInt(campaign.quantity) + fee;
   const total = perWallet * BigInt(unique.length);
-  if (perWallet <= 0n || total > campaign.spendPolicy.maxRunWei) throw new Error('PLANNED_EXPOSURE_INVALID');
+  if (perWallet <= 0n || total > campaign.spendPolicy.maxRunWei) throw new Error(`PLANNED_EXPOSURE_INVALID: this campaign was sized for ${sizedWalletCount(campaign)} wallet(s); you chose ${unique.length}. Use ${sizedWalletCount(campaign)} or fewer, or prepare a new campaign sized for more.`);
   const maxExposureEth = formatEth(total);
   return {
     campaignId,

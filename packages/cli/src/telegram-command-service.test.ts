@@ -180,7 +180,7 @@ describe('Telegram actions', () => {
       const created: Array<{ chainId: number; quantity: number; broadcastMode?: string }> = [];
       const simulations: unknown[] = [];
       const evidence = { id: 'verification_abc', chainId: 4663, status: 'accepted', executionEnabled: true, checkedAt: '2026-10-24T11:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', sourceBlock: 1n, endpointIdentity: 'robinhood-sequencer' };
-      const campaigns = [{ id: 'cmp_1', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n }];
+      const campaigns = [{ id: 'cmp_1', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n, spendPolicy: { maxRunWei: 400_000_000_000_000n, dailyCapWei: 10n ** 18n, gasCeilingWei: 10n ** 18n } }];
       const store = { snapshot: () => ({ events: [], campaigns, simulations, chainEvidence: [evidence], runs: [], killed: false }), transaction: async (mutate: (state: { simulations: unknown[] }) => void) => { mutate({ simulations }); } };
       const application = { createCampaign: async (input: { chainId: number; quantity: number; broadcastMode?: string }) => { created.push(input); return { id: 'cmp_new', ...input }; } };
       const actions = createTelegramActions(deps({ store: store as never, application: application as never, killSwitchPath, walletList: async () => [A, B], robinhoodDryRun: dryRun(), robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }), now: () => NOW, ...extra }));
@@ -208,7 +208,8 @@ describe('Telegram actions', () => {
         const text = await actions.prepare('robinhood', CONTRACT, 1, phrase);
         expect(created).toEqual([expect.objectContaining({ chainId: 4663, quantity: 1, broadcastMode: 'sequencer' })]);
         expect(text).toContain('Campaign recorded: cmp_new');
-        expect(text).toContain('/simulate cmp_new');
+        // The next step is a button in the guide, so no command is printed for the owner to copy.
+        expect(text).not.toContain('/simulate');
         await rm(join(directory, 'killswitch'));
         await expect(actions.prepare('robinhood', CONTRACT, 1, phrase)).rejects.toThrow('KILL_SWITCH_REQUIRED_FOR_PREPARATION');
         expect(created).toHaveLength(1);
@@ -243,9 +244,9 @@ describe('Telegram actions', () => {
     it('guided prepare builds the confirmation phrase itself and records a campaign sized for the chosen accounts only; it refuses when one is no longer ready', async () => {
       const { actions, directory, created } = await robinhood();
       try {
-        const text = await actions.guidedPrepare('robinhood', CONTRACT, 1, [A]);
-        expect(text).toContain('Campaign recorded: cmp_new');
-        expect(text).toContain('Sized for 1 wallet(s)');
+        const prepared = await actions.guidedPrepare('robinhood', CONTRACT, 1, [A]);
+        expect(prepared.text).toContain('Campaign recorded: cmp_new');
+        expect(prepared.text).toContain('Sized for 1 wallet(s)');
         expect(created).toHaveLength(1);
         await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A, '0x9999999999999999999999999999999999999999'])).rejects.toThrow('WALLETS_CHANGED');
         expect(created).toHaveLength(1);
@@ -259,7 +260,7 @@ describe('Telegram actions', () => {
         expect(reviewed.phrase).toContain('QTY-1 1-WALLETS');
         await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A], 'PREPARE-LIVE-ROBINHOOD 94db QTY-1 2-WALLETS 0.0004')).rejects.toThrow('PLAN_CHANGED');
         expect(created).toEqual([]);
-        await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A], reviewed.phrase)).resolves.toContain('Campaign recorded');
+        await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A], reviewed.phrase)).resolves.toMatchObject({ text: expect.stringContaining('Campaign recorded') });
         expect(created).toHaveLength(1);
       } finally { await rm(directory, { recursive: true, force: true }); }
     });
@@ -279,8 +280,7 @@ describe('Telegram actions', () => {
         const text = await actions.simulate('cmp_1');
         expect(simulations).toEqual([expect.objectContaining({ wallet: A, campaignId: 'cmp_1', success: true })]);
         expect(text).toContain('1 wallet(s) passed the test mint');
-        expect(text).toContain(`/request cmp_1 ${A} 0.2`);
-        expect(text).toContain('use a lower number if yours is lower');
+        expect(text).not.toContain('/request');
       } finally { await rm(directory, { recursive: true, force: true }); }
     });
 

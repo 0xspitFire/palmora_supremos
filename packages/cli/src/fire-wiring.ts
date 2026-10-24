@@ -4,7 +4,7 @@ import { formatEth, campaignInputDigest, type BackendStore, type Campaign, type 
 import type { FireScheduleRepository, FireScheduleRecord } from '@mint-bot/database';
 import { checkDrop } from './drop-check.js';
 import { assertScheduleWindow, parseWhen, runFire, type FireDeps, type FireResult, type MintState } from './fire.js';
-import { previewLiveRequest, runLiveRequest } from './live-request.js';
+import { previewLiveRequest, runLiveRequest, sizedWalletCount } from './live-request.js';
 import { recordPassingSimulationsAction } from './owner-actions.js';
 import { recordRobinhoodSimulationsAction } from './robinhood-live.js';
 import type { DryRunReport } from './robinhood-readonly.js';
@@ -103,9 +103,13 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     conflict: persistentConflict,
     recordSimulations,
     createRequest: async (campaign, wallets, maxFeeGwei) => {
-      const preview = previewLiveRequest(deps.store.snapshot(), campaign.id, wallets, maxFeeGwei, now());
+      // A campaign sized for N wallets covers at most N: the others that passed are left out and said so, never refused as an error.
+      const sized = Math.max(1, sizedWalletCount(campaign));
+      const used = wallets.slice(0, sized);
+      const leftOut = wallets.slice(sized);
+      const preview = previewLiveRequest(deps.store.snapshot(), campaign.id, used, maxFeeGwei, now());
       const result = await runLiveRequest({ action: 'create', campaignId: campaign.id, wallets: preview.wallets, maxFeeGwei, confirm: preview.phrase, now: now(), store: deps.store as never, approve: (validated) => deps.approve(validated as never) });
-      return { requestId: String(result.requestId) };
+      return { requestId: String(result.requestId), wallets: preview.wallets, leftOut };
     },
     kick: deps.kick,
   };
