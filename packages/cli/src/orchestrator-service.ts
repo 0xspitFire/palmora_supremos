@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import {
   AlertManager,
+  BackendApplication,
   CanonicalStoreBridge,
   CanonicalJobStore,
   loadHostSecretStore,
@@ -12,6 +14,7 @@ import {
   NotificationDispatcher,
   OrchestratorService,
   pathKillSwitchProbe,
+  PERSONAL_LIVE_FLEET_POLICY,
   RedactedLogger,
   ServiceHttpServer,
   summarizeServiceConfig,
@@ -28,6 +31,7 @@ import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
 import { chainRpcSecretNames } from '@mint-bot/engine';
+import { startLiveRequestPoller } from './live-request.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -171,6 +175,26 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     fleetWatcher = started;
     watcherHandle = started.watcher;
   }
+  // T-058: in host mode the service runs the owner's live requests. It uses its own application, not the read-only one above, so
+  // `arm` and `run` go through every gate exactly as a guided live run does (approval, simulation, caps, custody, watcher, kill switch).
+  let liveRequests: { stop(): void } | undefined;
+  if (config.mode === 'host') {
+    const bridge = runtime.store as CanonicalStoreBridge;
+    const liveApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+    liveRequests = startLiveRequestPoller({
+      unclaimed: () => bridge.unclaimedLiveRunRequests(),
+      claim: (requestId, outcome) => bridge.claimLiveRunRequest(requestId, outcome),
+      campaign: (campaignId) => runtime.store.snapshot().campaigns.find((item) => item.id === campaignId),
+      command: (name, input) => liveApplication.command(name, input),
+      setFeeCeiling: (campaignId, gwei) => runtime.setFeeCeiling(campaignId, gwei),
+      record: async ({ requestId, runId, state, code }) => {
+        await runtime.store.transaction((current) => { current.events.push({ id: `live_request_result_${randomUUID()}`, type: 'live_request_result', ...(runId ? { runId } : {}), at: new Date().toISOString(), data: { requestId, state, ...(code ? { code } : {}) } }); });
+        logger.info({ event: 'live_request_result', requestId, state, ...(code ? { code } : {}) }, 'live request processed');
+        if (state !== 'finished') await alerts.blocked(code ?? 'LIVE_REQUEST_STOPPED', runId).catch(() => undefined);
+      },
+      now: () => new Date(),
+    }, { onError: (error) => logger.warn({ event: 'live_request_poll_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'LIVE_REQUEST_POLL_FAILED' }, 'live request poll failed') });
+  }
   // Scheduled encrypted backups, only when the owner has put BACKUP_ENCRYPTION_KEY in the secret store.
   let backups: { stop(): void } | undefined;
   const backupScheduler = environment.MINT_BOT_BACKUP_SCHEDULER ?? 'internal';
@@ -228,6 +252,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     intelligence?.stop();
     liveness?.stop();
     fleetWatcher?.stop();
+    liveRequests?.stop();
     backups?.stop();
     await orchestrator.stop();
     await http.stop();

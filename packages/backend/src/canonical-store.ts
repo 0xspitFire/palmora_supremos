@@ -6,6 +6,7 @@ import type {
   AuditEventRecord,
   ExecutionRunRecord,
   LifecycleEventRecord,
+  LiveRunRequestRecord,
   ReceiptRecord as DatabaseReceiptRecord,
   ReconciliationRecord as DatabaseReconciliationRecord,
   SettlementComponents,
@@ -1314,6 +1315,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return this.databaseStore.revokeEnablement(chainId, { id: input.id, revokedAt: this.now().toISOString(), confirmationDigest: input.confirmationDigest, ...(input.expectedEnablementId !== undefined ? { expectedEnablementId: input.expectedEnablementId } : {}) });
   }
   public revokeRobinhood(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } { return this.revokeEnablement(ROBINHOOD_CHAIN_ID, input); }
+  /** T-058: owner command only. */
+  public recordLiveRunRequest(input: LiveRunRequestRecord): void { this.ensureOpen(); this.databaseStore.recordLiveRunRequest(input); }
+  /** T-058: the host service's view of requests it has not claimed. */
+  public unclaimedLiveRunRequests(): LiveRunRequestRecord[] { this.ensureOpen(); return this.databaseStore.unclaimedLiveRunRequests(); }
+  public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired'): boolean { this.ensureOpen(); return this.databaseStore.claimLiveRunRequest(requestId, outcome, this.now().toISOString()); }
   public revokeBase(input: { id: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } { return this.revokeEnablement(BASE_CHAIN_ID, input); }
 
   /** Creates the Robinhood chain profile row when there is none (disabled and unverified, like Ethereum's). */
