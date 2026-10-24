@@ -25,6 +25,10 @@ export interface DependencyFlagDeps {
 }
 
 export const BLOCK_MAX_AGE_MS = 180_000;
+/** A quiet chain may go minutes between blocks. Robinhood's sequencer only seals a block when it has work, so it gets a longer limit. */
+export const BLOCK_MAX_AGE_BY_CHAIN_MS: Readonly<Record<number, number>> = { 4663: 900_000 };
+/** A Telegram blip must not block an armed run: notifications turn off only after this many failed checks in a row (90 s). Engine and chain are never delayed. */
+export const NOTIFICATION_FAILURES_BEFORE_OFF = 3;
 export const BLOCK_MAX_FUTURE_MS = 120_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const REASON = 'DEPLOYMENT_DEPENDENCIES_NOT_READY';
@@ -43,33 +47,58 @@ export interface DependencyFlagResult { engine: boolean; chain: boolean; notific
 
 export function createDependencyFlags(deps: DependencyFlagDeps): { tick(): Promise<DependencyFlagResult> } {
   const chainReady = async (): Promise<boolean> => {
-    const chains = [...new Set([1, ...deps.chainsToProbe()])];
+    let chains: number[];
+    try { chains = [...new Set([1, ...deps.chainsToProbe()])]; } catch { return false; }
     const results = await Promise.all(chains.map((chainId) => passes(async () => {
       const at = (await deps.latestBlockTime(chainId)).getTime();
       const now = deps.now().getTime();
-      return Number.isFinite(at) && now - at <= BLOCK_MAX_AGE_MS && at - now <= BLOCK_MAX_FUTURE_MS;
+      return Number.isFinite(at) && now - at <= (BLOCK_MAX_AGE_BY_CHAIN_MS[chainId] ?? BLOCK_MAX_AGE_MS) && at - now <= BLOCK_MAX_FUTURE_MS;
     })));
     return results.every(Boolean);
   };
+  let notificationFailures = 0;
+  const write = async (flags: DependencyFlagResult, killed: boolean): Promise<boolean> => {
+    let changed = false;
+    await deps.store.transaction((state) => {
+      const next = { ...state.runtime.dependencies, ...flags };
+      changed = next.engine !== state.runtime.dependencies.engine || next.chain !== state.runtime.dependencies.chain || next.notifications !== state.runtime.dependencies.notifications;
+      const ready = Object.values(next).every(Boolean);
+      const hadReason = state.runtime.blockingReasons.includes(REASON);
+      const others = state.runtime.blockingReasons.filter((reason) => reason !== REASON);
+      if (!ready) {
+        state.runtime = { ...state.runtime, dependencies: next, startupState: 'Blocked', blockingReasons: [...new Set([...others, REASON])] };
+        return;
+      }
+      // Lifted only when this probe caused the block and nothing else blocks: no other reason, no kill (stored, file or unreadable),
+      // reconciliation done, no unresolved run. Otherwise its reason stays, so the block never loses its explanation.
+      const clear = hadReason && state.runtime.startupState === 'Blocked' && others.length === 0 && !state.killed && !killed && state.runtime.reconciliationCompletedAt !== undefined && unresolvedRunIds(state).length === 0;
+      state.runtime = clear ? { ...state.runtime, dependencies: next, blockingReasons: others, startupState: 'Ready' } : { ...state.runtime, dependencies: next };
+    });
+    return changed;
+  };
   return {
     async tick() {
-      const [engine, chain, notifications, killed] = await Promise.all([passes(deps.engineReady), chainReady(), passes(deps.notificationsReady), killSwitchUnknownOrOn(deps)]);
-      let changed = false;
-      await deps.store.transaction((state) => {
-        const next = { ...state.runtime.dependencies, engine, chain, notifications };
-        changed = next.engine !== state.runtime.dependencies.engine || next.chain !== state.runtime.dependencies.chain || next.notifications !== state.runtime.dependencies.notifications;
-        const ready = Object.values(next).every(Boolean);
-        const others = state.runtime.blockingReasons.filter((reason) => reason !== REASON);
-        if (!ready) {
-          state.runtime = { ...state.runtime, dependencies: next, startupState: 'Blocked', blockingReasons: [...new Set([...others, REASON])] };
-          return;
-        }
-        // Lifted only when nothing else blocks: no other reason, no kill (stored or file), reconciliation done, no unresolved run.
-        const clear = others.length === 0 && !state.killed && !killed && state.runtime.reconciliationCompletedAt !== undefined && unresolvedRunIds(state).length === 0;
-        state.runtime = { ...state.runtime, dependencies: next, blockingReasons: others, startupState: clear && state.runtime.startupState === 'Blocked' ? 'Ready' : state.runtime.startupState };
-      });
-      if (changed) deps.log?.('dependency_flags_changed', { engine, chain, notifications });
-      return { engine, chain, notifications };
+      let flags: DependencyFlagResult;
+      let killed = true;
+      try {
+        const [engine, chain, notifications, killState] = await Promise.all([passes(deps.engineReady), chainReady(), passes(deps.notificationsReady), killSwitchUnknownOrOn(deps)]);
+        notificationFailures = notifications ? 0 : notificationFailures + 1;
+        // Hysteresis for notifications only: stay on until the third failed check in a row (but an off flag only turns on when a check passes).
+        const wasOn = deps.store.snapshot().runtime.dependencies.notifications === true;
+        flags = { engine, chain, notifications: notifications || (wasOn && notificationFailures < NOTIFICATION_FAILURES_BEFORE_OFF) };
+        killed = killState;
+      } catch {
+        // The probe itself failed: everything it controls goes off (fail closed).
+        flags = { engine: false, chain: false, notifications: false };
+        notificationFailures = NOTIFICATION_FAILURES_BEFORE_OFF;
+      }
+      const changed = await write(flags, killed);
+      // The kill file is read again after a lift, so a kill created during the pass is not missed (as the orchestrator tick does).
+      if (deps.store.snapshot().runtime.startupState === 'Ready' && await killSwitchUnknownOrOn(deps)) {
+        await deps.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILL_SWITCH_ENGAGED'])] }; });
+      }
+      if (changed) deps.log?.('dependency_flags_changed', { ...flags });
+      return flags;
     },
   };
 }

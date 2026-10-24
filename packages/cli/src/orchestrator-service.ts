@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
-import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { access, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import {
   AlertManager,
@@ -227,12 +227,16 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         if (!reader) {
           const endpoints = [...(await resolveChainConfigFromSecrets(chainId as 1 | 8453 | 4663, 'mainnet', flagSecretRoot)).rpcEndpoints];
           if (endpoints.length === 0) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
-          reader = createPublicClient({ transport: failoverTransport(endpoints) });
+          const candidate = createPublicClient({ transport: failoverTransport(endpoints) });
+          // The endpoint must really be this chain (a wrong or swapped provider must not make the chain look ready).
+          if (await candidate.getChainId() !== chainId) throw new Error('CHAIN_ID_MISMATCH');
+          reader = candidate;
           flagClients.set(chainId, reader);
         }
         return new Date(Number((await reader.getBlock({ blockTag: 'latest' })).timestamp) * 1000);
       },
-      killSwitchOn: async () => existsSync(config.killSwitchPath) || runtime.store.snapshot().killed,
+      // Any answer but "no such file" counts as present: an unreadable kill file is treated as killed.
+      killSwitchOn: async () => runtime.store.snapshot().killed || await access(config.killSwitchPath).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT'),
       now: () => new Date(),
       log: (event, fields) => logger.info({ event, ...fields }, 'deployment readiness flags changed'),
     }, { onError: (error) => logger.warn({ event: 'dependency_flags_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'DEPENDENCY_FLAGS_FAILED' }, 'dependency flag pass failed') });

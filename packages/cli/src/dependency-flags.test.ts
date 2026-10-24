@@ -29,8 +29,6 @@ describe('deployment readiness flags', () => {
     const cases: Array<[Partial<DependencyFlagDeps>, keyof ReturnType<typeof expectFlags>]> = [
       [{ engineReady: async () => false }, 'engine'],
       [{ engineReady: async () => { throw new Error('TURNKEY_SECRET_REQUIRED'); } }, 'engine'],
-      [{ notificationsReady: async () => false }, 'notifications'],
-      [{ notificationsReady: async () => { throw new Error('down'); } }, 'notifications'],
       [{ latestBlockTime: async () => new Date(NOW.getTime() - 181_000) }, 'chain'],
       [{ latestBlockTime: async () => new Date(NOW.getTime() + 121_000) }, 'chain'],
       [{ latestBlockTime: async () => new Date(Number.NaN) }, 'chain'],
@@ -76,6 +74,74 @@ describe('deployment readiness flags', () => {
     const t = await setup({}, { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } });
     await t.flags.tick();
     expect(t.runtime().startupState).toBe('Ready');
+  });
+});
+
+describe('failure paths and hysteresis (review fixes)', () => {
+  const allOn = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } };
+
+  it('a probe that throws forces every flag it controls off and blocks (fail closed)', async () => {
+    const t = await setup({ chainsToProbe: () => { throw new Error('evidence unreadable'); } }, allOn);
+    const result = await t.flags.tick();
+    expect(result.chain).toBe(false);
+    expect(t.runtime().startupState).toBe('Blocked');
+    const broken = await setup({ killSwitchOn: async () => { throw new Error('x'); }, latestBlockTime: async () => { throw new Error('y'); } }, allOn);
+    await broken.flags.tick();
+    expect(broken.runtime().dependencies.chain).toBe(false);
+  });
+
+  it('a check that never answers is given up after 10 seconds', async () => {
+    const { vi } = await import('vitest');
+    vi.useFakeTimers();
+    try {
+      const t = await setup({ engineReady: () => new Promise<boolean>(() => undefined) }, allOn);
+      const pending = t.flags.tick();
+      await vi.advanceTimersByTimeAsync(10_100);
+      expect((await pending).engine).toBe(false);
+      expect(t.runtime().startupState).toBe('Blocked');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('notifications turn off only after three failed checks in a row; a pass resets the count; engine and chain are never delayed', async () => {
+    let ok = true;
+    const t = await setup({ notificationsReady: async () => ok }, allOn);
+    ok = false;
+    await t.flags.tick(); await t.flags.tick();
+    expect(t.runtime().dependencies.notifications).toBe(true);
+    expect(t.runtime().startupState).toBe('Ready');
+    ok = true;
+    await t.flags.tick();
+    ok = false;
+    await t.flags.tick(); await t.flags.tick();
+    expect(t.runtime().dependencies.notifications).toBe(true);
+    await t.flags.tick();
+    expect(t.runtime().dependencies.notifications).toBe(false);
+    expect(t.runtime().startupState).toBe('Blocked');
+  });
+
+  it('keeps its reason while an unresolved run or a kill still blocks, and lifts only a block it caused', async () => {
+    const withKill = await setup({ killSwitchOn: async () => true });
+    await withKill.flags.tick();
+    expect(withKill.runtime().blockingReasons).toContain('DEPLOYMENT_DEPENDENCIES_NOT_READY');
+    expect(withKill.runtime().startupState).toBe('Blocked');
+    const notOurs = await setup({}, { blockingReasons: [] });
+    await notOurs.flags.tick();
+    expect(notOurs.runtime().startupState).toBe('Blocked');
+  });
+
+  it('re-blocks when the kill file appears during the pass, after a lift', async () => {
+    let reads = 0;
+    const t = await setup({ killSwitchOn: async () => { reads += 1; return reads > 1; } });
+    await t.flags.tick();
+    expect(t.runtime().startupState).toBe('Blocked');
+    expect(t.runtime().blockingReasons).toContain('KILL_SWITCH_ENGAGED');
+  });
+
+  it('gives a quiet chain (Robinhood) a longer block age than Ethereum', async () => {
+    const t = await setup({ latestBlockTime: async (chainId) => new Date(NOW.getTime() - (chainId === 4663 ? 600_000 : 1_000)) });
+    expect((await t.flags.tick()).chain).toBe(true);
+    const eth = await setup({ latestBlockTime: async () => new Date(NOW.getTime() - 600_000) });
+    expect((await eth.flags.tick()).chain).toBe(false);
   });
 });
 
