@@ -36,7 +36,15 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
     limits: ok('limits'), history: ok('history'), eligible: ok('eligible'), activity: ok('activity'), holdings: ok('holdings'), gasAlerts: ok('gasAlerts'), gasAlertSet: ok('gasAlertSet'), gasAlertRemove: ok('gasAlertRemove'),
     prepare: ok('prepare'), simulate: ok('simulate'), cancel: ok('cancel'), kill: ok('kill'), revoke: ok('revoke'), release: ok('release'), watchAccept: ok('watchAccept'),
     firePreview: async (campaignId, wallets, gwei) => { calls.push(`firePreview(${campaignId}|${wallets}|${gwei})`); return { text: 'fire preview', wallets: ['0x1111111111111111111111111111111111111111'] }; },
-    fireNow: ok('fireNow'), portfolio: ok('portfolio'), schedules: ok('schedules'), scheduleCreate: ok('scheduleCreate'),
+    fireNow: ok('fireNow'), portfolio: ok('portfolio'),
+    guidedChains: async () => [{ key: 'ethereum', name: 'Ethereum' }, { key: 'robinhood', name: 'Robinhood' }],
+    guidedPlan: async (chain, contract, quantity, count) => { calls.push(`guidedPlan(${chain}|${contract}|${quantity ?? ''}|${count ?? ''})`); const ready = ['0x1111111111111111111111111111111111111111', '0x2222222222222222222222222222222222222222', '0x3333333333333333333333333333333333333333'].slice(0, count ?? 3); return { text: 'plan text', ok: true, ready, quantity: quantity ?? 1, maxQuantity: 3 }; },
+    guidedPrepare: async (chain, contract, quantity, wallets) => { calls.push(`guidedPrepare(${chain}|${contract}|${quantity}|${wallets.length})`); return 'Campaign recorded: cmp_guided'; },
+    releaseStatus: async () => ({ text: 'The kill switch is ON.', canRelease: true }),
+    releaseNow: async () => { calls.push('releaseNow()'); return 'The kill switch is off.'; },
+    guidedCampaigns: async () => [{ id: 'cmp_a', label: 'Robinhood 0xa686…94db · 1 NFT', note: 'mint is open' }],
+    signingWallets: async () => ['0x1111111111111111111111111111111111111111', '0x2222222222222222222222222222222222222222'],
+    feeOptions: async () => ({ presets: [0.1, 0.2], limit: 0.2, unit: 'gwei' }), schedules: ok('schedules'), scheduleCreate: ok('scheduleCreate'),
     schedulePreview: async (campaignId, wallets, gwei, from, until) => { calls.push(`schedulePreview(${campaignId}|${wallets}|${gwei}|${from}|${until})`); return { text: 'schedule preview', phrase: 'SCHEDULE abcd1234 1-WALLETS 0.0001 0.2-GWEI', wallets: ['0x1111111111111111111111111111111111111111'], from, until };  },
     killEngagedSince: (openedAt) => killedAfter !== undefined && killedAfter > openedAt,
   };
@@ -486,5 +494,110 @@ describe('/fire and /schedule (D-067)', () => {
     }
     expect(menuFor('viewer').map((item) => item.command)).not.toEqual(expect.arrayContaining(['fire']));
     expect(menuFor('owner').map((item) => item.command)).toEqual(expect.arrayContaining(['fire', 'schedule', 'schedules']));
+  });
+});
+
+describe('guided flows through the router (D-069)', () => {
+  const CONTRACT = '0xa686fde3299d5451af22382240e0dff62f7b94db';
+  const unlock = async (t: ReturnType<typeof setup>, step = 0) => { await t.send(t.message(OWNER, `/unlock ${t.code(step)}`)); };
+  const buttonsOf = (t: ReturnType<typeof setup>) => t.sent.at(-1)!.buttons!.flat();
+  const tapLabel = async (t: ReturnType<typeof setup>, label: string) => {
+    const button = buttonsOf(t).find((item) => item.text === label);
+    if (!button) throw new Error(`no "${label}" in ${buttonsOf(t).map((item) => item.text).join(' | ')}`);
+    await t.send(t.tap(OWNER, button.callback_data));
+  };
+
+  it('/prepare with no arguments guides the owner: chain, contract typed as a message, quantity, wallets, then one tap (no unlock needed)', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, '/prepare'));
+    expect(buttonsOf(t).map((item) => item.text)).toEqual(['Ethereum', 'Robinhood', 'Cancel']);
+    await tapLabel(t, 'Robinhood');
+    expect(t.lastTo(OWNER)).toContain('Send the contract address as a message');
+    await t.send(t.message(OWNER, CONTRACT));
+    expect(t.lastTo(OWNER)).toContain('How many NFTs per wallet?');
+    await tapLabel(t, '1');
+    await tapLabel(t, 'All ready (3)');
+    await tapLabel(t, 'Prepare (Spends Nothing)');
+    expect(t.lastTo(OWNER)).toBe('Campaign recorded: cmp_guided');
+    expect(t.calls.at(-1)).toBe(`guidedPrepare(robinhood|${CONTRACT}|1|3)`);
+    expect(t.records.at(-1)).toMatchObject({ command: 'prepare', outcome: 'ok' });
+  });
+
+  it('typed commands with arguments still work as before', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, `/prepare robinhood ${CONTRACT} 1 PREPARE-LIVE-ROBINHOOD x`));
+    expect(t.calls.some((call) => call.startsWith('prepare('))).toBe(true);
+    expect(t.sent.at(-1)!.buttons).toBeUndefined();
+  });
+
+  it('release and fire flows need the unlocked session at the tap, and act once after it', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, '/release'));
+    expect(t.lastTo(OWNER)).toContain('unlocked session');
+    await unlock(t);
+    await t.send(t.message(OWNER, '/release'));
+    const release = buttonsOf(t).find((item) => item.text === 'Release The Kill Switch')!;
+    await t.send(t.message(OWNER, '/lock'));
+    await t.send(t.tap(OWNER, release.callback_data));
+    expect(t.lastTo(OWNER)).toContain('unlocked session');
+    expect(t.calls).not.toContain('releaseNow()');
+    expect(t.records.at(-1)).toMatchObject({ command: 'release', outcome: 'refused:SESSION_REQUIRED' });
+    // A code works once, so the second unlock uses the next one.
+    await unlock(t, 1);
+    await t.send(t.tap(OWNER, release.callback_data));
+    expect(t.calls.filter((call) => call === 'releaseNow()')).toHaveLength(1);
+    expect(t.lastTo(OWNER)).toBe('The kill switch is off.');
+    await t.send(t.tap(OWNER, release.callback_data));
+    expect(t.lastTo(OWNER)).toContain('expired');
+    expect(t.calls.filter((call) => call === 'releaseNow()')).toHaveLength(1);
+  });
+
+  it('/fire with no arguments picks the campaign, wallets and fee, then fires only on the final tap', async () => {
+    const t = setup();
+    await unlock(t);
+    await t.send(t.message(OWNER, '/fire'));
+    await tapLabel(t, 'Robinhood 0xa686…94db · 1 NFT');
+    await tapLabel(t, 'All Signing Wallets (2)');
+    await tapLabel(t, '0.2 gwei');
+    expect(t.calls.some((call) => call.startsWith('fireNow'))).toBe(false);
+    await tapLabel(t, 'Fire Now');
+    expect(t.calls.some((call) => call.startsWith('fireNow'))).toBe(true);
+    expect(t.records.at(-1)).toMatchObject({ command: 'fire', outcome: 'ok' });
+  });
+
+  it('plain text is only the owner\'s answer to a flow: a viewer\'s or a stranger\'s message is ignored, and "join CODE" without a slash is not a join', async () => {
+    const t = setup();
+    await admitViewer(t);
+    await t.send(t.message(OWNER, '/prepare'));
+    await tapLabel(t, 'Ethereum');
+    const before = t.sent.length;
+    await t.send(t.message(VIEWER, CONTRACT));
+    await t.send(t.message(STRANGER, `join ${CONTRACT}`));
+    await t.send(t.message(OWNER, 'hello there'));
+    // The owner's text is taken as the flow's answer and refused in words; the others get nothing.
+    expect(t.sent.slice(before).map((item) => item.chatId)).toEqual([String(OWNER)]);
+    expect(t.lastTo(OWNER)).toContain('is not a contract address');
+    expect(t.calls.some((call) => call.startsWith('guidedPlan'))).toBe(false);
+  });
+
+  it('another command ends the wait for typed text; a button from an old flow or someone else\'s tap does nothing', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, '/prepare'));
+    await tapLabel(t, 'Ethereum');
+    await t.send(t.message(OWNER, '/status'));
+    const before = t.sent.length;
+    await t.send(t.message(OWNER, CONTRACT));
+    expect(t.sent.length).toBe(before);
+    expect(t.calls.some((call) => call.startsWith('guidedPlan'))).toBe(false);
+    await admitViewer(t);
+    await t.send(t.tap(VIEWER, '/f_00000000_0o1'));
+    await t.send(t.tap(OWNER, '/f_00000000_0o1'));
+    expect(t.lastTo(OWNER)).toContain('expired');
+  });
+
+  it('the owner menu has the guided buttons', async () => {
+    const t = setup();
+    await t.send(t.message(OWNER, '/menu'));
+    expect(t.sent.at(-1)!.buttons!.flat().map((item) => item.callback_data)).toEqual(expect.arrayContaining(['/prepare', '/release', '/fire']));
   });
 });
