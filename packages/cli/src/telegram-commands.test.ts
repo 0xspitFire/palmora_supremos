@@ -43,7 +43,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
   const send = (update: TelegramUpdate) => router.handle(update);
   const code = (offsetSteps = 0) => totpCode(KEY, timeStepAt(now) + offsetSteps);
   const lastTo = (chat: number) => [...sent].reverse().find((item) => item.chatId === String(chat))?.text ?? '';
-  return { access, sent, deleted, calls, records, alerts, router, message, tap, send, code, lastTo, advance: (ms: number) => { now = new Date(now.getTime() + ms); }, killAt: (iso: string) => { killedAfter = iso; } };
+  return { now: clock, access, sent, deleted, calls, records, alerts, router, message, tap, send, code, lastTo, advance: (ms: number) => { now = new Date(now.getTime() + ms); }, killAt: (iso: string) => { killedAfter = iso; } };
 }
 
 const admitViewer = async (t: ReturnType<typeof setup>) => {
@@ -236,7 +236,7 @@ describe('the unlocked session (D-063 items 5 and 6)', () => {
       api: { getUpdates: async () => [], sendMessage: async (_chat, text) => { t.sent.push({ chatId: String(OWNER), text }); }, answerCallback: async () => undefined, deleteMessage: async () => undefined },
       access: t.access,
       actions: { release: async () => 'released', killEngagedSince: () => { throw new Error('DB_LOCKED'); } } as unknown as TelegramActions,
-      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined,
+      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: t.now,
     });
     await failing.handle(t.message(OWNER, '/release'));
     expect(t.access.openSession()).toBeUndefined();
@@ -303,7 +303,7 @@ describe('stop and request commands', () => {
       api: { getUpdates: async () => [], sendMessage: async (chat, text, buttons) => { t.sent.push({ chatId: String(chat), text, ...(buttons ? { buttons } : {}) }); }, answerCallback: async () => undefined, deleteMessage: async () => undefined },
       access: t.access,
       actions: { kill: async () => { throw new Error('KILL_SWITCH_NOT_ENGAGED'); }, killEngagedSince: () => false } as unknown as TelegramActions,
-      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined,
+      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: t.now,
     });
     await router.handle(t.message(OWNER, '/kill'));
     await router.handle(t.tap(OWNER, t.sent.at(-1)!.buttons![0]![0]!.callback_data));
@@ -339,7 +339,7 @@ describe('stop and request commands', () => {
       api: { getUpdates: async () => [], sendMessage: async (_chat, text) => { t.sent.push({ chatId: String(OWNER), text }); }, answerCallback: async () => undefined, deleteMessage: async () => undefined },
       access: t.access,
       actions: { status: async () => { throw new Error(`RPC_FAILED: https://rpc.example/key ${'a'.repeat(64)}`); } } as unknown as TelegramActions,
-      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined,
+      ownerUserId: String(OWNER), totpKey: KEY, record: async () => undefined, alert: async () => undefined, now: t.now,
     });
     await router.handle(t.message(OWNER, '/status'));
     expect(t.sent.at(-1)!.text).toMatch(/^Not done: RPC_FAILED/);
