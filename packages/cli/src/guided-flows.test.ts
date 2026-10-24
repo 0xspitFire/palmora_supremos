@@ -10,20 +10,20 @@ const CONTRACT = '0xa686fde3299d5451af22382240e0dff62f7b94db';
 function setup(over: Partial<GuidedActions> = {}) {
   let clock = new Date('2026-10-25T12:00:00.000Z');
   const calls: string[] = [];
-  const plan = (quantity: number | undefined, count: number | undefined, ok = true): GuidedPlan => ({ text: `plan q=${quantity ?? '-'} n=${count ?? '-'}`, ok, ready: [A, B, C].slice(0, count ?? 3), quantity: quantity ?? 1, maxQuantity: 3 });
+  const plan = (quantity: number | undefined, count: number | undefined, ok = true): GuidedPlan => ({ text: `plan q=${quantity ?? '-'} n=${count ?? '-'}`, ok, ready: [A, B, C].slice(0, count ?? 3), quantity: quantity ?? 1, maxQuantity: 3, phrase: `PHRASE-${count ?? 3}` });
   const actions: GuidedActions = {
     guidedChains: async () => [{ key: 'ethereum', name: 'Ethereum' }, { key: 'robinhood', name: 'Robinhood' }],
     guidedPlan: async (chain, contract, quantity, count) => { calls.push(`plan(${chain},${contract},${quantity ?? ''},${count ?? ''})`); return plan(quantity, count); },
-    guidedPrepare: async (chain, contract, quantity, wallets) => { calls.push(`prepare(${chain},${contract},${quantity},${wallets.join('+')})`); return 'Campaign recorded: cmp_new'; },
-    releaseStatus: async () => ({ text: 'The kill switch is ON. Nothing blocks the release.', canRelease: true }),
-    releaseNow: async () => { calls.push('release'); return 'The kill switch is off.'; },
+    guidedPrepare: async (chain, contract, quantity, wallets, expected) => { calls.push(`prepare(${chain},${contract},${quantity},${wallets.join('+')},${expected})`); return 'Campaign recorded: cmp_new'; },
+    releaseStatus: async () => ({ text: 'The kill switch is ON. Nothing blocks the release.', canRelease: true, phrase: 'RELEASE engaged T1' }),
+    releaseNow: async (expected) => { calls.push(`release(${expected})`); return 'The kill switch is off.'; },
     guidedCampaigns: async () => [{ id: 'cmp_a', label: 'Robinhood 0xa686…94db · 1 NFT', note: 'mint is open' }, { id: 'cmp_b', label: 'Ethereum 0x1234…abcd · 1 NFT', note: 'mint not open yet; busy: queued' }],
     signingWallets: async () => [A, B],
     feeOptions: async (campaignId) => (campaignId === 'cmp_a' ? { presets: [0.1, 0.2], limit: 0.2, unit: 'gwei' } : { presets: [5, 10, 25], limit: undefined, unit: 'gwei' }),
     firePreview: async (campaignId, wallets, fee) => { calls.push(`firePreview(${campaignId},${wallets},${fee})`); return { text: 'The mint is OPEN. Fire now.', wallets: wallets === 'all' ? [A, B] : wallets.split(','), digest: 'd'.repeat(64) }; },
     fireNow: async (campaignId, wallets, fee, digest) => { calls.push(`fire(${campaignId},${wallets},${fee},${digest?.slice(0, 4)})`); return 'Request sent.'; },
-    schedulePreview: async (campaignId, wallets, fee, from, until) => { calls.push(`schedulePreview(${campaignId},${wallets},${fee},${from},${until})`); return { text: 'Scheduled mint preview.', phrase: 'SCHEDULE abc 2-WALLETS 0.0004 0.2-GWEI', wallets: [A, B], from: '2026-10-25T12:00:00.000Z', until: '2026-10-25T14:00:00.000Z' }; },
-    scheduleCreate: async (campaignId, wallets, fee, from, until, phrase) => { calls.push(`schedule(${campaignId},${wallets},${fee},${from},${until},${phrase})`); return 'Scheduled mint stored.'; },
+    schedulePreview: async (campaignId, wallets, fee, from, until) => { calls.push(`schedulePreview(${campaignId},${wallets},${fee},${from},${until})`); return { text: 'Scheduled mint preview.', phrase: 'SCHEDULE abc 2-WALLETS 0.0004 0.2-GWEI', wallets: [A, B], from: '2026-10-25T12:00:00.000Z', until: '2026-10-25T14:00:00.000Z', digest: 'dg' }; },
+    scheduleCreate: async (campaignId, wallets, fee, from, until, phrase, digest) => { calls.push(`schedule(${campaignId},${wallets},${fee},${from},${until},${phrase},${digest})`); return 'Scheduled mint stored.'; },
     ...over,
   };
   const flows = new GuidedFlows({ actions, now: () => clock, explain: (error) => (error instanceof Error ? error.message : 'x'), newId: () => 'abcd1234' });
@@ -54,7 +54,7 @@ describe('prepare flow (kill switch ON, no unlock)', () => {
     expect(step.reply.text).toContain('Review. This only records a campaign; it spends nothing.');
     expect(t.calls.at(-1)).toBe(`plan(robinhood,${CONTRACT},2,2)`);
     const done = await t.press(step, 'Prepare (Spends Nothing)');
-    expect(t.calls.at(-1)).toBe(`prepare(robinhood,${CONTRACT},2,${A}+${B})`);
+    expect(t.calls.at(-1)).toBe(`prepare(robinhood,${CONTRACT},2,${A}+${B},PHRASE-2)`);
     expect(done.reply.text).toBe('Campaign recorded: cmp_new');
     expect(done.done).toEqual({ command: 'prepare', outcome: 'ok' });
     // The same button cannot act twice.
@@ -112,7 +112,8 @@ describe('release flow (unlock needed, checked by the router)', () => {
     const step = await t.flows.start('release');
     expect(step.reply.text).toContain('The kill switch is ON');
     const done = await t.press(step, 'Release The Kill Switch');
-    expect(t.calls).toEqual(['release']);
+    // The release is bound to the kill engagement that was shown: its phrase goes with the tap.
+    expect(t.calls).toEqual(['release(RELEASE engaged T1)']);
     expect(done.done).toEqual({ command: 'release', outcome: 'ok' });
     const blocked = setup({ releaseStatus: async () => ({ text: 'A run is unresolved, so it cannot be released.', canRelease: false }) });
     const none = await blocked.flows.start('release');
@@ -210,7 +211,7 @@ describe('schedule flow', () => {
     step = await t.press(step, 'Now To +2 H');
     expect(t.calls.at(-1)).toBe('schedulePreview(cmp_a,all,0.2,now,+2h)');
     const done = await t.press(step, 'Store Schedule');
-    expect(t.calls.at(-1)).toBe(`schedule(cmp_a,${A},${B},0.2,2026-10-25T12:00:00.000Z,2026-10-25T14:00:00.000Z,SCHEDULE abc 2-WALLETS 0.0004 0.2-GWEI)`);
+    expect(t.calls.at(-1)).toBe(`schedule(cmp_a,${A},${B},0.2,2026-10-25T12:00:00.000Z,2026-10-25T14:00:00.000Z,SCHEDULE abc 2-WALLETS 0.0004 0.2-GWEI,dg)`);
     expect(done.done).toEqual({ command: 'schedule', outcome: 'ok' });
   });
 
@@ -226,6 +227,62 @@ describe('schedule flow', () => {
     expect((await t.flows.onText('now +9h'))!.reply.text).toContain('WINDOW_TOO_LONG: a window is at most 6 hours');
     expect((await t.flows.onText('now +90m'))!.reply.text).toContain('preview');
     expect(attempt).toBe(2);
+  });
+});
+
+describe('final taps are bound, short-lived and serialised (review fixes)', () => {
+  it('a release refused because the kill switch was engaged again since it was shown says so and records the refusal', async () => {
+    const t = setup({ releaseNow: async (expected) => { if (expected === 'RELEASE engaged T1') throw new Error('KILL_STATE_CHANGED: engaged again'); return 'x'; } });
+    const done = await t.press(await t.flows.start('release'), 'Release The Kill Switch');
+    expect(done.reply.text).toContain('Not done: KILL_STATE_CHANGED');
+    expect(done.done).toEqual({ command: 'release', outcome: 'refused:KILL_STATE_CHANGED' });
+  });
+
+  it('a prepare whose plan changed since it was reviewed is refused with the reviewed phrase', async () => {
+    const t = setup({ guidedPrepare: async (_c, _k, _q, _w, expected) => { if (expected === 'PHRASE-3') throw new Error('PLAN_CHANGED: the amount differs'); return 'x'; } });
+    let step = await t.flows.start('prepare');
+    step = await t.press(step, 'Ethereum');
+    step = (await t.flows.onText(CONTRACT))!;
+    step = await t.press(step, '1');
+    step = await t.press(step, 'All ready (3)');
+    const done = await t.press(step, 'Prepare (Spends Nothing)');
+    expect(done.reply.text).toContain('PLAN_CHANGED');
+    expect(done.done?.outcome).toBe('refused:PLAN_CHANGED');
+  });
+
+  it('the last tap is good for 2 minutes only, and a late tap changes nothing', async () => {
+    const t = setup();
+    const step = await t.flows.start('release');
+    t.advance(2 * 60_000 + 1);
+    const late = await t.press(step, 'Release The Kill Switch');
+    expect(late.reply.text).toContain('expired');
+    expect(late.done).toBeUndefined();
+    expect(t.calls).toEqual([]);
+    const fresh = await t.flows.start('release');
+    t.advance(2 * 60_000 - 1);
+    expect((await t.press(fresh, 'Release The Kill Switch')).done?.outcome).toBe('ok');
+  });
+
+  it('a Custom tap where there is no custom entry is refused, and two quick taps on one button act once', async () => {
+    const t = setup();
+    const release = await t.flows.start('release');
+    const stray = /^\/f_([0-9a-f]{8})_(\d)x?/.exec(release.reply.buttons!.flat()[0]!.callback_data)!;
+    expect((await t.flows.onButton(stray[1]!, `${stray[2]}cu`)).reply.text).toContain('no longer valid');
+    const button = release.reply.buttons!.flat()[0]!.callback_data;
+    const match = /^\/f_([0-9a-f]{8})_(.+)$/.exec(button)!;
+    const [one, two] = await Promise.all([t.flows.onButton(match[1]!, match[2]!), t.flows.onButton(match[1]!, match[2]!)]);
+    expect([one.done?.outcome, two.done?.outcome].filter(Boolean)).toEqual(['ok']);
+    expect(t.calls.filter((call) => call.startsWith('release('))).toHaveLength(1);
+  });
+
+  it('a new flow replaces the old one, whose buttons then do nothing', async () => {
+    const t = setup();
+    const first = await t.flows.start('prepare');
+    const old = first.reply.buttons!.flat()[0]!.callback_data;
+    await t.flows.start('release');
+    const match = /^\/f_([0-9a-f]{8})_(.+)$/.exec(old)!;
+    expect(t.flows.active()).toBe('release');
+    expect((await t.flows.onButton(match[1]!, match[2]!)).reply.text).toMatch(/earlier step|expired|no longer valid/);
   });
 });
 

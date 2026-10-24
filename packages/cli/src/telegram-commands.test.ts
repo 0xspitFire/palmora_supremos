@@ -595,6 +595,24 @@ describe('guided flows through the router (D-069)', () => {
     expect(t.lastTo(OWNER)).toContain('expired');
   });
 
+  it('/kill ends an open flow so an old button cannot act after it; a stale typed answer is not used', async () => {
+    const t = setup();
+    await unlock(t);
+    await t.send(t.message(OWNER, '/release'));
+    const release = buttonsOf(t).find((item) => item.text === 'Release The Kill Switch')!;
+    await t.send(t.message(OWNER, '/kill'));
+    await t.send(t.tap(OWNER, t.sent.at(-1)!.buttons![0]![0]!.callback_data));
+    await unlock(t, 1);
+    await t.send(t.tap(OWNER, release.callback_data));
+    expect(t.lastTo(OWNER)).toContain('expired');
+    expect(t.calls).not.toContain('releaseNow()');
+    await t.send(t.message(OWNER, '/prepare'));
+    await tapLabel(t, 'Ethereum');
+    await t.send(t.message(OWNER, CONTRACT, { ageMs: 6 * 60_000 }));
+    expect(t.lastTo(OWNER)).toContain('more than 5 minutes old');
+    expect(t.calls.some((call) => call.startsWith('guidedPlan'))).toBe(false);
+  });
+
   it('the owner menu has the guided buttons', async () => {
     const t = setup();
     await t.send(t.message(OWNER, '/menu'));

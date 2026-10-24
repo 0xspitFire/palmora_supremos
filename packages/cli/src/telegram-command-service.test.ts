@@ -252,6 +252,18 @@ describe('Telegram actions', () => {
       } finally { await rm(directory, { recursive: true, force: true }); }
     });
 
+    it('guided prepare refuses when the plan differs from the reviewed one (the amount or wallets changed)', async () => {
+      const { actions, directory, created } = await robinhood();
+      try {
+        const reviewed = await actions.guidedPlan('robinhood', CONTRACT, 1, 1);
+        expect(reviewed.phrase).toContain('QTY-1 1-WALLETS');
+        await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A], 'PREPARE-LIVE-ROBINHOOD 94db QTY-1 2-WALLETS 0.0004')).rejects.toThrow('PLAN_CHANGED');
+        expect(created).toEqual([]);
+        await expect(actions.guidedPrepare('robinhood', CONTRACT, 1, [A], reviewed.phrase)).resolves.toContain('Campaign recorded');
+        expect(created).toHaveLength(1);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
     it('guided chains lists Ethereum always and the others only when switched on; fee presets follow the chain', async () => {
       const { actions, directory } = await robinhood();
       try {

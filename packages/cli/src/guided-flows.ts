@@ -11,7 +11,8 @@ import type { InlineButton } from './telegram-api.js';
  * entry is checked before it is used; a wrong one is refused in plain words and the flow stays where it was.
  */
 export type ChainKey = 'ethereum' | 'base' | 'robinhood';
-export interface GuidedPlan { text: string; ok: boolean; ready: string[]; quantity: number; maxQuantity: number }
+/** `phrase` is the confirmation phrase the server built for exactly these figures; the final tap must still produce the same one. */
+export interface GuidedPlan { text: string; ok: boolean; ready: string[]; quantity: number; maxQuantity: number; phrase?: string }
 export interface GuidedCampaign { id: string; label: string; note: string }
 export interface FeeOptions { presets: number[]; limit: number | undefined; unit: string }
 
@@ -19,16 +20,18 @@ export interface FeeOptions { presets: number[]; limit: number | undefined; unit
 export interface GuidedActions {
   guidedChains(): Promise<Array<{ key: ChainKey; name: string }>>;
   guidedPlan(chain: string, contract: string, quantity: number | undefined, walletCount: number | undefined): Promise<GuidedPlan>;
-  guidedPrepare(chain: string, contract: string, quantity: number, wallets: string[]): Promise<string>;
-  releaseStatus(): Promise<{ text: string; canRelease: boolean }>;
-  releaseNow(): Promise<string>;
+  /** `expectedPhrase` is the phrase of the plan the owner reviewed; a changed plan is refused. */
+  guidedPrepare(chain: string, contract: string, quantity: number, wallets: string[], expectedPhrase?: string): Promise<string>;
+  /** `phrase` names the kill engagement being looked at (its time); the release tap is refused if the switch was engaged again since. */
+  releaseStatus(): Promise<{ text: string; canRelease: boolean; phrase?: string }>;
+  releaseNow(expectedPhrase?: string): Promise<string>;
   guidedCampaigns(): Promise<GuidedCampaign[]>;
   signingWallets(): Promise<string[]>;
   feeOptions(campaignId: string): Promise<FeeOptions>;
   firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[]; digest?: string }>;
   fireNow(campaignId: string, wallets: string, maxFeeGwei: number, digest?: string): Promise<string>;
-  schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[]; from: string; until: string }>;
-  scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string): Promise<string>;
+  schedulePreview(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string): Promise<{ text: string; phrase: string; wallets: string[]; from: string; until: string; digest?: string }>;
+  scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string, digest?: string): Promise<string>;
 }
 
 export type FlowKind = 'prepare' | 'release' | 'fire' | 'schedule';
@@ -45,11 +48,17 @@ interface Flow {
   touchedAt: number;
   wrong: number;
   options: Map<string, unknown>;
+  /** Set when a step offers a Custom… button; a stray Custom tap at any other step is refused. */
+  customOk?: boolean;
+  /** When the final confirmation was shown. */
+  confirmAt?: number;
   awaiting?: Awaiting;
   data: Record<string, unknown>;
 }
 
 export const FLOW_LIFETIME_MS = 15 * 60_000;
+/** The last tap (Release, Prepare, Fire Now, Store Schedule) is good for 2 minutes from the moment its summary is shown, like the kill and fire buttons. */
+export const CONFIRM_LIFETIME_MS = 2 * 60_000;
 const MAX_WRONG = 3;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const short = (address: string): string => `${address.slice(0, 6)}…${address.slice(-4)}`;
@@ -68,7 +77,10 @@ type Choice = { label: string; value: unknown };
 
 export class GuidedFlows {
   private flow: Flow | undefined;
+  // Taps and typed answers are handled one at a time, so two quick taps on the same button cannot both act.
+  private chain: Promise<unknown> = Promise.resolve();
   public constructor(private readonly deps: GuidedDeps) {}
+  private serial<T>(work: () => Promise<T>): Promise<T> { const run = this.chain.then(work, work); this.chain = run.catch(() => undefined); return run; }
 
   /** True while a flow is open and has not expired. */
   public active(): FlowKind | undefined { return this.live()?.kind; }
@@ -90,7 +102,9 @@ export class GuidedFlows {
 
   public cancel(): FlowResult { this.flow = undefined; return { reply: { text: 'Cancelled. Nothing was changed.' } }; }
 
-  public async onButton(flowId: string, code: string): Promise<FlowResult> {
+  public onButton(flowId: string, code: string): Promise<FlowResult> { return this.serial(() => this.handleButton(flowId, code)); }
+
+  private async handleButton(flowId: string, code: string): Promise<FlowResult> {
     const flow = this.live();
     if (!flow || flow.id !== flowId) return { reply: { text: 'That button has expired. Send the command again to start over.' } };
     const step = Number(code[0]);
@@ -103,7 +117,9 @@ export class GuidedFlows {
   }
 
   /** Typed text while a flow waits for it. Returns undefined when nothing is waiting (the message is not an answer). */
-  public async onText(text: string): Promise<FlowResult | undefined> {
+  public onText(text: string): Promise<FlowResult | undefined> { return this.serial(() => this.handleText(text)); }
+
+  private async handleText(text: string): Promise<FlowResult | undefined> {
     const flow = this.live();
     if (!flow?.awaiting) return undefined;
     flow.touchedAt = this.deps.now().getTime();
@@ -127,6 +143,7 @@ export class GuidedFlows {
   /** Buttons for a list of choices (two per row), plus Custom when allowed, plus Cancel. Values stay here; the buttons carry only keys. */
   private choices(flow: Flow, choices: Choice[], custom: boolean): InlineButton[][] {
     flow.options.clear();
+    flow.customOk = custom;
     const buttons: InlineButton[] = choices.map((choice, index) => { flow.options.set(`o${index + 1}`, choice.value); return { text: choice.label, callback_data: this.cb(flow, `o${index + 1}`) }; });
     const rows: InlineButton[][] = [];
     for (let index = 0; index < buttons.length; index += 2) rows.push(buttons.slice(index, index + 2));
@@ -142,11 +159,15 @@ export class GuidedFlows {
 
   private async render(flow: Flow): Promise<FlowResult> {
     delete flow.awaiting;
+    flow.customOk = false;
+    delete flow.confirmAt;
     const head = this.title(flow);
     const d = flow.data as Record<string, any>;
     if (flow.kind === 'release') {
       const status = await this.deps.actions.releaseStatus();
+      d.releasePhrase = status.phrase;
       flow.options.clear();
+      flow.confirmAt = this.deps.now().getTime();
       const rows: InlineButton[][] = status.canRelease ? [[{ text: 'Release The Kill Switch', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] : [this.cancelRow(flow)];
       return { reply: { text: `${head}\n\n${status.text}`, buttons: rows } };
     }
@@ -170,6 +191,7 @@ export class GuidedFlows {
       }
       const plan = d.plan as GuidedPlan;
       flow.options.clear();
+      flow.confirmAt = this.deps.now().getTime();
       return { reply: { text: `${head}\n\nReview. This only records a campaign; it spends nothing.\n\n${plan.text}`, buttons: [[{ text: 'Prepare (Spends Nothing)', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
     }
     // fire and schedule
@@ -195,6 +217,7 @@ export class GuidedFlows {
     }
     // final summary step
     flow.options.clear();
+    flow.confirmAt = this.deps.now().getTime();
     const label = flow.kind === 'fire' ? 'Fire Now' : 'Store Schedule';
     return { reply: { text: `${head}\n\n${String(d.summary)}`, buttons: [[{ text: label, callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
   }
@@ -206,7 +229,7 @@ export class GuidedFlows {
   private async press(flow: Flow, key: string): Promise<FlowResult> {
     const d = flow.data as Record<string, any>;
     if (key === 'bk') return this.render(flow);
-    if (key === 'cu') return this.custom(flow);
+    if (key === 'cu') return flow.customOk ? this.custom(flow) : { reply: { text: 'That button is no longer valid. Use the buttons on the latest message, or send the command again.' } };
     if (key === 'go') return this.finish(flow);
     if (!flow.options.has(key)) return { reply: { text: 'That button is no longer valid. Use the buttons on the latest message, or send the command again.' } };
     const value = flow.options.get(key);
@@ -345,6 +368,7 @@ export class GuidedFlows {
     const preview = await this.deps.actions.schedulePreview(String(d.campaign), walletsText, Number(d.fee), from, until);
     d.walletsText = preview.wallets.join(',');
     d.phrase = preview.phrase;
+    d.digest = preview.digest;
     d.from = preview.from;
     d.until = preview.until;
     d.summary = preview.text;
@@ -357,15 +381,16 @@ export class GuidedFlows {
     const d = flow.data as Record<string, any>;
     const isFinal = (flow.kind === 'release' && flow.step === 0) || (flow.kind === 'prepare' && flow.step === 4) || (flow.kind === 'fire' && flow.step === 3) || (flow.kind === 'schedule' && flow.step === 4);
     if (!isFinal) return { reply: { text: 'That button is no longer valid. Send the command again.' } };
-    // The flow ends with this tap, so the same button can never act twice.
+    // The flow ends with this tap, so the same button can never act twice; a confirmation older than 2 minutes is not acted on.
     this.flow = undefined;
+    if (flow.confirmAt === undefined || this.deps.now().getTime() - flow.confirmAt > CONFIRM_LIFETIME_MS) return { reply: { text: 'That confirmation expired (it is good for 2 minutes). Nothing was changed. Send the command again.' } };
     const code = (error: unknown): string => { const first = (error instanceof Error ? error.message : '').split(':')[0] ?? ''; return /^[A-Z][A-Z0-9_]{2,80}$/.test(first) ? first : 'FAILED'; };
     try {
       let text: string;
-      if (flow.kind === 'release') text = await this.deps.actions.releaseNow();
-      else if (flow.kind === 'prepare') text = await this.deps.actions.guidedPrepare(String(d.chain), String(d.contract), Number(d.quantity), d.selected as string[]);
+      if (flow.kind === 'release') text = await this.deps.actions.releaseNow(d.releasePhrase as string | undefined);
+      else if (flow.kind === 'prepare') text = await this.deps.actions.guidedPrepare(String(d.chain), String(d.contract), Number(d.quantity), d.selected as string[], (d.plan as GuidedPlan).phrase);
       else if (flow.kind === 'fire') text = await this.deps.actions.fireNow(String(d.campaign), String(d.walletsText), Number(d.fee), d.digest as string | undefined);
-      else text = await this.deps.actions.scheduleCreate(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.from), String(d.until), String(d.phrase));
+      else text = await this.deps.actions.scheduleCreate(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.from), String(d.until), String(d.phrase), d.digest as string | undefined);
       return { reply: { text }, done: { command: flow.kind, outcome: 'ok' } };
     } catch (error) {
       return { reply: { text: `Not done: ${this.deps.explain(error)}` }, done: { command: flow.kind, outcome: `refused:${code(error)}` } };

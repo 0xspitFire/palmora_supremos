@@ -186,7 +186,7 @@ export class TelegramCommandRouter {
   private readonly sessionLifetimeMs: number;
   private readonly inviteLifetimeMs: number;
   private readonly confirmTaps = new Map<string, number>();
-  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string } }>();
+  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string; digest?: string } }>();
   private readonly fireTaps = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; digest?: string }>();
   private readonly joinAttempts = new Map<string, number[]>();
   private readonly flows: GuidedFlows;
@@ -341,7 +341,7 @@ export class TelegramCommandRouter {
         const until = required(args[4], 'until');
         const preview = await a.schedulePreview(campaignId, required(args[1], 'wallets'), maxFeeGwei, from, until);
         this.prune();
-        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until } });
+        this.previews.set(preview.phrase, { campaignId, wallets: preview.wallets.join(','), maxFeeGwei, at: this.now().getTime(), schedule: { from: preview.from, until: preview.until, ...(preview.digest ? { digest: preview.digest } : {}) } });
         return reply(`${preview.text}\n\nTo store it, within 15 minutes:\n\n/confirm ${preview.phrase}`);
       }
       case 'schedules': return reply(await a.schedules());
@@ -351,7 +351,7 @@ export class TelegramCommandRouter {
         const preview = this.previews.get(phrase);
         if (!preview) throw new Error('PREVIEW_NOT_FOUND: send /request or /schedule again and copy the /confirm line it prints');
         this.previews.delete(phrase);
-        if (preview.schedule) return reply(await a.scheduleCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, preview.schedule.from, preview.schedule.until, phrase));
+        if (preview.schedule) return reply(await a.scheduleCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, preview.schedule.from, preview.schedule.until, phrase, preview.schedule.digest));
         return reply(await a.requestCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, phrase));
       }
       case 'requests': return reply(await a.requests());
@@ -446,6 +446,8 @@ export class TelegramCommandRouter {
   }
 
   private async flowText(incoming: Incoming): Promise<void> {
+    // An answer that is more than 5 minutes old is not used, as for commands.
+    if (this.now().getTime() - incoming.sentAt > MAX_MESSAGE_AGE_MS) { await this.reply(incoming, 'That message is more than 5 minutes old, so it was not used. Send it again if you still want it.'); return; }
     try {
       const result = await this.flows.onText(incoming.text);
       if (result) await this.showFlow(incoming, result);
@@ -462,6 +464,8 @@ export class TelegramCommandRouter {
       await this.record('owner', incoming, 'kill', 'refused:TAP_EXPIRED');
       return;
     }
+    // A kill ends any open guided flow, so an old button cannot act after it.
+    this.flows.cancel();
     try {
       const text = await this.options.actions.kill();
       this.options.access.closeSession('kill');

@@ -156,6 +156,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     return { kind: 'evm', planned, quantity: planned.plan.quantity, maxQuantity: planned.report.drop?.maxPerWallet ?? planned.plan.quantity };
   };
   const readyOf = (facts: PlanFacts): string[] => (facts.kind === 'robinhood' ? facts.plan.walletsReady : facts.planned.plan.walletsReady);
+  const phraseOf = (facts: PlanFacts, contract: string): string | undefined => (facts.kind === 'robinhood' ? (facts.plan.verdict === 'ready' ? robinhoodConfirmationPhrase(contract, facts.quantity, facts.plan.walletsReady.length, facts.plan.totalMaxExposureEth) : undefined) : facts.planned.phrase);
   const isReady = (facts: PlanFacts): boolean => (facts.kind === 'robinhood' ? facts.plan.verdict === 'ready' : facts.planned.plan.verdict === 'ready');
   const renderPlan = (facts: PlanFacts, chainText: string, contract: string, quantityLimit: number | undefined, withCommand: boolean): string => {
     if (facts.kind === 'robinhood') {
@@ -406,11 +407,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const wallets = await wiring.wallets(walletsText);
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, from: from.toISOString(), until: until.toISOString(), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
+      return { wallets, from: from.toISOString(), until: until.toISOString(), digest: wiring.campaignDigest(target), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
     },
-    async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase) {
+    async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase, digest) {
       const wiring = fireWiring();
       const target = fireCampaign(campaignId, maxFeeGwei);
+      if (digest !== undefined && wiring.campaignDigest(target) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; start the schedule again');
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
       if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: send /schedule again and copy the /confirm line it prints');
@@ -474,24 +476,29 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       let facts = await planFor(chainText, contract, quantity);
       const all = readyOf(facts);
       if (walletCount !== undefined && isReady(facts) && walletCount < all.length) facts = await planFor(chainText, contract, quantity, all.slice(0, walletCount));
-      return { text: renderPlan(facts, chainText, contract, quantity, false), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity };
+      return { text: renderPlan(facts, chainText, contract, quantity, false), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity, ...(isReady(facts) && phraseOf(facts, contract) ? { phrase: phraseOf(facts, contract)! } : {}) };
     },
-    async guidedPrepare(chainText, contract, quantity, wallets) {
+    async guidedPrepare(chainText, contract, quantity, wallets, expectedPhrase) {
       const facts = await planFor(chainText, contract, quantity, wallets);
       const ready = readyOf(facts);
       if (!isReady(facts) || ready.length !== wallets.length) throw new Error('WALLETS_CHANGED: the plan changed since you looked at it (a wallet is no longer ready). Start the guide again.');
-      const phrase = facts.kind === 'robinhood' ? robinhoodConfirmationPhrase(contract, facts.quantity, ready.length, facts.plan.totalMaxExposureEth) : facts.planned.phrase;
+      const phrase = phraseOf(facts, contract);
       if (!phrase) throw new Error('LIVE_PLAN_NOT_READY: the plan is not ready');
+      // The phrase names the contract, quantity, number of wallets and the most that can be spent: it must be the one that was reviewed.
+      if (expectedPhrase !== undefined && phrase !== expectedPhrase) throw new Error('PLAN_CHANGED: the plan changed since you reviewed it (the amount that can be spent or the wallets differ). Start the guide again.');
       return prepareFor(chainText, contract, quantity, phrase, wallets);
     },
     async releaseStatus() {
       const outcome = await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: undefined, actor: 'owner-telegram' });
-      return { text: outcome.message, canRelease: outcome.state === 'On' && Boolean(outcome.phrase) };
+      const phrase = outcome.state === 'On' ? outcome.phrase : undefined;
+      return { text: outcome.message, canRelease: Boolean(phrase), ...(phrase ? { phrase } : {}) };
     },
-    async releaseNow() {
+    async releaseNow(expectedPhrase) {
       // The phrase is built here from the current state (never taken from the button), then the same release action runs as for the typed phrase.
       const first = await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: undefined, actor: 'owner-telegram' });
       if (first.state !== 'On' || !first.phrase) return releaseResult(first);
+      // The phrase names this engagement of the kill switch; if it was engaged again since the owner looked, the old button does not release the new one.
+      if (expectedPhrase !== undefined && first.phrase !== expectedPhrase) throw new Error('KILL_STATE_CHANGED: the kill switch was engaged again since you looked. Send /release to see the current state.');
       return releaseResult(await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: first.phrase, actor: 'owner-telegram' }));
     },
     async guidedCampaigns() {
