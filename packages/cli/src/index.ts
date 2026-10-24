@@ -30,6 +30,7 @@ import { refreshFinalityEvidence } from './robinhood-evidence-refresh.js';
 import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { runLiveRequest, type LiveRequestStore } from './live-request.js';
 import { buildRobinhoodPlan, recordRobinhoodSimulationsAction, robinhoodConfirmationPhrase, robinhoodPrepareAction } from './robinhood-live.js';
+import { runEthereumProof, type EthereumProofStore, type ProofChainReader } from './ethereum-proof.js';
 import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, recordSimulationAction, watchAcceptAction, type PrepareStore } from './owner-actions.js';
 import { newTotpSecret, totpUri } from './totp.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
@@ -873,6 +874,22 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const store = runtime.store as unknown as Partial<EnableStore>;
         if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function' || typeof store.robinhoodEnablement !== 'function' || typeof store.revokeRobinhood !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
         process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), paid: args.paid, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+      } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
+    })
+  .command('ethereum-proof <action>', 'Owner-run (D-064): record an earlier live Ethereum mint as the proof Robinhood needs (status | record). Each transaction is read from Ethereum and checked first', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'record'] as const, demandOption: true })
+    .option('tx', { type: 'string', demandOption: true, describe: 'Comma-separated hashes of the Ethereum mint transactions (1 to 10)' })
+    .option('evidence-reference', { type: 'string', describe: 'Where the evidence is, e.g. "Docs/phase3-first-live-evidence.md, run 2026-10-19" (5 to 300 characters)' })
+    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (record only)' })
+    .option('rpc-url', { type: 'string' }), async (args) => {
+      try {
+        const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
+        if (!config.rpcEndpoints[0]) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
+        const reader = createPublicClient({ transport: failoverTransport(config.rpcEndpoints) });
+        const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false, allowTurnkey: false });
+        const store = runtime.store as unknown as Partial<EthereumProofStore>;
+        if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.recordEthereumLiveMintProofs !== 'function' || typeof store.ethereumLiveMintProofs !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
+        process.stdout.write(`${json(await runEthereumProof({ action: args.action, txHashes: args.tx, evidenceReference: args.evidenceReference, confirm: args.confirm, now: new Date(), reader: reader as unknown as ProofChainReader, store: store as EthereumProofStore, newId: () => `eth_proof_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('live-request <action>', 'Owner-run: ask the host service to arm and run one live mint (status | create). Every guard still applies', (args) => args

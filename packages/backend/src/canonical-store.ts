@@ -7,6 +7,7 @@ import type {
   ExecutionRunRecord,
   LifecycleEventRecord,
   LiveRunRequestRecord,
+  EthereumLiveMintProofInput,
   ReceiptRecord as DatabaseReceiptRecord,
   ReconciliationRecord as DatabaseReconciliationRecord,
   SettlementComponents,
@@ -1339,7 +1340,14 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   /** For the owner command's status page: has one Ethereum live mint been confirmed (D-040 item 6)? */
-  public ethereumLiveMintProven(): boolean { return this.hasConfirmedLiveEthereumMint(); }
+  public ethereumLiveMintProven(): boolean { return this.hasConfirmedLiveEthereumMint() || this.databaseStore.hasEthereumLiveMintProof(); }
+
+  /**
+   * T-062 (D-064): owner command only. Records the transactions the command verified on Ethereum as the proof D-040 item 6 asks
+   * for, in a database that never ran an Ethereum mint itself. It enables nothing; Robinhood still needs its own evidence file.
+   */
+  public recordEthereumLiveMintProofs(rows: EthereumLiveMintProofInput[]): void { this.ensureOpen(); this.databaseStore.recordEthereumLiveMintProofs(rows); }
+  public ethereumLiveMintProofs(): EthereumLiveMintProofInput[] { this.ensureOpen(); return this.databaseStore.ethereumLiveMintProofs(); }
 
   /** True when a live run on Ethereum has a confirmed receipt: the proof D-040 item 6 asks for before Robinhood may be enabled. */
   protected hasConfirmedLiveEthereumMint(): boolean {
@@ -1353,7 +1361,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
    */
   public enableRobinhood(input: { id: string; approvedAt: string; expiresAt: string; evidence: Record<'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7', true> & Partial<Record<'paidRehearsal' | 'paidPolicyApproved', true>>; paidAllowed: boolean; confirmationDigest: string }): void {
     this.ensureOpen();
-    if (!this.hasConfirmedLiveEthereumMint()) throw new Error('ETHEREUM_LIVE_MINT_REQUIRED');
+    if (!this.ethereumLiveMintProven()) throw new Error('ETHEREUM_LIVE_MINT_REQUIRED');
     const profile = this.ensureRobinhoodChainProfile();
     this.databaseStore.enableRobinhood(input, {
       chainProfileId: profile.id,
