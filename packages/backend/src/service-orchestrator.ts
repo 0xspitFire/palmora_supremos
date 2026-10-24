@@ -134,6 +134,10 @@ export class OrchestratorService {
       this.switchOffExpiredRobinhood();
       this.recordReconciliationMetrics();
       const backupReady = !this.options.backupStatusPath || (this.lastBackupStatus === 'ok' && this.lastBackupRecordedAt !== undefined && this.now().getTime() - this.lastBackupRecordedAt <= (this.options.backupMaxAgeMs ?? (this.options.requireOffHostBackup ? 8 * 60 * 60_000 : 30 * 86_400_000)));
+      // T-070 (D-068): the readiness flag follows the same check, so it is on only while a fresh verified backup exists.
+      if (this.options.backupStatusPath && this.store.snapshot().runtime.dependencies.backup !== backupReady) {
+        await this.store.transaction((state) => { state.runtime = { ...state.runtime, dependencies: { ...state.runtime.dependencies, backup: backupReady } }; });
+      }
       if (!backupReady) {
         await this.store.transaction((state) => {
           state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'BACKUP_NOT_READY'])] };
