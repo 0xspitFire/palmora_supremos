@@ -17,3 +17,5 @@ export { BackendStateRepository } from './backend-state.js';
 export type { SqliteDatabase } from './database.js';
 export { IntelligenceRepository } from './intelligence.js';
 export type { ObservedAddressRow } from './intelligence.js';
+export { TelegramAccessRepository } from './telegram-access.js';
+export type { TelegramRole, TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } from './telegram-access.js';

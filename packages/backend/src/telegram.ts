@@ -56,7 +56,7 @@ function credentials(options: TelegramNotifierOptions): TelegramCredentials {
   return { token, chatId };
 }
 
-/** The notifier is deliberately outbound-only: it never calls getUpdates or accepts Telegram commands. */
+/** The notifier is deliberately outbound-only: it never calls getUpdates or accepts Telegram commands. Owner commands (D-063) are a separate, opt-in service in the CLI package (T-061). */
 export class TelegramNotifier implements NotificationSink {
   private readonly config: TelegramCredentials;
   private readonly fetcher: TelegramFetcher;

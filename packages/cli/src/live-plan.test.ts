@@ -148,8 +148,11 @@ describe('live quantity-limit command wiring (D-055)', () => {
     const prepareBody = source.slice(prepareStart, nextStart);
     for (const body of [planBody, prepareBody]) {
       expect(body).toContain(".option('quantity-limit'");
-      expect(body).toContain('{ maxQuantity: args.quantityLimit }');
+      expect(body).toContain('{ quantityLimit: args.quantityLimit }');
     }
+    // The shared plan (T-061) hands the ceiling to the drop check as its maximum quantity.
+    const shared = await readFile(new URL('./owner-actions.ts', import.meta.url), 'utf8');
+    expect(shared).toContain('{ maxQuantity: input.quantityLimit }');
   });
 });
 

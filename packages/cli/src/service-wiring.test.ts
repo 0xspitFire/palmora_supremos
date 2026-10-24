@@ -46,6 +46,20 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(service).toContain('liveRequests?.stop()');
   });
 
+  it('Telegram commands run only when the owner turns them on, and the start fails without the owner, the token or the authenticator (T-061)', () => {
+    const setup = service.slice(service.indexOf('const commandsFlag'), service.indexOf('let intelligence:'));
+    expect(setup).toContain("if (commandsFlag !== '' && commandsFlag !== 'true' && commandsFlag !== 'false') throw new Error('TELEGRAM_COMMANDS_FLAG_INVALID')");
+    expect(setup).toContain("if (commandsFlag === 'true') {");
+    for (const refusal of ["throw new Error('TELEGRAM_COMMANDS_NEED_TELEGRAM')", "throw new Error('TELEGRAM_TOKEN_MISSING')", "throw new Error('TG_OWNER_USER_ID_MISSING')", "parseTotpSecret(secrets.get('TELEGRAM_TOTP_SECRET'))"]) expect(setup).toContain(refusal);
+    expect(setup).toContain("logger.registerSecret(secrets.get('TELEGRAM_TOTP_SECRET') ?? '')");
+    expect(service).toContain('alerts: intelligenceAlerts');
+    const wiring = service.slice(service.indexOf('if (telegramCommandSetup) {'), service.indexOf('// Scheduled encrypted backups'));
+    expect(wiring).toContain('const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY })');
+    expect(wiring).not.toContain('runtime.application');
+    expect(wiring).toContain('killSwitchPath: config.killSwitchPath');
+    expect(service).toContain('telegramCommands?.stop()');
+  });
+
   it('a dry-run service never builds it', () => {
     const block = service.slice(service.indexOf('const runtime = await createCliRuntime'), service.indexOf('const metrics = new MetricsRegistry()'));
     expect(block).toContain("config.mode === 'host'");

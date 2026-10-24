@@ -105,7 +105,8 @@ export class SqliteBackendStore implements BackendStore {
   public disableBaseIfNotEnabled(now: Date): boolean { return this.repository.disableBaseIfNotEnabled(now); }
   public recordLiveRunRequest(input: LiveRunRequestRecord): void { this.repository.recordLiveRunRequest(input); }
   public unclaimedLiveRunRequests(): LiveRunRequestRecord[] { return this.repository.unclaimedLiveRunRequests(); }
-  public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired', at: string): boolean { return this.repository.claimLiveRunRequest(requestId, outcome, at); }
+  public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired' | 'cancelled', at: string): boolean { return this.repository.claimLiveRunRequest(requestId, outcome, at); }
+  public recentLiveRunRequests(limit: number): ReturnType<DurableRepository['recentLiveRunRequests']> { return this.repository.recentLiveRunRequests(limit); }
   public revokeEnablement(chainId: 4663 | 8453, input: { id: string; revokedAt: string; confirmationDigest: string; expectedEnablementId?: string }): { enablementId: string } { return this.repository.revokeEnablement(chainId, input); }
   public recordRetentionEvidence(record: RetentionEvidenceRecord): void { this.repository.recordRetentionEvidence(record); }
   public settleExecution(id: string, mintValueWei: bigint, l2ExecutionGasWei: bigint, l1DataGasWei: bigint): void { this.reservations.settleExecution(id, mintValueWei, l2ExecutionGasWei, l1DataGasWei); }
