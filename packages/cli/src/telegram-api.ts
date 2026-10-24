@@ -1,4 +1,5 @@
 import type { TelegramFetcher } from '@mint-bot/backend';
+import { toCopyableHtml } from './telegram-format.js';
 
 /**
  * T-061 (D-063 item 1): the parts of the Telegram Bot API the command service uses. Every call is made by the service (outbound);
@@ -24,6 +25,7 @@ export interface TelegramBotApi {
 export interface BotCommand { command: string; description: string }
 
 const MAX_TEXT = 4_000;
+const MAX_FORMATTED = 4_096;
 
 export function createTelegramBotApi(options: { token: string; apiBaseUrl?: string; approvedProxy?: string; fetcher?: TelegramFetcher; timeoutMs?: number }): TelegramBotApi {
   if (!options.token || /\s/.test(options.token)) throw new Error('TELEGRAM_TOKEN_INVALID');
@@ -53,7 +55,15 @@ export function createTelegramBotApi(options: { token: string; apiBaseUrl?: stri
       return Array.isArray(result) ? result as TelegramUpdate[] : [];
     },
     async sendMessage(chatId, text, buttons) {
-      await call('sendMessage', { chat_id: chatId, text: text.slice(0, MAX_TEXT), disable_web_page_preview: true, ...(buttons && buttons.length > 0 ? { reply_markup: { inline_keyboard: buttons } } : {}) });
+      const plain = text.slice(0, MAX_TEXT);
+      const extra = { chat_id: chatId, disable_web_page_preview: true, ...(buttons && buttons.length > 0 ? { reply_markup: { inline_keyboard: buttons } } : {}) };
+      // T-069: copy-friendly formatting. A reply is never lost: if the formatted version is too long or Telegram refuses it (400), the plain text is sent.
+      const html = toCopyableHtml(plain);
+      if (html.length <= MAX_FORMATTED) {
+        try { await call('sendMessage', { ...extra, text: html, parse_mode: 'HTML' }); return; }
+        catch (error) { if (!(error instanceof Error) || !error.message.endsWith(':400')) throw error; }
+      }
+      await call('sendMessage', { ...extra, text: plain });
     },
     async answerCallback(callbackId, text) {
       await call('answerCallbackQuery', { callback_query_id: callbackId, ...(text ? { text: text.slice(0, 190) } : {}) });

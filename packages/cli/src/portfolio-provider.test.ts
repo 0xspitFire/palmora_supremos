@@ -111,6 +111,7 @@ describe('/portfolio', () => {
       reply(200, { items: [], next_page_params: null }), reply(200, { items: [item('9', '0x3333333333333333333333333333333333333333', 'Robin')], next_page_params: null }),
     ]);
     const text = await createTelegramActions(deps(t.p)).portfolio();
+    expect(text).toContain('signing wallet(s) hold');
     expect(text).toContain('Ethereum: 3 NFT(s)');
     expect(text).toContain('Cool Cats × 2');
     expect(text).toContain('Zed');

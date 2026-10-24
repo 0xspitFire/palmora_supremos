@@ -160,15 +160,26 @@ function spread<T>(items: readonly T[], count: number): T[] {
   return out;
 }
 
+/**
+ * A fixed code (capitals, digits, underscores) may be long, such as TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED, and is shown as it is;
+ * only the text after the first colon is checked for links, long hex and key-like strings.
+ */
+function isSafeCodedMessage(message: string): boolean {
+  const [code = '', ...rest] = message.split(':');
+  // At most 80 characters, and a code of 32 or more must contain an underscore, so a bare hex or key-like string is never taken for a code.
+  const codeOk = /^[A-Z][A-Z0-9_]{1,79}$/.test(code) && (code.length < 32 || code.includes('_'));
+  return codeOk && !/:\/\/|0x[0-9a-f]{20,}|[A-Za-z0-9_-]{32,}/i.test(rest.join(':'));
+}
+
 /** The only text the survey command may print for a failure: known survey codes as-is, anything else cleaned, because provider errors can contain the RPC URL and key. */
 export function surveyErrorMessage(error: unknown): string {
-  if (error instanceof Error && /^[A-Z][A-Z0-9_]+(:|$)/.test(error.message) && !/:\/\/|0x[0-9a-f]{20,}|[A-Za-z0-9_-]{32,}/i.test(error.message)) return error.message;
+  if (error instanceof Error && isSafeCodedMessage(error.message)) return error.message;
   return `SURVEY_FAILED: ${providerErrorDetail(error)}${connectionHint(error)}`;
 }
 
 /** Secret-safe error text for commands that are not surveys. */
 export function commandErrorMessage(error: unknown, fallbackCode = 'COMMAND_FAILED'): string {
-  if (error instanceof Error && /^[A-Z][A-Z0-9_]+(:|$)/.test(error.message) && !/:\/\/|0x[0-9a-f]{20,}|[A-Za-z0-9_-]{32,}/i.test(error.message)) return error.message;
+  if (error instanceof Error && isSafeCodedMessage(error.message)) return error.message;
   return `${fallbackCode}: ${providerErrorDetail(error)}${connectionHint(error)}`;
 }
 
