@@ -154,6 +154,84 @@ describe('Telegram actions', () => {
     expect(text).not.toContain('Kill switch');
   });
 
+  describe('Robinhood plan, prepare and simulate (T-063)', () => {
+    const CONTRACT = '0xa686fde3299d5451af22382240e0dff62f7b94db';
+    const A = '0x365952eb1e8209bf2bcc2db5ed213111a87d061e';
+    const B = '0x81c104dcb898416fd4f81ead091dba5b8f46f37a';
+    const NOW = new Date('2026-10-24T12:00:00.000Z');
+    const passing = (wallet: string) => ({ wallet, simulation: 'passed' as const, estimatedGas: '120000', estimatedCostEth: '0.0000024', withinPerWalletCap: true, balanceEth: '0.001', hasEnoughForGas: true });
+    const dryRun = (status: 'open' | 'upcoming' = 'open', wallets: string[] = [A, B]) => async (_contract: string, requested: readonly string[], quantity: number | undefined) => ({ contract: CONTRACT, verdict: 'ok' as const, summary: 'ok', quantity: quantity ?? 1, wallets: status === 'open' ? requested.filter((wallet) => wallets.includes(wallet)).map(passing) : [], drop: { priceEth: '0', opensAt: '2026-10-24T11:15:06.000Z', closesAt: '2026-10-24T13:00:06.000Z', maxPerWallet: 5, status } });
+    const robinhood = async (extra: Partial<TelegramActionDeps> = {}) => {
+      const directory = await mkdtemp(join(tmpdir(), 'mintbot-tg-rh-'));
+      const killSwitchPath = join(directory, 'killswitch');
+      await writeFile(killSwitchPath, 'on\n');
+      const created: Array<{ chainId: number; quantity: number; broadcastMode?: string }> = [];
+      const simulations: unknown[] = [];
+      const evidence = { id: 'verification_abc', chainId: 4663, status: 'accepted', executionEnabled: true, checkedAt: '2026-10-24T11:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', sourceBlock: 1n, endpointIdentity: 'robinhood-sequencer' };
+      const campaigns = [{ id: 'cmp_1', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n }];
+      const store = { snapshot: () => ({ events: [], campaigns, simulations, chainEvidence: [evidence], runs: [], killed: false }), transaction: async (mutate: (state: { simulations: unknown[] }) => void) => { mutate({ simulations }); } };
+      const application = { createCampaign: async (input: { chainId: number; quantity: number; broadcastMode?: string }) => { created.push(input); return { id: 'cmp_new', ...input }; } };
+      const actions = createTelegramActions(deps({ store: store as never, application: application as never, killSwitchPath, walletList: async () => [A, B], robinhoodDryRun: dryRun(), robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }), now: () => NOW, ...extra }));
+      return { actions, directory, created, simulations };
+    };
+    const phraseIn = (text: string): string => /\/prepare robinhood \S+ \d+ (.+)$/m.exec(text)![1]!;
+
+    it('/plan prints the exact /prepare line, sized for the wallets that can mint', async () => {
+      const { actions, directory } = await robinhood();
+      try {
+        const text = await actions.plan('robinhood', CONTRACT, undefined);
+        expect(text).toContain('Drop and wallets are ready');
+        expect(text).toContain(`/prepare robinhood ${CONTRACT} 1 PREPARE-LIVE-ROBINHOOD 2f7b94db QTY-1 2-WALLETS 0.0004`);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('/prepare records a sequencer campaign only with the exact phrase and the kill switch on, and says what to do next', async () => {
+      const { actions, directory, created } = await robinhood();
+      try {
+        await expect(actions.prepare('robinhood', CONTRACT, 1, 'PREPARE-LIVE-ROBINHOOD wrong')).rejects.toThrow('CONFIRMATION_PHRASE_MISMATCH');
+        expect(created).toEqual([]);
+        const phrase = phraseIn(await actions.plan('robinhood', CONTRACT, 1));
+        const text = await actions.prepare('robinhood', CONTRACT, 1, phrase);
+        expect(created).toEqual([expect.objectContaining({ chainId: 4663, quantity: 1, broadcastMode: 'sequencer' })]);
+        expect(text).toContain('Campaign recorded: cmp_new');
+        expect(text).toContain('/simulate cmp_new');
+        await rm(join(directory, 'killswitch'));
+        await expect(actions.prepare('robinhood', CONTRACT, 1, phrase)).rejects.toThrow('KILL_SWITCH_REQUIRED_FOR_PREPARATION');
+        expect(created).toHaveLength(1);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('/prepare refuses a drop that is not ready, such as an ended or paid one', async () => {
+      const ended = await robinhood({ robinhoodDryRun: async (contract, wallets, quantity) => ({ ...(await dryRun()(contract, wallets, quantity)), drop: { priceEth: '0', opensAt: null, closesAt: null, maxPerWallet: 5, status: 'ended' as const } }) });
+      const paid = await robinhood({ robinhoodDryRun: async (contract, wallets, quantity) => ({ ...(await dryRun()(contract, wallets, quantity)), drop: { priceEth: '0.001', opensAt: null, closesAt: null, maxPerWallet: 5, status: 'open' as const } }) });
+      try {
+        await expect(ended.actions.prepare('robinhood', CONTRACT, 1, 'PREPARE-LIVE-ROBINHOOD 2f7b94db QTY-1 2-WALLETS 0.0004')).rejects.toThrow('LIVE_PLAN_NOT_READY');
+        await expect(paid.actions.prepare('robinhood', CONTRACT, 1, 'PREPARE-LIVE-ROBINHOOD 2f7b94db QTY-1 2-WALLETS 0.0004')).rejects.toThrow('LIVE_PLAN_NOT_READY');
+        expect(ended.created).toEqual([]);
+        expect(paid.created).toEqual([]);
+      } finally { await Promise.all([ended, paid].map((item) => rm(item.directory, { recursive: true, force: true }))); }
+    });
+
+    it('/simulate records a test mint for each wallet that passed and prints the /request line with those wallets', async () => {
+      const { actions, directory, simulations } = await robinhood({ robinhoodDryRun: dryRun('open', [A]) });
+      try {
+        const text = await actions.simulate('cmp_1');
+        expect(simulations).toEqual([expect.objectContaining({ wallet: A, campaignId: 'cmp_1', success: true })]);
+        expect(text).toContain('1 wallet(s) passed the test mint');
+        expect(text).toContain(`/request cmp_1 ${A} 0.2`);
+        expect(text).toContain('use a lower number if yours is lower');
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('/simulate records nothing while the mint has not opened (fail closed)', async () => {
+      const { actions, directory, simulations } = await robinhood({ robinhoodDryRun: dryRun('upcoming') });
+      try {
+        await expect(actions.simulate('cmp_1')).rejects.toThrow('MINT_NOT_OPEN');
+        expect(simulations).toEqual([]);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+  });
+
   it('/cancel only wins when the service has not claimed the request', async () => {
     const claims: string[] = [];
     const store = { snapshot: () => ({ events: [] }), claimLiveRunRequest: (id: string, outcome: string) => { claims.push(`${id}:${outcome}`); return id === 'fresh'; } };
@@ -191,9 +269,4 @@ describe('Telegram actions', () => {
     await expect(actions.revoke('ethereum', undefined)).rejects.toThrow('NOTHING_TO_REVOKE');
   });
 
-  it('Robinhood planning and preparing are refused plainly until they exist', async () => {
-    const actions = createTelegramActions(deps());
-    await expect(actions.plan('robinhood', '0x1111111111111111111111111111111111111111', undefined)).rejects.toThrow('ROBINHOOD_NOT_SUPPORTED_YET');
-    await expect(actions.prepare('robinhood', '0x1111111111111111111111111111111111111111', 1, 'x')).rejects.toThrow('ROBINHOOD_NOT_SUPPORTED_YET');
-  });
 });

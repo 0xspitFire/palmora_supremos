@@ -178,6 +178,70 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
     });
   });
 
+  describe('a free Robinhood campaign with the real numbers (T-063, D-065)', () => {
+    const ALLOWANCE = 200_000_000_000_000n; // D-041: 0.0002 ETH per wallet
+    const TIP = 100_000_000n; // 0.1 gwei, separate from the budget
+    const real = (overrides: Record<string, unknown> = {}, fee: Record<string, unknown> = {}) => ({
+      ...campaignInput(ROBINHOOD),
+      maxRunWei: ALLOWANCE * 2n, dailyCapWei: ALLOWANCE, gasCeilingWei: ALLOWANCE,
+      feePolicy: { kind: 'free' as const, configuredPriorityFeeWei: TIP, freeTotalSpendCapWei: ALLOWANCE, l2ExecutionGasBudgetWei: ALLOWANCE - TIP, l1DataGasBudgetWei: 0n, totalFeeBudgetWei: ALLOWANCE, ...fee },
+      ...overrides,
+    });
+
+    it('is created and admitted for two wallets under the real fleet policy, reserving exactly the allowance each', async () => {
+      const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, PERSONAL_LIVE_FLEET_POLICY);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL), fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+      try {
+        await proven.open();
+        // The chain's stored fee policy comes from the first campaign, as on a new host database.
+        value.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ?').run('profile-4663');
+        proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+        const application = new BackendApplication(proven, {} as never, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+        const created = await application.createCampaign(real());
+        const prepared = await armed({ ...value, store: proven, application }, created, [WALLET_ONE, WALLET_TWO]);
+        const admission = await proven.admitExecution(prepared.input);
+        expect(admission.reservations.map((item) => item.amountWei)).toEqual([ALLOWANCE, ALLOWANCE]);
+      } finally { proven.close(); await close(value); }
+    });
+
+    it('refuses every shape that is not the approved one, and any number above the D-041 caps (fail closed)', async () => {
+      const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, PERSONAL_LIVE_FLEET_POLICY);
+      try {
+        const create = (input: ReturnType<typeof real>) => value.application.createCampaign(input as never);
+        // The old toy shape still works exactly as before.
+        await expect(create(campaignInput(ROBINHOOD) as never)).resolves.toBeDefined();
+        // A budget that is not the approved allowance falls back to the old rule, which a real budget cannot satisfy.
+        await expect(create(real({}, { freeTotalSpendCapWei: ALLOWANCE + 1n }))).rejects.toThrow('FREE_TOTAL_SPEND_POLICY_INVALID');
+        await expect(create(real({}, { freeTotalSpendCapWei: ALLOWANCE - 1n, totalFeeBudgetWei: ALLOWANCE - 1n, l2ExecutionGasBudgetWei: ALLOWANCE - 1n - TIP }))).rejects.toThrow('FREE_TOTAL_SPEND_POLICY_INVALID');
+        // Inside the shape: tip zero or above 2 gwei, a budget above the allowance, and caps above D-041.
+        await expect(create(real({}, { configuredPriorityFeeWei: 0n, l2ExecutionGasBudgetWei: ALLOWANCE }))).rejects.toThrow('FREE_TIP_OUT_OF_RANGE');
+        await expect(create(real({}, { configuredPriorityFeeWei: 2_000_000_001n, l2ExecutionGasBudgetWei: ALLOWANCE - 2_000_000_001n }))).rejects.toThrow('FREE_TIP_OUT_OF_RANGE');
+        await expect(create(real({}, { l2ExecutionGasBudgetWei: ALLOWANCE }))).rejects.toThrow('TOTAL_FEE_BUDGET_MISMATCH');
+        await expect(create(real({ gasCeilingWei: ALLOWANCE + 1n }))).rejects.toThrow();
+        await expect(create(real({ dailyCapWei: 2_000_000_000_000_001n }))).rejects.toThrow('ROBINHOOD_ACTIVE_PERIOD_CAP_EXCEEDED');
+        // Not a sequencer campaign, and not a free mint.
+        await expect(create(real({ broadcastMode: 'public' }))).rejects.toThrow('ROBINHOOD_SEQUENCER_REQUIRED');
+        await expect(create(real({ mintPriceWei: 1n }))).rejects.toThrow();
+      } finally { await close(value); }
+    });
+
+    it('can never reserve more than the allowance per wallet: three wallets at the real numbers exceed the Robinhood free budget at creation time', async () => {
+      const value = await fixture(ROBINHOOD, false, true, '2099-01-01T00:00:00.000Z', true, PERSONAL_LIVE_FLEET_POLICY);
+      const proven = new ProvenStore(value.db, { now: () => new Date(REAL), fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+      try {
+        await proven.open();
+        value.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ?').run('profile-4663');
+        proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
+        const application = new BackendApplication(proven, {} as never, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+        // A run limit for two wallets cannot admit three.
+        const created = await application.createCampaign(real());
+        const third = '0x3333333333333333333333333333333333333333';
+        const prepared = await armed({ ...value, store: proven, application }, created, [WALLET_ONE, WALLET_TWO, third]);
+        await expect(proven.admitExecution(prepared.input)).rejects.toThrow('SPEND_CAP_EXCEEDED');
+      } finally { proven.close(); await close(value); }
+    });
+  });
+
   it('lets a free Robinhood run get past the chain checks while enabled, and refuses again once revoked', async () => {
     const value = await fixture(ROBINHOOD);
     const proven = new ProvenStore(value.db, { now: () => new Date(REAL) });

@@ -115,7 +115,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   drops: { tier: 'read', roles: BOTH, usage: '/drops', help: 'Upcoming opportunities' },
   calendar: { tier: 'read', roles: BOTH, usage: '/calendar', help: 'Mint calendar' },
   check: { tier: 'read', roles: BOTH, usage: '/check <chain> <contract>', help: 'Price, phase and limits (and your wallets, for the owner)' },
-  plan: { tier: 'read', roles: OWNER, usage: '/plan <chain> <contract> [quantity]', help: 'Quantity and fee plan, and the phrase for /prepare' },
+  plan: { tier: 'read', roles: OWNER, usage: '/plan <chain> <contract> [quantity]', help: 'Quantity and cost plan (Ethereum, Base, Robinhood), and the phrase for /prepare' },
   request: { tier: 'read', roles: OWNER, usage: '/request <campaign> <wallets|all> <max gwei>', help: 'Preview a live request and its phrase' },
   requests: { tier: 'read', roles: OWNER, usage: '/requests', help: 'Pending and recent requests' },
   runs: { tier: 'read', roles: OWNER, usage: '/runs', help: 'Recent runs' },
