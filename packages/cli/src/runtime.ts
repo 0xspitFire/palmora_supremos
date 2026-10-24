@@ -10,7 +10,7 @@ import type { CoordinatorAssuranceWiring } from './turnkey-readiness-service.js'
 /** Where spend-limit alerts go. The default records a durable alert event; the service swaps in its Telegram-backed manager. */
 export interface SpendAlertSink { cap(reason: string, runId?: string): Promise<void>; }
 
-export interface CliRuntime { store: BackendStore; coordinator: ExecutionCoordinator; application: BackendApplication; walletRoot: string; setAlertSink(sink: SpendAlertSink): void; }
+export interface CliRuntime { store: BackendStore; coordinator: ExecutionCoordinator; application: BackendApplication; walletRoot: string; setAlertSink(sink: SpendAlertSink): void; /** T-058: the fee ceiling for one campaign's run, set by the service from a live request; undefined clears it. */ setFeeCeiling(campaignId: string, gwei: number | undefined): void; }
 
 export type CustodyMode = 'local' | 'turnkey';
 
@@ -79,6 +79,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   const configuredAdapterOptions = turnkeyConfig
     ? { ...adapterOptions, ...turnkeyOptions }
     : { ...turnkeyOptions, ...adapterOptions };
+  const feeCeilings = new Map<string, number>();
   const actualEngine = engine ?? createMintEngineAdapter({
     walletFile: configuredWalletPath(projectRoot),
     killSwitchFile: resolve(projectRoot, 'Rets', 'state', 'killswitch'),
@@ -88,6 +89,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     gasLimitPadding: 1.2,
     maxReplacementBumps: 0,
     ...configuredAdapterOptions,
+    maxFeePerGasGweiFor: (campaignId) => feeCeilings.get(campaignId),
     getState: () => store.snapshot(),
     transact: (mutate) => store.transaction(mutate),
     lifecycleStore: adapterOptions?.lifecycleStore ?? lifecycleStore,
@@ -101,5 +103,5 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   const assuranceWiring = runtimeOptions.coordinatorAssurance ? await runtimeOptions.coordinatorAssurance(store) : undefined;
   const coordinator = new ExecutionCoordinator(store, actualEngine, { alerts: { cap: (reason, runId) => alertSink.cap(reason, runId) }, ...(assuranceWiring ? { expectedCustodyPolicy: assuranceWiring.expectedCustodyPolicy, compensatingAssurance: assuranceWiring.compensatingAssurance, refreshReadiness: assuranceWiring.refreshReadiness, walletWatch: assuranceWiring.walletWatch } : {}), ...(personalLiveLocalCustodyAllowed(runtimeOptions.acceptPersonalLiveLocalCustody, useTurnkey) ? { acceptPersonalLiveLocalCustody: true } : {}) });
   if (runtimeOptions.startCoordinator !== false) await coordinator.start();
-  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY }), walletRoot: join(configuredSecretRoot(projectRoot), 'wallets'), setAlertSink: (sink) => { alertSink = sink; } };
+  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY }), walletRoot: join(configuredSecretRoot(projectRoot), 'wallets'), setAlertSink: (sink) => { alertSink = sink; }, setFeeCeiling: (campaignId, gwei) => { if (gwei === undefined) feeCeilings.delete(campaignId); else feeCeilings.set(campaignId, gwei); } };
 }

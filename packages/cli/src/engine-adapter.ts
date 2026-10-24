@@ -50,6 +50,8 @@ export interface MintEngineAdapterOptions {
   readonly secretRoot: string;
   readonly logFile: string;
   readonly maxFeePerGasGwei: number;
+  /** T-058: the fee ceiling the owner set on a live request for this campaign, while the service runs it. Falls back to `maxFeePerGasGwei`. */
+  readonly maxFeePerGasGweiFor?: (campaignId: string) => number | undefined;
   readonly gasLimitPadding: number;
   readonly maxReplacementBumps: number;
   readonly getState: () => BackendState;
@@ -188,7 +190,7 @@ export function engineConfigFromCampaign(campaign: Campaign, options: MintEngine
     target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id, ...(options.policyRef ? { policyRef: options.policyRef } : {}) },
     fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
-    fees: { maxFeePerGasGwei: options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding },
+    fees: { maxFeePerGasGwei: options.maxFeePerGasGweiFor?.(campaign.id) ?? options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding },
     safety: {
       maxSpendEth: asFiniteNumber(campaign.spendPolicy.maxRunWei, 'max_run_spend'),
       dailySpendCapEth: asFiniteNumber(campaign.spendPolicy.dailyCapWei, 'daily_spend_cap'),
