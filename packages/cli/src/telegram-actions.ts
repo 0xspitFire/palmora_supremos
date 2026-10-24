@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
-import { createPublicClient, formatGwei, http as httpTransport, parseAbi, type Address } from 'viem';
+import { createPublicClient, formatGwei, parseEther, http as httpTransport, parseAbi, type Address } from 'viem';
 import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import type { FireScheduleRepository, GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
@@ -21,6 +21,8 @@ import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion } from './host-facts.js';
 import { PORTFOLIO_CHAINS, type PortfolioProvider } from './portfolio-provider.js';
 import { sections, shortEth, shortenBalancesInParens } from './display.js';
+import { usdText, type EthPriceProvider } from './price-provider.js';
+import type { OpenSeaFloors } from './opensea-client.js';
 import { scheduleConfirmationDigest, type FireWiring } from './fire-wiring.js';
 
 /**
@@ -70,6 +72,10 @@ export interface TelegramActionDeps {
   /** T-067: `/fire` and `/schedule`. Absent in practice mode, where nothing would run them. */
   /** T-068: the outside NFT data service (Blockscout). Absent when no key is stored. */
   portfolio?: PortfolioProvider;
+  /** T-072: the ETH price in dollars (Chainlink, Coinbase as a fallback), display only. */
+  prices?: EthPriceProvider;
+  /** T-072: OpenSea collection floor prices, for the value shown by `/portfolio`. Absent when no key is stored. */
+  floors?: OpenSeaFloors;
   fire?: FireWiring;
   fireSchedulesRepository?: () => FireScheduleRepository;
   /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
@@ -183,6 +189,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async wallets() {
       const healthy = deps.watcherHealthy();
       const head = [`Watcher: ${healthy === undefined ? 'not running' : healthy ? 'healthy' : 'NOT healthy'}`];
+      const price = await deps.prices?.price().catch(() => undefined);
       const groups: string[][] = [];
       for (const chain of CHAINS) {
         const addresses = deps.watchedWallets(chain.id);
@@ -191,12 +198,13 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         const lines = [`${chain.name}:`];
         for (const address of addresses) {
           // Cut to three significant digits for reading (T-071); `/funding` keeps exact amounts.
-          const balance = reader ? await reader.getBalance({ address: address as Address }).then((wei) => `${shortEth(wei)} ETH`).catch(() => 'unavailable') : 'unavailable';
+          const balance = reader ? await reader.getBalance({ address: address as Address }).then((wei) => `${shortEth(wei)} ETH${price ? ` ≈ ${usdText(Number(wei) / 1e18, price)}` : ''}`).catch(() => 'unavailable') : 'unavailable';
           lines.push(`  ${short(address)}  ${balance}`);
         }
         groups.push(lines);
       }
-      return groups.length > 0 ? sections(head, ...groups) : sections(head, ['No wallets are listed for the watcher.']);
+      const priceNote = price ? [`Dollar values use the ${price.source === 'chainlink' ? 'Chainlink' : 'Coinbase'} ETH price of $${price.usd.toFixed(2)}${price.source === 'chainlink' ? ` (updated ${minutes(price.asOf.toISOString())} UTC)` : ''}.`] : [];
+      return groups.length > 0 ? sections(head, ...groups, priceNote) : sections(head, ['No wallets are listed for the watcher.']);
     },
     async funding(campaignId) {
       if (!campaignId) {
@@ -466,31 +474,45 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const provider = deps.portfolio;
       const wallets = (await deps.walletList()).slice(0, 10);
       if (wallets.length === 0) return 'No wallets are set up, so there is nothing to show.';
-      const lines = [`Everything your ${wallets.length} signing wallet(s) hold (the wallets in your Turnkey wallet map; /wallets also lists watched wallets), from Blockscout (it can lag the chain by a minute or two; /holdings reads MintBot's own mints straight from the chain):`];
+      const price = await deps.prices?.price().catch(() => undefined);
+      const money = (eth: number): string => `${shortEth(parseEther(eth.toFixed(18)))} ETH${price ? ` (${usdText(eth, price)})` : ''}`;
+      const groups: string[][] = [[`Everything your ${wallets.length} signing wallet(s) hold (the wallets in your Turnkey wallet map; /wallets also lists watched wallets), from Blockscout. It can lag the chain by a minute or two; /holdings reads MintBot's own mints straight from the chain.`]];
       let asOf: Date | undefined;
+      let anyFloor = false;
       for (const chainId of PORTFOLIO_CHAINS) {
         const rows = await Promise.all(wallets.map(async (wallet) => { try { return { wallet, ...(await provider.list(chainId, wallet)) }; } catch (error) { return { wallet, failed: (error instanceof Error ? error.message : '').split(':')[0] ?? 'PORTFOLIO_UNAVAILABLE' }; } }));
         const total = rows.reduce((sum, row) => sum + ('items' in row ? row.items.reduce((count, item) => count + item.amount, 0n) : 0n), 0n);
-        lines.push('', `${chainName(chainId)}: ${total} NFT(s)`);
-        const grouped = new Map<string, { name: string; count: bigint }>();
+        const lines = [`${chainName(chainId)}: ${total} NFT(s)`];
+        const grouped = new Map<string, { name: string; count: bigint; contract: string | undefined }>();
         for (const row of rows) {
           if ('failed' in row) { lines.push(`• ${short(row.wallet)} could not be read (${row.failed})`); continue; }
           asOf = asOf && asOf > row.asOf ? asOf : row.asOf;
           if (row.truncated) lines.push(`• ${short(row.wallet)}: only the first pages were read, so its list is partial`);
           for (const item of row.items) {
             const key = item.contract ?? 'unknown';
-            const entry = grouped.get(key) ?? { name: cleanName(item.name) ?? (item.contract ? short(item.contract) : 'unknown collection'), count: 0n };
+            const entry = grouped.get(key) ?? { name: cleanName(item.name) ?? (item.contract ? short(item.contract) : 'unknown collection'), count: 0n, contract: item.contract };
             entry.count += item.amount;
             grouped.set(key, entry);
           }
         }
         const top = [...grouped.values()].sort((left, right) => (right.count > left.count ? 1 : right.count < left.count ? -1 : 0)).slice(0, 12);
-        lines.push(...top.map((entry) => `  ${entry.name} × ${entry.count}`));
+        // T-072: floor prices from OpenSea for the largest holdings (an estimate of listing prices; a collection with no known floor is not counted).
+        const floors = await Promise.all(top.map(async (entry) => { if (!deps.floors || !entry.contract) return undefined; try { return (await deps.floors.floor(chainId, entry.contract)).floorEth; } catch { return undefined; } }));
+        let floorTotal = 0;
+        top.forEach((entry, index) => {
+          const floor = floors[index];
+          if (floor !== undefined) { floorTotal += Number(entry.count) * floor; anyFloor = true; }
+          lines.push(`  ${entry.name} × ${entry.count}${floor !== undefined ? ` · floor ${shortEth(parseEther(floor.toFixed(18)))} ETH` : ''}`);
+        });
         if (grouped.size > top.length) lines.push(`  …and ${grouped.size - top.length} more collection(s)`);
+        if (floorTotal > 0) lines.push(`Estimated Floor Value: ${money(floorTotal)}`);
+        groups.push(lines);
       }
-      lines.push('', 'Base is not covered by the free Blockscout plan; /holdings shows MintBot\'s Base mints from the chain.');
-      if (asOf) lines.push(`As of ${minutes(asOf.toISOString())} UTC (results are kept 5 minutes).`);
-      return lines.join('\n');
+      const notes = ['Base is not covered by the free Blockscout plan; /holdings shows MintBot\'s Base mints from the chain.'];
+      if (anyFloor) notes.push('Floor values are OpenSea listing prices, an estimate and not what a sale would fetch; collections without a known floor are not counted.');
+      if (price) notes.push(`Dollar values use the ${price.source === 'chainlink' ? 'Chainlink' : 'Coinbase'} ETH price of $${price.usd.toFixed(2)}${price.source === 'chainlink' ? ` (updated ${minutes(price.asOf.toISOString())} UTC)` : ''}.`);
+      if (asOf) notes.push(`As of ${minutes(asOf.toISOString())} UTC (results are kept 5 minutes).`);
+      return sections(...groups, notes);
     },
     async holdings() {
       const state = deps.store.snapshot();

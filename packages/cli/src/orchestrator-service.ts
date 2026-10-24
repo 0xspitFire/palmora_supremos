@@ -44,6 +44,8 @@ import { startLiveRequestPoller } from './live-request.js';
 import { createFireWiring, type FireWiring } from './fire-wiring.js';
 import { dryRunDrop } from './robinhood-readonly.js';
 import { createBlockscoutPortfolio, type PortfolioProvider } from './portfolio-provider.js';
+import { CHAINLINK_ABI, CHAINLINK_ETH_USD_FEED, createEthPriceProvider } from './price-provider.js';
+import { createOpenSeaFloors, type OpenSeaFloors } from './opensea-client.js';
 import { startFireScheduler } from './fire.js';
 
 export interface RunningOrchestratorService {
@@ -267,10 +269,32 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const secretRoot = configuredSecretRoot(config.projectRoot);
     // T-068: /portfolio needs the owner's Blockscout key in the secret store (BLOCKSCOUT_API_KEY); without it the command says it is off.
     let portfolioProvider: PortfolioProvider | undefined;
+    let floorPrices: OpenSeaFloors | undefined;
     if (config.secretStorePath) {
-      const portfolioKey = (await loadHostSecretStore(config.secretStorePath)).get('BLOCKSCOUT_API_KEY');
+      const keys = await loadHostSecretStore(config.secretStorePath);
+      const portfolioKey = keys.get('BLOCKSCOUT_API_KEY');
       if (portfolioKey) { logger.registerSecret(portfolioKey); portfolioProvider = createBlockscoutPortfolio({ apiKey: portfolioKey }); }
+      // T-072: OpenSea floor prices for /portfolio, when the owner has stored OPENSEA_API.
+      const openSeaKey = keys.get('OPENSEA_API');
+      if (openSeaKey) { logger.registerSecret(openSeaKey); floorPrices = createOpenSeaFloors({ apiKey: openSeaKey }); }
     }
+    // T-072: the ETH price in dollars (display only): Chainlink through the Ethereum RPC, Coinbase as a fallback.
+    let ethClient: ReturnType<typeof createPublicClient> | undefined;
+    const ethereum = async () => {
+      if (!ethClient) {
+        const endpoints = [...(await resolveChainConfigFromSecrets(1, 'mainnet', secretRoot)).rpcEndpoints];
+        if (endpoints.length === 0) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
+        ethClient = createPublicClient({ transport: failoverTransport(endpoints) });
+      }
+      return ethClient;
+    };
+    const priceProvider = createEthPriceProvider({
+      chainlink: {
+        description: async () => (await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'description' })),
+        decimals: async () => Number(await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'decimals' })),
+        latestRoundData: async () => { const round = await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'latestRoundData' }); return { answer: round[1], updatedAt: new Date(Number(round[3]) * 1000) }; },
+      },
+    });
     const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
     // T-067 (D-067): `/fire` and `/schedule`, in host mode only. Both end in the same pipeline and the same request processor.
     const reader = async (chainId: 1 | 8453 | 4663) => createPublicClient({ transport: failoverTransport([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]) });
@@ -332,6 +356,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       intelligence: () => bridge.intelligenceRepository(),
       gasAlerts: () => bridge.gasAlertRepository(),
       ...(portfolioProvider ? { portfolio: portfolioProvider } : {}),
+      prices: priceProvider,
+      ...(floorPrices ? { floors: floorPrices } : {}),
       ...(fire ? { fire, fireSchedulesRepository: () => bridge.fireScheduleRepository() } : {}),
     });
     const router = new TelegramCommandRouter({

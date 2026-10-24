@@ -123,3 +123,31 @@ describe('/portfolio', () => {
     expect(text).not.toContain(KEY);
   });
 });
+
+describe('/portfolio values (T-072)', () => {
+  const deps = (extra: Record<string, unknown>) => ({
+    mode: 'dry-run', custody: 'turnkey', store: { snapshot: () => ({ events: [], campaigns: [], runs: [], receipts: [], simulations: [], killed: false }) } as never, application: {} as never, coordinator: { kill: async () => undefined },
+    projectRoot: '/nonexistent', secretRoot: '/nonexistent', killSwitchPath: '/nonexistent/killswitch', backupStatusPath: '/nonexistent/status.json', startedAt: new Date(), walletList: async () => [A], watchedWallets: () => [], watcherHealthy: () => undefined,
+    intelligence: () => ({}) as never, gasAlerts: () => ({}) as never, now: () => new Date('2026-10-25T12:00:00.000Z'), ...extra,
+  }) as TelegramActionDeps;
+  const holdings = () => provider([reply(200, { items: [item('1'), item('2')], next_page_params: null }), reply(200, { items: [], next_page_params: null })]).p;
+  const price = { price: async () => ({ usd: 2500, source: 'chainlink' as const, asOf: new Date('2026-10-25T11:30:00.000Z') }) };
+
+  it('shows each collection floor and an estimated total in ETH and dollars, with the price source and an estimate note', async () => {
+    const text = await createTelegramActions(deps({ portfolio: holdings(), prices: price, floors: { floor: async () => ({ collection: 'cats', floorEth: 0.0123456 }) } })).portfolio();
+    expect(text).toContain('Cool Cats × 2 · floor 0.0123 ETH');
+    expect(text).toContain('Estimated Floor Value: 0.0246 ETH ($61.72)');
+    expect(text).toContain('Chainlink ETH price of $2500.00');
+    expect(text).toContain('listing prices, an estimate');
+  });
+
+  it('leaves values out, not guessed, when the floor or the price cannot be read, and still lists the NFTs', async () => {
+    const text = await createTelegramActions(deps({ portfolio: holdings(), prices: { price: async () => undefined }, floors: { floor: async () => { throw new Error('OPENSEA_RATE_LIMITED'); } } })).portfolio();
+    expect(text).toContain('Cool Cats × 2');
+    expect(text).not.toContain('floor');
+    expect(text).not.toContain('$');
+    const bare = await createTelegramActions(deps({ portfolio: holdings() })).portfolio();
+    expect(bare).toContain('Cool Cats × 2');
+    expect(bare).not.toContain('Estimated');
+  });
+});
