@@ -5,7 +5,7 @@ import type { Campaign, ChainVerification, CommandName, FeePolicy, ValidatedCamp
 import type { BackendStore } from './store.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { HealthService } from './health.js';
-import { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI } from './policy.js';
+import { assertRobinhoodFreePolicy, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from './policy.js';
 import { liveRequestDigest } from './evidence.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, type FleetSpendPolicy } from './fleet-policy.js';
 
@@ -147,8 +147,9 @@ export class BackendApplication {
       if (mintPriceWei !== 0n) throw new Error('FREE_MINT_VALUE_MUST_BE_ZERO');
       // D-042: an Ethereum free campaign may carry the approved per-wallet fee allowance as its fee budget, with the tip
       // kept separate and small. Anything else uses the old rule (cap = twice the tip, budget within the cap).
-      const approvedAllowanceWei = input.chainId === 8453 ? BASE_PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei : this.options.fleetPolicy?.freeFeeAllowanceWei;
-      const perWalletBudgetShape = (input.chainId === 1 || input.chainId === 8453) && approvedAllowanceWei !== undefined && input.feePolicy.freeTotalSpendCapWei === approvedAllowanceWei;
+      // D-065 (T-063): Robinhood free campaigns use the same shape, with its own approved allowance (D-041, 0.0002 ETH per wallet).
+      const approvedAllowanceWei = input.chainId === 8453 ? BASE_PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei : input.chainId === 4663 ? ROBINHOOD_FREE_PER_WALLET_CAP_WEI : this.options.fleetPolicy?.freeFeeAllowanceWei;
+      const perWalletBudgetShape = (input.chainId === 1 || input.chainId === 8453 || input.chainId === 4663) && approvedAllowanceWei !== undefined && input.feePolicy.freeTotalSpendCapWei === approvedAllowanceWei;
       if (perWalletBudgetShape) {
         if (input.feePolicy.configuredPriorityFeeWei <= 0n || input.feePolicy.configuredPriorityFeeWei > MAX_FREE_TIP_WEI) throw new Error('FREE_TIP_OUT_OF_RANGE');
         if (totalFeeBudget > approvedAllowanceWei!) throw new Error('FREE_TOTAL_SPEND_CAP_EXCEEDED');

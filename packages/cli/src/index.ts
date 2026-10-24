@@ -29,6 +29,7 @@ import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { refreshFinalityEvidence } from './robinhood-evidence-refresh.js';
 import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { runLiveRequest, type LiveRequestStore } from './live-request.js';
+import { buildRobinhoodPlan, recordRobinhoodSimulationsAction, robinhoodConfirmationPhrase, robinhoodPrepareAction } from './robinhood-live.js';
 import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, recordSimulationAction, watchAcceptAction, type PrepareStore } from './owner-actions.js';
 import { newTotpSecret, totpUri } from './totp.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
@@ -956,8 +957,16 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
       try {
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const campaign = persistedCampaign(runtime, args.campaignId);
-        if (campaign.dryRun || (campaign.chainId !== 1 && campaign.chainId !== 8453)) throw new Error('LIVE_SUPPORTED_CAMPAIGN_REQUIRED');
+        if (campaign.dryRun || (campaign.chainId !== 1 && campaign.chainId !== 8453 && campaign.chainId !== 4663)) throw new Error('LIVE_SUPPORTED_CAMPAIGN_REQUIRED');
         const wallets = await publicWallets(walletFile(args.walletFile));
+        if (campaign.chainId === 4663) {
+          // T-063: a fresh Robinhood dry run of the campaign's own quantity; every wallet that passes and can pay for gas gets a record.
+          const robinhood = await robinhoodReadClient(args.rpcUrl);
+          const report = await dryRunDrop(robinhood as never, campaign.contract, wallets, { quantity: campaign.quantity });
+          const recorded = await recordRobinhoodSimulationsAction({ store: runtime.store, campaign, report, latestBlock: async () => { const block = await robinhood.getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; } });
+          process.stdout.write(`${json({ state: 'Recorded', message: `${recorded.recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes, so approve, arm and run soon.`, simulationIds: recorded.ids, wallets: recorded.recorded, ...(recorded.skipped.length > 0 ? { notRecorded: recorded.skipped } : {}) })}\n`);
+          return;
+        }
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : campaign.chainId === 8453 ? await basePort() : await ethereumPort();
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets(campaign.chainId === 8453 ? 'base' : 'ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
         const client = createPublicClient({ transport: failoverTransport(config.rpcEndpoints) });
@@ -1012,12 +1021,21 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('live-plan','Read-only: is a FREE Ethereum or Base mint ready to go live? Shows the money at risk, what blocks it, and the next steps', (args) => args
-    .option('chain', { type: 'string', choices: ['ethereum', 'base'] as const, default: 'ethereum' })
+    .option('chain', { type: 'string', choices: ['ethereum', 'base', 'robinhood'] as const, default: 'ethereum' })
     .option('contract', { type: 'string', demandOption: true })
-    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
-    .option('quantity-limit', { type: 'number', describe: 'Maximum NFTs per wallet; the fee planner may reduce it further' })
-    .option('rpc-url', { type: 'string', describe: 'Override the Ethereum RPC (https only)' }), async (args) => {
+    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS; for Robinhood, the Turnkey wallets)' })
+    .option('quantity-limit', { type: 'number', describe: 'Maximum NFTs per wallet; the fee planner may reduce it further (Robinhood: the exact quantity your Turnkey policy pins, default 1)' })
+    .option('rpc-url', { type: 'string', describe: 'Override the chain RPC (https only)' }), async (args) => {
       try {
+        if (args.chain === 'robinhood') {
+          // T-063: Robinhood has no fee planner; the quantity is the one the Turnkey policy pins.
+          const robinhoodWallets = args.wallets ? checkWallets(args.wallets) : await publicWallets(walletFile(undefined));
+          const quantity = args.quantityLimit ?? 1;
+          const report = await dryRunDrop((await robinhoodReadClient(args.rpcUrl)) as never, args.contract, robinhoodWallets, { quantity });
+          const plan = buildRobinhoodPlan(report, { candidates: robinhoodWallets, killSwitchPresent: existsSync(DEFAULT_KILL_FILE), quantity });
+          process.stdout.write(`${json({ ...plan, ...(plan.verdict === 'ready' ? { confirmationPhrase: robinhoodConfirmationPhrase(args.contract, plan.quantity, plan.walletsReady.length, plan.totalMaxExposureEth) } : {}) })}\n`);
+          return;
+        }
         const wallets = checkWallets(args.wallets);
         const chainId = args.chain === 'base' ? 8453 : 1;
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : chainId === 8453 ? await basePort() : await ethereumPort();
@@ -1026,15 +1044,25 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
       } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('live-prepare', 'Record a live FREE Ethereum or Base campaign from a ready live-plan. Spends nothing; approve, arm and run are still separate steps', (args) => args
-    .option('chain', { type: 'string', choices: ['ethereum', 'base'] as const, default: 'ethereum' })
+    .option('chain', { type: 'string', choices: ['ethereum', 'base', 'robinhood'] as const, default: 'ethereum' })
     .option('contract', { type: 'string', demandOption: true })
-    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS)' })
+    .option('wallets', { type: 'string', describe: 'Comma-separated public addresses (default: MINT_BOT_READINESS_WALLETS; for Robinhood, the Turnkey wallets)' })
     .option('quantity-limit', { type: 'number', describe: 'Maximum NFTs per wallet; use the same value passed to live-plan' })
     .option('wallet-file', { type: 'string', default: DEFAULT_WALLET_FILE })
     .option('priority-fee-gwei', { type: 'number', default: 0.1, describe: 'Tip per gas (more than 0, at most 2)' })
     .option('confirm', { type: 'string', demandOption: true, describe: 'The confirmation phrase live-plan printed' })
     .option('rpc-url', { type: 'string' }), async (args) => {
       try {
+        if (args.chain === 'robinhood') {
+          const robinhoodWallets = args.wallets ? checkWallets(args.wallets) : await publicWallets(walletFile(args.walletFile));
+          const quantity = args.quantityLimit ?? 1;
+          const report = await dryRunDrop((await robinhoodReadClient(args.rpcUrl)) as never, args.contract, robinhoodWallets, { quantity });
+          const plan = buildRobinhoodPlan(report, { candidates: robinhoodWallets, killSwitchPresent: existsSync(DEFAULT_KILL_FILE), quantity });
+          const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, { walletFile: walletFile(args.walletFile) }, { startCoordinator: false });
+          const prepared = await robinhoodPrepareAction({ contract: args.contract, priorityFeeGwei: args.priorityFeeGwei, confirm: args.confirm, plan, killFile: DEFAULT_KILL_FILE, store: runtime.store as never, createCampaign: (input) => runtime.application.createCampaign(input), now: new Date() });
+          process.stdout.write(`${json({ state: 'Prepared', campaignId: prepared.campaign.id, quantity: prepared.quantity, walletsSizedFor: prepared.walletsSized, maxExposureEth: prepared.maxExposureEth, nextSteps: [`record-simulation --campaign-id ${prepared.campaign.id} (while the mint is open)`, `live-request status --campaign-id ${prepared.campaign.id} --wallets <addresses> --max-fee-gwei <at or below your Turnkey policy limit>`] })}\n`);
+          return;
+        }
         const chainId = args.chain === 'base' ? 8453 : 1;
         const wallets = checkWallets(args.wallets);
         const port = args.rpcUrl ? EngineIntelligencePort.fromRpcUrl(args.rpcUrl) : chainId === 8453 ? await basePort() : await ethereumPort();

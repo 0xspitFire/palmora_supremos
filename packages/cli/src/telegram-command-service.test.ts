@@ -191,9 +191,4 @@ describe('Telegram actions', () => {
     await expect(actions.revoke('ethereum', undefined)).rejects.toThrow('NOTHING_TO_REVOKE');
   });
 
-  it('Robinhood planning and preparing are refused plainly until they exist', async () => {
-    const actions = createTelegramActions(deps());
-    await expect(actions.plan('robinhood', '0x1111111111111111111111111111111111111111', undefined)).rejects.toThrow('ROBINHOOD_NOT_SUPPORTED_YET');
-    await expect(actions.prepare('robinhood', '0x1111111111111111111111111111111111111111', 1, 'x')).rejects.toThrow('ROBINHOOD_NOT_SUPPORTED_YET');
-  });
 });
