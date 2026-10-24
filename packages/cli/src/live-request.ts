@@ -115,7 +115,7 @@ export async function runLiveRequest(input: {
 
 /** What the host service needs to process requests. */
 export interface LiveRequestProcessorDeps {
-  unclaimed(): Array<{ id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; expiresAt: string }>;
+  unclaimed(): Array<{ id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; requestedAt: string; expiresAt: string }>;
   claim(requestId: string, outcome: 'started' | 'expired'): boolean;
   campaign(campaignId: string): Campaign | undefined;
   /** The service's own application (not read-only), so `arm` and `run` apply every gate exactly as the guided live run does. */
@@ -138,25 +138,34 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
   let handled = 0;
   for (const request of deps.unclaimed()) {
     const now = deps.now();
-    if (Date.parse(request.expiresAt) <= now.getTime()) {
-      if (deps.claim(request.id, 'expired')) await deps.record({ requestId: request.id, state: 'expired', code: 'LIVE_REQUEST_EXPIRED' });
+    // Expired, or dated in the future (a clock or a hand-written row): claimed as expired and never armed.
+    const requestedAt = Date.parse(request.requestedAt);
+    const future = !Number.isFinite(requestedAt) || requestedAt > now.getTime() + 60_000;
+    if (future || Date.parse(request.expiresAt) <= now.getTime()) {
+      if (deps.claim(request.id, 'expired')) await deps.record({ requestId: request.id, state: 'expired', code: future ? 'LIVE_REQUEST_TIME_INVALID' : 'LIVE_REQUEST_EXPIRED' });
       continue;
     }
     if (!deps.claim(request.id, 'started')) continue;
     handled += 1;
     let runId: string | undefined;
+    let result: { state: 'finished' | 'stopped'; code?: string };
     try {
       const campaign = deps.campaign(request.campaignId);
       if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
+      const maxFeeGwei = Number(request.maxFeeGwei);
+      if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500) throw new Error('MAX_FEE_GWEI_INVALID');
       const validated: ValidatedCampaign = { campaign, wallets: request.wallets, simulationIds: request.simulationIds, evidenceAt: request.evidenceAt };
       const armed = await deps.command('arm', { validated, mode: 'live', approvalId: request.approvalId, idempotencyKey: `live-request:${request.id}` });
       runId = armed.id;
-      deps.setFeeCeiling(request.campaignId, Number(request.maxFeeGwei));
-      try { await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` }); } finally { deps.setFeeCeiling(request.campaignId, undefined); }
-      await deps.record({ requestId: request.id, runId, state: 'finished' });
+      deps.setFeeCeiling(request.campaignId, maxFeeGwei);
+      let ran: { state?: string };
+      try { ran = await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` }); } finally { deps.setFeeCeiling(request.campaignId, undefined); }
+      // Only a completed run is finished; a run that ended any other way is stopped under its state name.
+      result = ran.state === 'Completed' ? { state: 'finished' } : { state: 'stopped', code: `RUN_${safeCode(new Error(String(ran.state ?? 'UNKNOWN').toUpperCase()))}` };
     } catch (error) {
-      await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), state: 'stopped', code: safeCode(error) });
+      result = { state: 'stopped', code: safeCode(error) };
     }
+    await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), ...result });
   }
   return handled;
 }

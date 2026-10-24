@@ -30,7 +30,7 @@ WHEN julianday(NEW.requested_at) IS NULL
   OR json_valid(NEW.simulation_ids_json) = 0 OR json_type(NEW.simulation_ids_json) IS NOT 'array'
   OR json_array_length(NEW.simulation_ids_json) <> json_array_length(NEW.wallets_json)
   OR length(NEW.approval_id) = 0
-  OR NEW.max_fee_gwei NOT GLOB '[0-9]*' OR NEW.max_fee_gwei GLOB '*[^0-9.]*' OR CAST(NEW.max_fee_gwei AS REAL) <= 0 OR CAST(NEW.max_fee_gwei AS REAL) > 500
+  OR NEW.max_fee_gwei NOT GLOB '[0-9]*' OR NEW.max_fee_gwei GLOB '*[^0-9.]*' OR NEW.max_fee_gwei GLOB '*.*.*' OR NEW.max_fee_gwei GLOB '*.' OR CAST(NEW.max_fee_gwei AS REAL) <= 0 OR CAST(NEW.max_fee_gwei AS REAL) > 500
 BEGIN SELECT RAISE(ABORT, 'live run request is incomplete'); END;
 
 CREATE TRIGGER live_run_request_immutable_update BEFORE UPDATE ON live_run_request
@@ -44,6 +44,11 @@ CREATE TABLE live_run_request_outcome (
   outcome TEXT NOT NULL CHECK (outcome IN ('started', 'expired')),
   claimed_at TEXT NOT NULL
 );
+
+-- A second claim is ignored, so INSERT OR REPLACE cannot rewrite the first one.
+CREATE TRIGGER live_run_request_outcome_once BEFORE INSERT ON live_run_request_outcome
+WHEN EXISTS (SELECT 1 FROM live_run_request_outcome o WHERE o.request_id = NEW.request_id)
+BEGIN SELECT RAISE(IGNORE); END;
 
 CREATE TRIGGER live_run_request_outcome_immutable_update BEFORE UPDATE ON live_run_request_outcome
 BEGIN SELECT RAISE(ABORT, 'live run request outcomes are immutable'); END;

@@ -48,6 +48,8 @@ describe('live run requests (T-058)', () => {
     expect(() => repository.recordLiveRunRequest(request({ maxFeeGwei: '0' }))).toThrow(/incomplete/);
     expect(() => repository.recordLiveRunRequest(request({ maxFeeGwei: '501' }))).toThrow(/incomplete/);
     expect(() => repository.recordLiveRunRequest(request({ maxFeeGwei: '5e2' }))).toThrow(/incomplete/);
+    expect(() => repository.recordLiveRunRequest(request({ maxFeeGwei: '1.2.3' }))).toThrow(/incomplete/);
+    expect(() => repository.recordLiveRunRequest(request({ maxFeeGwei: '500.' }))).toThrow(/incomplete/);
     expect(() => repository.recordLiveRunRequest(request({ approvalId: '' }))).toThrow(/incomplete/);
     expect(() => repository.recordLiveRunRequest(request({ confirmationDigest: 'not-a-digest' }))).toThrow();
     expect(() => repository.recordLiveRunRequest(request({ campaignId: 'no-such-campaign' }))).toThrow();
@@ -61,6 +63,8 @@ describe('live run requests (T-058)', () => {
     expect(() => db.prepare('DELETE FROM live_run_request').run()).toThrow(/immutable/);
     repository.claimLiveRunRequest('request-1', 'started', '2026-10-24T10:00:05.000Z');
     expect(() => db.prepare("UPDATE live_run_request_outcome SET outcome = 'expired'").run()).toThrow(/immutable/);
+    db.prepare("INSERT OR REPLACE INTO live_run_request_outcome (request_id, outcome, claimed_at) VALUES ('request-1', 'expired', '2026-10-24T10:01:00.000Z')").run();
+    expect(db.prepare('SELECT outcome FROM live_run_request_outcome').all()).toEqual([{ outcome: 'started' }]);
     expect(() => db.prepare('DELETE FROM live_run_request_outcome').run()).toThrow(/immutable/);
   });
 });

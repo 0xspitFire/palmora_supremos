@@ -92,7 +92,7 @@ describe('live-request create (T-058)', () => {
 });
 
 describe('live-request processing in the host service (T-058)', () => {
-  const pending = { id: 'request-1', campaignId: 'cmp_0000000000000000abcdef12', wallets: [WALLET_A], simulationIds: ['a'], approvalId: 'approval-1', evidenceAt: NOW.toISOString(), maxFeeGwei: '5', expiresAt: '2026-10-24T10:30:00.000Z' };
+  const pending = { id: 'request-1', campaignId: 'cmp_0000000000000000abcdef12', wallets: [WALLET_A], simulationIds: ['a'], approvalId: 'approval-1', evidenceAt: NOW.toISOString(), maxFeeGwei: '5', requestedAt: NOW.toISOString(), expiresAt: '2026-10-24T10:30:00.000Z' };
   const deps = (overrides: Partial<LiveRequestProcessorDeps> = {}) => {
     const calls: string[] = [];
     const events: unknown[] = [];
@@ -102,7 +102,7 @@ describe('live-request processing in the host service (T-058)', () => {
       unclaimed: () => [pending].filter((item) => !claimed.has(item.id)),
       claim: (id) => { if (claimed.has(id)) return false; claimed.add(id); calls.push(`claim:${id}`); return true; },
       campaign: () => campaign(),
-      command: async (name, input) => { calls.push(`${name}:${String(input.idempotencyKey)}:${String(input.approvalId ?? input.runId)}`); return { id: 'run-1' }; },
+      command: async (name, input) => { calls.push(`${name}:${String(input.idempotencyKey)}:${String(input.approvalId ?? input.runId)}`); return { id: 'run-1', state: name === 'run' ? 'Completed' : 'Armed' }; },
       setFeeCeiling: (id, gwei) => { ceilings.push([id, gwei]); },
       record: async (event) => { events.push(event); },
       now: () => NOW,
@@ -127,6 +127,13 @@ describe('live-request processing in the host service (T-058)', () => {
     expect(events).toEqual([{ requestId: 'request-1', state: 'expired', code: 'LIVE_REQUEST_EXPIRED' }]);
   });
 
+  it('a request dated in the future is claimed as expired and never armed (fail closed)', async () => {
+    const { value, calls, events } = deps({ unclaimed: () => [{ ...pending, requestedAt: '2099-01-01T00:00:00.000Z' }] });
+    expect(await processLiveRunRequests(value)).toBe(0);
+    expect(calls).toEqual(['claim:request-1']);
+    expect(events).toEqual([{ requestId: 'request-1', state: 'expired', code: 'LIVE_REQUEST_TIME_INVALID' }]);
+  });
+
   it('a request another pass already claimed is never armed', async () => {
     const { value, calls } = deps({ claim: () => false });
     expect(await processLiveRunRequests(value)).toBe(0);
@@ -142,6 +149,21 @@ describe('live-request processing in the host service (T-058)', () => {
     const leaky = deps({ command: async () => { throw new Error('fetch https://rpc.example/key-123 failed'); } });
     await processLiveRunRequests(leaky.value);
     expect(leaky.events).toEqual([{ requestId: 'request-1', state: 'stopped', code: 'LIVE_REQUEST_FAILED' }]);
+  });
+
+  it('a run that returns without completing is stopped under its state and never recorded as finished (fail closed)', async () => {
+    for (const state of ['Failed', 'Aborted', undefined]) {
+      const { value, events } = deps({ command: async (name) => ({ id: 'run-1', ...(name === 'run' && state ? { state } : {}) }) });
+      await processLiveRunRequests(value);
+      expect(events).toEqual([{ requestId: 'request-1', runId: 'run-1', state: 'stopped', code: `RUN_${state ? state.toUpperCase() : 'UNKNOWN'}` }]);
+    }
+  });
+
+  it('a stored fee ceiling outside 0 to 500 gwei is never armed', async () => {
+    const { value, calls, events } = deps({ unclaimed: () => [{ ...pending, maxFeeGwei: '900' }] });
+    await processLiveRunRequests(value);
+    expect(calls).toEqual(['claim:request-1']);
+    expect(events).toEqual([{ requestId: 'request-1', state: 'stopped', code: 'MAX_FEE_GWEI_INVALID' }]);
   });
 
   it('a failed run still clears the fee ceiling and is recorded as stopped with its run', async () => {
