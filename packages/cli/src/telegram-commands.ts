@@ -100,7 +100,6 @@ export const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1000;
 export const INVITE_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const MAX_MESSAGE_AGE_MS = 5 * 60 * 1000;
 const CONFIRM_TAP_LIFETIME_MS = 2 * 60 * 1000;
-const PREVIEW_LIFETIME_MS = 15 * 60 * 1000;
 const UNLOCK_FAILURE_LIMIT = 5;
 const UNLOCK_WINDOW_MS = 60 * 60 * 1000;
 const JOIN_ATTEMPT_LIMIT = 5;
@@ -122,30 +121,29 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   gas: { tier: 'read', roles: BOTH, usage: '/gas [ethereum|base|robinhood]', help: 'Current network fees' },
   backup: { tier: 'read', roles: OWNER, usage: '/backup', help: 'Last backup and its check' },
   wallets: { tier: 'read', roles: OWNER, usage: '/wallets', help: 'Fleet balances per chain, watcher state' },
-  funding: { tier: 'read', roles: OWNER, usage: '/funding <campaign>', help: 'What each wallet needs for a campaign' },
+  funding: { tier: 'read', roles: OWNER, usage: '/funding', help: 'What each wallet needs for a campaign (pick it with a button)' },
   enablement: { tier: 'read', roles: OWNER, usage: '/enablement', help: 'Base and Robinhood records' },
   drops: { tier: 'read', roles: BOTH, usage: '/drops', help: 'Upcoming opportunities' },
   calendar: { tier: 'read', roles: BOTH, usage: '/calendar', help: 'Mint calendar' },
   check: { tier: 'read', roles: BOTH, usage: '/check <chain> <contract>', help: 'Price, phase and limits (and your wallets, for the owner)' },
-  plan: { tier: 'read', roles: OWNER, usage: '/plan <chain> <contract> [quantity]', help: 'Quantity and cost plan (Ethereum, Base, Robinhood), and the phrase for /prepare' },
-  request: { tier: 'read', roles: OWNER, usage: '/request <campaign> <wallets|all> <max gwei>', help: 'Preview a live request and its phrase' },
+  plan: { tier: 'read', roles: OWNER, usage: '/plan', help: 'Check a drop and prepare a campaign, step by step (same guide as /prepare)' },
+  request: { tier: 'read', roles: OWNER, usage: '/request', help: 'Send a live request: campaign, wallets, fee, then one button' },
   requests: { tier: 'read', roles: OWNER, usage: '/requests', help: 'Pending and recent requests' },
   runs: { tier: 'read', roles: OWNER, usage: '/runs', help: 'Recent runs' },
-  run: { tier: 'read', roles: OWNER, usage: '/run <run id>', help: 'Result, spend and receipts of a run' },
+  run: { tier: 'read', roles: OWNER, usage: '/run', help: 'Result, spend and receipts of a run (pick it with a button)' },
   watchlist: { tier: 'read', roles: BOTH, usage: '/watchlist', help: 'Tracked whale wallets' },
   track: { tier: 'change', roles: OWNER, usage: '/track <address> [label]', help: 'Track a whale wallet' },
   untrack: { tier: 'change', roles: OWNER, usage: '/untrack <address>', help: 'Stop tracking a wallet' },
-  prepare: { tier: 'change', roles: OWNER, usage: '/prepare <chain> <contract> <quantity> <phrase from /plan>', help: 'Record a live campaign (spends nothing)' },
-  simulate: { tier: 'change', roles: OWNER, usage: '/simulate <campaign>', help: 'Record fresh test mints (good 30 minutes)' },
-  cancel: { tier: 'change', roles: OWNER, usage: '/cancel <request or schedule id>', help: 'Cancel a request or scheduled mint the service has not started' },
+  prepare: { tier: 'change', roles: OWNER, usage: '/prepare', help: 'Record a live campaign step by step (spends nothing)' },
+  simulate: { tier: 'change', roles: OWNER, usage: '/simulate', help: 'Record fresh test mints (good 30 minutes), then choose the wallets' },
+  cancel: { tier: 'change', roles: OWNER, usage: '/cancel', help: 'Cancel a request or scheduled mint the service has not started (pick it with a button)' },
   kill: { tier: 'stop', roles: OWNER, usage: '/kill', help: 'Stop everything at once (one tap to confirm)' },
   revoke: { tier: 'stop', roles: OWNER, usage: '/revoke <base|robinhood> [phrase]', help: 'Switch a chain off' },
   lock: { tier: 'stop', roles: OWNER, usage: '/lock', help: 'End the unlocked session now' },
   unlock: { tier: 'session', roles: OWNER, usage: '/unlock <6-digit code>', help: 'Unlock start commands for 12 hours' },
-  release: { tier: 'start', roles: OWNER, usage: '/release [phrase]', help: 'Turn the kill switch off' },
-  confirm: { tier: 'start', roles: OWNER, usage: '/confirm <phrase from /request or /schedule>', help: 'Send a live request, or store a scheduled mint' },
-  fire: { tier: 'start', roles: OWNER, usage: '/fire <campaign> <wallets|all> <max gwei>', help: 'Mint now: test, approve and run a prepared campaign (one tap)' },
-  schedule: { tier: 'start', roles: OWNER, usage: '/schedule <campaign> <wallets|all> <max gwei> <from> <until>', help: 'Fire a prepared mint when it opens, inside a window (UTC)' },
+  release: { tier: 'start', roles: OWNER, usage: '/release', help: 'Turn the kill switch off (one button)' },
+  fire: { tier: 'start', roles: OWNER, usage: '/fire', help: 'Mint now: test, approve and run a prepared campaign, step by step' },
+  schedule: { tier: 'start', roles: OWNER, usage: '/schedule', help: 'Fire a prepared mint when it opens, inside a window (UTC), step by step' },
   schedules: { tier: 'read', roles: OWNER, usage: '/schedules', help: 'Scheduled mints and what became of them' },
   watchaccept: { tier: 'start', roles: OWNER, usage: '/watchaccept <chain> <address> [phrase]', help: 'Accept a wallet change the watcher flagged' },
   limits: { tier: 'read', roles: OWNER, usage: '/limits', help: 'How much of each daily limit is used and left' },
@@ -185,7 +183,6 @@ export class TelegramCommandRouter {
   private readonly sessionLifetimeMs: number;
   private readonly inviteLifetimeMs: number;
   private readonly confirmTaps = new Map<string, number>();
-  private readonly previews = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; schedule?: { from: string; until: string; digest?: string } }>();
   private readonly fireTaps = new Map<string, { campaignId: string; wallets: string; maxFeeGwei: number; at: number; digest?: string }>();
   private readonly joinAttempts = new Map<string, number[]>();
   private readonly flows: GuidedFlows;
@@ -341,15 +338,6 @@ export class TelegramCommandRouter {
         return this.startFlow(incoming, 'schedule', { campaign: campaignId, wallets: walletsArg(required(args[1], 'wallets')), fee: maxFeeGwei, from, until });
       }
       case 'schedules': return reply(await a.schedules());
-      case 'confirm': {
-        const phrase = args.join(' ');
-        this.prune();
-        const preview = this.previews.get(phrase);
-        if (!preview) throw new Error('PREVIEW_NOT_FOUND: send /request or /schedule again and copy the /confirm line it prints');
-        this.previews.delete(phrase);
-        if (preview.schedule) return reply(await a.scheduleCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, preview.schedule.from, preview.schedule.until, phrase, preview.schedule.digest));
-        return reply(await a.requestCreate(preview.campaignId, preview.wallets, preview.maxFeeGwei, phrase));
-      }
       case 'requests': return reply(await a.requests());
       case 'runs': return reply(await a.runs());
       case 'run': return args.length === 0 ? this.startFlow(incoming, 'run') : reply(await a.run(args[0]!));
@@ -526,7 +514,7 @@ export class TelegramCommandRouter {
       if (count >= UNLOCK_FAILURE_LIMIT) await this.options.alert('Five wrong unlock codes were sent to the Telegram bot in the last hour. Unlocking is blocked for an hour. If this was not you, send /kill and secure your Telegram account.', `telegram-unlock-locked:${Math.floor(now.getTime() / UNLOCK_WINDOW_MS)}`).catch(() => undefined);
       throw new Error(`UNLOCK_CODE_WRONG: that code did not work (codes work once and change every 30 seconds). ${Math.max(0, UNLOCK_FAILURE_LIMIT - count)} attempt(s) left this hour`);
     }
-    await this.reply(incoming, `Unlocked until ${session.expiresAt.slice(0, 16).replace('T', ' ')} UTC. Start commands (/release, /confirm, /fire, /schedule, /watchaccept) now need only their phrase. Send /lock when you are done.`);
+    await this.reply(incoming, `Unlocked until ${session.expiresAt.slice(0, 16).replace('T', ' ')} UTC. Release, Fire, Schedule, the last Send Request button and /watchaccept now work with your tap or phrase. Send /lock when you are done.`);
   }
 
   private async join(incoming: Incoming, args: string[]): Promise<void> {
@@ -584,7 +572,7 @@ export class TelegramCommandRouter {
 
   private helpText(role: TelegramRole): string {
     const lines = Object.values(COMMANDS).filter((spec) => spec.roles.includes(role) && spec.usage !== '/start').map((spec) => `${spec.usage} — ${spec.help}`);
-    const note = role === 'owner' ? '\n\nStart commands (/release, /confirm, /fire, /schedule, /watchaccept) need /unlock first; /kill never does.' : '';
+    const note = role === 'owner' ? '\n\nRelease, Fire, Schedule, the last Send Request button and /watchaccept need /unlock first; /kill never does.' : '';
     return `Commands:\n${lines.join('\n')}${note}`;
   }
 
@@ -592,7 +580,6 @@ export class TelegramCommandRouter {
     const now = this.now().getTime();
     for (const [nonce, at] of this.confirmTaps) if (now - at > CONFIRM_TAP_LIFETIME_MS) this.confirmTaps.delete(nonce);
     for (const [nonce, tap] of this.fireTaps) if (now - tap.at > CONFIRM_TAP_LIFETIME_MS) this.fireTaps.delete(nonce);
-    for (const [phrase, preview] of this.previews) if (now - preview.at > PREVIEW_LIFETIME_MS) this.previews.delete(phrase);
   }
 
   private async reply(incoming: Incoming, text: string, buttons?: InlineButton[][]): Promise<void> {

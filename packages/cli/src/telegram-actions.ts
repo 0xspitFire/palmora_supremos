@@ -390,13 +390,13 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const target = fireCampaign(campaignId, maxFeeGwei);
       const state = await wiring.mintState(target);
       if (state !== 'open') throw new Error(`MINT_NOT_OPEN: the mint is ${state === 'unknown' ? 'not readable right now' : state}. Test mints only pass once it is open; use /schedule to fire it when it opens`);
-      const asked = await wiring.wallets(walletsText);
-      // A campaign sized for N wallets covers at most N; the first N are used and the owner is told.
-      const sized = Math.max(1, sizedWalletCount(target));
-      const wallets = asked.slice(0, sized);
+      const wallets = await wiring.wallets(walletsText);
+      // A campaign sized for N wallets covers at most N: it uses the first N that pass their test mint, and the owner is told.
+      const sized = sizedWalletCount(target);
+      if (sized < 1) throw new Error('CAMPAIGN_SIZED_FOR_NONE: this campaign was sized for no wallet (its run limit is below what one wallet can spend). Prepare a new one.');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, digest: wiring.campaignDigest(target), text: sections([`The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.`], [wiring.describe(target, wallets, maxFeeGwei)], asked.length > wallets.length ? [`This campaign was sized for ${sized} wallet(s), so only the first ${sized} are used.`] : []) };
+      return { wallets, digest: wiring.campaignDigest(target), text: sections([`The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.`], [wiring.describe(target, wallets, maxFeeGwei)], wallets.length > sized ? [`This campaign was sized for ${sized} wallet(s), so it uses the first ${sized} that pass their test mint.`] : []) };
     },
     async fireNow(campaignId, walletsText, maxFeeGwei, digest) {
       if (digest !== undefined && fireWiring().campaignDigest(campaign(campaignId)) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; send /fire again');
@@ -407,11 +407,12 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const wiring = fireWiring();
       const target = fireCampaign(campaignId, maxFeeGwei);
       const { from, until } = wiring.parseWindow(fromText, untilText);
-      const asked = await wiring.wallets(walletsText);
-      const wallets = asked.slice(0, Math.max(1, sizedWalletCount(target)));
+      const wallets = await wiring.wallets(walletsText);
+      const sized = sizedWalletCount(target);
+      if (sized < 1) throw new Error('CAMPAIGN_SIZED_FOR_NONE: this campaign was sized for no wallet (its run limit is below what one wallet can spend). Prepare a new one.');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, from: from.toISOString(), until: until.toISOString(), digest: wiring.campaignDigest(target), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
+      return { wallets, from: from.toISOString(), until: until.toISOString(), digest: wiring.campaignDigest(target), phrase: wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until), text: `Scheduled mint. When the mint opens between ${from.toISOString().slice(0, 16).replace('T', ' ')} and ${until.toISOString().slice(0, 16).replace('T', ' ')} UTC, the service tests each wallet, approves the ones that pass, and runs, without asking you again.\n${wiring.describe(target, wallets, maxFeeGwei)}${wallets.length > sized ? `\nThis campaign was sized for ${sized} wallet(s), so it uses the first ${sized} that pass their test mint.` : ''}\nIt is cancelled by /cancel, by /kill, or if the campaign changes. If the kill switch is on it waits and tells you.` };
     },
     async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase, digest) {
       const wiring = fireWiring();
@@ -419,7 +420,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (digest !== undefined && wiring.campaignDigest(target) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; start the schedule again');
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
-      if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: send /schedule again and copy the /confirm line it prints');
+      if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: the schedule changed since the preview. Send /schedule to start again');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
       const record = deps.fireSchedulesRepository!().create({ campaignId, campaignDigest: wiring.campaignDigest(target), wallets, maxFeeGwei: String(maxFeeGwei), windowFrom: from.toISOString(), windowUntil: until.toISOString(), confirmationDigest: scheduleConfirmationDigest(phrase, campaignId, wallets, from, until) });

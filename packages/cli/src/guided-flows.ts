@@ -156,15 +156,25 @@ export class GuidedFlows {
       if (preset && (kind === 'request' || kind === 'fire') && preset.campaign && preset.wallets && preset.fee !== undefined) {
         d.campaign = preset.campaign; d.wallets = preset.wallets;
         flow.step = 2;
+        await this.checkFee(preset.campaign, preset.fee);
         return await this.takeFee(flow, preset.fee);
       }
       if (preset && kind === 'schedule' && preset.campaign && preset.wallets && preset.fee !== undefined && preset.from && preset.until) {
+        await this.checkFee(preset.campaign, preset.fee);
         d.campaign = preset.campaign; d.wallets = preset.wallets; d.fee = preset.fee;
         flow.step = 3;
         return await this.takeWindow(flow, preset.from, preset.until);
       }
       return await this.render(flow);
     } catch (error) { return this.failed(flow, error); }
+  }
+
+  /** The same fee rule as a typed Custom entry: a plain number above 0, at most the Turnkey policy limit where there is one. */
+  private async checkFee(campaignId: string, fee: number): Promise<void> {
+    const fees = await this.deps.actions.feeOptions(campaignId);
+    const limit = fees.limit ?? 500;
+    if (!(fee > 0)) throw new Error(`MAX_FEE_GWEI_REQUIRED: the fee ceiling must be above 0 ${fees.unit}`);
+    if (fee > limit) throw new Error(`MAX_FEE_GWEI_ABOVE_LIMIT: ${fee} ${fees.unit} is above the limit of ${limit} ${fees.unit}${fees.limit !== undefined ? ' set by your Turnkey policy' : ''}`);
   }
 
   /** `/simulate <campaign>` typed in full: record the test mints now, then go straight on to choosing the wallets for the request. */
@@ -504,7 +514,7 @@ export class GuidedFlows {
     const code = (error: unknown): string => { const first = (error instanceof Error ? error.message : '').split(':')[0] ?? ''; return /^[A-Z][A-Z0-9_]{2,80}$/.test(first) ? first : 'FAILED'; };
     try {
       const text = flow.kind === 'cancel' ? await this.deps.actions.cancel(id) : flow.kind === 'run' ? await this.deps.actions.run(id) : await this.deps.actions.funding(id);
-      return { reply: { text }, done: { command: flow.kind, outcome: 'ok' } };
+      return { reply: { text }, done: { command: flow.kind, outcome: flow.kind === 'cancel' && /^Not cancelled/.test(text) ? 'refused:NOT_CANCELLED' : 'ok' } };
     } catch (error) {
       return { reply: { text: `Not done: ${this.deps.explain(error)}` }, done: { command: flow.kind, outcome: `refused:${code(error)}` } };
     }
@@ -514,7 +524,12 @@ export class GuidedFlows {
   private async recordTestMints(campaignId: string): Promise<FlowResult> {
     const result = await this.deps.actions.simulateCampaign(campaignId);
     const next = this.make('request', 1, { campaign: campaignId });
-    const step = await this.render(next);
+    let step: FlowResult;
+    try { step = await this.render(next); } catch (error) {
+      // The test mints are recorded; only the wallet choices could not be shown. Say so, and keep the outcome true.
+      this.flow = undefined;
+      return { reply: { text: `${result.text}\n\nThe wallet choices could not be shown (${this.deps.explain(error)}). The test mints are recorded; send /request to continue.` }, done: { command: 'simulate', outcome: 'ok' } };
+    }
     return { reply: { text: `${result.text}\n\n${step.reply.text}`, ...(step.reply.buttons ? { buttons: step.reply.buttons } : {}) }, done: { command: 'simulate', outcome: 'ok' } };
   }
 
@@ -547,7 +562,8 @@ export class GuidedFlows {
       else text = await a.scheduleCreate(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.from), String(d.until), String(d.phrase), d.digest as string | undefined);
       return { reply: { text }, done: { command: flow.kind, outcome: 'ok' } };
     } catch (error) {
-      return { reply: { text: `Not done: ${this.deps.explain(error)}` }, done: { command: flow.kind, outcome: `refused:${code(error)}` } };
+      const hint = flow.kind === 'simulate' ? ' Send /simulate when the mint is open.' : '';
+      return { reply: { text: `Not done: ${this.deps.explain(error)}${hint}` }, done: { command: flow.kind, outcome: `refused:${code(error)}` } };
     }
   }
 }

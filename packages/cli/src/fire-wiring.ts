@@ -132,15 +132,18 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     },
     describe(campaign, wallets, maxFeeGwei) {
       const fee = campaign.feePolicy.totalFeeBudgetWei ?? 0n;
-      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(wallets.length);
-      return `${campaign.quantity} NFT(s) per wallet at ${formatEth(campaign.mintPriceWei)} ETH from ${wallets.length} wallet(s) on chain ${campaign.chainId}, contract ${campaign.contract.slice(0, 6)}…${campaign.contract.slice(-4)}. The most that can be spent is ${formatEth(total)} ETH, signing at no more than ${maxFeeGwei} gwei. Every guard still applies.`;
+      // A campaign sized for N wallets spends for at most N, however many are listed.
+      const used = Math.min(wallets.length, Math.max(1, sizedWalletCount(campaign)));
+      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(used);
+      return `${campaign.quantity} NFT(s) per wallet at ${formatEth(campaign.mintPriceWei)} ETH from ${used} wallet(s) on chain ${campaign.chainId}, contract ${campaign.contract.slice(0, 6)}…${campaign.contract.slice(-4)}. The most that can be spent is ${formatEth(total)} ETH, signing at no more than ${maxFeeGwei} gwei. Every guard still applies.`;
     },
     fireNow: (campaignId, wallets, maxFeeGwei) => run({ campaignId, wallets, maxFeeGwei }),
     fireSchedule: (schedule) => run({ campaignId: schedule.campaignId, wallets: schedule.wallets, maxFeeGwei: Number(schedule.maxFeeGwei), scheduleId: schedule.id }),
     schedulePhrase(campaign, wallets, maxFeeGwei, from, until) {
       const fee = campaign.feePolicy.totalFeeBudgetWei ?? 0n;
-      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(wallets.length);
-      return `SCHEDULE ${campaign.id.slice(-8)} ${wallets.length}-WALLETS ${formatEth(total)} ${maxFeeGwei}-GWEI ${compact(from)}-${compact(until)}`;
+      const used = Math.min(wallets.length, Math.max(1, sizedWalletCount(campaign)));
+      const total = (campaign.mintPriceWei * BigInt(campaign.quantity) + fee) * BigInt(used);
+      return `SCHEDULE ${campaign.id.slice(-8)} ${used}-WALLETS ${formatEth(total)} ${maxFeeGwei}-GWEI ${compact(from)}-${compact(until)}`;
     },
     parseWindow(fromText, untilText) {
       const at = now();

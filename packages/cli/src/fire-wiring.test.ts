@@ -126,12 +126,37 @@ describe('a campaign sized for fewer wallets than pass (the screenshot bug)', ()
     const t = await setup({ maxRunWei: ONE });
     try {
       const preview = await t.actions.firePreview('campaign_abcdef12', 'all', 0.2);
-      expect(preview.wallets).toEqual([A]);
-      expect(preview.text).toContain('sized for 1 wallet(s), so only the first 1 are used');
+      // Both are listed: the first one that passes its test mint is used, so a failing first wallet does not stop it.
+      expect(preview.wallets).toEqual([A, B]);
+      expect(preview.text).toContain('sized for 1 wallet(s), so it uses the first 1 that pass their test mint');
+      expect(preview.text).toContain('from 1 wallet(s)');
       const text = await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
       expect(text).toContain('Request');
       expect(text).toContain('sized for fewer wallets');
       expect(t.requests).toEqual([expect.objectContaining({ wallets: [A] })]);
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('when the first wallet fails its test mint, the next one that passes is used (sized for 1); a campaign sized for none is refused with a clear reason', async () => {
+    const t = await setup({ maxRunWei: ONE, failing: [A] });
+    const none = await setup({ maxRunWei: 1_000n });
+    try {
+      const text = await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(text).toContain('Request');
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [B] })]);
+      await expect(none.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('CAMPAIGN_SIZED_FOR_NONE');
+      await expect(none.actions.schedulePreview('campaign_abcdef12', 'all', 0.2, ...WINDOW)).rejects.toThrow('CAMPAIGN_SIZED_FOR_NONE');
+    } finally { await Promise.all([cleanup(t.directory), cleanup(none.directory)]); }
+  });
+
+  it('a schedule sized for fewer wallets than listed says so, and its phrase and amount count only the sized wallets', async () => {
+    const t = await setup({ maxRunWei: ONE, status: 'upcoming' });
+    try {
+      const preview = await t.actions.schedulePreview('campaign_abcdef12', 'all', 0.2, ...WINDOW);
+      expect(preview.wallets).toEqual([A, B]);
+      expect(preview.text).toContain('sized for 1 wallet(s), so it uses the first 1 that pass their test mint');
+      expect(preview.text).toContain('from 1 wallet(s)');
+      expect(preview.phrase).toContain('1-WALLETS 0.0002');
     } finally { await cleanup(t.directory); }
   });
 

@@ -256,7 +256,7 @@ describe('more owner commands and the Telegram menu (T-066)', () => {
 describe('the unlocked session (D-063 items 5 and 6)', () => {
   it('start commands are refused without a session; read, change and stop commands never need one', async () => {
     const t = setup();
-    for (const text of ['/release', '/confirm X', '/watchaccept base 0x1111111111111111111111111111111111111111']) {
+    for (const text of ['/release', '/fire', '/schedule', '/watchaccept base 0x1111111111111111111111111111111111111111']) {
       await t.send(t.message(OWNER, text));
       expect(t.lastTo(OWNER), text).toContain('needs an unlocked session');
     }
@@ -412,12 +412,12 @@ describe('stop and request commands', () => {
   it('/request in full shows the summary with a Send Request button, and the tap sends it once with the reviewed phrase (nothing to copy)', async () => {
     const t = setup();
     await t.send(t.message(OWNER, `/unlock ${t.code()}`));
-    await t.send(t.message(OWNER, '/request cmp_00000000abcdef12 all 5'));
+    await t.send(t.message(OWNER, '/request cmp_00000000abcdef12 all 0.2'));
     expect(t.lastTo(OWNER)).not.toContain('/confirm');
     const button = t.sent.at(-1)!.buttons!.flat().find((item) => item.text === 'Send Request')!;
     expect(t.calls.some((call) => call.startsWith('requestSend'))).toBe(false);
     await t.send(t.tap(OWNER, button.callback_data));
-    expect(t.calls.at(-1)).toMatch(/^requestSend\(cmp_00000000abcdef12\|0x1111111111111111111111111111111111111111\|5\|LIVE-REQUEST abcdef12/);
+    expect(t.calls.at(-1)).toMatch(/^requestSend\(cmp_00000000abcdef12\|0x1111111111111111111111111111111111111111\|0.2\|LIVE-REQUEST abcdef12/);
     await t.send(t.tap(OWNER, button.callback_data));
     expect(t.lastTo(OWNER)).toContain('expired');
     expect(t.calls.filter((call) => call.startsWith('requestSend'))).toHaveLength(1);
