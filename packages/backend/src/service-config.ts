@@ -94,8 +94,13 @@ export function loadServiceConfig(env: NodeJS.ProcessEnv = process.env, projectR
   if (modeValue !== 'dry-run' && modeValue !== 'host') throw new Error('SERVICE_MODE_INVALID');
   const mode: ServiceMode = modeValue;
   if (mode === 'host') {
-    if (value(env, 'CI') === 'true') throw new Error('HOST_MODE_NOT_ALLOWED_IN_CI');
+    const ci = value(env, 'CI');
+    if ((ci !== undefined && ci !== 'false' && ci !== '0') || value(env, 'GITHUB_ACTIONS') !== undefined) throw new Error('HOST_MODE_NOT_ALLOWED_IN_CI');
     if (!value(env, 'SECRET_STORE_PATH')) throw new Error('HOST_MODE_REQUIRES_SECRET_STORE');
+    // Without these the Turnkey files and wallet list would be looked for in the release folder and fail only at the first live run.
+    if (value(env, 'MINT_BOT_CUSTODY') !== 'turnkey') throw new Error('HOST_MODE_REQUIRES_TURNKEY_CUSTODY');
+    const secretRoot = value(env, 'MINT_BOT_SECRET_ROOT');
+    if (!secretRoot || !isAbsolute(secretRoot)) throw new Error('HOST_MODE_REQUIRES_SECRET_ROOT');
     if (!bool(env, 'MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH', true)) throw new Error('HOST_MODE_REQUIRES_STARTUP_KILL_SWITCH');
   }
   const statePath = path(env, 'MINT_BOT_STATE_PATH', value(env, 'STORE_PATH') ?? '.runtime/ci/mintbot.sqlite', root);

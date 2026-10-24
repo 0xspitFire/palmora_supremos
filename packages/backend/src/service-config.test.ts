@@ -4,7 +4,7 @@ import { loadServiceConfig, summarizeServiceConfig } from './service-config.js';
 const load = (env: NodeJS.ProcessEnv) => loadServiceConfig({ CI: 'true', ...env }, '/tmp/mintbot-config');
 
 describe('service mode (T-059)', () => {
-  const host = { MINT_BOT_SERVICE_MODE: 'host', SECRET_STORE_PATH: '/etc/mint-bot/Rets/MINT_BOT_SECRETS.env' };
+  const host = { MINT_BOT_SERVICE_MODE: 'host', SECRET_STORE_PATH: '/etc/mint-bot/Rets/MINT_BOT_SECRETS.env', MINT_BOT_CUSTODY: 'turnkey', MINT_BOT_SECRET_ROOT: '/etc/mint-bot/Rets' };
   it('is dry-run unless host is asked for exactly', () => {
     expect(load({}).mode).toBe('dry-run');
     expect(loadServiceConfig(host, '/tmp/mintbot-config').mode).toBe('host');
@@ -13,7 +13,13 @@ describe('service mode (T-059)', () => {
   it('refuses any other mode, host mode in CI, without the secret store, or without the startup kill switch (fail closed)', () => {
     for (const bad of ['live', 'Host', 'HOST', ' host']) expect(() => loadServiceConfig({ ...host, MINT_BOT_SERVICE_MODE: bad }, '/tmp/mintbot-config'), bad).toThrow('SERVICE_MODE_INVALID');
     expect(() => load(host)).toThrow('HOST_MODE_NOT_ALLOWED_IN_CI');
+    for (const ci of [{ CI: '1' }, { CI: 'yes' }, { GITHUB_ACTIONS: 'true' }]) expect(() => loadServiceConfig({ ...host, ...ci }, '/tmp/mintbot-config')).toThrow('HOST_MODE_NOT_ALLOWED_IN_CI');
+    expect(loadServiceConfig({ ...host, CI: 'false' }, '/tmp/mintbot-config').mode).toBe('host');
     expect(() => loadServiceConfig({ MINT_BOT_SERVICE_MODE: 'host' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_SECRET_STORE');
+    expect(() => loadServiceConfig({ ...host, MINT_BOT_CUSTODY: 'local' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_TURNKEY_CUSTODY');
+    expect(() => loadServiceConfig({ ...host, MINT_BOT_CUSTODY: '' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_TURNKEY_CUSTODY');
+    expect(() => loadServiceConfig({ ...host, MINT_BOT_SECRET_ROOT: '' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_SECRET_ROOT');
+    expect(() => loadServiceConfig({ ...host, MINT_BOT_SECRET_ROOT: 'Rets' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_SECRET_ROOT');
     expect(() => loadServiceConfig({ ...host, MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH: 'false' }, '/tmp/mintbot-config')).toThrow('HOST_MODE_REQUIRES_STARTUP_KILL_SWITCH');
     expect(loadServiceConfig({ ...host, MINT_BOT_REQUIRE_STARTUP_KILL_SWITCH: 'true' }, '/tmp/mintbot-config').requireStartupKillSwitch).toBe(true);
   });
