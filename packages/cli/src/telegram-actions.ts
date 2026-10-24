@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
-import { createPublicClient, formatEther, formatGwei, http as httpTransport, parseAbi, type Address } from 'viem';
+import { createPublicClient, formatGwei, http as httpTransport, parseAbi, type Address } from 'viem';
 import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import type { FireScheduleRepository, GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
@@ -20,6 +20,7 @@ import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion } from './host-facts.js';
 import { PORTFOLIO_CHAINS, type PortfolioProvider } from './portfolio-provider.js';
+import { sections, shortEth, shortenBalancesInParens } from './display.js';
 import { scheduleConfirmationDigest, type FireWiring } from './fire-wiring.js';
 
 /**
@@ -134,18 +135,17 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (role === 'viewer') return `MintBot is running (version ${version.slice(0, 12)}, up ${uptimeHours} h).`;
       const killed = existsSync(deps.killSwitchPath) || state.killed;
       const pending = bridge.recentLiveRunRequests ? bridge.recentLiveRunRequests(20).filter((item) => !item.outcome).length : 0;
-      return [
+      return sections([
         `Mode: ${deps.mode === 'host' ? 'LIVE (host)' : 'practice (dry-run)'}`,
         `Kill switch: ${killed ? 'ON (nothing can be spent)' : 'off'}`,
         `Service: ${state.runtime.startupState}${state.runtime.blockingReasons.length > 0 ? ` — ${state.runtime.blockingReasons.join(', ')}` : ''}`,
         `Live requests waiting: ${pending}`,
-        `Version ${version.slice(0, 12)}, up ${uptimeHours} h`,
-      ].join('\n');
+      ], [`Version: ${version.slice(0, 12)}`, `Uptime: ${uptimeHours} h`]);
     },
     async health() {
       const response = await deps.application.command<{ state?: string; ready?: boolean; reasons?: string[] }>('health');
       const data = response.data ?? {};
-      return `Health: ${data.ready ? 'ready' : 'not ready'} (${data.state ?? response.state})${data.reasons && data.reasons.length > 0 ? `\nBlocking: ${data.reasons.join(', ')}` : ''}`;
+      return sections([`Health: ${data.ready ? 'ready' : 'not ready'} (${data.state ?? response.state})`], data.reasons && data.reasons.length > 0 ? [`Blocking: ${data.reasons.join(', ')}`] : []);
     },
     async rpc() {
       const lines: string[] = [];
@@ -181,20 +181,22 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       return `Last backup: ${facts.status === 'ok' ? 'OK' : 'FAILED'} at ${minutes(facts.recordedAt.toISOString())} UTC (${hours} h ago).`;
     },
     async wallets() {
-      const lines: string[] = [];
       const healthy = deps.watcherHealthy();
-      lines.push(`Watcher: ${healthy === undefined ? 'not running' : healthy ? 'healthy' : 'NOT healthy'}`);
+      const head = [`Watcher: ${healthy === undefined ? 'not running' : healthy ? 'healthy' : 'NOT healthy'}`];
+      const groups: string[][] = [];
       for (const chain of CHAINS) {
         const addresses = deps.watchedWallets(chain.id);
         if (addresses.length === 0) continue;
         const reader = await client(chain.id).catch(() => undefined);
-        lines.push(`${chain.name}:`);
+        const lines = [`${chain.name}:`];
         for (const address of addresses) {
-          const balance = reader ? await reader.getBalance({ address: address as Address }).then((wei) => `${formatEther(wei)} ETH`).catch(() => 'unavailable') : 'unavailable';
+          // Cut to three significant digits for reading (T-071); `/funding` keeps exact amounts.
+          const balance = reader ? await reader.getBalance({ address: address as Address }).then((wei) => `${shortEth(wei)} ETH`).catch(() => 'unavailable') : 'unavailable';
           lines.push(`  ${short(address)}  ${balance}`);
         }
+        groups.push(lines);
       }
-      return lines.length > 1 ? lines.join('\n') : `${lines[0]}\nNo wallets are listed for the watcher.`;
+      return groups.length > 0 ? sections(head, ...groups) : sections(head, ['No wallets are listed for the watcher.']);
     },
     async funding(campaignId) {
       if (!campaignId) {
@@ -213,12 +215,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const at = now();
       const robinhood = validRobinhoodEnablement((deps.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), at);
       const base = validBaseEnablement((deps.store as { baseEnablement?: () => unknown }).baseEnablement?.(), at);
-      return [
+      return sections([
         'Ethereum: on (no record needed)',
-        `Base: ${base ? `ON since ${minutes(base.approvedAt)} UTC, ${base.paidAllowed ? 'free and paid' : 'free only'}, until revoked` : 'off'}`,
+        `Base: ${base ? `ON since ${minutes(base.approvedAt)} UTC, ${base.paidAllowed ? 'free and paid' : 'free only'}, until revoked` : 'off (needs its own evidence and record; nothing has been recorded for Base)'}`,
         `Robinhood: ${robinhood ? `ON since ${minutes(robinhood.approvedAt)} UTC, ${robinhood.paidAllowed ? 'free and paid' : 'free only'}, until revoked` : 'off'}`,
-        'Recording an enablement is done on the host; /revoke switches one off.',
-      ].join('\n');
+      ], ['Recording an enablement is done on the host; /revoke switches one off.']);
     },
     async drops() {
       const items = new Phase2ReadModelService(now).opportunities(deps.store.snapshot()).data ?? [];
@@ -263,24 +264,23 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         const candidates = await deps.walletList();
         const quantity = quantityLimit ?? 1;
         const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantity, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity });
-        return [
-          robinhoodPlan.summary,
-          ...(robinhoodPlan.opensAt ? [`Opens ${minutes(robinhoodPlan.opensAt)} UTC${robinhoodPlan.closesAt ? `, closes ${minutes(robinhoodPlan.closesAt)} UTC` : ''}.`] : []),
-          ...robinhoodPlan.blockers.map((blocker) => `✗ ${blocker}`),
-          ...robinhoodPlan.walletsNotReady.map((item) => `✗ ${short(item.wallet)}: ${item.why}`),
-          ...robinhoodPlan.warnings.map((warning) => `• ${warning}`),
-          ...(robinhoodPlan.verdict === 'ready' ? ['', 'To record the campaign (spends nothing):', `/prepare robinhood ${contract} ${quantity} ${robinhoodConfirmationPhrase(contract, quantity, robinhoodPlan.walletsReady.length, robinhoodPlan.totalMaxExposureEth)}`] : []),
-        ].join('\n');
+        return sections(
+          [robinhoodPlan.summary],
+          robinhoodPlan.opensAt ? [`Opens ${minutes(robinhoodPlan.opensAt)} UTC${robinhoodPlan.closesAt ? `, closes ${minutes(robinhoodPlan.closesAt)} UTC` : ''}.`] : [],
+          [...robinhoodPlan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`), ...robinhoodPlan.walletsNotReady.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`)],
+          robinhoodPlan.warnings.map((warning) => `• ${warning}`),
+          robinhoodPlan.verdict === 'ready' ? ['To record the campaign (spends nothing):', '', `/prepare robinhood ${contract} ${quantity} ${robinhoodConfirmationPhrase(contract, quantity, robinhoodPlan.walletsReady.length, robinhoodPlan.totalMaxExposureEth)}`] : [],
+        );
       }
       const chainId = evmChain(chainText);
       const planned = await livePlanAction({ chainId, contract, wallets: await deps.walletList(), ...(quantityLimit === undefined ? {} : { quantityLimit }), port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
       const { plan } = planned;
-      return [
-        plan.summary,
-        ...plan.blockers.map((blocker) => `✗ ${blocker}`),
-        ...plan.warnings.map((warning) => `• ${warning}`),
-        ...(planned.phrase ? ['', `Planning fee: ${planned.planningMaxFeeGwei ?? '?'} gwei. To record the campaign (spends nothing):`, `/prepare ${chainText.toLowerCase()} ${contract} ${quantityLimit ?? plan.quantity} ${planned.phrase}`] : []),
-      ].join('\n');
+      return sections(
+        [plan.summary],
+        plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`),
+        plan.warnings.map((warning) => `• ${warning}`),
+        planned.phrase ? [`Planning fee: ${planned.planningMaxFeeGwei ?? '?'} gwei. To record the campaign (spends nothing):`, '', `/prepare ${chainText.toLowerCase()} ${contract} ${quantityLimit ?? plan.quantity} ${planned.phrase}`] : [],
+      );
     },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
@@ -322,7 +322,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         const candidates = await deps.walletList();
         const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantityLimit, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity: quantityLimit });
         const prepared = await robinhoodPrepareAction({ contract, priorityFeeGwei: ROBINHOOD_DEFAULT_TIP_GWEI, confirm: phrase, plan: robinhoodPlan, killFile: deps.killSwitchPath, store: deps.store as never, createCampaign: (input) => deps.application.createCampaign(input), now: now() });
-        return [`Campaign recorded: ${prepared.campaign.id}`, `Sized for ${prepared.walletsSized} wallet(s), ${prepared.quantity} NFT(s) each, the most it can spend is ${prepared.maxExposureEth} ETH. Nothing was sent.`, '', 'When the mint is open:', `/simulate ${prepared.campaign.id}`, 'Then it prints the exact /request line to use (keep the fee ceiling at or below your Turnkey policy limit).'].join('\n');
+        return sections([`Campaign recorded: ${prepared.campaign.id}`], [`Sized for ${prepared.walletsSized} wallet(s), ${prepared.quantity} NFT(s) each, the most it can spend is ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['When the mint is open:', '', `/simulate ${prepared.campaign.id}`], ['Then it prints the exact /request line to use (keep the fee ceiling at or below your Turnkey policy limit).']);
       }
       const chainId = evmChain(chainText);
       const wallets = await deps.walletList();
@@ -332,20 +332,18 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const tipWei = policy?.stored?.tipWei ?? policy?.approved?.tipWei;
       const priorityFeeGwei = tipWei === undefined ? 0.1 : Number(formatGwei(BigInt(tipWei)));
       const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
-      return [`Campaign recorded: ${prepared.campaign.id}`, `${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`, '', 'Next, close to the mint:', `/simulate ${prepared.campaign.id}`, `/request ${prepared.campaign.id} all ${prepared.planningMaxFeeGwei ?? '<max gwei>'}`].join('\n');
+      return sections([`Campaign recorded: ${prepared.campaign.id}`], [`${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`], ['Next, close to the mint:', '', `/simulate ${prepared.campaign.id}`, `/request ${prepared.campaign.id} all ${prepared.planningMaxFeeGwei ?? '<max gwei>'}`]);
     },
     async simulate(campaignId) {
       const target = campaign(campaignId);
       if (target.chainId === 4663) {
         const report = await robinhoodDryRun(target.contract, await deps.walletList(), target.quantity, now());
         const recorded = await recordRobinhoodSimulationsAction({ store: deps.store, campaign: target, report, latestBlock: robinhoodBlock });
-        return [
-          `${recorded.recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`,
-          ...recorded.skipped.map((item) => `✗ ${short(item.wallet)}: ${item.why}`),
-          '',
-          'Send the request with a fee ceiling (gwei) at or below your Turnkey policy limit. 0.2 is the limit of the standard policy; use a lower number if yours is lower:',
-          `/request ${target.id} ${recorded.recorded.join(',')} 0.2`,
-        ].join('\n');
+        return sections(
+          [`${recorded.recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`],
+          recorded.skipped.map((item) => `✗ ${short(item.wallet)}: ${item.why}`),
+          ['Send the request with a fee ceiling (gwei) at or below your Turnkey policy limit. 0.2 is the limit of the standard policy; use a lower number if yours is lower:', '', `/request ${target.id} ${recorded.recorded.join(',')} 0.2`],
+        );
       }
       const reader = await client(target.chainId);
       const ids = await recordSimulationAction({ store: deps.store, campaign: target, wallets: await deps.walletList(), port: await port(target.chainId), latestBlock: async () => { const block = await reader.getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; } });
@@ -364,7 +362,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async fireNow(campaignId, walletsText, maxFeeGwei, digest) {
       if (digest !== undefined && fireWiring().campaignDigest(campaign(campaignId)) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; send /fire again');
       const result = await fireWiring().fireNow(campaignId, await fireWiring().wallets(walletsText), maxFeeGwei);
-      return [`Request ${result.requestId} sent for ${result.wallets.length} wallet(s); the service arms and runs it within seconds. Follow it with /requests and /runs. /kill stops everything.`, ...result.skipped.map((item) => `✗ ${short(item.wallet)} skipped: ${item.why}`)].join('\n');
+      return sections([`Request ${result.requestId} sent for ${result.wallets.length} wallet(s); the service arms and runs it within seconds. Follow it with /requests and /runs. /kill stops everything.`], result.skipped.map((item) => `✗ ${short(item.wallet)} skipped: ${item.why}`));
     },
     async schedulePreview(campaignId, walletsText, maxFeeGwei, fromText, untilText) {
       const wiring = fireWiring();

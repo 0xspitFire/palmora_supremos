@@ -46,7 +46,7 @@ describe('trial status messages (T-005)', () => {
     expect(h.sent[0]).toBe(plainSystemText(startMessage({ watched: 90, ownWallets: 2, startedAt: now(), startNumber: 1, version: 'a1b2c3d4' })));
     expect(h.sent[0]).toContain('MINTBOT STARTED · INFO');
     expect(h.sent[0]).toContain('Watching: 90 watched wallets on ETHEREUM SeaDrop mints');
-    expect(h.sent[0]).toContain('Your wallets checked: 2 wallets for mint readiness');
+    expect(h.sent[0]).toContain('Your Wallets Checked: 2 wallets for mint readiness');
     expect(h.sent[0]).toContain('Version: a1b2c3d4');
     expect(h.sent[0]).not.toMatch(/0x[0-9a-f]{40}/i);
     expect(h.store.snapshot().events.filter((event) => event.type === 'alert_status')).toHaveLength(1);
@@ -67,7 +67,7 @@ describe('trial status messages (T-005)', () => {
     expect(checkIns()).toHaveLength(1);
     // No scan has worked in this test (the port never answers), so the check-in says so and asks for attention.
     expect(checkIns()[0]).toContain('DAILY CHECK-IN · ATTENTION');
-    expect(checkIns()[0]).toContain('Chain scan: no successful scan yet');
+    expect(checkIns()[0]).toContain('Chain Scan: no successful scan yet');
     clock += 24 * 60 * 60_000;
     await service.runOnce();
     expect(checkIns()).toHaveLength(2);
@@ -95,7 +95,7 @@ describe('trial status messages (T-005)', () => {
     });
     const counts = checkInCounts(store, new Repo(1), at);
     expect(counts).toEqual({ opportunities: 1, upcomingMints: 1, alerts: 1, healthWarnings: 1, lastBlock: null, failedDeliveries: 0, pendingFailures: 0 });
-    expect(plainSystemText(checkInMessage(counts, { runningSince: new Date('2026-09-29T00:00:00.000Z'), now: at, lastScanAt: null, scanStale: true }))).toContain('Chain scan: no successful scan yet');
+    expect(plainSystemText(checkInMessage(counts, { runningSince: new Date('2026-09-29T00:00:00.000Z'), now: at, lastScanAt: null, scanStale: true }))).toContain('Chain Scan: no successful scan yet');
   });
 
   it('keeps running when a status message cannot be delivered', async () => {

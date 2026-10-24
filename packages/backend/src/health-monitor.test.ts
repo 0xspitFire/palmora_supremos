@@ -37,7 +37,7 @@ describe('health monitor (T-030)', () => {
     expect(sent[0]).toMatchObject({ kind: 'health', priority: 'immediate' });
     expect(html(0)).toContain('<b>CHAIN SCAN STALLED</b> · ATTENTION');
     expect(html(0)).toContain('<b>no successful chain scan for 16 min.</b>');
-    expect(html(0)).toContain('<b>Last good scan:</b> <b>08:00 UTC, block 24,631,002</b>');
+    expect(html(0)).toContain('<b>Last Good Scan:</b> <b>08:00 UTC, block 24,631,002</b>');
     expect(html(0)).toContain('the chain provider is limiting requests');
     expect(html(0)).toContain('Check that the chain provider is up');
     expect(sent[0]!.text).toContain('CHAIN SCAN STALLED');
@@ -57,7 +57,7 @@ describe('health monitor (T-030)', () => {
     const back = await monitor.check(sample(minutes(12 * 60)));
     expect(back).toEqual(['scan_stalled:recovered']);
     expect(html(3)).toContain('RECOVERED · CHAIN SCAN STALLED</b> · INFO');
-    expect(html(3)).toContain('<b>It lasted:</b> <b>12 h 0 min</b>');
+    expect(html(3)).toContain('<b>It Lasted:</b> <b>12 h 0 min</b>');
     expect(new Set(sent.map((entry) => entry.dedupe)).size).toBe(4);
     expect(await monitor.check(sample(minutes(13 * 60)))).toEqual([]);
   });
@@ -65,7 +65,7 @@ describe('health monitor (T-030)', () => {
   it('counts the time since the bot started when no scan has ever worked, and says so', async () => {
     const { monitor, sample, html } = setup();
     await monitor.check(sample(minutes(20), { scan: { startedAt: START, lastProblem: 'HEAD_UNAVAILABLE' } }));
-    expect(html(0)).toContain('<b>Last good scan:</b> <b>none since the bot started</b>');
+    expect(html(0)).toContain('<b>Last Good Scan:</b> <b>none since the bot started</b>');
     expect(html(0)).toContain('the chain provider is not answering');
   });
 

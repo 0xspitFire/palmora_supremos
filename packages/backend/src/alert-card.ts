@@ -1,3 +1,4 @@
+import { titleCaseLabel } from './text-style.js';
 import { redactText } from './observability.js';
 
 /**
@@ -242,7 +243,7 @@ function buttonsFor(card: AlertCard): AlertButton[] {
 function htmlOf(card: AlertCard, ctx: RenderContext, fields: readonly AlertCardField[], notes: readonly AlertCardField[]): string {
   const { name, kind, explorer } = heading(card);
   const dashboard = dashboardLink(ctx.dashboardUrl, card.record);
-  const line = (entry: AlertCardField): string => `<b>${safe(entry.label)}:</b> ${safe(entry.value)}`;
+  const line = (entry: AlertCardField): string => `<b>${safe(titleCaseLabel(entry.label))}:</b> ${safe(entry.value)}`;
   return [
     `<b>${safe(card.title)}</b>`,
     explorer ? `<a href="${escapeHtml(explorer)}">${safe(name)}</a>` : safe(name),
@@ -259,7 +260,7 @@ function htmlOf(card: AlertCard, ctx: RenderContext, fields: readonly AlertCardF
 function plainOf(card: AlertCard, ctx: Partial<RenderContext>): string {
   const { name, kind, explorer } = heading(card);
   const dashboard = dashboardLink(ctx.dashboardUrl, card.record);
-  const line = (entry: AlertCardField): string => `${entry.label}: ${entry.value}`;
+  const line = (entry: AlertCardField): string => `${titleCaseLabel(entry.label)}: ${entry.value}`;
   return [
     card.title,
     name,

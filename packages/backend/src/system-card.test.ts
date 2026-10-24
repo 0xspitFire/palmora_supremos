@@ -18,12 +18,16 @@ describe('system message cards (T-030)', () => {
     const { html, plain, buttons } = renderSystemCard(card(), { now: NOW });
     expect(html.split('\n')).toEqual([
       '<b>KILL SWITCH ENGAGED</b> · CRITICAL',
-      '<b>What happened:</b> <b>the kill switch was engaged.</b>',
-      '<b>What it means:</b> no new mints are admitted.',
-      '<b>What to do:</b>',
+      '',
+      '<b>What Happened:</b> <b>the kill switch was engaged.</b>',
+      '<b>What It Means:</b> no new mints are admitted.',
+      '',
+      '<b>What To Do:</b>',
       '1. Check the state.',
       '2. Release it from the terminal.',
+      '',
       '<b>Run:</b> <code>run_1</code>',
+      '',
       '<i>Sent 14:03:22 UTC, 2 s after the kill</i>',
     ]);
     expect(plain).not.toMatch(/<[a-z/]/);
@@ -81,7 +85,7 @@ describe('system message cards (T-030)', () => {
 
   it('stores a plain-text form without a send time for other sinks', () => {
     const text = plainSystemText(card());
-    expect(text).toContain('What happened: the kill switch was engaged.');
+    expect(text).toContain('What Happened: the kill switch was engaged.');
     expect(text).not.toContain('Sent ');
   });
 });
