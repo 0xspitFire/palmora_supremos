@@ -166,7 +166,9 @@ function spread<T>(items: readonly T[], count: number): T[] {
  */
 function isSafeCodedMessage(message: string): boolean {
   const [code = '', ...rest] = message.split(':');
-  return /^[A-Z][A-Z0-9_]+$/.test(code) && !/:\/\/|0x[0-9a-f]{20,}|[A-Za-z0-9_-]{32,}/i.test(rest.join(':'));
+  // At most 80 characters, and a code of 32 or more must contain an underscore, so a bare hex or key-like string is never taken for a code.
+  const codeOk = /^[A-Z][A-Z0-9_]{1,79}$/.test(code) && (code.length < 32 || code.includes('_'));
+  return codeOk && !/:\/\/|0x[0-9a-f]{20,}|[A-Za-z0-9_-]{32,}/i.test(rest.join(':'));
 }
 
 /** The only text the survey command may print for a failure: known survey codes as-is, anything else cleaned, because provider errors can contain the RPC URL and key. */
