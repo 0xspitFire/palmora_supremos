@@ -4,6 +4,7 @@ import { formatEth, campaignInputDigest, type BackendStore, type Campaign, type 
 import type { FireScheduleRepository, FireScheduleRecord } from '@mint-bot/database';
 import { checkDrop } from './drop-check.js';
 import { roundUpEth, shortEth } from './display.js';
+import { requiredPerWallet } from './fleet-funding-cli.js';
 import { assertScheduleWindow, parseWhen, runFire, type FireDeps, type FireResult, type MintState } from './fire.js';
 import { previewLiveRequest, runLiveRequest, sizedWalletCount } from './live-request.js';
 import { recordPassingSimulationsAction } from './owner-actions.js';
@@ -90,9 +91,8 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   };
 
   const fundingSplit: FireWiring['fundingSplit'] = async (campaign, wallets) => {
-    const fee = campaign.feePolicy.totalFeeBudgetWei;
-    if (fee === undefined) throw new Error('TOTAL_FEE_BUDGET_REQUIRED');
-    const required = campaign.mintPriceWei * BigInt(campaign.quantity) + fee;
+    // The very function the arm check uses, so the two can never disagree (it throws TOTAL_FEE_BUDGET_REQUIRED without a fee budget).
+    const required = requiredPerWallet(campaign);
     const funded: string[] = [];
     const short: Array<{ wallet: string; why: string }> = [];
     for (const wallet of wallets) {
@@ -118,6 +118,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   };
 
   /** A wallet that passed its test mint but does not hold what a run needs is left out and told exactly what to send; if none is funded, nothing is requested. */
+  // (The test mints are already recorded when this refuses; that is harmless, they only record that a wallet passed.)
   const withFunding = async (campaign: Campaign, result: { recorded: string[]; skipped: Array<{ wallet: string; why: string }> }): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }> => {
     const split = await fundingSplit(campaign, result.recorded);
     if (split.funded.length === 0) throw new Error(`FUNDING_NOT_ARRIVED: no wallet holds what a run needs. ${split.short.map((item) => `${item.wallet.slice(0, 6)}…${item.wallet.slice(-4)}: ${item.why}.`).join(' ')}`);

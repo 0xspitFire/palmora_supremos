@@ -218,6 +218,18 @@ describe('a run needs each wallet to hold its full worst case (the second live a
     } finally { await cleanup(t.directory); }
   });
 
+  it('a request with a wallet list (typed or chosen) is refused with the top-up when a listed wallet is short, and a short wallet does not use up a sized slot', async () => {
+    const t = await setup({ balances: { [A]: SHORT }, maxRunWei: 200_000_000_000_000n });
+    try {
+      await t.actions.simulateCampaign('campaign_abcdef12');
+      await expect(t.actions.requestPreview('campaign_abcdef12', A, 0.2)).rejects.toThrow(/FUNDING_NOT_ARRIVED.*send 0\.000049 ETH more first/);
+      await expect(t.actions.requestPreview('campaign_abcdef12', B, 0.2)).resolves.toMatchObject({ wallets: [B] });
+      // Sized for one wallet, the first wallet is short: the funded second one is used, not refused for lack of a slot.
+      await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [B] })]);
+    } finally { await cleanup(t.directory); }
+  });
+
   it('the simulate-then-request path says who needs funding, offers only funded wallets, and an unreadable balance counts as short (fail closed)', async () => {
     const t = await setup({ balances: { [A]: SHORT } });
     try {

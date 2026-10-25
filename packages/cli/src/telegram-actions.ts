@@ -342,6 +342,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
+      // A wallet that holds less than a run needs would stop the whole run at arm: say so now, with the exact top-up, before anything is sent.
+      if (deps.fire) {
+        const split = await deps.fire.fundingSplit(campaign(campaignId), preview.wallets);
+        if (split.short.length > 0) throw new Error(`FUNDING_NOT_ARRIVED: ${split.short.map((item) => `${short(item.wallet)}: ${item.why}.`).join(' ')}`);
+      }
       return { wallets: preview.wallets, text: `The service will arm and run ${chainName(preview.chainId)} ${short(preview.contract)}: ${preview.quantityPerWallet} NFT(s) per wallet at ${preview.priceEth} ETH, from ${preview.wallets.length} wallet(s). The most that can be spent is ${preview.maxExposureEth} ETH, signing at no more than ${preview.maxFeeGwei} gwei. Every guard still applies.`, phrase: preview.phrase };
     },
     async requestCreate(campaignId, walletsText, maxFeeGwei, phrase) {
