@@ -40,6 +40,16 @@ export interface GuidedActions {
   cancellables(): Promise<Array<{ id: string; label: string }>>;
   cancel(id: string): Promise<string>;
   funding(campaignId: string | undefined): Promise<string>;
+  /** D-070: the chains that can be switched off (Base and Robinhood, when on). */
+  revokeChoices(): Promise<Array<{ key: ChainKey; name: string }>>;
+  /** `phrase` names the enablement record being looked at; the tap is refused if a different record is current by then. */
+  revokeStatus(chain: string): Promise<{ text: string; phrase?: string }>;
+  revokeNow(chain: string, expectedPhrase: string): Promise<string>;
+  /** D-070: the chains with watched wallets, the wallets, and what the wallet looks like now (`phrase` names that state). */
+  watchChains(): Promise<Array<{ key: ChainKey; name: string }>>;
+  watchWallets(chain: string): Promise<string[]>;
+  watchStatus(chain: string, address: string): Promise<{ text: string; phrase: string }>;
+  watchAcceptNow(chain: string, address: string, expectedPhrase: string): Promise<string>;
   recentRuns(): Promise<Array<{ id: string; label: string }>>;
   run(runId: string): Promise<string>;
   firePreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; wallets: string[]; digest?: string }>;
@@ -48,7 +58,7 @@ export interface GuidedActions {
   scheduleCreate(campaignId: string, wallets: string, maxFeeGwei: number, from: string, until: string, phrase: string, digest?: string): Promise<string>;
 }
 
-export type FlowKind = 'prepare' | 'simulate' | 'release' | 'request' | 'fire' | 'schedule' | 'cancel' | 'funding' | 'run';
+export type FlowKind = 'prepare' | 'simulate' | 'release' | 'request' | 'fire' | 'schedule' | 'cancel' | 'funding' | 'run' | 'revoke' | 'watchaccept';
 export interface FlowReply { text: string; buttons?: InlineButton[][] }
 /** What the router records after a flow finishes its last action: the command name and `ok` or `refused:CODE`. */
 export interface FlowDone { command: FlowKind; outcome: string }
@@ -56,11 +66,11 @@ export interface FlowResult { reply: FlowReply; done?: FlowDone }
 
 /** Values a command typed with all its arguments hands to a flow, so it shows the summary and its button instead of a phrase to copy. */
 export interface FlowPreset {
-  chain?: string; contract?: string;
+  chain?: string; contract?: string; address?: string;
   campaign?: string; wallets?: string[] | 'all'; fee?: number; from?: string; until?: string;
 }
 
-type StepName = 'chain' | 'contract' | 'quantity' | 'count' | 'campaign' | 'wallets' | 'fee' | 'window' | 'pick' | 'review';
+type StepName = 'chain' | 'contract' | 'quantity' | 'count' | 'campaign' | 'wallets' | 'wallet' | 'fee' | 'window' | 'pick' | 'review';
 const PLAN: Readonly<Record<FlowKind, readonly StepName[]>> = {
   prepare: ['chain', 'contract', 'quantity', 'count', 'review'],
   simulate: ['campaign', 'review'],
@@ -71,10 +81,12 @@ const PLAN: Readonly<Record<FlowKind, readonly StepName[]>> = {
   cancel: ['pick'],
   funding: ['pick'],
   run: ['pick'],
+  revoke: ['chain', 'review'],
+  watchaccept: ['chain', 'wallet', 'review'],
 };
-const NAMES: Readonly<Record<FlowKind, string>> = { prepare: 'Prepare A Live Campaign', simulate: 'Record Test Mints', release: 'Release The Kill Switch', request: 'Send A Live Request', fire: 'Fire A Campaign', schedule: 'Schedule A Mint', cancel: 'Cancel A Request Or Schedule', funding: 'Funding For A Campaign', run: 'Look At A Run' };
+const NAMES: Readonly<Record<FlowKind, string>> = { prepare: 'Prepare A Live Campaign', simulate: 'Record Test Mints', release: 'Release The Kill Switch', request: 'Send A Live Request', fire: 'Fire A Campaign', schedule: 'Schedule A Mint', cancel: 'Cancel A Request Or Schedule', funding: 'Funding For A Campaign', run: 'Look At A Run', revoke: 'Switch A Chain Off', watchaccept: 'Accept A Wallet Change' };
 
-interface Awaiting { field: 'contract' | 'quantity' | 'count' | 'wallets' | 'fee' | 'window' }
+interface Awaiting { field: 'contract' | 'quantity' | 'count' | 'wallets' | 'address' | 'fee' | 'window' }
 interface Flow {
   id: string;
   kind: FlowKind;
@@ -97,7 +109,8 @@ const MAX_WRONG = 3;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const short = (address: string): string => `${address.slice(0, 6)}…${address.slice(-4)}`;
 /** Whether a tap needs the unlocked session: release, fire and schedule at every tap; a request only at its last tap (it is a read until then). */
-export const flowNeedsSession = (kind: FlowKind, key?: string): boolean => (kind === 'release' || kind === 'fire' || kind === 'schedule') || (kind === 'request' && key === 'go');
+/** (A revoke needs none, like `/kill` and the typed `/revoke`: turning something off is never held back by the session.) */
+export const flowNeedsSession = (kind: FlowKind, key?: string): boolean => (kind === 'release' || kind === 'fire' || kind === 'schedule' || kind === 'watchaccept') || (kind === 'request' && key === 'go');
 
 export interface GuidedDeps {
   actions: GuidedActions;
@@ -147,6 +160,17 @@ export class GuidedFlows {
         d.chain = preset.chain;
         flow.step = 1;
         return await this.typed(flow, 'contract', preset.contract);
+      }
+      if (preset && kind === 'revoke' && preset.chain) {
+        d.chain = preset.chain;
+        flow.step = 1;
+        return await this.render(flow);
+      }
+      if (preset && kind === 'watchaccept' && preset.chain && preset.address) {
+        if (!ADDRESS.test(preset.address)) throw new Error('ADDRESS_INVALID: that is not a wallet address');
+        d.chain = preset.chain; d.address = preset.address.toLowerCase();
+        flow.step = 2;
+        return await this.render(flow);
       }
       if (preset && kind === 'simulate' && preset.campaign) {
         d.campaign = preset.campaign; d.campaignLabel = `campaign ${preset.campaign}`;
@@ -220,9 +244,16 @@ export class GuidedFlows {
 
   private cb(flow: Flow, key: string): string { return `/f_${flow.id}_${flow.step}${key}`; }
   private cancelRow(flow: Flow): InlineButton[] { return [{ text: 'Cancel', callback_data: `/f_${flow.id}_${flow.step}x` }]; }
+  /** The step heading, and the campaign id right under it once a campaign is chosen, so it is always in view (and one tap to copy). */
   private title(flow: Flow): string {
     const steps = PLAN[flow.kind].length;
-    return steps === 1 ? NAMES[flow.kind] : `${NAMES[flow.kind]} · Step ${flow.step + 1} Of ${steps}`;
+    const heading = steps === 1 ? NAMES[flow.kind] : `${NAMES[flow.kind]} · Step ${flow.step + 1} Of ${steps}`;
+    const data = flow.data as Record<string, unknown>;
+    const campaign = data.campaign;
+    // `idShown` means the text above this step already shows the campaign id: skip it for this one step only, then show it on every later step.
+    const skip = data.idShown === true;
+    delete data.idShown;
+    return typeof campaign === 'string' && !skip ? `${heading}\nCampaign: ${campaign}` : heading;
   }
 
   /** Buttons for a list of choices (two per row), plus Custom when allowed, plus Cancel. Values stay here; the buttons carry only keys. */
@@ -258,8 +289,9 @@ export class GuidedFlows {
     const a = this.deps.actions;
     switch (this.name(flow)) {
       case 'chain': {
-        const chains = await a.guidedChains();
-        return { reply: { text: `${head}\n\nChoose the chain. Only chains that are switched on are listed.`, buttons: this.choices(flow, chains.map((chain) => ({ label: chain.name, value: chain.key })), false) } };
+        const chains = flow.kind === 'revoke' ? await a.revokeChoices() : flow.kind === 'watchaccept' ? await a.watchChains() : await a.guidedChains();
+        if (chains.length === 0) { this.flow = undefined; return { reply: { text: flow.kind === 'revoke' ? 'Nothing to switch off: only Base and Robinhood can be switched off, and neither is on.' : 'No chain has watched wallets.' } }; }
+        return { reply: { text: `${head}\n\nChoose the chain. ${flow.kind === 'prepare' ? 'Only chains that are switched on are listed.' : ''}`.trim(), buttons: this.choices(flow, chains.map((chain) => ({ label: chain.name, value: chain.key })), false) } };
       }
       case 'contract': return this.ask(flow, 'contract', `${head}\n\nSend the contract address as a message (0x followed by 40 letters or digits).`);
       case 'quantity': {
@@ -272,6 +304,10 @@ export class GuidedFlows {
         const ready = (d.plan as GuidedPlan).ready.length;
         const presets: Choice[] = [...[1, 2].filter((value) => value < ready).map((value) => ({ label: `${value} wallet${value === 1 ? '' : 's'}`, value })), { label: `All ready (${ready})`, value: ready }];
         return { reply: { text: `${head}\n\n${ready} wallet(s) are ready. How many should this campaign be sized for? (The campaign can never use more wallets than this.)`, buttons: this.choices(flow, presets, ready > 1) } };
+      }
+      case 'wallet': {
+        const wallets = await a.watchWallets(String(d.chain));
+        return { reply: { text: `${head}\n\nWhich wallet changed? Choose it, or type its address with Custom.`, buttons: this.choices(flow, wallets.slice(0, 8).map((wallet) => ({ label: short(wallet), value: wallet })), true) } };
       }
       case 'campaign': {
         if (flow.kind === 'request') return this.campaignChoices(flow, head, await a.requestCandidates(), 'No campaign has fresh test mints. Record them when the mint is open: send /simulate.');
@@ -322,6 +358,16 @@ export class GuidedFlows {
       d.releasePhrase = status.phrase;
       return { reply: { text: `${head}\n\n${status.text}`, buttons: status.canRelease ? [[{ text: 'Release The Kill Switch', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] : [this.cancelRow(flow)] } };
     }
+    if (flow.kind === 'revoke') {
+      const status = await a.revokeStatus(String(d.chain));
+      d.phrase = status.phrase;
+      return { reply: { text: `${head}\n\n${status.text}`, buttons: status.phrase ? [[{ text: 'Switch It Off', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] : [this.cancelRow(flow)] } };
+    }
+    if (flow.kind === 'watchaccept') {
+      const status = await a.watchStatus(String(d.chain), String(d.address));
+      d.phrase = status.phrase;
+      return { reply: { text: `${head}\n\n${status.text}`, buttons: [[{ text: 'Accept This Change', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
+    }
     if (flow.kind === 'simulate') {
       const label = String(((d.labels as Record<string, string> | undefined)?.[String(d.campaign)]) ?? (d.campaignLabel as string | undefined) ?? 'the campaign');
       return { reply: { text: `${head}\n\nRecord a test mint for each wallet on ${label}. Test mints only pass once the mint is open, and each record is good for 30 minutes. Nothing is sent or spent.`, buttons: [[{ text: 'Record Test Mints', callback_data: this.cb(flow, 'go') }], this.cancelRow(flow)] } };
@@ -348,6 +394,7 @@ export class GuidedFlows {
       case 'count': return this.takeCount(flow, Number(value));
       case 'campaign': d.campaign = value; return this.advance(flow);
       case 'wallets': d.wallets = value === 'all' ? 'all' : [String(value)]; return this.advance(flow);
+      case 'wallet': d.address = String(value); return this.advance(flow);
       case 'fee': return this.takeFee(flow, Number(value));
       case 'window': { const window = value as { from: string; until: string }; return this.takeWindow(flow, window.from, window.until); }
       case 'pick': return this.pick(flow, String(value));
@@ -361,6 +408,7 @@ export class GuidedFlows {
       case 'quantity': return this.ask(flow, 'quantity', `Type the number of NFTs per wallet (a whole number from 1 to ${Math.max(1, (d.plan as GuidedPlan).maxQuantity)}).`);
       case 'count': return this.ask(flow, 'count', `Type how many wallets to size the campaign for (a whole number from 1 to ${(d.plan as GuidedPlan).ready.length}).`);
       case 'wallets': return this.ask(flow, 'wallets', flow.kind === 'request' ? 'Type the wallet addresses, separated by commas. Each must be one of the wallets that have fresh test mints.' : 'Type the wallet addresses, separated by commas. Each must be one of your signing wallets.');
+      case 'wallet': return this.ask(flow, 'address', 'Type the wallet address (0x followed by 40 letters or digits).');
       case 'fee': return this.ask(flow, 'fee', 'Type the fee ceiling as a plain number, for example 0.15.');
       default: return this.ask(flow, 'window', 'Type the window as two times separated by a space, in UTC: for example "now +90m" or "2026-10-25T18:00 2026-10-25T20:00". At most 6 hours, starting within 7 days.');
     }
@@ -423,6 +471,11 @@ export class GuidedFlows {
         }
         if (request && seen.size > Number(d.sized)) return bad(`this campaign was sized for ${String(d.sized)} wallet(s); you chose ${seen.size}.`);
         d.wallets = [...seen];
+        return this.advance(flow);
+      }
+      case 'address': {
+        if (!ADDRESS.test(text)) return bad(`"${text.slice(0, 60)}" is not a wallet address. Send 0x followed by 40 letters or digits.`);
+        d.address = text.toLowerCase();
         return this.advance(flow);
       }
       case 'fee': {
@@ -523,7 +576,8 @@ export class GuidedFlows {
   /** Records the test mints, then goes straight on to choosing the wallets for the request (nothing to copy). */
   private async recordTestMints(campaignId: string): Promise<FlowResult> {
     const result = await this.deps.actions.simulateCampaign(campaignId);
-    const next = this.make('request', 1, { campaign: campaignId });
+    // The test-mint result above already starts with the campaign id, so this first step does not repeat it.
+    const next = this.make('request', 1, { campaign: campaignId, idShown: true });
     let step: FlowResult;
     try { step = await this.render(next); } catch (error) {
       // The test mints are recorded; only the wallet choices could not be shown. Say so, and keep the outcome true.
@@ -551,12 +605,15 @@ export class GuidedFlows {
         const prepared = await a.guidedPrepare(String(d.chain), String(d.contract), Number(d.quantity), d.selected as string[], (d.plan as GuidedPlan).phrase);
         if (!prepared.campaignId) return { reply: { text: prepared.text }, done: { command: 'prepare', outcome: 'ok' } };
         // Straight on to the next step: the test mints (they can only pass once the mint is open).
-        const next = this.make('simulate', 1, { campaign: prepared.campaignId, campaignLabel: `campaign ${prepared.campaignId}` });
+        // The prepared text above already shows the campaign id at its top, so the next step does not repeat it.
+        const next = this.make('simulate', 1, { campaign: prepared.campaignId, campaignLabel: 'this campaign', idShown: true });
         const step = await this.render(next);
         return { reply: { text: `${prepared.text}\n\n${step.reply.text}`, ...(step.reply.buttons ? { buttons: step.reply.buttons } : {}) }, done: { command: 'prepare', outcome: 'ok' } };
       }
       let text: string;
       if (flow.kind === 'release') text = await a.releaseNow(d.releasePhrase as string | undefined);
+      else if (flow.kind === 'revoke') text = await a.revokeNow(String(d.chain), String(d.phrase ?? ''));
+      else if (flow.kind === 'watchaccept') text = await a.watchAcceptNow(String(d.chain), String(d.address), String(d.phrase));
       else if (flow.kind === 'fire') text = await a.fireNow(String(d.campaign), String(d.walletsText), Number(d.fee), d.digest as string | undefined);
       else if (flow.kind === 'request') text = await a.requestSend(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.phrase));
       else text = await a.scheduleCreate(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.from), String(d.until), String(d.phrase), d.digest as string | undefined);

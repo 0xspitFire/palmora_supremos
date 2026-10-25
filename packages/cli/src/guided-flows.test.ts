@@ -17,7 +17,7 @@ function setup(over: Partial<GuidedActions> = {}) {
     guidedPrepare: async (chain, contract, quantity, wallets, expected) => { calls.push(`prepare(${chain},${contract},${quantity},${wallets.join('+')},${expected})`); return { text: 'Campaign recorded: cmp_new', campaignId: 'cmp_new' }; },
     releaseStatus: async () => ({ text: 'The kill switch is ON. Nothing blocks the release.', canRelease: true, phrase: 'RELEASE engaged T1' }),
     releaseNow: async (expected) => { calls.push(`release(${expected})`); return 'The kill switch is off.'; },
-    simulateCampaign: async (campaignId) => { calls.push(`simulate(${campaignId})`); return { text: '2 wallet(s) passed the test mint. The records are good for 30 minutes.', recorded: [A, B], sized: 1 }; },
+    simulateCampaign: async (campaignId) => { calls.push(`simulate(${campaignId})`); return { text: `Campaign: ${campaignId}\n\n2 wallet(s) passed the test mint. The records are good for 30 minutes.`, recorded: [A, B], sized: 1 }; },
     requestCandidates: async () => [{ id: 'cmp_a', label: 'Robinhood 0xa686…94db · 1 NFT', note: '2 wallet(s) tested, about 25 min left' }],
     requestWallets: async () => ({ wallets: [A, B], sized: 1 }),
     requestPreview: async (campaignId, wallets, fee) => { calls.push(`requestPreview(${campaignId},${wallets},${fee})`); return { text: 'The service will arm and run the request.', phrase: `REQ-${wallets.split(',').length}`, wallets: wallets.split(',') }; },
@@ -25,6 +25,13 @@ function setup(over: Partial<GuidedActions> = {}) {
     cancellables: async () => [{ id: 'live_request_1', label: 'Request 000001 · 1 wallet(s)' }, { id: 'fire_schedule_2', label: 'Schedule 000002' }],
     cancel: async (id) => { calls.push(`cancel(${id})`); return `Cancelled ${id}.`; },
     funding: async (id) => { calls.push(`funding(${id})`); return `Funding for ${id}.`; },
+    revokeChoices: async () => [{ key: 'base', name: 'Base' }, { key: 'robinhood', name: 'Robinhood' }],
+    revokeStatus: async (chain) => ({ text: `Switching ${chain} off stops new runs.`, phrase: `REVOKE ${chain} rec1` }),
+    revokeNow: async (chain, expected) => { calls.push(`revoke(${chain},${expected})`); return `${chain} is off.`; },
+    watchChains: async () => [{ key: 'ethereum', name: 'Ethereum' }],
+    watchWallets: async () => [A, B],
+    watchStatus: async (chain, address) => ({ text: `The wallet ${address} on ${chain} now has 3 sent transactions.`, phrase: 'ACCEPT 3' }),
+    watchAcceptNow: async (chain, address, expected) => { calls.push(`watchaccept(${chain},${address},${expected})`); return 'Accepted.'; },
     recentRuns: async () => [{ id: 'run_1', label: 'live · Completed · 10-25 12:00 UTC' }],
     run: async (id) => { calls.push(`run(${id})`); return `Run ${id} result.`; },
     guidedCampaigns: async () => [{ id: 'cmp_a', label: 'Robinhood 0xa686…94db · 1 NFT', note: 'mint is open' }, { id: 'cmp_b', label: 'Ethereum 0x1234…abcd · 1 NFT', note: 'mint not open yet; busy: queued' }],
@@ -422,6 +429,80 @@ describe('the steps after prepare are buttons too (T-074)', () => {
     expect((await setup({ recentRuns: async () => [] }).flows.start('run')).reply.text).toBe('No runs yet.');
     expect((await setup({ cancellables: async () => [] }).flows.start('cancel')).reply.text).toContain('Nothing is waiting');
     expect((await setup({ requestCandidates: async () => [] }).flows.start('request')).reply.text).toContain('No campaign has fresh test mints');
+  });
+});
+
+describe('revoke and watchaccept (D-070)', () => {
+  it('revoke: pick the chain, see what it means, one button, bound to the record shown; nothing when no chain is on', async () => {
+    const t = setup();
+    let step = await t.flows.start('revoke');
+    expect(step.reply.buttons?.flat().map((button) => button.text)).toEqual(['Base', 'Robinhood', 'Cancel']);
+    step = await t.press(step, 'Robinhood');
+    expect(step.reply.text).toContain('Switching robinhood off stops new runs.');
+    const done = await t.press(step, 'Switch It Off');
+    expect(t.calls.at(-1)).toBe('revoke(robinhood,REVOKE robinhood rec1)');
+    expect(done.done).toEqual({ command: 'revoke', outcome: 'ok' });
+    expect((await setup({ revokeChoices: async () => [] }).flows.start('revoke')).reply.text).toContain('Nothing to switch off');
+    const changed = setup({ revokeNow: async () => { throw new Error('ENABLEMENT_CHANGED: a different record is current'); } });
+    const refused = await changed.press(await changed.flows.start('revoke', { chain: 'base' }), 'Switch It Off');
+    expect(refused.done).toEqual({ command: 'revoke', outcome: 'refused:ENABLEMENT_CHANGED' });
+  });
+
+  it('watchaccept: chain, wallet or a typed address (checked), the wallet as it is now, one button bound to that state', async () => {
+    const t = setup();
+    let step = await t.flows.start('watchaccept');
+    step = await t.press(step, 'Ethereum');
+    expect(step.reply.buttons?.flat().map((button) => button.text)).toEqual(['0x1111…1111', '0x2222…2222', 'Custom…', 'Cancel']);
+    step = await t.press(step, 'Custom…');
+    expect((await t.flows.onText('0x123'))!.reply.text).toContain('is not a wallet address');
+    step = (await t.flows.onText(C))!;
+    expect(step.reply.text).toContain(`The wallet ${C} on ethereum now has 3 sent transactions.`);
+    const done = await t.press(step, 'Accept This Change');
+    expect(t.calls.at(-1)).toBe(`watchaccept(ethereum,${C},ACCEPT 3)`);
+    expect(done.done).toEqual({ command: 'watchaccept', outcome: 'ok' });
+    expect((await t.flows.start('watchaccept', { chain: 'ethereum', address: 'nope' })).reply.text).toContain('ADDRESS_INVALID');
+    const typedInFull = await t.flows.start('watchaccept', { chain: 'ethereum', address: A });
+    expect(typedInFull.reply.buttons?.flat().map((button) => button.text)).toEqual(['Accept This Change', 'Cancel']);
+  });
+
+  it('only the watchaccept taps need the unlocked session; a revoke never does', () => {
+    expect(flowNeedsSession('watchaccept', 'o1')).toBe(true);
+    expect(flowNeedsSession('watchaccept', 'go')).toBe(true);
+    expect(flowNeedsSession('revoke', 'go')).toBe(false);
+  });
+});
+
+describe('the campaign id stays in view (T-074)', () => {
+  it('shows the campaign id under the heading of every step once a campaign is chosen, and not twice right after prepare', async () => {
+    const t = setup();
+    let step = await t.flows.start('fire');
+    step = await t.press(step, 'Robinhood 0xa686…94db · 1 NFT');
+    expect(step.reply.text).toContain('Fire A Campaign · Step 2 Of 4\nCampaign: cmp_a');
+    step = await t.press(step, 'All Signing Wallets (2)');
+    expect(step.reply.text).toContain('Campaign: cmp_a');
+    step = await t.press(step, '0.2 gwei');
+    expect(step.reply.text).toContain('Campaign: cmp_a');
+    let prepare = await t.flows.start('prepare');
+    prepare = await t.press(prepare, 'Robinhood');
+    prepare = (await t.flows.onText(CONTRACT))!;
+    prepare = await t.press(prepare, '1');
+    prepare = await t.press(prepare, 'All ready (3)');
+    const recorded = await t.press(prepare, 'Prepare (Spends Nothing)');
+    expect(recorded.reply.text.match(/cmp_new/g)?.length).toBe(1);
+  });
+});
+
+describe('the campaign id is shown once at the top of each message (T-075 review)', () => {
+  it('after Record Test Mints the id is in the result and not repeated in the wallet step, then it shows on the next steps', async () => {
+    const t = setup();
+    const result = await t.flows.runSimulate('cmp_a');
+    expect(result.reply.text.match(/cmp_a/g)).toHaveLength(1);
+    const wallets = await t.press(result, 'All Tested (1)');
+    expect(wallets.reply.text).toContain('Campaign: cmp_a');
+    expect(wallets.reply.text.match(/cmp_a/g)).toHaveLength(1);
+    const typed = await t.flows.start('simulate', { campaign: 'cmp_a' });
+    const done = await t.press(typed, 'Record Test Mints');
+    expect(done.reply.text.match(/cmp_a/g)).toHaveLength(1);
   });
 });
 

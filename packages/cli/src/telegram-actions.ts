@@ -80,6 +80,8 @@ export interface TelegramActionDeps {
   fire?: FireWiring;
   /** T-073: the Turnkey policy's fee limit for Robinhood, in gwei (default 0.2, the standard policy). Used to check a custom fee ceiling. */
   policyFeeLimitGwei?: number;
+  /** The reader `/watchaccept` uses for a wallet's transaction count and balance (default: the chain's own RPC). Tests supply their own. */
+  walletReader?: (chainId: number) => Promise<unknown>;
   fireSchedulesRepository?: () => FireScheduleRepository;
   /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
   nftBalance?: (chainId: number, contract: string, wallet: string) => Promise<bigint>;
@@ -106,6 +108,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     if (urls.length === 0) throw new Error(`${chainName(chainId).toUpperCase()}_RPC_UNAVAILABLE`);
     return EngineIntelligencePort.fromRpcUrls(urls);
   };
+  const walletReaderFor = async (chainId: number): Promise<unknown> => (deps.walletReader ? deps.walletReader(chainId) : client(chainId as ChainId));
   const fleet = async (chainId: number): Promise<string[]> => {
     const watched = deps.watchedWallets(chainId);
     return watched.length > 0 ? watched : (await deps.walletList()).map((wallet) => wallet.toLowerCase());
@@ -158,7 +161,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   const readyOf = (facts: PlanFacts): string[] => (facts.kind === 'robinhood' ? facts.plan.walletsReady : facts.planned.plan.walletsReady);
   const phraseOf = (facts: PlanFacts, contract: string): string | undefined => (facts.kind === 'robinhood' ? (facts.plan.verdict === 'ready' ? robinhoodConfirmationPhrase(contract, facts.quantity, facts.plan.walletsReady.length, facts.plan.totalMaxExposureEth) : undefined) : facts.planned.phrase);
   const isReady = (facts: PlanFacts): boolean => (facts.kind === 'robinhood' ? facts.plan.verdict === 'ready' : facts.planned.plan.verdict === 'ready');
-  const renderPlan = (facts: PlanFacts, chainText: string, contract: string, quantityLimit: number | undefined, withCommand: boolean): string => {
+  const renderPlan = (facts: PlanFacts): string => {
     if (facts.kind === 'robinhood') {
       const plan = facts.plan;
       return sections(
@@ -166,7 +169,6 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         plan.opensAt ? [`Opens ${minutes(plan.opensAt)} UTC${plan.closesAt ? `, closes ${minutes(plan.closesAt)} UTC` : ''}.`] : [],
         [...plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`), ...plan.walletsNotReady.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`)],
         plan.warnings.map((warning) => `• ${warning}`),
-        withCommand && plan.verdict === 'ready' ? ['To record the campaign (spends nothing):', '', `/prepare robinhood ${contract} ${facts.quantity} ${robinhoodConfirmationPhrase(contract, facts.quantity, plan.walletsReady.length, plan.totalMaxExposureEth)}`] : [],
       );
     }
     const { plan } = facts.planned;
@@ -174,7 +176,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       [plan.summary],
       plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`),
       plan.warnings.map((warning) => `• ${warning}`),
-      facts.planned.phrase ? (withCommand ? [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei. To record the campaign (spends nothing):`, '', `/prepare ${chainText.toLowerCase()} ${contract} ${quantityLimit ?? plan.quantity} ${facts.planned.phrase}`] : [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei.`]) : [],
+      facts.planned.phrase ? [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei.`] : [],
     );
   };
   const prepareFor = async (chainText: string, contract: string, quantityLimit: number | undefined, phrase: string, only?: readonly string[]): Promise<string> => {
@@ -195,6 +197,14 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
     return sections([`Campaign recorded: ${prepared.campaign.id}`], [`${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`]);
   };
+  const revokeRun = (chainId: ChainId, phrase: string | undefined): Record<string, unknown> => {
+    if (chainId === 1) throw new Error('NOTHING_TO_REVOKE: Ethereum has no enablement record');
+    const newId = () => `${chainId === 4663 ? 'rh' : 'base'}_revoke_${randomBytes(8).toString('hex')}`;
+    return chainId === 4663
+      ? runRobinhoodEnable({ action: 'revoke', confirm: phrase, now: now(), store: deps.store as unknown as EnableStore, newId })
+      : runBaseEnable({ action: 'revoke', ...(phrase !== undefined ? { confirm: phrase } : {}), now: now(), store: deps.store as unknown as BaseEnableStore, newId });
+  };
+  const revokePhraseOf = (result: Record<string, unknown>): string | undefined => (result['state'] === 'ConfirmToRevoke' ? /--confirm "(.+)"$/.exec(String(result['copyThisToRevoke'] ?? ''))?.[1] : undefined);
   const releaseResult = (outcome: { state: string; message: string; phrase?: string }): string =>
     outcome.state === 'Released' ? `${outcome.message} The service accepts live work again within a few seconds if nothing else blocks it. /kill stops everything at any time.` : outcome.message;
 
@@ -274,7 +284,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async funding(campaignId) {
       if (!campaignId) {
         const live = deps.store.snapshot().campaigns.filter((item) => !item.dryRun).slice(-5);
-        return live.length === 0 ? 'No live campaign is recorded. Prepare one with /plan and /prepare.' : ['Add a campaign id: /funding <id>', ...live.map((item) => `• ${item.id} (${chainName(item.chainId)} ${short(item.contract)})`)].join('\n');
+        return live.length === 0 ? 'No live campaign is recorded. Prepare one with /prepare.' : ['Live campaigns (send /funding and tap one):', ...live.map((item) => `• ${item.id} (${chainName(item.chainId)} ${short(item.contract)})`)].join('\n');
       }
       const treasury = process.env.MINT_BOT_TREASURY_ADDRESS ?? '';
       if (!ADDRESS.test(treasury)) throw new Error('FLEET_WATCH_TREASURY_INVALID');
@@ -330,9 +340,6 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         ...(includeFleet ? report.wallets.map((row) => `  ${short(row.wallet)} ${row.verdict}${row.topUpEth ? ` (needs ${row.topUpEth} ETH)` : ''}`) : []),
       ].join('\n');
     },
-    async plan(chainText, contract, quantityLimit) {
-      return renderPlan(await planFor(chainText, contract, quantityLimit), chainText, contract, quantityLimit, true);
-    },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
       return { wallets: preview.wallets, text: `The service will arm and run ${chainName(preview.chainId)} ${short(preview.contract)}: ${preview.quantityPerWallet} NFT(s) per wallet at ${preview.priceEth} ETH, from ${preview.wallets.length} wallet(s). The most that can be spent is ${preview.maxExposureEth} ETH, signing at no more than ${preview.maxFeeGwei} gwei. Every guard still applies.`, phrase: preview.phrase };
@@ -341,7 +348,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (deps.mode !== 'host') throw new Error('LIVE_MODE_REQUIRED: the service is in practice mode, so nothing would run this request');
       if (deps.fireSchedulesRepository?.().open(campaignId).length) throw new Error('FIRE_CONFLICT: a scheduled mint is open for this campaign; cancel it first with /schedules and /cancel');
       const result = await runLiveRequest({ action: 'create', campaignId, wallets: await walletsFor(walletsText), maxFeeGwei, confirm: phrase, now: now(), store: deps.store as never, approve: (validated) => deps.application.command('approve', { validated }) });
-      return `Request ${String(result.requestId)} sent. The service starts it within a few seconds; follow it with /requests and /runs. /kill stops everything.`;
+      return sections([`Campaign: ${campaignId}`], [`Request ${String(result.requestId)} sent. The service starts it within a few seconds; follow it with /requests and /runs. /kill stops everything.`]);
     },
     async requests() {
       const rows = bridge.recentLiveRunRequests ? bridge.recentLiveRunRequests(10) : [];
@@ -401,7 +408,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async fireNow(campaignId, walletsText, maxFeeGwei, digest) {
       if (digest !== undefined && fireWiring().campaignDigest(campaign(campaignId)) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; send /fire again');
       const result = await fireWiring().fireNow(campaignId, await fireWiring().wallets(walletsText), maxFeeGwei);
-      return sections([`Request ${result.requestId} sent for ${result.wallets.length} wallet(s); the service arms and runs it within seconds. Follow it with /requests and /runs. /kill stops everything.`], result.skipped.map((item) => `✗ ${short(item.wallet)} skipped: ${item.why}`));
+      return sections([`Campaign: ${campaignId}`], [`Request ${result.requestId} sent for ${result.wallets.length} wallet(s); the service arms and runs it within seconds. Follow it with /requests and /runs. /kill stops everything.`], result.skipped.map((item) => `✗ ${short(item.wallet)} skipped: ${item.why}`));
     },
     async schedulePreview(campaignId, walletsText, maxFeeGwei, fromText, untilText) {
       const wiring = fireWiring();
@@ -424,7 +431,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
       const record = deps.fireSchedulesRepository!().create({ campaignId, campaignDigest: wiring.campaignDigest(target), wallets, maxFeeGwei: String(maxFeeGwei), windowFrom: from.toISOString(), windowUntil: until.toISOString(), confirmationDigest: scheduleConfirmationDigest(phrase, campaignId, wallets, from, until) });
-      return `Scheduled mint ${record.id.slice(-6)} stored. It fires once, when the mint opens between ${minutes(record.windowFrom)} and ${minutes(record.windowUntil)} UTC. Cancel it any time with /cancel (it lists what can be cancelled as buttons). Keep the kill switch off until then.`;
+      return `Campaign: ${campaignId}\n\nScheduled mint ${record.id.slice(-6)} stored. It fires once, when the mint opens between ${minutes(record.windowFrom)} and ${minutes(record.windowUntil)} UTC. Cancel it any time with /cancel (it lists what can be cancelled as buttons). Keep the kill switch off until then.`;
     },
     async schedules() {
       const rows = deps.fireSchedulesRepository ? deps.fireSchedulesRepository().recent(10) : [];
@@ -450,26 +457,61 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async revoke(chainText, phrase) {
       const chainId = chainFrom(chainText);
-      if (chainId === 1) throw new Error('NOTHING_TO_REVOKE: Ethereum has no enablement record');
-      const newId = () => `${chainId === 4663 ? 'rh' : 'base'}_revoke_${randomBytes(8).toString('hex')}`;
-      const result = chainId === 4663
-        ? runRobinhoodEnable({ action: 'revoke', confirm: phrase, now: now(), store: deps.store as unknown as EnableStore, newId })
-        : runBaseEnable({ action: 'revoke', ...(phrase !== undefined ? { confirm: phrase } : {}), now: now(), store: deps.store as unknown as BaseEnableStore, newId });
-      if (result.state === 'ConfirmToRevoke') {
-        const copy = /--confirm "(.+)"$/.exec(String(result.copyThisToRevoke ?? ''))?.[1];
-        return `${String(result.message)}\n\nTo switch ${chainName(chainId)} off, send:\n/revoke ${chainId === 4663 ? 'robinhood' : 'base'} ${copy ?? ''}`;
-      }
+      const result = revokeRun(chainId, phrase);
+      if (result.state === 'ConfirmToRevoke') return `${String(result.message)}\n\nSend /revoke to switch ${chainName(chainId)} off with a button.`;
       return String(result.message);
+    },
+    async revokeChoices() {
+      const at = now();
+      const robinhood = validRobinhoodEnablement((deps.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), at);
+      const base = validBaseEnablement((deps.store as { baseEnablement?: () => unknown }).baseEnablement?.(), at);
+      return [...(base ? [{ key: 'base' as const, name: 'Base' }] : []), ...(robinhood ? [{ key: 'robinhood' as const, name: 'Robinhood' }] : [])];
+    },
+    async revokeStatus(chainText) {
+      const chainId = chainFrom(chainText);
+      const result = revokeRun(chainId, undefined);
+      const phrase = result.state === 'ConfirmToRevoke' ? revokePhraseOf(result) : undefined;
+      return { text: String(result.message), ...(phrase ? { phrase } : {}) };
+    },
+    async revokeNow(chainText, expectedPhrase) {
+      const chainId = chainFrom(chainText);
+      // The phrase names the enablement record that was shown; if a different record is current now, the old button does not switch it off.
+      const current = revokePhraseOf(revokeRun(chainId, undefined));
+      if (!current) throw new Error('NOTHING_TO_REVOKE: that chain is not switched on');
+      if (!expectedPhrase || current !== expectedPhrase) throw new Error('ENABLEMENT_CHANGED: the enablement record is a different one now. Send /revoke to see the current state.');
+      return String(revokeRun(chainId, current).message);
+    },
+    async watchChains() {
+      return CHAINS.filter((chain) => deps.watchedWallets(chain.id).length > 0).map((chain) => ({ key: (chain.id === 1 ? 'ethereum' : chain.id === 8453 ? 'base' : 'robinhood') as 'ethereum' | 'base' | 'robinhood', name: chain.name }));
+    },
+    async watchWallets(chainText) { return deps.watchedWallets(chainFrom(chainText)).map((wallet) => wallet.toLowerCase()); },
+    async watchStatus(chainText, address) {
+      const chainId = chainFrom(chainText);
+      const outcome = await watchAcceptAction({ chainId, address, confirm: undefined, client: await walletReaderFor(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
+      if (outcome.state !== 'Preview') throw new Error('WALLET_NOT_PREVIEWABLE: the wallet could not be read');
+      return { text: outcome.message, phrase: outcome.phrase };
+    },
+    async watchAcceptNow(chainText, address, expectedPhrase) {
+      const chainId = chainFrom(chainText);
+      const reader = await walletReaderFor(chainId) as never;
+      const newId = () => `evt_${randomBytes(8).toString('hex')}`;
+      const fresh = await watchAcceptAction({ chainId, address, confirm: undefined, client: reader, store: deps.store, newId, now: now() });
+      // The phrase names the wallet's sent-transaction count and balance: if either changed since it was shown, the owner must look again.
+      if (fresh.state !== 'Preview' || fresh.phrase !== expectedPhrase) throw new Error('WALLET_CHANGED_AGAIN: the wallet changed since you looked (new transactions or a new balance). Send /watchaccept to look again.');
+      const outcome = await watchAcceptAction({ chainId, address, confirm: expectedPhrase, client: reader, store: deps.store, newId, now: now() });
+      // Only a real acceptance counts: if the wallet moved between the two reads nothing was accepted, and that is said and recorded as refused.
+      if (outcome.state !== 'Accepted') throw new Error('WALLET_CHANGED_AGAIN: the wallet changed while accepting, so nothing was accepted. Send /watchaccept to look again.');
+      return outcome.message;
     },
     async release(phrase) {
       const outcome = await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: phrase, actor: 'owner-telegram' });
-      if (outcome.state === 'On') return `${outcome.message}${outcome.phrase ? `\n\nTo release it, send:\n/release ${outcome.phrase}` : ''}`;
+      if (outcome.state === 'On') return `${outcome.message}${outcome.phrase ? '\n\nSend /release to release it with a button.' : ''}`;
       return outcome.state === 'Released' ? `${outcome.message} The service accepts live work again within a few seconds if nothing else blocks it. /kill stops everything at any time.` : outcome.message;
     },
     async watchAccept(chainText, address, phrase) {
       const chainId = chainFrom(chainText);
-      const outcome = await watchAcceptAction({ chainId, address, confirm: phrase, client: await client(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
-      return outcome.state === 'Preview' ? `${outcome.message}\n\nTo accept, send:\n/watchaccept ${chainText.toLowerCase()} ${address} ${outcome.phrase}` : outcome.message;
+      const outcome = await watchAcceptAction({ chainId, address, confirm: phrase, client: await walletReaderFor(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
+      return outcome.state === 'Preview' ? `${outcome.message}\n\nThat phrase does not match the wallet as it is now. Send /watchaccept to look again and accept it with a button.` : outcome.message;
     },
     async guidedChains() {
       const at = now();
@@ -481,7 +523,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       let facts = await planFor(chainText, contract, quantity);
       const all = readyOf(facts);
       if (walletCount !== undefined && isReady(facts) && walletCount < all.length) facts = await planFor(chainText, contract, quantity, all.slice(0, walletCount));
-      return { text: renderPlan(facts, chainText, contract, quantity, false), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity, ...(isReady(facts) && phraseOf(facts, contract) ? { phrase: phraseOf(facts, contract)! } : {}) };
+      return { text: renderPlan(facts), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity, ...(isReady(facts) && phraseOf(facts, contract) ? { phrase: phraseOf(facts, contract)! } : {}) };
     },
     async guidedPrepare(chainText, contract, quantity, wallets, expectedPhrase) {
       const facts = await planFor(chainText, contract, quantity, wallets);
@@ -539,7 +581,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         recorded = result.recorded; skipped = result.skipped;
       }
       const sized = sizedWalletCount(target);
-      return { recorded, sized, text: sections([`${recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`], skipped.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`), recorded.length > sized ? [`This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized} of them.`] : []) };
+      return { recorded, sized, text: sections([`Campaign: ${campaignId}`], [`${recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`], skipped.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`), recorded.length > sized ? [`This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized} of them.`] : []) };
     },
     async requestCandidates() {
       const at = now().toISOString();
