@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs';
 import { formatEth, campaignInputDigest, type BackendStore, type Campaign, type IntelligenceChainPort } from '@mint-bot/backend';
 import type { FireScheduleRepository, FireScheduleRecord } from '@mint-bot/database';
 import { checkDrop } from './drop-check.js';
+import { roundUpEth, shortEth } from './display.js';
+import { requiredPerWallet } from './fleet-funding-cli.js';
 import { assertScheduleWindow, parseWhen, runFire, type FireDeps, type FireResult, type MintState } from './fire.js';
 import { previewLiveRequest, runLiveRequest, sizedWalletCount } from './live-request.js';
 import { recordPassingSimulationsAction } from './owner-actions.js';
@@ -26,6 +28,8 @@ export interface FireWiringDeps {
   evmPort(chainId: 1 | 8453): Promise<IntelligenceChainPort>;
   evmLatestBlock(chainId: 1 | 8453): Promise<{ number: bigint; hash: string }>;
   robinhoodDryRun(contract: string, wallets: readonly string[], quantity: number | undefined, at: Date): Promise<DryRunReport>;
+  /** A wallet's balance on a chain (used to check the funding a run needs before anything is tapped). */
+  balanceOf(chainId: number, address: string): Promise<bigint>;
   robinhoodLatestBlock(): Promise<{ number: bigint; hash: string }>;
   /** Asks the request processor to look now. */
   kick(): void;
@@ -37,6 +41,8 @@ export interface FireWiring {
   mintState(campaign: Campaign): Promise<MintState>;
   /** The wallets the owner typed (`all` = the whole fleet), each once. */
   wallets(text: string): Promise<string[]>;
+  /** Which wallets hold what one run needs (mint value plus the fee budget), and the exact top-up for the others. An unreadable balance counts as short. */
+  fundingSplit(campaign: Campaign, wallets: readonly string[]): Promise<{ funded: string[]; short: Array<{ wallet: string; why: string }> }>;
   /** Text for a preview: what would be minted, from how many wallets, and the most that can be spent. */
   describe(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number): string;
   fireNow(campaignId: string, wallets: readonly string[], maxFeeGwei: number): Promise<FireResult>;
@@ -84,16 +90,39 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     } catch { return 'unknown'; }
   };
 
+  const fundingSplit: FireWiring['fundingSplit'] = async (campaign, wallets) => {
+    // The very function the arm check uses, so the two can never disagree (it throws TOTAL_FEE_BUDGET_REQUIRED without a fee budget).
+    const required = requiredPerWallet(campaign);
+    const funded: string[] = [];
+    const short: Array<{ wallet: string; why: string }> = [];
+    for (const wallet of wallets) {
+      let balance: bigint | undefined;
+      try { balance = await deps.balanceOf(campaign.chainId, wallet); } catch { balance = undefined; }
+      if (balance === undefined) short.push({ wallet, why: 'its balance could not be read' });
+      else if (balance < required) short.push({ wallet, why: `it holds ${shortEth(balance)} ETH and a run needs at least ${formatEth(required)} ETH: send ${roundUpEth(required - balance)} ETH more first (see /funding)` });
+      else funded.push(wallet);
+    }
+    return { funded, short };
+  };
+
   const recordSimulations: FireDeps['recordSimulations'] = async (campaign, wallets) => {
     if (campaign.chainId === 4663) {
       const report = await deps.robinhoodDryRun(campaign.contract, wallets, campaign.quantity, now());
       const result = await recordRobinhoodSimulationsAction({ store: deps.store, campaign, report, latestBlock: deps.robinhoodLatestBlock });
-      return { recorded: result.recorded, skipped: result.skipped };
+      return withFunding(campaign, result);
     }
     if (campaign.chainId !== 1 && campaign.chainId !== 8453) throw new Error('LIVE_SUPPORTED_CAMPAIGN_REQUIRED');
     const chainId = campaign.chainId;
     const result = await recordPassingSimulationsAction({ store: deps.store, campaign, wallets, port: await deps.evmPort(chainId), latestBlock: () => deps.evmLatestBlock(chainId) });
-    return { recorded: result.recorded, skipped: result.skipped };
+    return withFunding(campaign, result);
+  };
+
+  /** A wallet that passed its test mint but does not hold what a run needs is left out and told exactly what to send; if none is funded, nothing is requested. */
+  // (The test mints are already recorded when this refuses; that is harmless, they only record that a wallet passed.)
+  const withFunding = async (campaign: Campaign, result: { recorded: string[]; skipped: Array<{ wallet: string; why: string }> }): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }> => {
+    const split = await fundingSplit(campaign, result.recorded);
+    if (split.funded.length === 0) throw new Error(`FUNDING_NOT_ARRIVED: no wallet holds what a run needs. ${split.short.map((item) => `${item.wallet.slice(0, 6)}…${item.wallet.slice(-4)}: ${item.why}.`).join(' ')}`);
+    return { recorded: split.funded, skipped: [...result.skipped, ...split.short] };
   };
 
   const fireDeps: FireDeps = {
@@ -124,6 +153,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   return {
     fireDeps,
     mintState,
+    fundingSplit,
     async wallets(text) {
       const raw = text.toLowerCase() === 'all' ? await deps.walletList() : text.split(',').map((item) => item.trim()).filter(Boolean);
       const unique = [...new Set(raw.map((wallet) => wallet.toLowerCase()))];

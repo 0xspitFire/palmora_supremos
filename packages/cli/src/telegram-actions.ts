@@ -342,6 +342,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
+      // A wallet that holds less than a run needs would stop the whole run at arm: say so now, with the exact top-up, before anything is sent.
+      if (deps.fire) {
+        const split = await deps.fire.fundingSplit(campaign(campaignId), preview.wallets);
+        if (split.short.length > 0) throw new Error(`FUNDING_NOT_ARRIVED: ${split.short.map((item) => `${short(item.wallet)}: ${item.why}.`).join(' ')}`);
+      }
       return { wallets: preview.wallets, text: `The service will arm and run ${chainName(preview.chainId)} ${short(preview.contract)}: ${preview.quantityPerWallet} NFT(s) per wallet at ${preview.priceEth} ETH, from ${preview.wallets.length} wallet(s). The most that can be spent is ${preview.maxExposureEth} ETH, signing at no more than ${preview.maxFeeGwei} gwei. Every guard still applies.`, phrase: preview.phrase };
     },
     async requestCreate(campaignId, walletsText, maxFeeGwei, phrase) {
@@ -397,13 +402,17 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const target = fireCampaign(campaignId, maxFeeGwei);
       const state = await wiring.mintState(target);
       if (state !== 'open') throw new Error(`MINT_NOT_OPEN: the mint is ${state === 'unknown' ? 'not readable right now' : state}. Test mints only pass once it is open; use /schedule to fire it when it opens`);
-      const wallets = await wiring.wallets(walletsText);
+      const asked = await wiring.wallets(walletsText);
+      // A wallet that does not hold what a run needs (mint value plus the fee budget) would stop the whole run at arm: it is left out here, with the exact top-up.
+      const split = await wiring.fundingSplit(target, asked);
+      if (split.funded.length === 0) throw new Error(`FUNDING_NOT_ARRIVED: no wallet holds what a run needs, so nothing can be fired yet. ${split.short.map((item) => `${short(item.wallet)}: ${item.why}.`).join(' ')}`);
+      const wallets = split.funded;
       // A campaign sized for N wallets covers at most N: it uses the first N that pass their test mint, and the owner is told.
       const sized = sizedWalletCount(target);
       if (sized < 1) throw new Error('CAMPAIGN_SIZED_FOR_NONE: this campaign was sized for no wallet (its run limit is below what one wallet can spend). Prepare a new one.');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
-      return { wallets, digest: wiring.campaignDigest(target), text: sections([`The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.`], [wiring.describe(target, wallets, maxFeeGwei)], wallets.length > sized ? [`This campaign was sized for ${sized} wallet(s), so it uses the first ${sized} that pass their test mint.`] : []) };
+      return { wallets, digest: wiring.campaignDigest(target), text: sections([`The mint is OPEN. Fire now: test mint each wallet, approve the ones that pass, and run.`], [wiring.describe(target, wallets, maxFeeGwei)], split.short.map((item) => `✗ ${short(item.wallet)} left out: ${item.why}.`), wallets.length > sized ? [`This campaign was sized for ${sized} wallet(s), so it uses the first ${sized} that pass their test mint.`] : []) };
     },
     async fireNow(campaignId, walletsText, maxFeeGwei, digest) {
       if (digest !== undefined && fireWiring().campaignDigest(campaign(campaignId)) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; send /fire again');
@@ -581,7 +590,9 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         recorded = result.recorded; skipped = result.skipped;
       }
       const sized = sizedWalletCount(target);
-      return { recorded, sized, text: sections([`Campaign: ${campaignId}`], [`${recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`], skipped.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`), recorded.length > sized ? [`This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized} of them.`] : []) };
+      const split = deps.fire ? await deps.fire.fundingSplit(target, recorded) : undefined;
+      const unfunded = split ? split.short.map((item) => `✗ ${short(item.wallet)} needs funding: ${item.why}.`) : [];
+      return { recorded, sized, text: sections([`Campaign: ${campaignId}`], [`${recorded.length} wallet(s) passed the test mint. The records are good for 30 minutes.`], skipped.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`), unfunded, recorded.length > sized ? [`This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized} of them.`] : []) };
     },
     async requestCandidates() {
       const at = now().toISOString();
@@ -609,7 +620,15 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         const wallet = sim.wallet.toLowerCase();
         if (!latest.has(wallet) || sim.checkedAt > latest.get(wallet)!) latest.set(wallet, sim.checkedAt);
       }
-      return { wallets: [...latest.keys()], sized: Math.max(1, sizedWalletCount(target)) };
+      let wallets = [...latest.keys()];
+      let note: string | undefined;
+      // Only wallets that hold what a run needs can be in a request (the others would stop it at arm); the rest are named with their top-up.
+      if (deps.fire) {
+        const split = await deps.fire.fundingSplit(target, wallets);
+        wallets = split.funded;
+        if (split.short.length > 0) note = split.short.map((item) => `✗ ${short(item.wallet)} left out: ${item.why}.`).join('\n');
+      }
+      return { wallets, sized: Math.max(1, sizedWalletCount(target)), ...(note ? { note } : {}) };
     },
     async requestSend(campaignId, walletsText, maxFeeGwei, expectedPhrase) {
       const preview = await actions.requestPreview(campaignId, walletsText, maxFeeGwei);

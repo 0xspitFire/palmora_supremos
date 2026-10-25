@@ -95,6 +95,17 @@ export interface TurnkeyReadiness {
   probeAtStart(): Promise<void>;
 }
 
+const FIXED_CODE = /^[A-Z][A-Z0-9_]{2,80}(?::[A-Z][A-Z0-9_]{2,80})?$/;
+/** The message itself when it is entirely one or two fixed `UPPER_CASE` parts. Anything with provider text, an address, an amount or a system error's words is not a code. */
+export function fixedCode(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : '';
+  return FIXED_CODE.test(message) ? message : undefined;
+}
+/** Runs one readiness step; if it fails, the owner sees which step (a fixed name) or the step's own fixed code, never provider text. */
+async function step<T>(fallback: string, work: () => Promise<T> | T): Promise<T> {
+  try { return await work(); } catch (error) { throw new Error(fixedCode(error) ?? fallback); }
+}
+
 export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): Promise<TurnkeyReadiness> {
   const now = options.now ?? (() => new Date());
   const ceilings = options.ceilings ?? DEFAULT_IDLE_BALANCE_CEILINGS;
@@ -118,7 +129,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
   };
 
   const probe = async (record: VerifiedTurnkeyRecord) => {
-    const signer = await options.createSigner();
+    const signer = await step('READINESS_SIGNER_UNAVAILABLE', () => options.createSigner());
     try {
       const result = await probeOrEngageKillSwitch(() => signer.probe(), options.engageKillSwitch, now);
       // A provider that vouches for a different record than the verified one is drift: stop everything.
@@ -147,7 +158,8 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
       }),
     });
     const blocker = plan.blockers[0];
-    if (blocker) throw new Error(`FUNDING_PLAN_BLOCKED:${blocker}`);
+    // The reason only, never the wallet address that some reasons carry after a colon.
+    if (blocker) throw new Error(`FUNDING_PLAN_BLOCKED:${blocker.split(':')[0]}`);
     return {
       ceilings,
       expected: { recordDigest: observed.record.digest, walletSetDigest: computeWalletSetDigest(observed.record.addresses), lockfileDigest: observed.lockfileDigest },
@@ -162,18 +174,18 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
     probeAtStart: async () => { await probe(await currentRecord()); },
     refresh: async (run) => {
       const at = now();
-      const record = await currentRecord();
+      const record = await step('READINESS_RECORD_UNREADABLE', () => currentRecord());
       if (run.chainId !== record.chainId) throw new Error('TURNKEY_RECORD_CHAIN_MISMATCH');
       const covered = new Set(record.addresses);
       if (run.wallets.length === 0 || run.wallets.some((wallet) => !covered.has(wallet.toLowerCase()))) throw new Error('TURNKEY_WALLET_NOT_IN_RECORD');
       const providerProbe = await probe(record);
-      const balances = await options.readBalances(run.chainId, record.addresses);
-      const lockfileDigest = await options.lockfileDigest();
+      const balances = await step('READINESS_BALANCES_UNREADABLE', () => options.readBalances(run.chainId, record.addresses));
+      const lockfileDigest = await step('READINESS_LOCKFILE_UNREADABLE', () => options.lockfileDigest());
       const rehearsalRaw = await options.readOptional('rehearsal').catch(() => undefined);
       const trustRaw = await options.readOptional('trust-center').catch(() => undefined);
       const rehearsal = (() => { try { return rehearsalRaw === undefined ? undefined : parseRehearsalEvidence(rehearsalRaw); } catch { return undefined; } })();
       const trustCenter = (() => { try { return trustRaw === undefined ? undefined : parseTrustCenterRecord(trustRaw); } catch { return undefined; } })();
-      const evidence = buildCompensatingEvidence({
+      const evidence = await step('READINESS_EVIDENCE_FAILED', () => buildCompensatingEvidence({
         chainId: run.chainId,
         record: { digest: record.digest, issuedAt: record.issuedAt, expiresAt: record.expiresAt, wallets: record.addresses },
         lockfileDigest,
@@ -183,7 +195,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
         ...(trustCenter ? { trustCenter } : {}),
         now: at,
         balanceValiditySeconds: Math.floor(COMPENSATING_OBSERVATION_MAX_AGE_MS / 1000),
-      });
+      }));
       observations.set(run.chainId, { at: at.getTime(), balances: new Map(balances.map((balance) => [balance.address.toLowerCase(), balance.balanceWei])), record, lockfileDigest });
       const reconciledAt = options.reconciledAt();
       if (!reconciledAt) throw new Error('RECONCILIATION_REQUIRED');
@@ -214,7 +226,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
         observedAt,
         expiresAt,
       };
-      await options.record(operational, { config: assurance(run), chainId: run.chainId, wallets: run.wallets });
+      await step('READINESS_RECORD_REJECTED', () => options.record(operational, { config: assurance(run), chainId: run.chainId, wallets: run.wallets }));
     },
   };
 }

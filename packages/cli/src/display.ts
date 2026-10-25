@@ -20,6 +20,13 @@ export function shortenBalancesInParens(text: string): string {
   return text.replace(/\((\d+\.\d+) ETH\)/g, (match, value: string) => { try { return `(${shortEth(parseEther(value))} ETH)`; } catch { return match; } });
 }
 
+/** An amount shown for SENDING: rounded up (never down) to 6 decimals, so a top-up of this size always covers the shortfall. */
+export function roundUpEth(wei: bigint): string {
+  const unit = 1_000_000_000_000n;
+  const rounded = ((wei + unit - 1n) / unit) * unit;
+  return formatEther(rounded);
+}
+
 /** Joins groups of lines with one blank line between groups; an empty group is skipped. */
 export function sections(...groups: ReadonlyArray<readonly string[]>): string {
   return groups.filter((group) => group.length > 0).map((group) => group.join('\n')).join('\n\n');

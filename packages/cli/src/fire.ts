@@ -85,8 +85,9 @@ export interface SchedulerDeps {
 }
 
 const safeCode = (error: unknown): string => {
-  const code = (error instanceof Error ? error.message : '').split(':')[0] ?? '';
-  return /^[A-Z][A-Z0-9_]{2,80}$/.test(code) ? code : 'SCHEDULED_FIRE_FAILED';
+  const parts: string[] = [];
+  for (const part of (error instanceof Error ? error.message : '').split(':').slice(0, 3)) { if (!/^[A-Z][A-Z0-9_]{2,80}$/.test(part)) break; parts.push(part); }
+  return parts.length > 0 ? parts.join(':') : 'SCHEDULED_FIRE_FAILED';
 };
 
 export function createFireScheduler(deps: SchedulerDeps): { tick(): Promise<number> } {

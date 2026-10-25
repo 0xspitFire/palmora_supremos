@@ -209,6 +209,40 @@ describe('Turnkey readiness at the service (T-042 requirements 1 to 4)', () => {
   });
 });
 
+describe('a failing readiness step names itself with a fixed code (the second live attempt)', () => {
+  const stepFails = async (over: Partial<TurnkeyReadinessOptions>, expected: string) => {
+    const h = harness(over);
+    const readiness = await createTurnkeyReadiness(h.options);
+    const error = await readiness.refresh(run()).then(() => undefined, (caught: Error) => caught);
+    expect(error?.message).toBe(expected);
+    expect(error?.message).not.toMatch(/https?:|secret|provider said|0x[0-9a-f]{8}/i);
+    expect(h.recorded).toHaveLength(0);
+  };
+
+  it('each step that can fail with provider text is reported as that step, never as the text', async () => {
+    await stepFails({ readBalances: async () => { throw new Error('HTTP request failed. URL: https://rpc.example/key123 Status: 429'); } }, 'READINESS_BALANCES_UNREADABLE');
+    await stepFails({ lockfileDigest: async () => { throw new Error('ENOENT: no such file, open the lockfile'); } }, 'READINESS_LOCKFILE_UNREADABLE');
+    await stepFails({ createSigner: async () => { throw new Error('could not read the settings file'); } }, 'READINESS_SIGNER_UNAVAILABLE');
+    await stepFails({ record: async () => { throw new Error('some library said something'); } }, 'READINESS_RECORD_REJECTED');
+  });
+
+  it('a step that already raises a fixed code keeps it; the funding refusal shows its reason without the wallet address', async () => {
+    await stepFails({ lockfileDigest: async () => { throw new Error('COMPENSATING_LOCKFILE_UNAVAILABLE'); } }, 'COMPENSATING_LOCKFILE_UNAVAILABLE');
+    const h = harness();
+    const readiness = await createTurnkeyReadiness(h.options);
+    await readiness.refresh(run());
+    h.state.balances = 5_000_000_000_000_000n;
+    await expect(readiness.refresh(run())).rejects.toThrow(/^READINESS_RECORD_REJECTED$|^FUNDING_PLAN_BLOCKED:WALLET_ABOVE_RUN_ENVELOPE$/);
+  });
+
+  it('a record that cannot be read at refresh time is reported as such', async () => {
+    let reads = 0;
+    const h = harness({ readSigned: async () => { reads += 1; if (reads > 1) throw new Error('permission denied reading the policy record'); return { signed: {}, publicKey: 'pinned' }; } });
+    const readiness = await createTurnkeyReadiness(h.options);
+    await expect(readiness.refresh(run())).rejects.toThrow(/^READINESS_RECORD_UNREADABLE$/);
+  });
+});
+
 describe('pinned approver key (digest in settings the service cannot change)', () => {
   const key = '-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n';
   const pin = createHash('sha256').update(key, 'utf8').digest('hex');
