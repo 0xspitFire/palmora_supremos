@@ -2,7 +2,7 @@
  * D-058 / D-059: `turnkey-compensating-controls` custody assurance.
  *
  * This is NOT Turnkey Verifiable Cloud (TVC) attestation and must never be displayed or interpreted as "TVC verified".
- * It is valid only when ALL seven controls are present and current. A missing, stale, mismatched or unknown control makes the
+ * It is valid only when ALL six controls are present and current. A missing, stale, mismatched or unknown control makes the
  * whole profile invalid and the refusal names that control. Nothing here weakens a cap, reservation, simulation, kill switch,
  * finality or custody rule; it only adds conditions that must hold before a Turnkey-custodied live run may arm.
  *
@@ -18,16 +18,12 @@ export const COMPENSATING_CONTROL_IDS = [
   'provider-probe',
   'signature-verification',
   'rehearsal',
-  'trust-center-review',
   'drift-response',
 ] as const;
 export type CompensatingControlId = (typeof COMPENSATING_CONTROL_IDS)[number];
 
 /** Balance and probe observations must be this fresh when a run arms or executes. */
 export const COMPENSATING_OBSERVATION_MAX_AGE_MS = 10 * 60 * 1000;
-/** The Trust Center review is valid for 90 days plus a fixed seven-day grace period. */
-export const TRUST_CENTER_REVIEW_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
-export const TRUST_CENTER_REVIEW_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface BalanceCeiling {
   walletMaxWei: bigint;
@@ -64,7 +60,6 @@ export interface CompensatingControlsEvidence {
   providerProbe?: { observedAt: string; status: 'ok'; policyRecordDigest: string };
   signatureChecks?: { transactionMatch: boolean; signerRecovery: boolean };
   rehearsal?: { recordedAt: string; policyRecordDigest: string; walletSetDigest: string; lockfileDigest: string; broadcastAttempted: boolean };
-  trustCenter?: { reviewedAt: string; documents: Array<{ name: string; date: string; sha256: string }> };
   driftResponse?: { killSwitchOnDrift: boolean };
 }
 
@@ -95,7 +90,6 @@ export interface CompensatingAssuranceContext {
 export interface ControlResult { id: CompensatingControlId; ok: boolean; reason?: string }
 
 const SHA256 = /^sha256:[0-9a-f]{64}$/i;
-const HEX_SHA256 = /^(?:sha256:)?[0-9a-f]{64}$/i;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DECIMAL = /^\d{1,40}$/;
 
@@ -198,20 +192,6 @@ function checkRehearsal(evidence: CompensatingControlsEvidence, config: Compensa
   return undefined;
 }
 
-function checkTrustCenter(evidence: CompensatingControlsEvidence, now: number): string | undefined {
-  const review = evidence.trustCenter;
-  if (!review) return 'MISSING';
-  const reviewed = time(review.reviewedAt);
-  if (reviewed === undefined || reviewed > now) return 'INVALID_TIME';
-  if (now - reviewed > TRUST_CENTER_REVIEW_MAX_AGE_MS + TRUST_CENTER_REVIEW_GRACE_MS) return 'EXPIRED';
-  if (!Array.isArray(review.documents) || review.documents.length === 0) return 'NO_DOCUMENTS';
-  for (const document of review.documents) {
-    if (!document || typeof document.name !== 'string' || !document.name || document.name.length > 200 || /[\r\n]/.test(document.name)) return 'INVALID_DOCUMENT';
-    if (time(document.date) === undefined || typeof document.sha256 !== 'string' || !HEX_SHA256.test(document.sha256)) return 'INVALID_DOCUMENT';
-  }
-  return undefined;
-}
-
 function checkDriftResponse(evidence: CompensatingControlsEvidence): string | undefined {
   if (!evidence.driftResponse) return 'MISSING';
   if (evidence.driftResponse.killSwitchOnDrift !== true) return 'NOT_ENFORCED';
@@ -233,12 +213,11 @@ export function evaluateCompensatingControls(evidence: CompensatingControlsEvide
     run('provider-probe', () => checkProbe(evidence!, config, now)),
     run('signature-verification', () => checkSignatureChecks(evidence!)),
     run('rehearsal', () => checkRehearsal(evidence!, config, now)),
-    run('trust-center-review', () => checkTrustCenter(evidence!, now)),
     run('drift-response', () => checkDriftResponse(evidence!)),
   ];
 }
 
-/** Fails closed unless all seven controls are current. The error names the first failing control. */
+/** Fails closed unless all six controls are current. The error names the first failing control. */
 export function assertCompensatingControls(evidence: CompensatingControlsEvidence | undefined, context: CompensatingAssuranceContext | undefined, nowDate = new Date()): void {
   if (!context) throw new Error('CUSTODY_COMPENSATING_ASSURANCE_NOT_ACCEPTED');
   const config = context.config;

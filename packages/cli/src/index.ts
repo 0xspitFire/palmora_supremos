@@ -18,7 +18,7 @@ import { importWatchList } from './watch-import.js';
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
 import { failoverTransport, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
-import { buildCompensatingEvidence, createTrustCenterRecord, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, parseTrustCenterRecord, probeOrEngageKillSwitch, walletSetDigest } from './compensating-controls-cli.js';
+import { buildCompensatingEvidence, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, probeOrEngageKillSwitch, walletSetDigest } from './compensating-controls-cli.js';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
@@ -512,29 +512,11 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         process.stdout.write(`${JSON.stringify({ ok: true, output, ...evidence })}\n`);
       } catch (error) { printError(error); } finally { signer?.zeroize(); }
     })
-  .command('trust-center-record', 'Record the quarterly Turnkey Trust Center review (names, dates and SHA-256 digests only; D-058 control 6)', (args) => args
-    .option('document', { type: 'string', array: true, demandOption: true, description: 'NAME::YYYY-MM-DD::path-to-the-downloaded-document (repeat for each document)' })
-    .option('reviewed-at', { type: 'string', description: 'ISO time of the review; default now' })
-    .option('output', { type: 'string' }), async (args) => {
-      try {
-        const documents = [];
-        for (const entry of args.document as string[]) {
-          const parts = entry.split('::');
-          if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) throw new Error('TRUST_CENTER_DOCUMENT_ARGUMENT_INVALID');
-          documents.push({ name: parts[0], date: parts[1], bytes: new Uint8Array(await readFile(resolve(parts[2]))) });
-        }
-        const record = createTrustCenterRecord({ reviewedAt: args.reviewedAt ?? new Date().toISOString(), documents });
-        const output = turnkeySecretPath(args.output, 'turnkey-trust-center-review.json');
-        await writeTurnkeyJson(output, record);
-        process.stdout.write(`${JSON.stringify({ ok: true, output, reviewedAt: record.reviewedAt, documents: record.documents.map((document) => ({ name: document.name, date: document.date, sha256: document.sha256 })) })}\n`);
-      } catch (error) { printError(error); }
-    })
-  .command('compensating-controls-status', 'Check all seven D-058 controls now (read-only; a failed provider check engages the kill switch)', (args) => args
+  .command('compensating-controls-status', 'Check all six D-058 controls now (read-only; a failed provider check engages the kill switch)', (args) => args
     .option('chain-id', { type: 'number', demandOption: true, choices: [1, 8453, 4663] })
     .option('wallet-ceiling-wei', { type: 'string', default: '400000000000000' })
     .option('fleet-ceiling-wei', { type: 'string', default: '2000000000000000' })
-    .option('rehearsal', { type: 'string' })
-    .option('trust-center', { type: 'string' }), async (args) => {
+    .option('rehearsal', { type: 'string' }), async (args) => {
       let signer: TurnkeySigner | undefined;
       try {
         if (!/^\d{1,30}$/.test(args.walletCeilingWei) || !/^\d{1,30}$/.test(args.fleetCeilingWei)) throw new Error('BALANCE_CEILING_INVALID');
@@ -555,7 +537,6 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const balances = [];
         for (const address of addresses) balances.push({ address, balanceWei: await client.getBalance({ address: address as Address }) });
         const rehearsal = await readFile(turnkeySecretPath(args.rehearsal, 'turnkey-signing-rehearsal.json'), 'utf8').then((text) => parseRehearsalEvidence(JSON.parse(text))).catch(() => undefined);
-        const trustCenter = await readFile(turnkeySecretPath(args.trustCenter, 'turnkey-trust-center-review.json'), 'utf8').then((text) => parseTrustCenterRecord(JSON.parse(text))).catch(() => undefined);
         const now = new Date();
         const evidence = buildCompensatingEvidence({
           chainId: args.chainId,
@@ -564,7 +545,6 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           probe,
           balances,
           ...(rehearsal ? { rehearsal } : {}),
-          ...(trustCenter ? { trustCenter } : {}),
           now,
         });
         const status = evaluateStatus(evidence, { ceilings: { [args.chainId]: { walletMaxWei: BigInt(args.walletCeilingWei), fleetMaxWei: BigInt(args.fleetCeilingWei) } }, expected: { recordDigest: digest, walletSetDigest: walletSetDigest(addresses), lockfileDigest: evidence.lockfileDigest } }, now);

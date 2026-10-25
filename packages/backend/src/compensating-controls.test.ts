@@ -4,8 +4,6 @@ import {
   COMPENSATING_ASSURANCE_KIND,
   computeWalletSetDigest,
   COMPENSATING_CONTROL_IDS,
-  TRUST_CENTER_REVIEW_GRACE_MS,
-  TRUST_CENTER_REVIEW_MAX_AGE_MS,
   assertCompensatingControls,
   describeCustodyAssurance,
   evaluateCompensatingControls,
@@ -40,7 +38,6 @@ const evidence = (over: Partial<CompensatingControlsEvidence> = {}): Compensatin
   providerProbe: { observedAt: iso(-MIN), status: 'ok', policyRecordDigest: RECORD },
   signatureChecks: { transactionMatch: true, signerRecovery: true },
   rehearsal: { recordedAt: iso(-DAY), policyRecordDigest: RECORD, walletSetDigest: WALLET_SET, lockfileDigest: LOCK, broadcastAttempted: false },
-  trustCenter: { reviewedAt: iso(-10 * DAY), documents: [{ name: 'SOC 2 report', date: '2026-09-01T00:00:00.000Z', sha256: 'd'.repeat(64) }] },
   driftResponse: { killSwitchOnDrift: true },
   ...over,
 });
@@ -51,7 +48,7 @@ const refusal = (value: CompensatingControlsEvidence | undefined, cfg: Compensat
 };
 
 describe('turnkey-compensating-controls (D-058, D-059)', () => {
-  it('accepts only when all seven controls are present and current', () => {
+  it('accepts only when all six controls are present and current', () => {
     expect(refusal(evidence())).toBe('ACCEPTED');
     const results = evaluateCompensatingControls(evidence(), config(), NOW);
     expect(results.map((result) => result.id)).toEqual([...COMPENSATING_CONTROL_IDS]);
@@ -65,7 +62,6 @@ describe('turnkey-compensating-controls (D-058, D-059)', () => {
       ['providerProbe', 'COMPENSATING_CONTROL_PROVIDER_PROBE_MISSING'],
       ['signatureChecks', 'COMPENSATING_CONTROL_SIGNATURE_VERIFICATION_MISSING'],
       ['rehearsal', 'COMPENSATING_CONTROL_REHEARSAL_MISSING'],
-      ['trustCenter', 'COMPENSATING_CONTROL_TRUST_CENTER_REVIEW_MISSING'],
       ['driftResponse', 'COMPENSATING_CONTROL_DRIFT_RESPONSE_MISSING'],
     ];
     for (const [key, code] of missing) {
@@ -216,19 +212,11 @@ describe('turnkey-compensating-controls (D-058, D-059)', () => {
     });
   });
 
-  describe('Trust Center review (control 6)', () => {
-    it('is valid for 90 days plus the grace period and then expires', () => {
-      const reviewed = (ageMs: number) => evidence({ trustCenter: { reviewedAt: iso(-ageMs), documents: [{ name: 'doc', date: '2026-09-01T00:00:00.000Z', sha256: 'd'.repeat(64) }] } });
-      expect(refusal(reviewed(TRUST_CENTER_REVIEW_MAX_AGE_MS))).toBe('ACCEPTED');
-      expect(refusal(reviewed(TRUST_CENTER_REVIEW_MAX_AGE_MS + TRUST_CENTER_REVIEW_GRACE_MS))).toBe('ACCEPTED');
-      expect(refusal(reviewed(TRUST_CENTER_REVIEW_MAX_AGE_MS + TRUST_CENTER_REVIEW_GRACE_MS + 1))).toBe('COMPENSATING_CONTROL_TRUST_CENTER_REVIEW_EXPIRED');
-      expect(refusal(reviewed(-MIN))).toBe('COMPENSATING_CONTROL_TRUST_CENTER_REVIEW_INVALID_TIME');
-    });
-
-    it('refuses an empty or malformed document list', () => {
-      expect(refusal(evidence({ trustCenter: { reviewedAt: iso(-DAY), documents: [] } }))).toBe('COMPENSATING_CONTROL_TRUST_CENTER_REVIEW_NO_DOCUMENTS');
-      expect(refusal(evidence({ trustCenter: { reviewedAt: iso(-DAY), documents: [{ name: 'doc', date: 'bad', sha256: 'd'.repeat(64) }] } }))).toBe('COMPENSATING_CONTROL_TRUST_CENTER_REVIEW_INVALID_DOCUMENT');
-      expect(refusal(evidence({ trustCenter: { reviewedAt: iso(-DAY), documents: [{ name: 'doc', date: '2026-09-01T00:00:00.000Z', sha256: 'xyz' }] } }))).toBe('COMPENSATING_CONTROL_TRUST_CENTER_REVIEW_INVALID_DOCUMENT');
+  describe('Trust Center review (removed, D-071)', () => {
+    it('is no longer one of the controls, and nothing about a review is needed to arm', () => {
+      expect([...COMPENSATING_CONTROL_IDS]).not.toContain('trust-center-review');
+      expect(COMPENSATING_CONTROL_IDS).toHaveLength(6);
+      expect(refusal(evidence())).toBe('ACCEPTED');
     });
   });
 

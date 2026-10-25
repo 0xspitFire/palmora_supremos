@@ -55,7 +55,7 @@ export async function createServiceAssurance(store: CanonicalStoreBridge, inputs
       assertApproverKeyPin(publicKey, inputs.approverKeySha256);
       return { signed, publicKey };
     },
-    readOptional: (name) => readJsonIfPresent(join(inputs.secretRoot, name === 'rehearsal' ? 'turnkey-signing-rehearsal.json' : 'turnkey-trust-center-review.json')),
+    readOptional: () => readJsonIfPresent(join(inputs.secretRoot, 'turnkey-signing-rehearsal.json')),
     lockfileDigest: () => lockfileDigest(inputs.projectRoot),
     createSigner: async () => {
       const signer = await TurnkeySigner.fromSecrets('mainnet', inputs.secretRoot);
