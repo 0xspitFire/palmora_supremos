@@ -24,6 +24,8 @@ export interface FireWiringDeps {
   fireSchedules(): FireScheduleRepository;
   /** Unclaimed live requests (the same ones the request processor works through). */
   unclaimedRequests(): Array<{ campaignId: string; expiresAt: string }>;
+  /** Requests the service has picked up (claimed as started), newest first, with when. */
+  startedRequests(): Array<{ id: string; campaignId: string; claimedAt?: string }>;
   walletList(): Promise<string[]>;
   evmPort(chainId: 1 | 8453): Promise<IntelligenceChainPort>;
   evmLatestBlock(chainId: 1 | 8453): Promise<{ number: bigint; hash: string }>;
@@ -59,19 +61,27 @@ const compact = (date: Date): string => date.toISOString().replace(/[-:]/g, '').
 export function createFireWiring(deps: FireWiringDeps): FireWiring {
   const now = deps.now ?? (() => new Date());
   const inFlight = new Set<string>();
-  /** When each campaign was last fired: after the processor claims a request it no longer shows as waiting, so a short memory covers its run. */
-  const firedAt = new Map<string, number>();
-  const RECENT_FIRE_MS = 10 * 60_000;
+  /** A read from a chain provider is given 20 seconds; after that the step fails by name and nothing is sent (so a slow provider never leaves a fire hanging). */
+  const read = <T,>(work: () => Promise<T>): Promise<T> => {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('READ_TIMED_OUT: the chain provider did not answer in time; nothing was sent')), 20_000); timer.unref?.(); });
+    return Promise.race([work(), timeout]).finally(() => clearTimeout(timer));
+  };
   const findCampaign = (campaignId: string): Campaign | undefined => deps.store.snapshot().campaigns.find((item) => item.id === campaignId);
 
   /** Open schedules and waiting requests. The in-flight guard is separate: the pipeline itself holds it while it runs. */
   const persistentConflict = (campaignId: string, ignoreScheduleId?: string): string | undefined => {
-    const last = firedAt.get(campaignId);
-    if (last !== undefined && now().getTime() - last < RECENT_FIRE_MS) return 'this campaign was fired in the last 10 minutes; see /requests and /runs';
+    // A run that is armed or running for this campaign, by what the store says (not a timer): a request that stopped at arm leaves no run, so a retry is never held back for it.
+    const running = deps.store.snapshot().runs.find((run) => run.campaignId === campaignId && (run.state === 'Armed' || run.state === 'Active'));
+    if (running) return `a run for this campaign is still in progress (${running.id}); see /runs`;
     const schedule = deps.fireSchedules().open(campaignId).find((item) => item.id !== ignoreScheduleId);
-    if (schedule) return `a scheduled mint (${schedule.id.slice(-6)}) is open for this campaign; cancel it first with /cancel ${schedule.id.slice(-6)}`;
+    if (schedule) return `a scheduled mint (${schedule.id.slice(-6)}) is open for this campaign; cancel it first (send /cancel and tap it)`;
     const nowMs = now().getTime();
     if (deps.unclaimedRequests().some((request) => request.campaignId === campaignId && Date.parse(request.expiresAt) > nowMs)) return 'a live request for this campaign is waiting for the service; see /requests';
+    // Picked up by the service but not armed yet: no run exists and it is no longer "waiting", so without this a second fire would pass. Held until the request reports a result, for at most 10 minutes (a crashed service never writes one).
+    const resulted = new Set(deps.store.snapshot().events.filter((event) => event.type === 'live_request_result').map((event) => String(event.data['requestId'])));
+    const arming = deps.startedRequests().find((request) => request.campaignId === campaignId && !resulted.has(request.id) && request.claimedAt !== undefined && Date.parse(request.claimedAt) + 600_000 > nowMs);
+    if (arming) return `a live request for this campaign (${arming.id.slice(-6)}) is being started by the service; see /requests`;
     return undefined;
   };
   const conflict = (campaignId: string, ignoreScheduleId?: string): string | undefined => (inFlight.has(campaignId) ? 'this campaign is being fired right now' : persistentConflict(campaignId, ignoreScheduleId));
@@ -81,11 +91,11 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
       if (campaign.chainId === 4663) {
         const wallet = (await deps.walletList())[0];
         if (!wallet) return 'unknown';
-        const report = await deps.robinhoodDryRun(campaign.contract, [wallet], campaign.quantity, now());
+        const report = await read(() => deps.robinhoodDryRun(campaign.contract, [wallet], campaign.quantity, now()));
         return report.drop?.status ?? 'unknown';
       }
       if (campaign.chainId !== 1 && campaign.chainId !== 8453) return 'unknown';
-      const report = await checkDrop(await deps.evmPort(campaign.chainId), campaign.contract, [], { simulate: false, now: now() });
+      const report = await read(async () => checkDrop(await deps.evmPort(campaign.chainId as 1 | 8453), campaign.contract, [], { simulate: false, now: now() }));
       return report.drop?.status ?? 'unknown';
     } catch { return 'unknown'; }
   };
@@ -97,7 +107,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     const short: Array<{ wallet: string; why: string }> = [];
     for (const wallet of wallets) {
       let balance: bigint | undefined;
-      try { balance = await deps.balanceOf(campaign.chainId, wallet); } catch { balance = undefined; }
+      try { balance = await read(() => deps.balanceOf(campaign.chainId, wallet)); } catch { balance = undefined; }
       if (balance === undefined) short.push({ wallet, why: 'its balance could not be read' });
       else if (balance < required) short.push({ wallet, why: `it holds ${shortEth(balance)} ETH and a run needs at least ${formatEth(required)} ETH: send ${roundUpEth(required - balance)} ETH more first (see /funding)` });
       else funded.push(wallet);
@@ -107,13 +117,13 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
 
   const recordSimulations: FireDeps['recordSimulations'] = async (campaign, wallets) => {
     if (campaign.chainId === 4663) {
-      const report = await deps.robinhoodDryRun(campaign.contract, wallets, campaign.quantity, now());
-      const result = await recordRobinhoodSimulationsAction({ store: deps.store, campaign, report, latestBlock: deps.robinhoodLatestBlock });
+      const report = await read(() => deps.robinhoodDryRun(campaign.contract, wallets, campaign.quantity, now()));
+      const result = await recordRobinhoodSimulationsAction({ store: deps.store, campaign, report, latestBlock: () => read(() => deps.robinhoodLatestBlock()) });
       return withFunding(campaign, result);
     }
     if (campaign.chainId !== 1 && campaign.chainId !== 8453) throw new Error('LIVE_SUPPORTED_CAMPAIGN_REQUIRED');
     const chainId = campaign.chainId;
-    const result = await recordPassingSimulationsAction({ store: deps.store, campaign, wallets, port: await deps.evmPort(chainId), latestBlock: () => deps.evmLatestBlock(chainId) });
+    const result = await recordPassingSimulationsAction({ store: deps.store, campaign, wallets, port: await read(() => deps.evmPort(chainId)), latestBlock: () => read(() => deps.evmLatestBlock(chainId)) });
     return withFunding(campaign, result);
   };
 
@@ -147,7 +157,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     // Held for the whole pipeline, so a second tap or a scheduler pass cannot start the same campaign twice.
     if (inFlight.has(input.campaignId)) throw new Error('FIRE_CONFLICT: this campaign is being fired right now');
     inFlight.add(input.campaignId);
-    try { const result = await runFire(fireDeps, input); firedAt.set(input.campaignId, now().getTime()); return result; } finally { inFlight.delete(input.campaignId); }
+    try { return await runFire(fireDeps, input); } finally { inFlight.delete(input.campaignId); }
   };
 
   return {
