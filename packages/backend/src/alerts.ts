@@ -24,7 +24,8 @@ export interface IntelligenceAlertInput {
   system?: SystemCard;
   at?: string;
 }
-export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; }
+/** `occurrence` makes one occurrence its own alert: a live request stopped at arm has no run, so without it every later stop for the same reason would be taken for a repeat and never sent. */
+export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; occurrence?: string; }
 export interface AlertPolicy { retentionDays: number; immediateKinds: readonly AlertKind[]; groupedKinds: readonly AlertKind[]; }
 export const DEFAULT_ALERT_POLICY: AlertPolicy = { retentionDays: 30, immediateKinds: ['kill', 'cap', 'blocked', 'failed'], groupedKinds: ['started', 'reminder'] };
 export interface OperationalAlert { key: string; severity: 'warning' | 'critical'; reason: string; message: string; at: string; }
@@ -89,7 +90,7 @@ export class AlertManager {
   public async started(runId: string, walletCount: number): Promise<void> { await this.emit({ kind: 'started', runId, walletCount }); }
   public async kill(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'kill', runId, reason }); }
   public async cap(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'cap', runId, reason }); }
-  public async blocked(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'blocked', runId, reason }); }
+  public async blocked(reason: string, runId?: string, occurrence?: string): Promise<void> { await this.emit({ kind: 'blocked', runId, reason, ...(occurrence ? { occurrence } : {}) }); }
   public async failed(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'failed', runId, reason }); }
 
   /** Records an intelligence alert once per dedupe identity; immediate ones are dispatched now, grouped ones join the next digest. */
@@ -154,14 +155,14 @@ export class AlertManager {
   private async emit(input: AlertInput): Promise<void> {
     const type = alertType(input.kind);
     const state = this.store.snapshot();
-    const duplicate = state.events.some((event) => event.type === type && event.runId === input.runId && (input.kind === 'started' || event.data.reason === input.reason));
+    const duplicate = state.events.some((event) => event.type === type && event.runId === input.runId && (input.kind === 'started' || event.data.reason === input.reason) && (input.occurrence === undefined || event.data.occurrence === input.occurrence));
     if (duplicate) return;
     const at = input.at ?? this.now().toISOString();
     // Kill, cap, blocked and failed alerts carry a structured message for Telegram; the plain text stays as the fallback.
     const system = systemFor(input, at);
     const text = system ? plainSystemText(system) : alertText(input);
     const retentionUntil = new Date(Date.parse(at) + this.policy.retentionDays * 86_400_000).toISOString();
-    const eventId = `alert_${type}_${input.runId ?? 'global'}_${Date.parse(at)}`;
+    const eventId = `alert_${type}_${input.runId ?? 'global'}_${Date.parse(at)}${input.occurrence ? `_${shortDigest(input.occurrence).slice(0, 8)}` : ''}`;
     await this.store.transaction((current) => { current.events.push({ id: eventId, ...(input.runId ? { runId: input.runId } : {}), type, at, data: { ...input, text, retentionUntil, ...(system ? { system } : {}) } }); });
     this.metrics?.recordNotification('pending');
     const priority: AlertPriority = this.policy.immediateKinds.includes(input.kind) ? 'immediate' : 'grouped';

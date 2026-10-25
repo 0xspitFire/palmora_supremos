@@ -15,7 +15,7 @@ const B = '0x81c104dcb898416fd4f81ead091dba5b8f46f37a';
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint> } = {}) {
+async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; runs?: Array<{ id: string; campaignId: string; state: string }>; events?: Array<{ type: string; data: Record<string, unknown> }> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -32,10 +32,11 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
   const evidence = { id: 'verification_abc', chainId: 4663, status: 'accepted', executionEnabled: true, checkedAt: '2026-10-25T11:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', sourceBlock: 1n, endpointIdentity: 'robinhood-sequencer' };
   const campaigns = [{ id: 'campaign_abcdef12', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n, spendPolicy: { maxRunWei: options.maxRunWei ?? 10n ** 18n, dailyCapWei: 10n ** 18n, gasCeilingWei: 10n ** 18n }, chainVerification: { chainId: 4663, status: 'verified', seaDropCompatible: true }, state: 'draft', createdAt: 'x', updatedAt: 'x', broadcastMode: 'sequencer' }];
   const store = {
-    snapshot: () => ({ events: [], campaigns, simulations, chainEvidence: [evidence], runs: [], killed: false }),
+    snapshot: () => ({ events: options.events ?? [], campaigns, simulations, chainEvidence: [evidence], runs: options.runs ?? [], killed: false }),
     transaction: async (mutate: (state: { simulations: unknown[] }) => void) => { mutate({ simulations }); },
     recordLiveRunRequest: (input: Record<string, unknown>) => { requests.push(input); },
     claimLiveRunRequest: () => false,
+    recentLiveRunRequests: () => [...requests].reverse().map((request) => ({ id: String(request.id ?? request.requestId), wallets: request.wallets as string[], maxFeeGwei: String(request.maxFeeGwei), requestedAt: '2026-10-25T11:00:00.000Z', expiresAt: '9999-12-31T00:00:00.000Z', outcome: request.outcome as string | undefined })),
   };
   const status = options.status ?? 'open';
   const passing = (wallet: string) => ({ wallet, simulation: 'passed' as const, estimatedGas: '120000', estimatedCostEth: '0.0000024', withinPerWalletCap: true, balanceEth: '0.001', hasEnoughForGas: true });
@@ -97,6 +98,32 @@ describe('/fire', () => {
     } finally { await cleanup(t.directory); }
   });
 
+  it('a run still armed or active for the campaign holds a new fire back by name; one that stopped does not', async () => {
+    const active = await setup({ runs: [{ id: 'run_live1', campaignId: 'campaign_abcdef12', state: 'Active' }] });
+    const stopped = await setup({ runs: [{ id: 'run_old1', campaignId: 'campaign_abcdef12', state: 'Blocked' }] });
+    try {
+      await expect(active.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FIRE_CONFLICT.*run_live1.*\/runs/);
+      await expect(stopped.actions.firePreview('campaign_abcdef12', 'all', 0.2)).resolves.toBeDefined();
+      // No clock window: a retry right after a stopped request is allowed.
+      await stopped.actions.fireNow('campaign_abcdef12', A, 0.2);
+      await expect(stopped.actions.fireNow('campaign_abcdef12', A, 0.2)).rejects.toThrow('FIRE_CONFLICT');
+    } finally { await cleanup(active.directory); await cleanup(stopped.directory); }
+  });
+
+  it('/requests says what became of each request, and that a stopped one minted nothing', async () => {
+    const t = await setup({ events: [{ type: 'live_request_result', data: { requestId: 'live_request_a', state: 'stopped', code: 'FUNDING_NOT_ARRIVED' } }, { type: 'live_request_result', data: { requestId: 'live_request_b', state: 'finished' } }] });
+    try {
+      t.requests.push({ id: 'live_request_a', campaignId: 'campaign_abcdef12', wallets: [A], maxFeeGwei: '0.2', outcome: 'started' });
+      t.requests.push({ id: 'live_request_b', campaignId: 'campaign_abcdef12', wallets: [A], maxFeeGwei: '0.2', outcome: 'started' });
+      t.requests.push({ id: 'live_request_c', campaignId: 'campaign_abcdef12', wallets: [A], maxFeeGwei: '0.2' });
+      const text = await t.actions.requests();
+      expect(text).toContain('live_request_a — stopped before minting: FUNDING_NOT_ARRIVED');
+      expect(text).toContain('live_request_b — finished');
+      expect(text).toContain('live_request_c — waiting for the service');
+      expect(text).toContain('A request that stopped did not mint anything');
+    } finally { await cleanup(t.directory); }
+  });
+
   it('refuses before the mint opens or after it ended (suggesting /schedule), with the kill switch on, in practice mode, and for a second fire', async () => {
     const early = await setup({ status: 'upcoming' });
     const ended = await setup({ status: 'ended' });
@@ -111,7 +138,7 @@ describe('/fire', () => {
       await expect(open.actions.firePreview('campaign_abcdef12', 'all', 0)).rejects.toThrow('MAX_FEE_GWEI_REQUIRED');
       await expect(open.actions.firePreview('nope', 'all', 0.2)).rejects.toThrow('CAMPAIGN_NOT_FOUND');
       await open.actions.fireNow('campaign_abcdef12', A, 0.2);
-      await expect(open.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FIRE_CONFLICT.*fired in the last 10 minutes/);
+      await expect(open.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FIRE_CONFLICT.*a live request for this campaign/);
       await expect(open.actions.fireNow('campaign_abcdef12', A, 0.2)).rejects.toThrow('FIRE_CONFLICT');
       expect(open.requests).toHaveLength(1);
       expect([early, ended, killed].flatMap((item) => item.requests)).toEqual([]);

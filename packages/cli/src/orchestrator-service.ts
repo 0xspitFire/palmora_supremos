@@ -253,7 +253,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       record: async ({ requestId, runId, state, code }) => {
         await runtime.store.transaction((current) => { current.events.push({ id: `live_request_result_${randomUUID()}`, type: 'live_request_result', ...(runId ? { runId } : {}), at: new Date().toISOString(), data: { requestId, state, ...(code ? { code } : {}) } }); });
         logger.info({ event: 'live_request_result', requestId, state, ...(code ? { code } : {}) }, 'live request processed');
-        if (state !== 'finished') await alerts.blocked(code ?? 'LIVE_REQUEST_STOPPED', runId).catch(() => undefined);
+        // Each stopped request is its own alert (keyed by its id), so a repeat of the same reason is still told.
+        if (state !== 'finished') await alerts.blocked(code ?? 'LIVE_REQUEST_STOPPED', runId, requestId).catch(() => undefined);
       },
       now: () => new Date(),
     }, { onError: (error) => logger.warn({ event: 'live_request_poll_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'LIVE_REQUEST_POLL_FAILED' }, 'live request poll failed') });

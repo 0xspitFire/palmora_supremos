@@ -14,6 +14,7 @@ import { DEFAULT_IDLE_BALANCE_CEILINGS, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, RO
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
+import { importWatchList } from './watch-import.js';
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
 import { failoverTransport, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
@@ -1138,12 +1139,18 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         process.stdout.write(`${json({ chain: args.chain, ...(await probeRpc(client as never, { requestsPerLevel: args.requests })) })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
-  .command('watch <action> [address]', 'Manage watched (whale) wallets for discovery: add, list, remove', (args) => args
-    .positional('action', { type: 'string', choices: ['add', 'list', 'remove'] as const, demandOption: true })
+  .command('watch <action> [address]', 'Manage watched (whale) wallets for discovery: add, list, remove, import (from a file made by `watch list`)', (args) => args
+    .positional('action', { type: 'string', choices: ['add', 'list', 'remove', 'import'] as const, demandOption: true })
     .positional('address', { type: 'string' })
-    .option('label', { type: 'string' }), (args) => {
+    .option('file', { type: 'string', describe: 'import: a JSON file, the output of `watch list` or a list of {address, label}' })
+    .option('label', { type: 'string' }), async (args) => {
       const store = intelligenceRepository();
       try {
+        if (args.action === 'import') {
+          if (!args.file) throw new Error('FILE_REQUIRED: pass --file <the list>');
+          process.stdout.write(`${json(await importWatchList(args.file, store.repo))}\n`);
+          return;
+        }
         if (args.action === 'list') { process.stdout.write(`${json({ watched: store.repo.observedAddresses(1).map((row) => ({ address: row.address, label: row.label, since: row.createdAt })) })}\n`); return; }
         if (!args.address) throw new Error('ADDRESS_REQUIRED');
         if (args.action === 'add') { const row = store.repo.addObservedAddress(1, args.address, args.label); process.stdout.write(`${json({ watching: row.address, label: row.label })}\n`); return; }

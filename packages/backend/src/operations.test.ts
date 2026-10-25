@@ -116,6 +116,26 @@ describe('phase 2 operations', () => {
     expect(delivered).toHaveLength(2);
   });
 
+  it('a stopped live request is told every time, even for the same reason, while a repeat of the same occurrence is still ignored', async () => {
+    const store = new DurableStore();
+    await store.open();
+    const delivered: string[] = [];
+    let clock = Date.parse('2026-01-01T00:00:00.000Z');
+    const dispatcher = new NotificationDispatcher(store, { send: async ({ text }) => { delivered.push(text); } });
+    const alerts = new AlertManager(store, dispatcher, undefined, { now: () => new Date(clock) });
+    // Two requests stopped at arm for the same reason: neither has a run, so only their occurrence tells them apart.
+    await alerts.blocked('READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED', undefined, 'live_request_1');
+    clock += 60_000;
+    await alerts.blocked('READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED', undefined, 'live_request_2');
+    await alerts.blocked('READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED', undefined, 'live_request_2');
+    expect(store.snapshot().events.filter((event) => event.type === 'alert_blocked')).toHaveLength(2);
+    expect(delivered).toHaveLength(2);
+    // Without an occurrence (a run-less alert of any other source) the earlier de-duplication is unchanged.
+    await alerts.blocked('SOME_OTHER_REASON');
+    await alerts.blocked('SOME_OTHER_REASON');
+    expect(store.snapshot().events.filter((event) => event.type === 'alert_blocked')).toHaveLength(3);
+  });
+
   it('reconciles before executing a scheduled dry-run job', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mintbot-orchestrator-'));
     try {

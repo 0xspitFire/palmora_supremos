@@ -356,9 +356,22 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       return sections([`Campaign: ${campaignId}`], [`Request ${String(result.requestId)} sent. The service starts it within a few seconds; follow it with /requests and /runs. /kill stops everything.`]);
     },
     async requests() {
-      const rows = bridge.recentLiveRunRequests ? bridge.recentLiveRunRequests(10) : [];
+      const rows = bridge.recentLiveRunRequests ? bridge.recentLiveRunRequests(8) : [];
       if (rows.length === 0) return 'No live requests yet.';
-      return ['Live requests (newest first):', ...rows.map((row) => `• ${row.id} — ${row.outcome ?? (Date.parse(row.expiresAt) <= now().getTime() ? 'expired (not claimed)' : 'waiting')} — ${row.wallets.length} wallet(s), ≤${row.maxFeeGwei} gwei, ${minutes(row.requestedAt)} UTC`)].join('\n');
+      // What became of each request, from the service's own result record (a code only): "started" alone only means the service picked it up.
+      const results = new Map<string, { state: string; code?: string }>();
+      for (const event of deps.store.snapshot().events) if (event.type === 'live_request_result') results.set(String(event.data['requestId']), { state: String(event.data['state']), ...(event.data['code'] ? { code: String(event.data['code']) } : {}) });
+      const status = (row: (typeof rows)[number]): string => {
+        const result = results.get(row.id);
+        if (result?.state === 'finished') return 'finished';
+        if (result?.state === 'stopped') return `stopped before minting${result.code ? `: ${result.code}` : ''}`;
+        if (result?.state === 'expired') return 'expired, never started';
+        return row.outcome ?? (Date.parse(row.expiresAt) <= now().getTime() ? 'expired (not claimed)' : 'waiting for the service');
+      };
+      return sections(
+        ['Live requests (newest first):', ...rows.map((row) => `• ${row.id} — ${status(row)} — ${row.wallets.length} wallet(s), ≤${row.maxFeeGwei} gwei, ${minutes(row.requestedAt)} UTC`)],
+        ['A request that stopped did not mint anything. Requests are a record and are not deleted; only one that is still waiting can be cancelled (send /cancel).'],
+      );
     },
     async runs() {
       const runs = [...deps.store.snapshot().runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 10);
