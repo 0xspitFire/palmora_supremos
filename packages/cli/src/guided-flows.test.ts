@@ -17,7 +17,7 @@ function setup(over: Partial<GuidedActions> = {}) {
     guidedPrepare: async (chain, contract, quantity, wallets, expected) => { calls.push(`prepare(${chain},${contract},${quantity},${wallets.join('+')},${expected})`); return { text: 'Campaign recorded: cmp_new', campaignId: 'cmp_new' }; },
     releaseStatus: async () => ({ text: 'The kill switch is ON. Nothing blocks the release.', canRelease: true, phrase: 'RELEASE engaged T1' }),
     releaseNow: async (expected) => { calls.push(`release(${expected})`); return 'The kill switch is off.'; },
-    simulateCampaign: async (campaignId) => { calls.push(`simulate(${campaignId})`); return { text: '2 wallet(s) passed the test mint. The records are good for 30 minutes.', recorded: [A, B], sized: 1 }; },
+    simulateCampaign: async (campaignId) => { calls.push(`simulate(${campaignId})`); return { text: `Campaign: ${campaignId}\n\n2 wallet(s) passed the test mint. The records are good for 30 minutes.`, recorded: [A, B], sized: 1 }; },
     requestCandidates: async () => [{ id: 'cmp_a', label: 'Robinhood 0xa686…94db · 1 NFT', note: '2 wallet(s) tested, about 25 min left' }],
     requestWallets: async () => ({ wallets: [A, B], sized: 1 }),
     requestPreview: async (campaignId, wallets, fee) => { calls.push(`requestPreview(${campaignId},${wallets},${fee})`); return { text: 'The service will arm and run the request.', phrase: `REQ-${wallets.split(',').length}`, wallets: wallets.split(',') }; },
@@ -489,6 +489,20 @@ describe('the campaign id stays in view (T-074)', () => {
     prepare = await t.press(prepare, 'All ready (3)');
     const recorded = await t.press(prepare, 'Prepare (Spends Nothing)');
     expect(recorded.reply.text.match(/cmp_new/g)?.length).toBe(1);
+  });
+});
+
+describe('the campaign id is shown once at the top of each message (T-075 review)', () => {
+  it('after Record Test Mints the id is in the result and not repeated in the wallet step, then it shows on the next steps', async () => {
+    const t = setup();
+    const result = await t.flows.runSimulate('cmp_a');
+    expect(result.reply.text.match(/cmp_a/g)).toHaveLength(1);
+    const wallets = await t.press(result, 'All Tested (1)');
+    expect(wallets.reply.text).toContain('Campaign: cmp_a');
+    expect(wallets.reply.text.match(/cmp_a/g)).toHaveLength(1);
+    const typed = await t.flows.start('simulate', { campaign: 'cmp_a' });
+    const done = await t.press(typed, 'Record Test Mints');
+    expect(done.reply.text.match(/cmp_a/g)).toHaveLength(1);
   });
 });
 

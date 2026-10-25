@@ -48,7 +48,6 @@ export interface TelegramActions extends GuidedActions {
   drops(): Promise<string>;
   calendar(): Promise<string>;
   check(chain: string, contract: string, includeFleet: boolean): Promise<string>;
-  plan(chain: string, contract: string, quantityLimit: number | undefined): Promise<string>;
   /** The preview names the exact wallets, so a later `/confirm` uses those and no others. */
   requestCreate(campaignId: string, wallets: string, maxFeeGwei: number, phrase: string): Promise<string>;
   requests(): Promise<string>;

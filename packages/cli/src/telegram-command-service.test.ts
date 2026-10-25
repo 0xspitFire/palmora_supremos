@@ -186,16 +186,16 @@ describe('Telegram actions', () => {
       const actions = createTelegramActions(deps({ store: store as never, application: application as never, killSwitchPath, walletList: async () => [A, B], robinhoodDryRun: dryRun(), robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }), now: () => NOW, ...extra }));
       return { actions, directory, created, simulations };
     };
-    const phraseIn = (text: string): string => /\/prepare robinhood \S+ \d+ (.+)$/m.exec(text)![1]!;
 
-    it('/plan prints the exact /prepare line, sized for the wallets that can mint', async () => {
+    it('the plan shows the drop and the wallets that can mint in spaced blocks, with no command to copy; its phrase is for the button', async () => {
       const { actions, directory } = await robinhood();
       try {
-        const text = await actions.plan('robinhood', CONTRACT, undefined);
-        expect(text).toContain('Drop and wallets are ready');
-        // Spaced into blocks (T-071): summary, window, wallets, notes, the command.
-        expect(text.split('\n\n').length).toBeGreaterThanOrEqual(3);
-        expect(text).toContain(`/prepare robinhood ${CONTRACT} 1 PREPARE-LIVE-ROBINHOOD 2f7b94db QTY-1 2-WALLETS 0.0004`);
+        const plan = await actions.guidedPlan('robinhood', CONTRACT, undefined, undefined);
+        expect(plan.text).toContain('Drop and wallets are ready');
+        // Spaced into blocks (T-071): summary, window, wallets, notes.
+        expect(plan.text.split('\n\n').length).toBeGreaterThanOrEqual(3);
+        expect(plan.text).not.toContain('/prepare');
+        expect(plan.phrase).toBe('PREPARE-LIVE-ROBINHOOD 2f7b94db QTY-1 2-WALLETS 0.0004');
       } finally { await rm(directory, { recursive: true, force: true }); }
     });
 
@@ -204,7 +204,7 @@ describe('Telegram actions', () => {
       try {
         await expect(actions.prepare('robinhood', CONTRACT, 1, 'PREPARE-LIVE-ROBINHOOD wrong')).rejects.toThrow('CONFIRMATION_PHRASE_MISMATCH');
         expect(created).toEqual([]);
-        const phrase = phraseIn(await actions.plan('robinhood', CONTRACT, 1));
+        const phrase = (await actions.guidedPlan('robinhood', CONTRACT, 1, undefined)).phrase!;
         const text = await actions.prepare('robinhood', CONTRACT, 1, phrase);
         expect(created).toEqual([expect.objectContaining({ chainId: 4663, quantity: 1, broadcastMode: 'sequencer' })]);
         expect(text).toContain('Campaign recorded: cmp_new');
@@ -450,11 +450,44 @@ describe('Telegram actions', () => {
     expect(shown.phrase).toBeTruthy();
     // A different enablement record became current after it was shown: the old button does not switch it off.
     record = { ...record, recordId: 'rh_2' };
-    await expect(actions.revokeNow('robinhood', shown.phrase)).rejects.toThrow('ENABLEMENT_CHANGED');
+    await expect(actions.revokeNow('robinhood', shown.phrase!)).rejects.toThrow('ENABLEMENT_CHANGED');
+    await expect(actions.revokeNow('robinhood', '')).rejects.toThrow('ENABLEMENT_CHANGED');
     expect(revoked).toEqual([]);
     const again = await actions.revokeStatus('robinhood');
-    await expect(actions.revokeNow('robinhood', again.phrase)).resolves.toContain('Robinhood');
+    await expect(actions.revokeNow('robinhood', again.phrase!)).resolves.toContain('Robinhood');
     expect(revoked).toEqual(['rh_2']);
+  });
+
+  it('/watchaccept: a wrong typed phrase prints no phrase; the guided tap is bound to the wallet as shown; only a real acceptance is written (D-070)', async () => {
+    const WALLET = '0x1111111111111111111111111111111111111111';
+    const events: Array<Record<string, unknown>> = [];
+    const store = { snapshot: () => ({ events: [] }), transaction: async (mutate: (state: { events: Array<Record<string, unknown>> }) => void) => { const state = { events: [] as Array<Record<string, unknown>> }; mutate(state); events.push(...state.events); } };
+    let nonce = 3;
+    let moveOnSecondRead = false;
+    let reads = 0;
+    const reader = { getBlockNumber: async () => 100n, getTransactionCount: async () => { reads += 1; return moveOnSecondRead && reads % 2 === 0 ? nonce + 1 : nonce; }, getBalance: async () => 1_000_000_000_000_000n };
+    const actions = createTelegramActions(deps({ store: store as never, walletReader: async () => reader, watchedWallets: (chainId) => (chainId === 1 ? [WALLET] : []) }));
+    expect(await actions.watchChains()).toEqual([{ key: 'ethereum', name: 'Ethereum' }]);
+    expect(await actions.watchWallets('ethereum')).toEqual([WALLET]);
+    const shown = await actions.watchStatus('ethereum', WALLET);
+    expect(shown.text).toContain('3 sent transactions');
+    const typedWrong = await actions.watchAccept('ethereum', WALLET, 'WRONG PHRASE');
+    expect(typedWrong).toContain('Send /watchaccept to look again');
+    expect(typedWrong).not.toContain(shown.phrase);
+    // The wallet sent another transaction after it was shown: the old button accepts nothing.
+    nonce = 4;
+    await expect(actions.watchAcceptNow('ethereum', WALLET, shown.phrase)).rejects.toThrow('WALLET_CHANGED_AGAIN');
+    expect(events).toEqual([]);
+    // It moves between the check and the accept: nothing is written and it is refused, never reported as accepted.
+    nonce = 5; moveOnSecondRead = true;
+    const second = await actions.watchStatus('ethereum', WALLET);
+    await expect(actions.watchAcceptNow('ethereum', WALLET, second.phrase)).rejects.toThrow('WALLET_CHANGED_AGAIN');
+    expect(events).toEqual([]);
+    // Looked at and unchanged: accepted, and written once.
+    moveOnSecondRead = false;
+    const third = await actions.watchStatus('ethereum', WALLET);
+    await expect(actions.watchAcceptNow('ethereum', WALLET, third.phrase)).resolves.toContain('Accepted');
+    expect(events).toEqual([expect.objectContaining({ type: 'fleet_watch_accept' })]);
   });
 
 });

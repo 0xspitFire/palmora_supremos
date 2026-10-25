@@ -30,7 +30,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
   const ok = (name: string) => async (...args: unknown[]) => { calls.push(`${name}(${args.filter((arg) => arg !== undefined).join('|')})`); return `${name} done`; };
   const actions: TelegramActions = {
     status: ok('status'), health: ok('health'), rpc: ok('rpc'), gas: ok('gas'), backup: ok('backup'), wallets: ok('wallets'), funding: ok('funding'), enablement: ok('enablement'), drops: ok('drops'), calendar: ok('calendar'),
-    check: ok('check'), plan: ok('plan'),
+    check: ok('check'),
     requestPreview: async (campaignId, wallets, gwei) => { calls.push(`requestPreview(${campaignId}|${wallets}|${gwei})`); return { text: 'preview', wallets: ['0x1111111111111111111111111111111111111111'], phrase: `LIVE-REQUEST ${campaignId.slice(-8)} 1-WALLETS 0.0002 ${gwei}-GWEI` }; },
     requestCreate: ok('requestCreate'), requests: ok('requests'), runs: ok('runs'), run: ok('run'), watchlist: ok('watchlist'), track: ok('track'), untrack: ok('untrack'),
     limits: ok('limits'), history: ok('history'), eligible: ok('eligible'), activity: ok('activity'), holdings: ok('holdings'), gasAlerts: ok('gasAlerts'), gasAlertSet: ok('gasAlertSet'), gasAlertRemove: ok('gasAlertRemove'),

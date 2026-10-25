@@ -44,7 +44,7 @@ export interface GuidedActions {
   revokeChoices(): Promise<Array<{ key: ChainKey; name: string }>>;
   /** `phrase` names the enablement record being looked at; the tap is refused if a different record is current by then. */
   revokeStatus(chain: string): Promise<{ text: string; phrase?: string }>;
-  revokeNow(chain: string, expectedPhrase?: string): Promise<string>;
+  revokeNow(chain: string, expectedPhrase: string): Promise<string>;
   /** D-070: the chains with watched wallets, the wallets, and what the wallet looks like now (`phrase` names that state). */
   watchChains(): Promise<Array<{ key: ChainKey; name: string }>>;
   watchWallets(chain: string): Promise<string[]>;
@@ -248,8 +248,12 @@ export class GuidedFlows {
   private title(flow: Flow): string {
     const steps = PLAN[flow.kind].length;
     const heading = steps === 1 ? NAMES[flow.kind] : `${NAMES[flow.kind]} · Step ${flow.step + 1} Of ${steps}`;
-    const campaign = (flow.data as Record<string, unknown>).campaign;
-    return typeof campaign === 'string' && !(flow.data as Record<string, unknown>).idShown ? `${heading}\nCampaign: ${campaign}` : heading;
+    const data = flow.data as Record<string, unknown>;
+    const campaign = data.campaign;
+    // `idShown` means the text above this step already shows the campaign id: skip it for this one step only, then show it on every later step.
+    const skip = data.idShown === true;
+    delete data.idShown;
+    return typeof campaign === 'string' && !skip ? `${heading}\nCampaign: ${campaign}` : heading;
   }
 
   /** Buttons for a list of choices (two per row), plus Custom when allowed, plus Cancel. Values stay here; the buttons carry only keys. */
@@ -572,7 +576,8 @@ export class GuidedFlows {
   /** Records the test mints, then goes straight on to choosing the wallets for the request (nothing to copy). */
   private async recordTestMints(campaignId: string): Promise<FlowResult> {
     const result = await this.deps.actions.simulateCampaign(campaignId);
-    const next = this.make('request', 1, { campaign: campaignId });
+    // The test-mint result above already starts with the campaign id, so this first step does not repeat it.
+    const next = this.make('request', 1, { campaign: campaignId, idShown: true });
     let step: FlowResult;
     try { step = await this.render(next); } catch (error) {
       // The test mints are recorded; only the wallet choices could not be shown. Say so, and keep the outcome true.
@@ -607,7 +612,7 @@ export class GuidedFlows {
       }
       let text: string;
       if (flow.kind === 'release') text = await a.releaseNow(d.releasePhrase as string | undefined);
-      else if (flow.kind === 'revoke') text = await a.revokeNow(String(d.chain), d.phrase as string | undefined);
+      else if (flow.kind === 'revoke') text = await a.revokeNow(String(d.chain), String(d.phrase ?? ''));
       else if (flow.kind === 'watchaccept') text = await a.watchAcceptNow(String(d.chain), String(d.address), String(d.phrase));
       else if (flow.kind === 'fire') text = await a.fireNow(String(d.campaign), String(d.walletsText), Number(d.fee), d.digest as string | undefined);
       else if (flow.kind === 'request') text = await a.requestSend(String(d.campaign), String(d.walletsText), Number(d.fee), String(d.phrase));

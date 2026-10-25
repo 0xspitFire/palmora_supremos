@@ -80,6 +80,8 @@ export interface TelegramActionDeps {
   fire?: FireWiring;
   /** T-073: the Turnkey policy's fee limit for Robinhood, in gwei (default 0.2, the standard policy). Used to check a custom fee ceiling. */
   policyFeeLimitGwei?: number;
+  /** The reader `/watchaccept` uses for a wallet's transaction count and balance (default: the chain's own RPC). Tests supply their own. */
+  walletReader?: (chainId: number) => Promise<unknown>;
   fireSchedulesRepository?: () => FireScheduleRepository;
   /** T-066: how many NFTs of a contract a wallet holds, and the contract's name. Default: read the chain. Tests supply their own. */
   nftBalance?: (chainId: number, contract: string, wallet: string) => Promise<bigint>;
@@ -106,6 +108,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     if (urls.length === 0) throw new Error(`${chainName(chainId).toUpperCase()}_RPC_UNAVAILABLE`);
     return EngineIntelligencePort.fromRpcUrls(urls);
   };
+  const walletReaderFor = async (chainId: number): Promise<unknown> => (deps.walletReader ? deps.walletReader(chainId) : client(chainId as ChainId));
   const fleet = async (chainId: number): Promise<string[]> => {
     const watched = deps.watchedWallets(chainId);
     return watched.length > 0 ? watched : (await deps.walletList()).map((wallet) => wallet.toLowerCase());
@@ -158,7 +161,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   const readyOf = (facts: PlanFacts): string[] => (facts.kind === 'robinhood' ? facts.plan.walletsReady : facts.planned.plan.walletsReady);
   const phraseOf = (facts: PlanFacts, contract: string): string | undefined => (facts.kind === 'robinhood' ? (facts.plan.verdict === 'ready' ? robinhoodConfirmationPhrase(contract, facts.quantity, facts.plan.walletsReady.length, facts.plan.totalMaxExposureEth) : undefined) : facts.planned.phrase);
   const isReady = (facts: PlanFacts): boolean => (facts.kind === 'robinhood' ? facts.plan.verdict === 'ready' : facts.planned.plan.verdict === 'ready');
-  const renderPlan = (facts: PlanFacts, chainText: string, contract: string, quantityLimit: number | undefined, withCommand: boolean): string => {
+  const renderPlan = (facts: PlanFacts): string => {
     if (facts.kind === 'robinhood') {
       const plan = facts.plan;
       return sections(
@@ -166,7 +169,6 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         plan.opensAt ? [`Opens ${minutes(plan.opensAt)} UTC${plan.closesAt ? `, closes ${minutes(plan.closesAt)} UTC` : ''}.`] : [],
         [...plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`), ...plan.walletsNotReady.map((item) => `✗ ${short(item.wallet)}: ${shortenBalancesInParens(item.why)}`)],
         plan.warnings.map((warning) => `• ${warning}`),
-        withCommand && plan.verdict === 'ready' ? ['To record the campaign (spends nothing):', '', `/prepare robinhood ${contract} ${facts.quantity} ${robinhoodConfirmationPhrase(contract, facts.quantity, plan.walletsReady.length, plan.totalMaxExposureEth)}`] : [],
       );
     }
     const { plan } = facts.planned;
@@ -174,7 +176,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       [plan.summary],
       plan.blockers.map((blocker) => `✗ ${shortenBalancesInParens(blocker)}`),
       plan.warnings.map((warning) => `• ${warning}`),
-      facts.planned.phrase ? (withCommand ? [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei. To record the campaign (spends nothing):`, '', `/prepare ${chainText.toLowerCase()} ${contract} ${quantityLimit ?? plan.quantity} ${facts.planned.phrase}`] : [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei.`]) : [],
+      facts.planned.phrase ? [`Planning fee: ${facts.planned.planningMaxFeeGwei ?? '?'} gwei.`] : [],
     );
   };
   const prepareFor = async (chainText: string, contract: string, quantityLimit: number | undefined, phrase: string, only?: readonly string[]): Promise<string> => {
@@ -338,9 +340,6 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         ...(includeFleet ? report.wallets.map((row) => `  ${short(row.wallet)} ${row.verdict}${row.topUpEth ? ` (needs ${row.topUpEth} ETH)` : ''}`) : []),
       ].join('\n');
     },
-    async plan(chainText, contract, quantityLimit) {
-      return renderPlan(await planFor(chainText, contract, quantityLimit), chainText, contract, quantityLimit, true);
-    },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
       return { wallets: preview.wallets, text: `The service will arm and run ${chainName(preview.chainId)} ${short(preview.contract)}: ${preview.quantityPerWallet} NFT(s) per wallet at ${preview.priceEth} ETH, from ${preview.wallets.length} wallet(s). The most that can be spent is ${preview.maxExposureEth} ETH, signing at no more than ${preview.maxFeeGwei} gwei. Every guard still applies.`, phrase: preview.phrase };
@@ -479,7 +478,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       // The phrase names the enablement record that was shown; if a different record is current now, the old button does not switch it off.
       const current = revokePhraseOf(revokeRun(chainId, undefined));
       if (!current) throw new Error('NOTHING_TO_REVOKE: that chain is not switched on');
-      if (expectedPhrase !== undefined && current !== expectedPhrase) throw new Error('ENABLEMENT_CHANGED: the enablement record is a different one now. Send /revoke to see the current state.');
+      if (!expectedPhrase || current !== expectedPhrase) throw new Error('ENABLEMENT_CHANGED: the enablement record is a different one now. Send /revoke to see the current state.');
       return String(revokeRun(chainId, current).message);
     },
     async watchChains() {
@@ -488,18 +487,21 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async watchWallets(chainText) { return deps.watchedWallets(chainFrom(chainText)).map((wallet) => wallet.toLowerCase()); },
     async watchStatus(chainText, address) {
       const chainId = chainFrom(chainText);
-      const outcome = await watchAcceptAction({ chainId, address, confirm: undefined, client: await client(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
+      const outcome = await watchAcceptAction({ chainId, address, confirm: undefined, client: await walletReaderFor(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
       if (outcome.state !== 'Preview') throw new Error('WALLET_NOT_PREVIEWABLE: the wallet could not be read');
       return { text: outcome.message, phrase: outcome.phrase };
     },
     async watchAcceptNow(chainText, address, expectedPhrase) {
       const chainId = chainFrom(chainText);
-      const reader = await client(chainId) as never;
+      const reader = await walletReaderFor(chainId) as never;
       const newId = () => `evt_${randomBytes(8).toString('hex')}`;
       const fresh = await watchAcceptAction({ chainId, address, confirm: undefined, client: reader, store: deps.store, newId, now: now() });
       // The phrase names the wallet's sent-transaction count and balance: if either changed since it was shown, the owner must look again.
       if (fresh.state !== 'Preview' || fresh.phrase !== expectedPhrase) throw new Error('WALLET_CHANGED_AGAIN: the wallet changed since you looked (new transactions or a new balance). Send /watchaccept to look again.');
-      return (await watchAcceptAction({ chainId, address, confirm: expectedPhrase, client: reader, store: deps.store, newId, now: now() })).message;
+      const outcome = await watchAcceptAction({ chainId, address, confirm: expectedPhrase, client: reader, store: deps.store, newId, now: now() });
+      // Only a real acceptance counts: if the wallet moved between the two reads nothing was accepted, and that is said and recorded as refused.
+      if (outcome.state !== 'Accepted') throw new Error('WALLET_CHANGED_AGAIN: the wallet changed while accepting, so nothing was accepted. Send /watchaccept to look again.');
+      return outcome.message;
     },
     async release(phrase) {
       const outcome = await killReleaseAction({ store: asKillStore(deps.store), killFile: deps.killSwitchPath, confirm: phrase, actor: 'owner-telegram' });
@@ -508,7 +510,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async watchAccept(chainText, address, phrase) {
       const chainId = chainFrom(chainText);
-      const outcome = await watchAcceptAction({ chainId, address, confirm: phrase, client: await client(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
+      const outcome = await watchAcceptAction({ chainId, address, confirm: phrase, client: await walletReaderFor(chainId) as never, store: deps.store, newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
       return outcome.state === 'Preview' ? `${outcome.message}\n\nThat phrase does not match the wallet as it is now. Send /watchaccept to look again and accept it with a button.` : outcome.message;
     },
     async guidedChains() {
@@ -521,7 +523,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       let facts = await planFor(chainText, contract, quantity);
       const all = readyOf(facts);
       if (walletCount !== undefined && isReady(facts) && walletCount < all.length) facts = await planFor(chainText, contract, quantity, all.slice(0, walletCount));
-      return { text: renderPlan(facts, chainText, contract, quantity, false), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity, ...(isReady(facts) && phraseOf(facts, contract) ? { phrase: phraseOf(facts, contract)! } : {}) };
+      return { text: renderPlan(facts), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity, ...(isReady(facts) && phraseOf(facts, contract) ? { phrase: phraseOf(facts, contract)! } : {}) };
     },
     async guidedPrepare(chainText, contract, quantity, wallets, expectedPhrase) {
       const facts = await planFor(chainText, contract, quantity, wallets);
