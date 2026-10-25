@@ -137,8 +137,10 @@ export interface LiveRequestProcessorDeps {
 /** Only fixed upper-case codes are kept; provider or library text never is. */
 const safeCode = (error: unknown): string => {
   const message = error instanceof Error ? error.message : '';
-  const code = message.split(':')[0] ?? '';
-  return /^[A-Z][A-Z0-9_]{2,80}$/.test(code) ? code : 'LIVE_REQUEST_FAILED';
+  // Up to three fixed `UPPER_CASE` parts (for example READINESS_REFRESH_FAILED:FUNDING_PLAN_BLOCKED:WALLET_ABOVE_RUN_ENVELOPE) so the failing check is visible; anything else is dropped.
+  const parts: string[] = [];
+  for (const part of message.split(':').slice(0, 3)) { if (!/^[A-Z][A-Z0-9_]{2,80}$/.test(part)) break; parts.push(part); }
+  return parts.length > 0 ? parts.join(':') : 'LIVE_REQUEST_FAILED';
 };
 
 /** One pass of the host service over unclaimed requests. Each request is claimed once, before anything else happens. */

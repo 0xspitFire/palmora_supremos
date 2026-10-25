@@ -15,7 +15,7 @@ const B = '0x81c104dcb898416fd4f81ead091dba5b8f46f37a';
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint } = {}) {
+async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -46,7 +46,7 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
     mode: 'host', store: store as never, approve: async (validated) => { approvals.push(validated); return { id: 'approval_1' }; }, killSwitchPath,
     fireSchedules: () => schedules, unclaimedRequests: () => requests.map((request) => ({ campaignId: String(request.campaignId), expiresAt: String(request.expiresAt) })),
     walletList: async () => [A, B], evmPort: async () => { throw new Error('not used'); }, evmLatestBlock: async () => { throw new Error('not used'); },
-    robinhoodDryRun, robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }), kick: () => { kicks.push('kick'); }, now: () => NOW,
+    robinhoodDryRun, robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }), balanceOf: async (_chain, address) => options.balances?.[address.toLowerCase()] ?? 400_000_000_000_000n, kick: () => { kicks.push('kick'); }, now: () => NOW,
   });
   const base: TelegramActionDeps = {
     mode: 'host', custody: 'turnkey', store: store as never, application: { command: async () => ({ id: 'approval_1' }) } as never, coordinator: { kill: async () => undefined }, projectRoot: '/nonexistent', secretRoot: '/nonexistent', killSwitchPath,
@@ -189,6 +189,44 @@ describe('a campaign sized for fewer wallets than pass (the screenshot bug)', ()
       expect(item!.label).toContain('Schedule');
       expect(await t.actions.cancel(item!.id)).toContain('cancelled');
       expect(await t.actions.cancellables()).toEqual([]);
+    } finally { await cleanup(t.directory); }
+  });
+});
+
+describe('a run needs each wallet to hold its full worst case (the second live attempt)', () => {
+  // The campaign's worst case per wallet is its fee budget, 0.0002 ETH.
+  const SHORT = 151_000_000_000_000n; // 0.000151 ETH, like the real wallet
+  it('/fire leaves out a wallet that holds less than a run needs, names the exact top-up, and fires the funded one', async () => {
+    const t = await setup({ balances: { [A]: SHORT } });
+    try {
+      const preview = await t.actions.firePreview('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(preview.wallets).toEqual([B]);
+      expect(preview.text).toContain('left out');
+      expect(preview.text).toContain('it holds 0.000151 ETH and a run needs at least 0.0002 ETH: send 0.000049 ETH more first');
+      const text = await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(text).toContain('send 0.000049 ETH more');
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [B] })]);
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('when no wallet is funded nothing is previewed or requested, and the reason is plain (not a bare readiness code)', async () => {
+    const t = await setup({ balances: { [A]: SHORT, [B]: 81_000_000_000_000n } });
+    try {
+      await expect(t.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FUNDING_NOT_ARRIVED: no wallet holds what a run needs.*send 0\.000049 ETH more.*send 0\.000119 ETH more/s);
+      await expect(t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2)).rejects.toThrow('FUNDING_NOT_ARRIVED');
+      expect(t.requests).toEqual([]);
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('the simulate-then-request path says who needs funding, offers only funded wallets, and an unreadable balance counts as short (fail closed)', async () => {
+    const t = await setup({ balances: { [A]: SHORT } });
+    try {
+      const simulated = await t.actions.simulateCampaign('campaign_abcdef12');
+      expect(simulated.text).toContain('needs funding');
+      expect(simulated.text).toContain('send 0.000049 ETH more');
+      expect(await t.actions.requestWallets('campaign_abcdef12')).toMatchObject({ wallets: [B], note: expect.stringContaining('left out') });
+      const split = await t.fire.fundingSplit({ chainId: 4663, quantity: 1, mintPriceWei: 0n, feePolicy: { kind: 'free', configuredPriorityFeeWei: 0n, totalFeeBudgetWei: 200_000_000_000_000n } } as never, [A]);
+      expect(split.short[0]!.why).toContain('send 0.000049 ETH more');
     } finally { await cleanup(t.directory); }
   });
 });

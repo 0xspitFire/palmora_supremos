@@ -506,6 +506,20 @@ describe('the campaign id is shown once at the top of each message (T-075 review
   });
 });
 
+describe('funding in the request guide (the second live attempt)', () => {
+  it('shows who was left out for funding, and when no tested wallet is funded it says what to do instead of showing empty choices', async () => {
+    const t = setup({ requestWallets: async () => ({ wallets: [A], sized: 1, note: '✗ 0x2222…2222 left out: it holds 0.000081 ETH and a run needs at least 0.0002 ETH: send 0.000119 ETH more first (see /funding).' }) });
+    const step = await t.flows.runSimulate('cmp_a');
+    expect(step.reply.text).toContain('enough ETH for a run');
+    expect(step.reply.text).toContain('send 0.000119 ETH more first');
+    const none = setup({ requestWallets: async () => ({ wallets: [], sized: 1, note: '✗ 0x1111…1111 left out: send 0.000049 ETH more first.' }) });
+    const empty = await none.flows.runSimulate('cmp_a');
+    expect(empty.reply.text).toContain('No wallet with a fresh test mint holds what a run needs');
+    expect(empty.reply.text).toContain('send 0.000049 ETH more first');
+    expect(empty.reply.buttons).toBeUndefined();
+  });
+});
+
 describe('review fixes for the button steps (T-074)', () => {
   it('a command typed in full is held to the same fee rule as a Custom entry', async () => {
     const t = setup();

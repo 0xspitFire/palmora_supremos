@@ -33,7 +33,7 @@ export interface GuidedActions {
   /** Records the test mints; says which wallets passed and how many wallets the campaign was sized for. */
   simulateCampaign(campaignId: string): Promise<{ text: string; recorded: string[]; sized: number }>;
   requestCandidates(): Promise<GuidedCampaign[]>;
-  requestWallets(campaignId: string): Promise<{ wallets: string[]; sized: number }>;
+  requestWallets(campaignId: string): Promise<{ wallets: string[]; sized: number; note?: string }>;
   requestPreview(campaignId: string, wallets: string, maxFeeGwei: number): Promise<{ text: string; phrase: string; wallets: string[] }>;
   /** `expectedPhrase` is the phrase of the preview the owner saw; a changed request is refused. */
   requestSend(campaignId: string, wallets: string, maxFeeGwei: number, expectedPhrase: string): Promise<string>;
@@ -315,12 +315,14 @@ export class GuidedFlows {
       }
       case 'wallets': {
         if (flow.kind === 'request') {
-          const { wallets, sized } = await a.requestWallets(String(d.campaign));
+          const { wallets, sized, note } = await a.requestWallets(String(d.campaign));
           d.tested = wallets; d.sized = sized;
+          if (wallets.length === 0) { this.flow = undefined; return { reply: { text: `${head}\n\nNo wallet with a fresh test mint holds what a run needs, so there is nothing to send yet.${note ? `\n\n${note}` : ''}\n\nFund the wallet, then send /request again (the test mints stay good for 30 minutes).` } }; }
           const usable = Math.min(wallets.length, sized);
           const choices: Choice[] = [{ label: `All Tested (${usable})`, value: 'all' }, ...wallets.slice(0, 6).map((wallet) => ({ label: short(wallet), value: wallet }))];
-          const note = wallets.length > sized ? ` This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized}.` : '';
-          return { reply: { text: `${head}\n\nWhich wallets? ${wallets.length} wallet(s) have fresh test mints.${note}`, buttons: this.choices(flow, choices, true) } };
+          const sizedNote = wallets.length > sized ? ` This campaign was sized for ${sized} wallet(s), so a request uses at most ${sized}.` : '';
+          const extra = note;
+          return { reply: { text: `${head}\n\nWhich wallets? ${wallets.length} wallet(s) have fresh test mints and enough ETH for a run.${sizedNote}${extra ? `\n\n${extra}` : ''}`, buttons: this.choices(flow, choices, true) } };
         }
         const wallets = await a.signingWallets();
         const choices: Choice[] = [{ label: `All Signing Wallets (${wallets.length})`, value: 'all' }, ...wallets.slice(0, 6).map((wallet) => ({ label: short(wallet), value: wallet }))];

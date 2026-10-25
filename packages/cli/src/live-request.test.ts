@@ -195,3 +195,20 @@ describe('the request poller keeps every nudge (T-067)', () => {
     poller.stop();
   });
 });
+
+describe('the code shown for a stopped request keeps the failing check visible (second live attempt)', () => {
+  it('keeps up to three fixed parts and drops everything else (words, addresses, amounts)', async () => {
+    const now = new Date();
+    const request = { id: 'live_request_1', campaignId: 'c', wallets: ['0x1111111111111111111111111111111111111111'], simulationIds: ['s'], approvalId: 'a', evidenceAt: now.toISOString(), maxFeeGwei: '0.2', requestedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+    const codeFor = async (message: string): Promise<string | undefined> => {
+      const records: Array<{ code?: string }> = [];
+      await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async () => { throw new Error(message); }, setFeeCeiling: () => undefined, record: async (event) => { records.push(event); }, now: () => now });
+      return records[0]?.code;
+    };
+    expect(await codeFor('READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED')).toBe('READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED');
+    expect(await codeFor('READINESS_REFRESH_FAILED:FUNDING_PLAN_BLOCKED:WALLET_ABOVE_RUN_ENVELOPE')).toBe('READINESS_REFRESH_FAILED:FUNDING_PLAN_BLOCKED:WALLET_ABOVE_RUN_ENVELOPE');
+    expect(await codeFor('READINESS_REFRESH_FAILED:FUNDING_PLAN_BLOCKED:0x1111111111111111111111111111111111111111')).toBe('READINESS_REFRESH_FAILED:FUNDING_PLAN_BLOCKED');
+    expect(await codeFor('KILLED')).toBe('KILLED');
+    expect(await codeFor('some provider said something about https://rpc.example/key')).toBe('LIVE_REQUEST_FAILED');
+  });
+});

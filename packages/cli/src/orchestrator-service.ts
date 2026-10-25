@@ -312,6 +312,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       evmLatestBlock: latestBlock,
       robinhoodDryRun: async (contract, wallets, quantity, at) => dryRunDrop(await reader(4663), contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at }),
       robinhoodLatestBlock: () => latestBlock(4663),
+      balanceOf: async (chainId, address) => (await reader(chainId as 1 | 8453 | 4663)).getBalance({ address: address as `0x${string}` }),
       kick: () => { void liveRequests?.tick(); },
     }) : undefined;
     if (fire) {
