@@ -308,6 +308,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       killSwitchPath: config.killSwitchPath,
       fireSchedules: () => bridge.fireScheduleRepository(),
       unclaimedRequests: () => bridge.unclaimedLiveRunRequests(),
+      startedRequests: () => bridge.recentLiveRunRequests(20).filter((row) => row.outcome === 'started').map((row) => ({ id: row.id, campaignId: row.campaignId, ...(row.claimedAt ? { claimedAt: row.claimedAt } : {}) })),
       walletList: walletAddresses,
       evmPort: async (chainId) => EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]),
       evmLatestBlock: latestBlock,

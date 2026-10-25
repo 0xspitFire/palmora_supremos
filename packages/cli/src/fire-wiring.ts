@@ -24,6 +24,8 @@ export interface FireWiringDeps {
   fireSchedules(): FireScheduleRepository;
   /** Unclaimed live requests (the same ones the request processor works through). */
   unclaimedRequests(): Array<{ campaignId: string; expiresAt: string }>;
+  /** Requests the service has picked up (claimed as started), newest first, with when. */
+  startedRequests(): Array<{ id: string; campaignId: string; claimedAt?: string }>;
   walletList(): Promise<string[]>;
   evmPort(chainId: 1 | 8453): Promise<IntelligenceChainPort>;
   evmLatestBlock(chainId: 1 | 8453): Promise<{ number: bigint; hash: string }>;
@@ -76,6 +78,10 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     if (schedule) return `a scheduled mint (${schedule.id.slice(-6)}) is open for this campaign; cancel it first (send /cancel and tap it)`;
     const nowMs = now().getTime();
     if (deps.unclaimedRequests().some((request) => request.campaignId === campaignId && Date.parse(request.expiresAt) > nowMs)) return 'a live request for this campaign is waiting for the service; see /requests';
+    // Picked up by the service but not armed yet: no run exists and it is no longer "waiting", so without this a second fire would pass. Held until the request reports a result, for at most 10 minutes (a crashed service never writes one).
+    const resulted = new Set(deps.store.snapshot().events.filter((event) => event.type === 'live_request_result').map((event) => String(event.data['requestId'])));
+    const arming = deps.startedRequests().find((request) => request.campaignId === campaignId && !resulted.has(request.id) && request.claimedAt !== undefined && Date.parse(request.claimedAt) + 600_000 > nowMs);
+    if (arming) return `a live request for this campaign (${arming.id.slice(-6)}) is being started by the service; see /requests`;
     return undefined;
   };
   const conflict = (campaignId: string, ignoreScheduleId?: string): string | undefined => (inFlight.has(campaignId) ? 'this campaign is being fired right now' : persistentConflict(campaignId, ignoreScheduleId));

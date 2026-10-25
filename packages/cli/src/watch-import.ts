@@ -14,7 +14,7 @@ export async function importWatchList(file: string, repo: WatchImportTarget): Pr
   const items = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { watched?: unknown }).watched) ? (parsed as { watched: unknown[] }).watched : undefined);
   if (!items) throw new Error('FILE_INVALID: expected the output of `watch list` or a list of {address, label}');
   if (items.length > 1_000) throw new Error('FILE_TOO_LARGE: at most 1000 wallets at a time');
-  let imported = 0;
+  const accepted: Array<{ address: string; label?: string }> = [];
   let skipped = 0;
   for (const item of items) {
     const entry = item && typeof item === 'object' ? item as { address?: unknown; label?: unknown } : {};
@@ -22,8 +22,9 @@ export async function importWatchList(file: string, repo: WatchImportTarget): Pr
     if (!address) { skipped += 1; continue; }
     // eslint-disable-next-line no-control-regex
     const label = typeof entry.label === 'string' ? entry.label.replace(/[\u0000-\u001f\u007f‪-‮⁦-⁩]/g, '').trim().slice(0, 60) : '';
-    repo.addObservedAddress(1, address, label || undefined);
-    imported += 1;
+    accepted.push({ address, ...(label ? { label } : {}) });
   }
-  return { imported, skipped, nowWatching: repo.observedAddresses(1).length };
+  // Every entry is checked first; only then are any added.
+  for (const entry of accepted) repo.addObservedAddress(1, entry.address, entry.label);
+  return { imported: accepted.length, skipped, nowWatching: repo.observedAddresses(1).length };
 }
