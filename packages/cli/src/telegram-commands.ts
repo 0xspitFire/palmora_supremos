@@ -138,14 +138,14 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   simulate: { tier: 'change', roles: OWNER, usage: '/simulate', help: 'Record fresh test mints (good 30 minutes), then choose the wallets' },
   cancel: { tier: 'change', roles: OWNER, usage: '/cancel', help: 'Cancel a request or scheduled mint the service has not started (pick it with a button)' },
   kill: { tier: 'stop', roles: OWNER, usage: '/kill', help: 'Stop everything at once (one tap to confirm)' },
-  revoke: { tier: 'stop', roles: OWNER, usage: '/revoke <base|robinhood> [phrase]', help: 'Switch a chain off' },
+  revoke: { tier: 'stop', roles: OWNER, usage: '/revoke', help: 'Switch Base or Robinhood off (pick it, then one button)' },
   lock: { tier: 'stop', roles: OWNER, usage: '/lock', help: 'End the unlocked session now' },
   unlock: { tier: 'session', roles: OWNER, usage: '/unlock <6-digit code>', help: 'Unlock start commands for 12 hours' },
   release: { tier: 'start', roles: OWNER, usage: '/release', help: 'Turn the kill switch off (one button)' },
   fire: { tier: 'start', roles: OWNER, usage: '/fire', help: 'Mint now: test, approve and run a prepared campaign, step by step' },
   schedule: { tier: 'start', roles: OWNER, usage: '/schedule', help: 'Fire a prepared mint when it opens, inside a window (UTC), step by step' },
   schedules: { tier: 'read', roles: OWNER, usage: '/schedules', help: 'Scheduled mints and what became of them' },
-  watchaccept: { tier: 'start', roles: OWNER, usage: '/watchaccept <chain> <address> [phrase]', help: 'Accept a wallet change the watcher flagged' },
+  watchaccept: { tier: 'start', roles: OWNER, usage: '/watchaccept', help: 'Accept a wallet change the watcher flagged (pick the wallet, then one button)' },
   limits: { tier: 'read', roles: OWNER, usage: '/limits', help: 'How much of each daily limit is used and left' },
   history: { tier: 'read', roles: OWNER, usage: '/history', help: 'Past live mints: totals per chain and newest runs' },
   eligible: { tier: 'read', roles: OWNER, usage: '/eligible', help: 'Upcoming drops against your wallets' },
@@ -353,7 +353,8 @@ export class TelegramCommandRouter {
       case 'track': return reply(await a.track(required(args[0], 'address'), args.slice(1).join(' ') || undefined));
       case 'untrack': return reply(await a.untrack(required(args[0], 'address')));
       case 'prepare': {
-        if (args.length === 0) return this.startFlow(incoming, 'prepare');
+        // Anything short of the full typed form (with its phrase) opens the guide, with the chain and contract already chosen when given.
+        if (args.length < 4) return this.startFlow(incoming, 'prepare', args.length >= 2 ? { chain: args[0]!, contract: args[1]! } : undefined);
         const text = await a.prepare(required(args[0], 'chain'), required(args[1], 'contract'), requiredNumber(args[2], 'quantity'), required(args.slice(3).join(' ') || undefined, 'phrase from /plan'));
         // Straight on to the next step (the test mints) with its button.
         const campaign = /cmp_[0-9a-f-]{36}/.exec(text)?.[0];
@@ -369,14 +370,15 @@ export class TelegramCommandRouter {
         this.confirmTaps.set(nonce, this.now().getTime());
         return reply('Stop everything now? This engages the kill switch: no new live work until you release it. Tap within 2 minutes.', [[{ text: 'Yes, stop everything', callback_data: `/tap_kill_${nonce}` }]]);
       }
-      case 'revoke': return reply(await a.revoke(required(args[0], 'base or robinhood'), args.slice(1).join(' ') || undefined));
+      // With a phrase the typed form still works; otherwise a guide with a button (nothing to copy).
+      case 'revoke': return args.length >= 2 ? reply(await a.revoke(args[0]!, args.slice(1).join(' '))) : this.startFlow(incoming, 'revoke', args[0] ? { chain: args[0] } : undefined);
       case 'lock': {
         const closed = this.options.access.closeSession('lock');
         return reply(closed ? 'Locked. Start commands need /unlock again.' : 'There was no unlocked session.');
       }
       case 'unlock': return this.unlock(incoming, args.length > 0 ? args.join('') : undefined);
       case 'release': return args.length === 0 ? this.startFlow(incoming, 'release') : reply(await a.release(args.join(' ')));
-      case 'watchaccept': return reply(await a.watchAccept(required(args[0], 'chain'), required(args[1], 'address'), args.slice(2).join(' ') || undefined));
+      case 'watchaccept': return args.length >= 3 ? reply(await a.watchAccept(args[0]!, args[1]!, args.slice(2).join(' '))) : this.startFlow(incoming, 'watchaccept', args.length === 2 ? { chain: args[0]!, address: args[1]! } : undefined);
       case 'invite': {
         const code = base32Encode(randomBytes(10));
         const invite = this.options.access.createInvite(code, 'viewer', this.inviteLifetimeMs);

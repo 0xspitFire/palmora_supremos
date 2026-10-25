@@ -423,8 +423,11 @@ describe('Telegram actions', () => {
       const released: string[] = [];
       const store = { snapshot: () => ({ killed: true, events: [], runs: [], attempts: [], reconciliations: [], campaigns: [] }), killSwitchStatus: () => ({ engaged: true, changedBy: 'x', changedAt: '2026-10-24T10:00:00.000Z' }), releaseKillSwitch: async (actor: string) => { released.push(actor); return { released: true }; } };
       const actions = createTelegramActions(deps({ store: store as never, killSwitchPath: file }));
+      // No phrase is printed to copy: the guide's status carries it for the button.
       const preview = await actions.release(undefined);
-      const phrase = /\/release (.+)$/.exec(preview)![1]!;
+      expect(preview).not.toContain('RELEASE-KILL');
+      expect(preview).toContain('Send /release to release it with a button');
+      const phrase = (await actions.releaseStatus()).phrase!;
       await expect(actions.release('RELEASE-KILL wrong')).rejects.toThrow('CONFIRMATION_PHRASE_MISMATCH');
       expect(released).toEqual([]);
       await expect(actions.release(phrase)).resolves.toContain('The kill switch is off');
@@ -432,15 +435,26 @@ describe('Telegram actions', () => {
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
-  it('/revoke shows the phrase first and changes nothing without it', async () => {
+  it('/revoke prints no phrase, changes nothing without the exact one, and the guided tap is bound to the record that was shown (D-070)', async () => {
     const revoked: string[] = [];
-    const record = { recordId: 'rh_1', approvedBy: 'owner-cli', approvedAt: '2026-10-20T00:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', paidAllowed: false, evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true } };
-    const store = { snapshot: () => ({ events: [] }), robinhoodEnablement: () => record, revokeRobinhood: () => { revoked.push('rh_1'); return { enablementId: 'rh_1' }; } };
+    let record: Record<string, unknown> = { recordId: 'rh_1', approvedBy: 'owner-cli', approvedAt: '2026-10-20T00:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', paidAllowed: false, evidence: { E1: true, E2: true, E3: true, E4: true, E5: true, E6: true, E7: true } };
+    const store = { snapshot: () => ({ events: [] }), robinhoodEnablement: () => record, revokeRobinhood: () => { revoked.push(String(record['recordId'])); return { enablementId: String(record['recordId']) }; } };
     const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T10:00:00.000Z') }));
     const preview = await actions.revoke('robinhood', undefined);
-    expect(preview).toContain('/revoke robinhood ');
+    expect(preview).toContain('Send /revoke to switch Robinhood off with a button');
+    expect(preview).not.toContain('/revoke robinhood ');
     expect(revoked).toEqual([]);
     await expect(actions.revoke('ethereum', undefined)).rejects.toThrow('NOTHING_TO_REVOKE');
+    expect((await actions.revokeChoices()).map((chain) => chain.key)).toEqual(['robinhood']);
+    const shown = await actions.revokeStatus('robinhood');
+    expect(shown.phrase).toBeTruthy();
+    // A different enablement record became current after it was shown: the old button does not switch it off.
+    record = { ...record, recordId: 'rh_2' };
+    await expect(actions.revokeNow('robinhood', shown.phrase)).rejects.toThrow('ENABLEMENT_CHANGED');
+    expect(revoked).toEqual([]);
+    const again = await actions.revokeStatus('robinhood');
+    await expect(actions.revokeNow('robinhood', again.phrase)).resolves.toContain('Robinhood');
+    expect(revoked).toEqual(['rh_2']);
   });
 
 });
