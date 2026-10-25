@@ -1,4 +1,4 @@
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -31,6 +31,8 @@ describe('watch import', () => {
     await withFile('{"other":1}', async (file) => { await expect(importWatchList(file, t.repo)).rejects.toThrow('FILE_INVALID'); });
     await withFile(JSON.stringify(Array.from({ length: 1001 }, () => ({ address: A }))), async (file) => { await expect(importWatchList(file, t.repo)).rejects.toThrow('FILE_TOO_LARGE'); });
     await withFile('[]', async (file, directory) => { const link = join(directory, 'link.json'); await symlink(file, link); await expect(importWatchList(link, t.repo)).rejects.toThrow('FILE_INVALID'); });
+    // A link in the folder part of the path is refused too.
+    await withFile('[]', async (file, directory) => { await mkdir(join(directory, 'real')); await writeFile(join(directory, 'real', 'list.json'), '[]'); await symlink(join(directory, 'real'), join(directory, 'via')); await expect(importWatchList(join(directory, 'via', 'list.json'), t.repo)).rejects.toThrow('FILE_INVALID'); void file; });
     expect(t.rows).toEqual([]);
   });
 });

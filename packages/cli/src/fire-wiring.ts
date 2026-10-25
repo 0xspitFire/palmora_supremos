@@ -26,6 +26,8 @@ export interface FireWiringDeps {
   unclaimedRequests(): Array<{ campaignId: string; expiresAt: string }>;
   /** Requests the service has picked up (claimed as started), newest first, with when. */
   startedRequests(): Array<{ id: string; campaignId: string; claimedAt?: string }>;
+  /** How long a chain read may take before the step fails by name (default 20 seconds; tests shorten it). */
+  readTimeoutMs?: number;
   walletList(): Promise<string[]>;
   evmPort(chainId: 1 | 8453): Promise<IntelligenceChainPort>;
   evmLatestBlock(chainId: 1 | 8453): Promise<{ number: bigint; hash: string }>;
@@ -64,7 +66,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   /** A read from a chain provider is given 20 seconds; after that the step fails by name and nothing is sent (so a slow provider never leaves a fire hanging). */
   const read = <T,>(work: () => Promise<T>): Promise<T> => {
     let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('READ_TIMED_OUT: the chain provider did not answer in time; nothing was sent')), 20_000); timer.unref?.(); });
+    const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('READ_TIMED_OUT: the chain provider did not answer in time; nothing was sent')), deps.readTimeoutMs ?? 20_000); timer.unref?.(); });
     return Promise.race([work(), timeout]).finally(() => clearTimeout(timer));
   };
   const findCampaign = (campaignId: string): Campaign | undefined => deps.store.snapshot().campaigns.find((item) => item.id === campaignId);
@@ -72,8 +74,11 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   /** Open schedules and waiting requests. The in-flight guard is separate: the pipeline itself holds it while it runs. */
   const persistentConflict = (campaignId: string, ignoreScheduleId?: string): string | undefined => {
     // A run that is armed or running for this campaign, by what the store says (not a timer): a request that stopped at arm leaves no run, so a retry is never held back for it.
-    const running = deps.store.snapshot().runs.find((run) => run.campaignId === campaignId && (run.state === 'Armed' || run.state === 'Active'));
+    const running = deps.store.snapshot().runs.find((run) => run.campaignId === campaignId && (run.state === 'Armed' || run.state === 'Active' || run.state === 'Paused'));
     if (running) return `a run for this campaign is still in progress (${running.id}); see /runs`;
+    // A run that finished minutes ago: a second fire would spend again for what looks like the same mint, so it waits out 10 minutes (the owner can still fire after that).
+    const finished = deps.store.snapshot().runs.find((run) => run.campaignId === campaignId && run.state === 'Completed' && Date.parse(run.updatedAt) + 600_000 > now().getTime());
+    if (finished) return `a run for this campaign finished a moment ago (${finished.id}); check /runs before minting again, then retry in a few minutes`;
     const schedule = deps.fireSchedules().open(campaignId).find((item) => item.id !== ignoreScheduleId);
     if (schedule) return `a scheduled mint (${schedule.id.slice(-6)}) is open for this campaign; cancel it first (send /cancel and tap it)`;
     const nowMs = now().getTime();
