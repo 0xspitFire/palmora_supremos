@@ -67,6 +67,7 @@ import { BaseFinalityObserver, EthereumFinalityObserver, IndependentBaseFinality
 import type { FinalityObserver } from './finality-observer.js';
 import { LocalEncryptedSigner } from './signer.js';
 import { createBroadcaster } from './broadcasters/index.js';
+import { selectFleetWallets } from './fleet-selection.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
 import { assertBaseProviderAgreement, type BaseAgreementClient } from './base-provider-agreement.js';
 import { KillSwitch, SpendTracker } from './safety.js';
@@ -352,7 +353,7 @@ export class MintEngine {
       this.checkKill();
       signer = await this.signerFactory(passphrase);
       const allWallets = await signer.listWallets();
-      const wallets = allWallets.slice(0, this.config.fleet.maxWallets);
+      const wallets = selectFleetWallets(allWallets, this.config.fleet);
       engineLog.info({ walletCount: wallets.length }, 'Wallets loaded');
 
       if (chainId === 8453 && !this.config.safety.dryRun) {
@@ -1200,7 +1201,7 @@ export class MintEngine {
   private sanitizeConfig(): Record<string, unknown> {
     return {
       target: this.config.target,
-      fleet: { maxWallets: this.config.fleet.maxWallets },
+      fleet: { maxWallets: this.config.fleet.maxWallets, ...(this.config.fleet.walletIndexes ? { walletIndexes: this.config.fleet.walletIndexes } : {}) },
       timing: this.config.timing,
       fees: this.config.fees,
       safety: {
