@@ -76,6 +76,7 @@ import { safeEndpointReference } from './endpoint-reference.js';
 import {
   assertDirectChainExecutionPolicy,
   authorizedBaseExecutionProfile,
+  authorizedRobinhoodExecutionProfile,
   assertDurableReservationProvider,
   assertSimulationFresh,
   assertTimingWindow,
@@ -553,7 +554,9 @@ export class MintEngine {
       }
       const broadcastChainConfig = chainId === 8453
         ? authorizedBaseExecutionProfile(chainConfig, this.config.safety.dryRun, this.config.safety.baseGrant, this.now())
-        : chainConfig;
+        : chainId === 4663
+          ? authorizedRobinhoodExecutionProfile(chainConfig, this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), mintCostPerWallet)
+          : chainConfig;
       const broadcaster = createBroadcaster(
         broadcastChainConfig,
         this.config.broadcast.mode,
