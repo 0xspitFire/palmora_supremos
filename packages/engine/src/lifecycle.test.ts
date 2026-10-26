@@ -224,7 +224,9 @@ describe('the engine hands its Robinhood grant to the policy at every check', ()
     const calls = source.match(/assertDirectChainExecutionPolicy\(/g)?.length ?? 0;
     const granted = source.match(/this\.config\.safety\.robinhoodGrant/g)?.length ?? 0;
     expect(calls).toBe(5);
-    expect(granted).toBe(7);
+    // Six direct hand-offs remain. The former seventh occurrence was a mere
+    // object-presence bypass; admission now proves that the grant is current.
+    expect(granted).toBe(6);
     expect(source).not.toMatch(/process\.env[^\n]*(ROBINHOOD|GRANT)/i);
   });
 });

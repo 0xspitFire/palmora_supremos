@@ -56,6 +56,47 @@ const ERC721_ABI = parseAbi([
   'function maxSupply() view returns (uint256)',
 ]);
 
+/**
+ * Resolve the exact recipient which must be embedded in SeaDrop calldata.
+ * Callers preparing custody policy can omit the restriction flag; this helper
+ * then reads it from the same on-chain public-drop record used by the engine.
+ */
+export async function resolveSeaDropFeeRecipient(
+  client: Pick<PublicClient, 'readContract'>,
+  nftContract: Address,
+  restrictFeeRecipients?: boolean,
+): Promise<Address> {
+  let restricted = restrictFeeRecipients;
+  if (restricted === undefined) {
+    const drop = await client.readContract({
+      address: SEADROP_V1_ADDRESS,
+      abi: SEADROP_ABI,
+      functionName: 'getPublicDrop',
+      args: [nftContract],
+    }) as unknown as SeaDropPublicDrop;
+    restricted = drop.restrictFeeRecipients;
+  }
+  if (!restricted) return OPENSEA_FEE_COLLECTOR;
+  try {
+    const allowed = await client.readContract({
+      address: SEADROP_V1_ADDRESS,
+      abi: SEADROP_ABI,
+      functionName: 'getAllowedFeeRecipients',
+      args: [nftContract],
+    }) as readonly Address[];
+    if (allowed[0]) return allowed[0];
+  } catch {
+    // Preserve the engine's established fallback for providers that cannot
+    // serve this optional read; the simulation/pre-sign checks remain final.
+  }
+  return OPENSEA_FEE_COLLECTOR;
+}
+
+export function buildSeaDropPublicMintCalldata(nftContract: Address, feeRecipient: Address, quantity: number): Hex {
+  if (!Number.isSafeInteger(quantity) || quantity < 1) throw new Error('INVALID_QUANTITY');
+  return encodeFunctionData({ abi: SEADROP_ABI, functionName: 'mintPublic', args: [nftContract, feeRecipient, zeroAddress, BigInt(quantity)] });
+}
+
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
@@ -98,7 +139,7 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
     }
 
     // 2. Resolve fee recipient
-    const feeRecipient = await this.resolveFeeRecipient(
+    const feeRecipient = await resolveSeaDropFeeRecipient(
       client,
       nftContract,
       publicDrop.restrictFeeRecipients,
@@ -154,16 +195,7 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
   buildCalldata(drop: DropConfig, _minter: Address, quantity: number): Hex {
     // minterIfNotPayer = address(0) → msg.sender is the minter.
     // This makes calldata byte-identical across wallets (key insight from §3).
-    return encodeFunctionData({
-      abi: SEADROP_ABI,
-      functionName: 'mintPublic',
-      args: [
-        drop.nftContract,
-        drop.feePayer,
-        zeroAddress,  // minterIfNotPayer = 0 → replayable across wallets
-        BigInt(quantity),
-      ],
-    });
+    return buildSeaDropPublicMintCalldata(drop.nftContract, drop.feePayer, quantity);
   }
 
   async estimateGas(
@@ -225,39 +257,4 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
     };
   }
 
-  /**
-   * Resolve the fee recipient for a SeaDrop mint.
-   *
-   * Logic:
-   * 1. If restrictFeeRecipients is true, use the first from getAllowedFeeRecipients()
-   * 2. Otherwise, fall back to OpenSea's fee collector
-   * 3. If allowed list is empty despite restriction, fall back to OpenSea's collector
-   */
-  private async resolveFeeRecipient(
-    client: PublicClient,
-    nftContract: Address,
-    restrictFeeRecipients: boolean,
-  ): Promise<Address> {
-    if (!restrictFeeRecipients) {
-      return OPENSEA_FEE_COLLECTOR;
-    }
-
-    try {
-      const allowedRecipients = await client.readContract({
-        address: SEADROP_V1_ADDRESS,
-        abi: SEADROP_ABI,
-        functionName: 'getAllowedFeeRecipients',
-        args: [nftContract],
-      });
-
-      if (allowedRecipients.length > 0 && allowedRecipients[0]) {
-        return allowedRecipients[0];
-      }
-    } catch {
-      // Fall through to default
-    }
-
-    // Fallback — most drops allow the OpenSea fee collector
-    return OPENSEA_FEE_COLLECTOR;
-  }
 }

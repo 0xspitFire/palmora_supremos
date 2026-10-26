@@ -190,7 +190,8 @@ export interface BaseEnablementInput {
   paidAllowed?: boolean;
 }
 export interface EthereumLiveMintProofInput { id: string; txHash: string; blockNumber: string; blockHash: string; seadropAddress: string; sender: string; nftContract: string; callSelector: string; evidenceReference: string; approvedAt: string; confirmationDigest: string }
-export interface LiveRunRequestRecord { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string }
+export type LiveRunRequestProvenance = { kind: 'legacy' } | { kind: 'attended' } | { kind: 'schedule'; scheduleId: string };
+export interface LiveRunRequestRecord { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string; provenance?: LiveRunRequestProvenance }
 export interface BaseEnablementRow extends BaseEnablementInput { approvedBy: string; freeAllowed: true; paidAllowed: boolean; createdAt: string; }
 
 export interface ReorgEventRecord {
@@ -582,13 +583,20 @@ export class DurableRepository {
 
   /** T-058: the owner's request to the host service to arm and run one live mint. Immutable; the database checks it is complete. */
   public recordLiveRunRequest(input: LiveRunRequestRecord): void {
-    this.db.prepare("INSERT INTO live_run_request (id, campaign_id, wallets_json, simulation_ids_json, approval_id, evidence_at, max_fee_gwei, requested_by, confirmation_digest, requested_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'owner-cli', ?, ?, ?)").run(input.id, input.campaignId, JSON.stringify(input.wallets), JSON.stringify(input.simulationIds), input.approvalId, input.evidenceAt, input.maxFeeGwei, input.confirmationDigest, input.requestedAt, input.expiresAt);
+    const provenance = input.provenance ?? { kind: 'attended' as const };
+    if (provenance.kind === 'legacy') throw new Error('legacy live request provenance cannot be created');
+    this.db.prepare("INSERT INTO live_run_request (id, campaign_id, wallets_json, simulation_ids_json, approval_id, evidence_at, max_fee_gwei, requested_by, confirmation_digest, requested_at, expires_at, execution_provenance, schedule_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'owner-cli', ?, ?, ?, ?, ?)").run(input.id, input.campaignId, JSON.stringify(input.wallets), JSON.stringify(input.simulationIds), input.approvalId, input.evidenceAt, input.maxFeeGwei, input.confirmationDigest, input.requestedAt, input.expiresAt, provenance.kind === 'schedule' ? 'scheduled' : 'attended', provenance.kind === 'schedule' ? provenance.scheduleId : null);
+  }
+
+  private liveRequest(row: Record<string, string | null>): LiveRunRequestRecord {
+    const provenance: LiveRunRequestProvenance = row['execution_provenance'] === 'scheduled' ? { kind: 'schedule', scheduleId: row['schedule_id']! } : row['execution_provenance'] === 'attended' ? { kind: 'attended' } : { kind: 'legacy' };
+    return { id: row['id']!, campaignId: row['campaign_id']!, wallets: JSON.parse(row['wallets_json']!) as string[], simulationIds: JSON.parse(row['simulation_ids_json']!) as string[], approvalId: row['approval_id']!, evidenceAt: row['evidence_at']!, maxFeeGwei: row['max_fee_gwei']!, confirmationDigest: row['confirmation_digest']!, requestedAt: row['requested_at']!, expiresAt: row['expires_at']!, provenance };
   }
 
   /** Requests the service has not claimed yet, oldest first. */
   public unclaimedLiveRunRequests(): LiveRunRequestRecord[] {
     const rows = this.db.prepare('SELECT r.* FROM live_run_request r LEFT JOIN live_run_request_outcome o ON o.request_id = r.id WHERE o.request_id IS NULL ORDER BY r.rowid').all() as Array<Record<string, string>>;
-    return rows.map((row) => ({ id: row['id']!, campaignId: row['campaign_id']!, wallets: JSON.parse(row['wallets_json']!) as string[], simulationIds: JSON.parse(row['simulation_ids_json']!) as string[], approvalId: row['approval_id']!, evidenceAt: row['evidence_at']!, maxFeeGwei: row['max_fee_gwei']!, confirmationDigest: row['confirmation_digest']!, requestedAt: row['requested_at']!, expiresAt: row['expires_at']! }));
+    return rows.map((row) => this.liveRequest(row));
   }
 
   /** Claims a request exactly once. Returns false when it was already claimed (another tick, another process). */
@@ -600,7 +608,7 @@ export class DurableRepository {
   /** T-061: the newest requests with what happened to each (undefined: not claimed yet). */
   public recentLiveRunRequests(limit: number): Array<LiveRunRequestRecord & { outcome?: 'started' | 'expired' | 'cancelled'; claimedAt?: string }> {
     const rows = this.db.prepare('SELECT r.*, o.outcome AS outcome, o.claimed_at AS claimed_at FROM live_run_request r LEFT JOIN live_run_request_outcome o ON o.request_id = r.id ORDER BY r.rowid DESC LIMIT ?').all(Math.max(1, Math.min(50, Math.trunc(limit)))) as Array<Record<string, string | null>>;
-    return rows.map((row) => ({ id: row['id']!, campaignId: row['campaign_id']!, wallets: JSON.parse(row['wallets_json']!) as string[], simulationIds: JSON.parse(row['simulation_ids_json']!) as string[], approvalId: row['approval_id']!, evidenceAt: row['evidence_at']!, maxFeeGwei: row['max_fee_gwei']!, confirmationDigest: row['confirmation_digest']!, requestedAt: row['requested_at']!, expiresAt: row['expires_at']!, ...(row['outcome'] ? { outcome: row['outcome'] as 'started' | 'expired' | 'cancelled', claimedAt: row['claimed_at']! } : {}) }));
+    return rows.map((row) => ({ ...this.liveRequest(row), ...(row['outcome'] ? { outcome: row['outcome'] as 'started' | 'expired' | 'cancelled', claimedAt: row['claimed_at']! } : {}) }));
   }
 
   /** The owner's revocation of an enablement (D-062), if any. */

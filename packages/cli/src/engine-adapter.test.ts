@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, engineConfigFromCampaign, freeMintReserveCapsFor, preSignReservationGate, selectKeyListWallets } from './engine-adapter.js';
+import { assertCampaignCustodySelection, assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, engineConfigFromCampaign, freeMintReserveCapsFor, preSignReservationGate, selectKeyListWallets } from './engine-adapter.js';
 import { canonicalExecutionIdentity, createBroadcaster } from '@mint-bot/engine';
 
 const campaign = { mintPriceWei: 1_000n, quantity: 2 };
@@ -103,6 +103,18 @@ describe('complete pre-sign reservation gate used by the adapter reserve step (T
 });
 
 describe('adapter wiring (T-010)', () => {
+  it('fails closed for a rehydrated live Turnkey campaign without both immutable policy digests', () => {
+    expect(() => assertCampaignCustodySelection({ dryRun: false } as never, false, true)).toThrow('TURNKEY_CAMPAIGN_POLICY_BINDING_REQUIRED');
+    expect(() => assertCampaignCustodySelection({ dryRun: false, custodyPolicy: { policyReference: 'turnkey:p:x' } } as never, false, true)).toThrow('TURNKEY_CAMPAIGN_POLICY_BINDING_REQUIRED');
+    expect(() => assertCampaignCustodySelection({ dryRun: true } as never, true, true)).not.toThrow();
+  });
+  it('puts the campaign-scoped custody reference into the immutable engine target', () => {
+    const policyDigest = `0x${'a'.repeat(64)}`;
+    const config = engineConfigFromCampaign({ id: 'c', chainId: 1, contract: '0x3333333333333333333333333333333333333333', strategy: 'seadrop-v1-public', quantity: 1, custodyPolicy: { provider: 'turnkey', policyReference: `turnkey:p:${policyDigest}`, policyDigest, recordDigest: `sha256:${'b'.repeat(64)}` }, spendPolicy: { maxRunWei: 1n, dailyCapWei: 1n, gasCeilingWei: 1n }, feePolicy: { kind: 'free', configuredPriorityFeeWei: 0n, totalFeeBudgetWei: 0n } } as never, { policyRef: `turnkey:legacy:0x${'c'.repeat(64)}`, maxFeePerGasGwei: 1, gasLimitPadding: 1, maxReplacementBumps: 0, killSwitchFile: '/x' } as never, true, 1);
+    expect(config.target.policyRef).toBe(`turnkey:p:${policyDigest}`);
+    expect(config.target.policyRecordDigest).toBe(`sha256:${'b'.repeat(64)}`);
+  });
+
   it('routes the reserve step through the complete pre-sign gate', async () => {
     const { readFile } = await import('node:fs/promises');
     const source = await readFile(new URL('./engine-adapter.ts', import.meta.url), 'utf8');

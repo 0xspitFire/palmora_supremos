@@ -40,6 +40,8 @@ export interface FireWiringDeps {
   /** Asks the request processor to look now. */
   kick(): void;
   now?: () => Date;
+  /** D-017: accepted host evidence, checked when a schedule is created and again before it fires. */
+  assertUnattendedReady?: () => Promise<void>;
 }
 
 export interface FireWiring {
@@ -59,6 +61,7 @@ export interface FireWiring {
   parseWindow(from: string, until: string): { from: Date; until: Date };
   campaignDigest(campaign: Campaign): string;
   conflict(campaignId: string, ignoreScheduleId?: string): string | undefined;
+  assertUnattendedReady(): Promise<void>;
 }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -164,13 +167,13 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     campaign: findCampaign,
     conflict: persistentConflict,
     recordSimulations,
-    createRequest: async (campaign, wallets, maxFeeGwei) => {
+    createRequest: async (campaign, wallets, maxFeeGwei, provenance) => {
       // A campaign sized for N wallets covers at most N: the others that passed are left out and said so, never refused as an error.
       const sized = Math.max(1, sizedWalletCount(campaign));
       const used = wallets.slice(0, sized);
       const leftOut = wallets.slice(sized);
       const preview = previewLiveRequest(deps.store.snapshot(), campaign.id, used, maxFeeGwei, now());
-      const result = await runLiveRequest({ action: 'create', campaignId: campaign.id, wallets: preview.wallets, maxFeeGwei, confirm: preview.phrase, now: now(), store: deps.store as never, approve: (validated) => deps.approve(validated as never) });
+      const result = await runLiveRequest({ action: 'create', campaignId: campaign.id, wallets: preview.wallets, maxFeeGwei, confirm: preview.phrase, now: now(), store: deps.store as never, approve: (validated) => deps.approve(validated as never), ...(provenance ? { provenance } : {}) });
       return { requestId: String(result.requestId), wallets: preview.wallets, leftOut };
     },
     kick: deps.kick,
@@ -202,7 +205,15 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
       return `${campaign.quantity} NFT(s) per wallet at ${formatEth(campaign.mintPriceWei)} ETH from ${used} wallet(s) on chain ${campaign.chainId}, contract ${campaign.contract.slice(0, 6)}…${campaign.contract.slice(-4)}. The most that can be spent is ${formatEth(total)} ETH, signing at no more than ${maxFeeGwei} gwei. Every guard still applies.`;
     },
     fireNow: (campaignId, wallets, maxFeeGwei) => run({ campaignId, wallets, maxFeeGwei }),
-    fireSchedule: (schedule) => run({ campaignId: schedule.campaignId, wallets: schedule.wallets, maxFeeGwei: Number(schedule.maxFeeGwei), scheduleId: schedule.id }),
+    fireSchedule: async (schedule) => {
+      if (!deps.assertUnattendedReady) throw new Error('OPS_EVIDENCE_CHECK_REQUIRED');
+      await deps.assertUnattendedReady();
+      return run({ campaignId: schedule.campaignId, wallets: schedule.wallets, maxFeeGwei: Number(schedule.maxFeeGwei), scheduleId: schedule.id });
+    },
+    async assertUnattendedReady() {
+      if (!deps.assertUnattendedReady) throw new Error('OPS_EVIDENCE_CHECK_REQUIRED');
+      await deps.assertUnattendedReady();
+    },
     schedulePhrase(campaign, wallets, maxFeeGwei, from, until) {
       const fee = campaign.feePolicy.totalFeeBudgetWei ?? 0n;
       const used = Math.min(wallets.length, Math.max(1, sizedWalletCount(campaign)));

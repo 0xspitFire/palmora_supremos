@@ -343,7 +343,7 @@ describe('buttons and typed text in general', () => {
 });
 
 describe('the steps after prepare are buttons too (T-074)', () => {
-  it('prepare, then record the test mints, then choose the wallets for the request: nothing to copy at any point', async () => {
+  it('prepare, record test mints, release the kill switch, then choose the request wallets: nothing to copy', async () => {
     const t = setup();
     let step = await t.flows.start('prepare');
     step = await t.press(step, 'Robinhood');
@@ -356,6 +356,10 @@ describe('the steps after prepare are buttons too (T-074)', () => {
     step = await t.press(step, 'Record Test Mints');
     expect(t.calls.at(-1)).toBe('simulate(cmp_new)');
     expect(step.reply.text).toContain('2 wallet(s) passed the test mint');
+    expect(step.reply.text).toContain('The kill switch is ON');
+    expect(step.reply.buttons?.flat().map((button) => button.text)).toEqual(['Release The Kill Switch', 'Cancel']);
+    step = await t.press(step, 'Release The Kill Switch');
+    expect(t.calls.at(-1)).toBe('release(RELEASE engaged T1)');
     expect(step.reply.text).toContain('sized for 1 wallet(s)');
     expect(step.reply.buttons?.flat().map((button) => button.text)).toEqual(['All Tested (1)', '0x1111…1111', '0x2222…2222', 'Custom…', 'Cancel']);
     step = await t.press(step, 'All Tested (1)');
@@ -404,12 +408,12 @@ describe('the steps after prepare are buttons too (T-074)', () => {
     expect(simulate.reply.buttons?.flat().map((button) => button.text)).toEqual(['Record Test Mints', 'Cancel']);
   });
 
-  it('typed /simulate in full records the test mints at once and goes straight on to the wallets', async () => {
+  it('typed /simulate in full records the test mints at once and goes to release before wallets', async () => {
     const t = setup();
     const result = await t.flows.runSimulate('cmp_a');
     expect(t.calls).toEqual(['simulate(cmp_a)']);
     expect(result.done).toEqual({ command: 'simulate', outcome: 'ok' });
-    expect(result.reply.buttons?.flat().map((button) => button.text)).toContain('All Tested (1)');
+    expect(result.reply.buttons?.flat().map((button) => button.text)).toContain('Release The Kill Switch');
     const failing = setup({ simulateCampaign: async () => { throw new Error('MINT_NOT_OPEN: the mint is upcoming'); } });
     expect((await failing.flows.runSimulate('cmp_a')).reply.text).toContain('Not done: MINT_NOT_OPEN');
   });
@@ -497,7 +501,9 @@ describe('the campaign id is shown once at the top of each message (T-075 review
     const t = setup();
     const result = await t.flows.runSimulate('cmp_a');
     expect(result.reply.text.match(/cmp_a/g)).toHaveLength(1);
-    const wallets = await t.press(result, 'All Tested (1)');
+    const released = await t.press(result, 'Release The Kill Switch');
+    expect(released.reply.text.match(/cmp_a/g)).toHaveLength(1);
+    const wallets = await t.press(released, 'All Tested (1)');
     expect(wallets.reply.text).toContain('Campaign: cmp_a');
     expect(wallets.reply.text.match(/cmp_a/g)).toHaveLength(1);
     const typed = await t.flows.start('simulate', { campaign: 'cmp_a' });
@@ -509,11 +515,11 @@ describe('the campaign id is shown once at the top of each message (T-075 review
 describe('funding in the request guide (the second live attempt)', () => {
   it('shows who was left out for funding, and when no tested wallet is funded it says what to do instead of showing empty choices', async () => {
     const t = setup({ requestWallets: async () => ({ wallets: [A], sized: 1, note: '✗ 0x2222…2222 left out: it holds 0.000081 ETH and a run needs at least 0.0002 ETH: send 0.000119 ETH more first (see /funding).' }) });
-    const step = await t.flows.runSimulate('cmp_a');
+    const step = await t.press(await t.flows.runSimulate('cmp_a'), 'Release The Kill Switch');
     expect(step.reply.text).toContain('enough ETH for a run');
     expect(step.reply.text).toContain('send 0.000119 ETH more first');
     const none = setup({ requestWallets: async () => ({ wallets: [], sized: 1, note: '✗ 0x1111…1111 left out: send 0.000049 ETH more first.' }) });
-    const empty = await none.flows.runSimulate('cmp_a');
+    const empty = await none.press(await none.flows.runSimulate('cmp_a'), 'Release The Kill Switch');
     expect(empty.reply.text).toContain('No wallet with a fresh test mint holds what a run needs');
     expect(empty.reply.text).toContain('send 0.000049 ETH more first');
     expect(empty.reply.buttons).toBeUndefined();
@@ -541,11 +547,11 @@ describe('review fixes for the button steps (T-074)', () => {
     expect(refused.done).toEqual({ command: 'simulate', outcome: 'refused:MINT_NOT_OPEN' });
   });
 
-  it('when the test mints are recorded but the wallet choices cannot be shown, it says so and keeps the outcome true', async () => {
-    const t = setup({ requestWallets: async () => { throw new Error('RPC_DOWN: no answer'); } });
+  it('when the test mints are recorded but release status cannot be shown, it says so and keeps the outcome true', async () => {
+    const t = setup({ releaseStatus: async () => { throw new Error('RPC_DOWN: no answer'); } });
     const result = await t.flows.runSimulate('cmp_a');
     expect(result.reply.text).toContain('2 wallet(s) passed the test mint');
-    expect(result.reply.text).toContain('The test mints are recorded; send /request to continue.');
+    expect(result.reply.text).toContain('The test mints are recorded; send /release, then /request to continue.');
     expect(result.done).toEqual({ command: 'simulate', outcome: 'ok' });
   });
 

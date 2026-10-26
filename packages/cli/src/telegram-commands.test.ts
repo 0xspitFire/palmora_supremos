@@ -540,12 +540,12 @@ describe('guided flows through the router (D-069)', () => {
     expect(t.lastTo(OWNER)).toContain('Campaign recorded: cmp_11111111-1111-1111-1111-111111111111');
     expect(t.calls.at(-1)).toBe(`guidedPrepare(robinhood|${CONTRACT}|1|3)`);
     expect(t.records.at(-1)).toMatchObject({ command: 'prepare', outcome: 'ok' });
-    // The next step is a button, not a command to copy: record the test mints, then pick the wallets for the request.
+    // The next steps are buttons: record the test mints, then release before a request can be queued.
     expect(t.lastTo(OWNER)).not.toContain('/simulate');
     await tapLabel(t, 'Record Test Mints');
     expect(t.calls.at(-1)).toBe('simulateCampaign(cmp_11111111-1111-1111-1111-111111111111)');
-    expect(t.lastTo(OWNER)).toContain('This campaign was sized for 1 wallet(s)');
-    expect(buttonsOf(t).map((item) => item.text)).toContain('All Tested (1)');
+    expect(t.lastTo(OWNER)).toContain('The kill switch is ON');
+    expect(buttonsOf(t).map((item) => item.text)).toContain('Release The Kill Switch');
   });
 
   it('typed commands with arguments still work as before', async () => {
@@ -649,17 +649,18 @@ describe('guided flows through the router (D-069)', () => {
     expect(buttonsOf(t).map((item) => item.text)).toEqual(['Ethereum', 'Robinhood', 'Cancel']);
   });
 
-  it('/simulate with nothing after it picks the campaign; with a campaign it records the test mints at once; both go on to the wallet buttons', async () => {
+  it('/simulate with nothing after it picks the campaign; both forms record test mints and then require release', async () => {
     const t = setup();
     await t.send(t.message(OWNER, '/simulate'));
     await tapLabel(t, 'Robinhood 0xa686…94db · 1 NFT');
     expect(t.lastTo(OWNER)).toContain('Record a test mint for each wallet');
     await tapLabel(t, 'Record Test Mints');
     expect(t.calls.at(-1)).toBe('simulateCampaign(cmp_a)');
-    expect(buttonsOf(t).map((item) => item.text)).toContain('All Tested (1)');
+    expect(buttonsOf(t).map((item) => item.text)).toContain('Release The Kill Switch');
     await t.send(t.message(OWNER, '/simulate cmp_b'));
     expect(t.calls.at(-1)).toBe('simulateCampaign(cmp_b)');
     expect(t.lastTo(OWNER)).toContain('2 wallet(s) passed the test mint');
+    expect(buttonsOf(t).map((item) => item.text)).toContain('Release The Kill Switch');
     expect(t.lastTo(OWNER)).not.toContain('/request');
     expect(t.records.at(-1)).toMatchObject({ command: 'simulate', outcome: 'ok' });
   });
@@ -741,9 +742,8 @@ describe('guided flows through the router (D-069)', () => {
     await press('Robinhood'); await t.send(t.message(OWNER, CONTRACT));
     await press('1'); await press('All ready (3)'); await press('Prepare (Spends Nothing)');
     expect(t.lastTo(OWNER)).toContain('cmp_11111111-1111-1111-1111-111111111111');
-    await press('Record Test Mints'); await press('All Tested (1)'); await press('0.2 gwei'); await press('Send Request');
+    await press('Record Test Mints'); await press('Release The Kill Switch'); await press('All Tested (1)'); await press('0.2 gwei'); await press('Send Request');
     // release, fire, schedule, cancel, funding, run, revoke, watchaccept
-    await t.send(t.message(OWNER, '/release')); await press('Release The Kill Switch');
     await t.send(t.message(OWNER, '/fire')); await press('Robinhood 0xa686…94db · 1 NFT'); await press('All Signing Wallets (2)'); await press('0.2 gwei'); await press('Fire Now');
     await t.send(t.message(OWNER, '/schedule')); await press('Robinhood 0xa686…94db · 1 NFT'); await press('All Signing Wallets (2)'); await press('0.2 gwei'); await press('Now To +2 H'); await press('Store Schedule');
     await t.send(t.message(OWNER, '/cancel')); await press('Request 000001');

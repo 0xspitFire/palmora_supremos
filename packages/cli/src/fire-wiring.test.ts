@@ -16,7 +16,7 @@ const SHORT = 151_000_000_000_000n; // 0.000151 ETH, like the real wallet
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; walletsUsed?: string[]; reconciliations?: Array<{ runId: string; result: string; reason?: string; observedAt: string }>; reconcileNow?: () => Promise<void>; reconcileTimeoutMs?: number; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string } = {}) {
+async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; walletsUsed?: string[]; reconciliations?: Array<{ runId: string; result: string; reason?: string; observedAt: string }>; reconcileNow?: () => Promise<void>; reconcileTimeoutMs?: number; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string; opsReady?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -33,7 +33,7 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
   const evidence = { id: 'verification_abc', chainId: 4663, status: 'accepted', executionEnabled: true, checkedAt: '2026-10-25T11:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', sourceBlock: 1n, endpointIdentity: 'robinhood-sequencer' };
   const campaigns = [{ id: 'campaign_abcdef12', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n, spendPolicy: { maxRunWei: options.maxRunWei ?? 10n ** 18n, dailyCapWei: 10n ** 18n, gasCeilingWei: 10n ** 18n }, chainVerification: { chainId: 4663, status: 'verified', seaDropCompatible: true }, state: 'draft', createdAt: 'x', updatedAt: 'x', broadcastMode: 'sequencer' }];
   const store = {
-    snapshot: () => ({ attempts: [], receipts: [], reservations: [], reconciliations: options.reconciliations ?? [], events: options.events ?? [], campaigns, simulations, chainEvidence: [evidence], runs: options.runs ?? [], killed: false }),
+    snapshot: () => ({ attempts: [], receipts: [], reservations: [], reconciliations: options.reconciliations ?? [], events: options.events ?? [], campaigns, simulations, chainEvidence: [evidence], runs: options.runs ?? [], killed: false, runtime: { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } } }),
     transaction: async (mutate: (state: { simulations: unknown[] }) => void) => { mutate({ simulations }); },
     recordLiveRunRequest: (input: Record<string, unknown>) => { requests.push(input); },
     claimLiveRunRequest: () => false,
@@ -49,6 +49,7 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
     readTimeoutMs: options.readTimeoutMs, campaignWalletsUsed: () => options.walletsUsed ?? [], fireSchedules: () => schedules, startedRequests: () => (options.started ?? []).map((item) => ({ ...item, claimedAt: options.claimedAt ?? NOW.toISOString() })), unclaimedRequests: () => requests.map((request) => ({ campaignId: String(request.campaignId), expiresAt: String(request.expiresAt) })),
     walletList: async () => options.walletsInList ?? [A, B], evmPort: async () => { throw new Error('not used'); }, evmLatestBlock: async () => { throw new Error('not used'); },
     robinhoodDryRun, robinhoodLatestBlock: async () => options.slowRead ? new Promise<{ number: bigint; hash: string }>(() => undefined) : ({ number: 99n, hash: '0xabc' }), balanceOf: async (_chain, address) => options.balances?.[address.toLowerCase()] ?? 400_000_000_000_000n, kick: () => { kicks.push('kick'); }, now: () => NOW,
+    assertUnattendedReady: async () => { if (options.opsReady === false) throw new Error('OPS_EVIDENCE_NOT_ACCEPTED'); },
   });
   const base: TelegramActionDeps = {
     mode: 'host', custody: 'turnkey', store: store as never, application: { command: async () => ({ id: 'approval_1' }) } as never, coordinator: { kill: async () => undefined }, projectRoot: '/nonexistent', secretRoot: '/nonexistent', killSwitchPath,
@@ -400,6 +401,19 @@ describe('a run needs each wallet to hold its full worst case (the second live a
 });
 
 describe('/schedule', () => {
+  it('fails closed at preview and execution until D-017 evidence is accepted', async () => {
+    const blocked = await setup({ status: 'upcoming', opsReady: false });
+    const ready = await setup({ status: 'upcoming' });
+    try {
+      await expect(blocked.actions.schedulePreview('campaign_abcdef12', A, 0.2, ...WINDOW)).rejects.toThrow('OPS_EVIDENCE_NOT_ACCEPTED');
+      const preview = await ready.actions.schedulePreview('campaign_abcdef12', A, 0.2, ...WINDOW);
+      await ready.actions.scheduleCreate('campaign_abcdef12', A, 0.2, ...WINDOW, preview.phrase);
+      const schedule = ready.schedules.open()[0]!;
+      // The scheduler checks through fireSchedule itself, independent of the Telegram preview.
+      await expect(blocked.fire.fireSchedule(schedule)).rejects.toThrow('OPS_EVIDENCE_NOT_ACCEPTED');
+    } finally { await Promise.all([cleanup(blocked.directory), cleanup(ready.directory)]); }
+  });
+
   it('stores an immutable schedule only with the exact phrase, and refuses a second one for the same campaign', async () => {
     const t = await setup({ status: 'upcoming' });
     try {
@@ -472,6 +486,7 @@ describe('/schedule', () => {
       t.schedules.claim(schedule.id, 'started');
       await t.fire.fireSchedule(schedule);
       expect(t.requests).toHaveLength(1);
+      expect(t.requests[0]!.provenance).toEqual({ kind: 'schedule', scheduleId: schedule.id });
       expect(t.kicks).toEqual(['kick']);
     } finally { await cleanup(t.directory); }
   });

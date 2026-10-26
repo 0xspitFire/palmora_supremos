@@ -51,6 +51,7 @@ describe('live run requests (T-058)', () => {
     expect(() => repository.recordLiveRunRequest(request({ maxFeeGwei: '1.2.3' }))).toThrow(/incomplete/);
     expect(() => repository.recordLiveRunRequest(request({ maxFeeGwei: '500.' }))).toThrow(/incomplete/);
     expect(() => repository.recordLiveRunRequest(request({ approvalId: '' }))).toThrow(/incomplete/);
+    expect(() => repository.recordLiveRunRequest(request({ provenance: { kind: 'legacy' } }))).toThrow(/legacy live request provenance/);
     expect(() => repository.recordLiveRunRequest(request({ confirmationDigest: 'not-a-digest' }))).toThrow();
     expect(() => repository.recordLiveRunRequest(request({ campaignId: 'no-such-campaign' }))).toThrow();
     expect(repository.unclaimedLiveRunRequests()).toEqual([]);
@@ -66,5 +67,14 @@ describe('live run requests (T-058)', () => {
     db.prepare("INSERT OR REPLACE INTO live_run_request_outcome (request_id, outcome, claimed_at) VALUES ('request-1', 'expired', '2026-10-24T10:01:00.000Z')").run();
     expect(db.prepare('SELECT outcome FROM live_run_request_outcome').all()).toEqual([{ outcome: 'started' }]);
     expect(() => db.prepare('DELETE FROM live_run_request_outcome').run()).toThrow(/immutable/);
+  });
+
+  it('persists immutable schedule provenance and rejects a missing or cross-campaign schedule', () => {
+    const { db, repository } = fixture();
+    db.prepare("INSERT INTO fire_schedule (id, campaign_id, campaign_digest, wallets_json, max_fee_gwei, window_from, window_until, requested_by, confirmation_digest, created_at) VALUES ('fire_schedule_12345678', 'campaign', ?, ?, '5', '2026-10-24T10:01:00.000Z', '2026-10-24T10:20:00.000Z', 'owner-telegram', ?, '2026-10-24T10:00:00.000Z')").run('b'.repeat(64), JSON.stringify(request().wallets), 'c'.repeat(64));
+    repository.recordLiveRunRequest(request({ provenance: { kind: 'schedule', scheduleId: 'fire_schedule_12345678' } }));
+    expect(repository.unclaimedLiveRunRequests()[0]!.provenance).toEqual({ kind: 'schedule', scheduleId: 'fire_schedule_12345678' });
+    expect(() => db.prepare("UPDATE live_run_request SET execution_provenance = 'attended', schedule_id = NULL").run()).toThrow(/immutable/);
+    expect(() => repository.recordLiveRunRequest(request({ id: 'request-2', provenance: { kind: 'schedule', scheduleId: 'fire_schedule_missing' } }))).toThrow(/incomplete/);
   });
 });

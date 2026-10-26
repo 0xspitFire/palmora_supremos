@@ -106,7 +106,9 @@ if ! cmp -s "$WORK/native-found.sorted" "$WORK/native-pinned.sorted"; then
 fi
 echo "Native files match the pinned hashes: $(wc -l < "$WORK/native-found.sorted") file(s)"
 
-printf 'commit=%s\nbuilt_at=%s\nnode=20.19.1\nbuilder=build-release.sh\nmethod=%s\n' "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUILD_NOTE" > "$WORK/out/release/RELEASE"
+PRODUCT_VERSION="$(node -e "const p=require('$WORK/src/package.json'); if(!/^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$/.test(p.version)) process.exit(1); process.stdout.write(p.version)")" \
+  || { echo "STOP: package.json has no valid semantic version." >&2; exit 1; }
+printf 'commit=%s\nproduct_version=%s\nbuilt_at=%s\nnode=20.19.1\nbuilder=build-release.sh\nmethod=%s\n' "$COMMIT" "$PRODUCT_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUILD_NOTE" > "$WORK/out/release/RELEASE"
 # Hard links are written as ordinary files, so the installer can refuse every hard link.
 tar --sort=name --owner=0 --group=0 --numeric-owner --hard-dereference -czf "$OUT" -C "$WORK/out" release
 echo

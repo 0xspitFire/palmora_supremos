@@ -36,11 +36,12 @@ import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './f
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
+import { assertOpsEvidenceAccepted } from '../../../scripts/ops-evidence-runtime.mjs';
 import { chainRpcSecretNames, failoverTransport, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import { startDependencyFlags } from './dependency-flags.js';
 import { createPublicClient, formatGwei } from 'viem';
 import { startGasAlerts } from './gas-alert-service.js';
-import { liveRequestFollowUp, startLiveRequestPoller } from './live-request.js';
+import { liveRequestFollowUp, sentTransactionsForRun, startLiveRequestPoller } from './live-request.js';
 import { createFireWiring, type FireWiring } from './fire-wiring.js';
 import { dryRunDrop } from './robinhood-readonly.js';
 import { createBlockscoutPortfolio, type PortfolioProvider } from './portfolio-provider.js';
@@ -251,7 +252,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       command: (name, input) => liveApplication.command(name, input),
       setFeeCeiling: (campaignId, gwei) => runtime.setFeeCeiling(campaignId, gwei),
       closeRun: (runId) => runtime.coordinator.closeUnsentRun(runId, 'REQUEST_FAILED'),
-      sentTransactions: (runId) => runtime.store.snapshot().attempts.filter((attempt) => attempt.runId === runId && typeof attempt.hash === 'string' && attempt.hash.length > 0).map((attempt) => ({ hash: attempt.hash!, wallet: attempt.wallet })),
+      assertUnattendedReady: async () => { await assertOpsEvidenceAccepted({ environment }); },
+      sentTransactions: (runId) => { const state = runtime.store.snapshot(); return sentTransactionsForRun(state.attempts, state.receipts, runId); },
       record: async ({ requestId, runId, campaignId, state, code, runClosed, sent }) => {
         await runtime.store.transaction((current) => { current.events.push({ id: `live_request_result_${randomUUID()}`, type: 'live_request_result', ...(runId ? { runId } : {}), at: new Date().toISOString(), data: { requestId, state, ...(code ? { code } : {}) } }); });
         logger.info({ event: 'live_request_result', requestId, state, ...(code ? { code } : {}), ...(runClosed ? { runClosed } : {}) }, 'live request processed');
@@ -326,6 +328,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       robinhoodLatestBlock: () => latestBlock(4663),
       balanceOf: async (chainId, address) => (await reader(chainId as 1 | 8453 | 4663)).getBalance({ address: address as `0x${string}` }),
       kick: () => { void liveRequests?.tick(); },
+      assertUnattendedReady: async () => { await assertOpsEvidenceAccepted({ environment }); },
     }) : undefined;
     if (fire) {
       // A schedule claimed before a crash may never have reached the request: tell the owner once at start (D-067 review).

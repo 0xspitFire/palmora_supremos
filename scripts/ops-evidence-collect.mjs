@@ -16,6 +16,7 @@ import { REQUIRED_CHECKS, sanitize, sha256Hex, validateEvidence } from './ops-ev
  *   sudo node scripts/ops-evidence-collect.mjs service_supervision
  *   sudo node scripts/ops-evidence-collect.mjs heap_core_dump
  *   sudo node scripts/ops-evidence-collect.mjs backup_restore --restore-drill ~/restore-drill-output.json
+ *   sudo node scripts/ops-evidence-collect.mjs rotation_revocation --rotation-drill ~/rotation-revocation-output.json
  */
 const run = promisify(execFile);
 const CURRENT = '/opt/mint-bot/current';
@@ -23,6 +24,14 @@ const RELEASES = '/opt/mint-bot/releases';
 const SETTINGS = '/etc/mint-bot/mint-bot.env';
 const BACKUP_STATUS = '/var/lib/mint-bot/backup-status/status.json';
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+const ROTATION_REFERENCE_NAMES = [
+  'canonical-policy-record',
+  'production-wallet-map',
+  'bounded-funding-profile',
+  'no-broadcast-rehearsal',
+  'old-reference-exclusion',
+];
 
 export const ZEROIZATION_LIMITS = 'JavaScript strings and V8 heap objects cannot be reliably overwritten; transaction signing keys never enter this process (they stay in Turnkey), the process holds only the API credential, and core dumps are disabled.';
 
@@ -51,6 +60,8 @@ export function realIo() {
 const pass = (name, observed) => ({ name, result: 'pass', observed: sanitize(observed) });
 const fail = (name, observed) => ({ name, result: 'fail', observed: sanitize(observed) });
 const check = (name, ok, observedOk, observedFail) => (ok ? pass(name, observedOk) : fail(name, observedFail));
+const hasExactKeys = (value, names) => Boolean(value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join('\n') === [...names].sort().join('\n'));
 
 async function show(io, unit, property) {
   const result = await io.exec('systemctl', ['show', unit, '-p', property, '--value']);
@@ -163,7 +174,7 @@ async function recovery(io, options) {
   try { drill = JSON.parse(drillText.trim().split('\n').filter((line) => line.startsWith('{')).at(-1) ?? ''); } catch { drill = undefined; }
   if (drillText) references.push({ name: 'recovery-drill-output', sha256: sha256Hex(drillText) });
   const age = drill ? io.now().getTime() - Date.parse(drill.completedAt) : Number.NaN;
-  const recent = age >= 0 && age <= 24 * 60 * 60 * 1000;
+  const recent = age >= 0 && age <= TWENTY_FOUR_HOURS_MS;
   for (const name of ['restored_from_offhost', 'integrity_ok', 'schema_current', 'post_recovery_reconciliation']) {
     const result = drill?.checks?.[name];
     checks.push(check(name, Boolean(drill && drill.status === 'ok' && recent && result?.pass === true), String(result?.observed ?? ''), drill ? (recent ? `recovery drill reported: ${result?.observed ?? 'no result'}` : 'the recovery drill output is older than 24 hours; run it again') : 'no recovery drill output was given'));
@@ -173,8 +184,64 @@ async function recovery(io, options) {
   return { checks, references };
 }
 
+/**
+ * Consume a redacted result produced outside this collector after the owner/provider rotation ceremony.
+ * The collector does not call the custody provider or infer revocation from local configuration. Every
+ * required conclusion must be stated independently and bound to the digests of its supporting records.
+ */
+async function rotationRevocation(io, options) {
+  const checks = [];
+  const references = [];
+  let drill;
+  let drillText = '';
+  if (options.rotationDrill) drillText = await io.readText(options.rotationDrill).catch(() => '');
+  try { drill = JSON.parse(drillText); } catch { drill = undefined; }
+  if (drillText) references.push({ name: 'rotation-revocation-drill-output', sha256: sha256Hex(drillText) });
+
+  const age = drill ? io.now().getTime() - Date.parse(drill.completedAt) : Number.NaN;
+  const recent = age >= 0 && age <= TWENTY_FOUR_HOURS_MS;
+  const contractOk = Boolean(
+    drill
+    && hasExactKeys(drill, ['version', 'type', 'environment', 'status', 'completedAt', 'checks', 'references'])
+    && drill.version === 1
+    && drill.type === 'mintbot-rotation-revocation-drill'
+    && drill.environment === 'production'
+    && drill.status === 'ok'
+    && hasExactKeys(drill.checks, ['fresh_wallet_inventory', 'funding_profile_bounded', 'old_references_excluded'])
+    && recent,
+  );
+  const suppliedReferences = Array.isArray(drill?.references) ? drill.references : [];
+  const referenceByName = new Map(suppliedReferences.map((reference) => [reference?.name, reference]));
+  const referencesOk = suppliedReferences.length === ROTATION_REFERENCE_NAMES.length
+    && ROTATION_REFERENCE_NAMES.every((name) => {
+      const reference = referenceByName.get(name);
+      return hasExactKeys(reference, ['name', 'sha256']) && typeof reference.sha256 === 'string' && /^[0-9a-f]{64}$/.test(reference.sha256);
+    });
+  if (referencesOk) references.push(...ROTATION_REFERENCE_NAMES.map((name) => ({ name, sha256: referenceByName.get(name).sha256 })));
+
+  for (const name of ['fresh_wallet_inventory', 'funding_profile_bounded', 'old_references_excluded']) {
+    const result = drill?.checks?.[name];
+    const observed = typeof result?.observed === 'string' ? result.observed : '';
+    const safeObservation = observed.length >= 3 && observed.length <= 300 && sanitize(observed) === observed.trim();
+    checks.push(check(
+      name,
+      Boolean(contractOk && referencesOk && hasExactKeys(result, ['pass', 'observed']) && result.pass === true && safeObservation),
+      observed,
+      !drill
+        ? 'no redacted rotation/revocation drill result was supplied'
+        : !recent
+          ? 'the rotation/revocation drill result is older than 24 hours; run it again'
+          : !referencesOk
+            ? 'the drill is missing one or more required supporting-record digests'
+            : `the independent drill did not prove ${name}`,
+    ));
+  }
+  return { checks, references };
+}
+
 const COLLECTORS = {
   recovery: (io, options) => recovery(io, options),
+  rotation_revocation: (io, options) => rotationRevocation(io, options),
   service_supervision: async (io, _options, commit) => ({ checks: await serviceSupervision(io, commit), references: [] }),
   heap_core_dump: async (io) => ({ checks: await heapCore(io), references: [] }),
   backup_restore: (io, options) => backupRestore(io, options),
@@ -202,12 +269,16 @@ export const DEFAULT_PATHS = {
 async function main() {
   const [kind, ...rest] = process.argv.slice(2);
   const option = (name) => { const index = rest.indexOf(name); return index >= 0 ? rest[index + 1] : undefined; };
-  if (!kind || !Object.hasOwn(REQUIRED_CHECKS, kind)) { console.error(`Usage: node ops-evidence-collect.mjs <${Object.keys(REQUIRED_CHECKS).join('|')}> [--restore-drill FILE] [--recovery-drill FILE] [--out FILE]`); process.exitCode = 2; return; }
+  if (!kind || !Object.hasOwn(REQUIRED_CHECKS, kind)) { console.error(`Usage: node ops-evidence-collect.mjs <${Object.keys(REQUIRED_CHECKS).join('|')}> [--restore-drill FILE] [--recovery-drill FILE] [--rotation-drill FILE] [--out FILE]`); process.exitCode = 2; return; }
   if (typeof process.getuid === 'function' && process.getuid() !== 0) { console.error('Run this as root: sudo node scripts/ops-evidence-collect.mjs <kind>'); process.exitCode = 2; return; }
-  const { artifact, failed, problems } = await collect(kind, realIo(), process.env, { restoreDrill: option('--restore-drill'), recoveryDrill: option('--recovery-drill') });
+  const { artifact, failed, problems } = await collect(kind, realIo(), process.env, { restoreDrill: option('--restore-drill'), recoveryDrill: option('--recovery-drill'), rotationDrill: option('--rotation-drill') });
   for (const item of artifact.checks) console.log(`${item.result === 'pass' ? 'PASS' : 'FAIL'}  ${item.name}: ${item.observed}`);
   if (failed.length > 0 || problems.length > 0) {
     console.log(`\nNot written: ${failed.length} check(s) failed${problems.length ? `; problems: ${problems.join(', ')}` : ''}. Fix what is listed and run it again.`);
+    if (kind === 'rotation_revocation') {
+      console.log('Supply --rotation-drill FILE with redacted JSON: version 1, type mintbot-rotation-revocation-drill, environment production, status ok, and completedAt within 24 hours.');
+      console.log(`It must pass all three named checks and contain SHA-256 references named: ${ROTATION_REFERENCE_NAMES.join(', ')}.`);
+    }
     process.exitCode = 1;
     return;
   }

@@ -5,14 +5,18 @@ import {
   canonicalTurnkeyPolicyRecordJson,
   createTurnkeyPolicyRecord,
   projectTurnkeyProviderKey,
+  pruneTurnkeySignedPolicyCatalog,
   signTurnkeyPolicyRecord,
   turnkeyPolicyApproverKeyId,
   turnkeyProviderPolicyExpressions,
   validateTurnkeyActualProviderState,
   validateTurnkeyCanonicalPolicyRecord,
+  verifyTurnkeySignedPolicyCatalog,
   verifyTurnkeySignedPolicyRecord,
 } from './turnkey-policy-record.js';
 import type { TurnkeyPolicyAst } from './turnkey-policy.js';
+import { selectTurnkeyPolicyRecord, turnkeyPolicySelection } from './turnkey-signer.js';
+import { validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
 
 const ORG = 'org-1';
 const USER = 'user-1';
@@ -32,10 +36,10 @@ function organization(rootUserIds = ['root-user']) {
   return { configs: { quorum: { threshold: 1, userIds: rootUserIds } } };
 }
 
-function providerPolicy() {
-  const expressions = turnkeyProviderPolicyExpressions(enforcementPolicy());
+function providerPolicy(ast = enforcementPolicy()) {
+  const expressions = turnkeyProviderPolicyExpressions(ast);
   return {
-    policyId: POLICY_ID,
+    policyId: ast.scope.policyId,
     policyName: 'MintBot exact transaction',
     effect: 'EFFECT_ALLOW' as const,
     createdAt: timestamp('1800000000'),
@@ -80,12 +84,12 @@ function enforcementPolicy(): TurnkeyPolicyAst {
   };
 }
 
-function record() {
+function record(ast = enforcementPolicy()) {
   return createTurnkeyPolicyRecord({
     environment: 'production',
     providerIdentity: identity(),
-    providerPolicy: providerPolicy(),
-    enforcementPolicy: enforcementPolicy(),
+    providerPolicy: providerPolicy(ast),
+    enforcementPolicy: ast,
     walletReferences: [{ index: 0, address: WALLET, signWith: KEY_ID }],
     providerKeys: [providerKey()],
     issuedAt: '2030-01-01T00:00:00.000Z',
@@ -98,6 +102,13 @@ function clone<T>(value: T): T {
 }
 
 describe('Turnkey signed canonical policy record', () => {
+  it('selects exactly the campaign-bound policy reference', () => {
+    const first = record();
+    const second = record({ ...enforcementPolicy(), scope: { ...enforcementPolicy().scope, policyId: 'policy-2' } });
+    expect(selectTurnkeyPolicyRecord([first, second], turnkeyPolicySelection(second).policyReference).providerPolicy.policyId).toBe('policy-2');
+    expect(() => selectTurnkeyPolicyRecord([first, second], turnkeyPolicySelection(second).policyReference, turnkeyPolicySelection(first).recordDigest)).toThrow('TURNKEY_POLICY_SELECTION_NOT_FOUND');
+    expect(() => selectTurnkeyPolicyRecord([first], turnkeyPolicySelection(second).policyReference)).toThrow('TURNKEY_POLICY_SELECTION_NOT_FOUND');
+  });
   it('renders the reviewed provider CEL exactly', () => {
     expect(turnkeyProviderPolicyExpressions(enforcementPolicy())).toEqual({
       consensus: "approvers.any(user, user.id == 'user-1')",
@@ -115,6 +126,16 @@ describe('Turnkey signed canonical policy record', () => {
     expect(canonical.providerPolicy.time).toBeNull();
     expect(canonical.wallets[0]!.providerKey.privateKeyTags).toEqual(['tag-a', 'tag-b']);
     expect(canonicalTurnkeyPolicyRecordJson(clone(canonical))).toBe(canonicalTurnkeyPolicyRecordJson(canonical));
+  });
+
+  it('validates one atomic bundle only when its active record, catalog and wallet map agree', () => {
+    const owner = generateKeyPairSync('ed25519');
+    const signed = signTurnkeyPolicyRecord(record(), owner.privateKey);
+    const catalog = { version: 1 as const, context: 'mintbot.turnkey-policy-catalog/v1' as const, records: [signed] };
+    const walletMap = { version: 2 as const, policyRecordDigest: signed.recordDigest, wallets: signed.record.wallets.map(({ index, address, signWith }) => ({ index, address, signWith })) };
+    const bundle = { version: 1 as const, context: 'mintbot.turnkey-policy-bundle/v1' as const, activeRecord: signed, catalog, walletMap };
+    expect(validateTurnkeyPolicyBundle(bundle, owner.publicKey, NOW)).toEqual(bundle);
+    expect(() => validateTurnkeyPolicyBundle({ ...bundle, walletMap: { ...walletMap, policyRecordDigest: `sha256:${'0'.repeat(64)}` } }, owner.publicKey, NOW)).toThrow('TURNKEY_POLICY_BUNDLE_BINDING_INVALID');
   });
 
   it('rejects tampering, the wrong key, an attacker-supplied key, and a signature without the domain separator', () => {
@@ -138,6 +159,28 @@ describe('Turnkey signed canonical policy record', () => {
     const signed = signTurnkeyPolicyRecord(record(), owner.privateKey);
     expect(() => verifyTurnkeySignedPolicyRecord(signed, owner.publicKey, new Date('2029-12-31T23:59:59.999Z'))).toThrow('TURNKEY_POLICY_RECORD_NOT_CURRENT');
     expect(() => verifyTurnkeySignedPolicyRecord(signed, owner.publicKey, new Date('2031-01-01T00:00:00.000Z'))).toThrow('TURNKEY_POLICY_RECORD_NOT_CURRENT');
+  });
+
+  it('authenticates retained expired catalog records but exposes only currently eligible policies', () => {
+    const owner = generateKeyPairSync('ed25519');
+    const current = signTurnkeyPolicyRecord(record(), owner.privateKey);
+    const oldAst = { ...enforcementPolicy(), scope: { ...enforcementPolicy().scope, policyId: 'policy-old' } };
+    const expired = signTurnkeyPolicyRecord({ ...record(oldAst), issuedAt: '2028-01-01T00:00:00.000Z', expiresAt: '2029-01-01T00:00:00.000Z' }, owner.privateKey);
+    const catalog = { version: 1, context: 'mintbot.turnkey-policy-catalog/v1', records: [expired, current] };
+    const eligible = verifyTurnkeySignedPolicyCatalog(catalog, owner.publicKey, NOW);
+    expect(eligible.map((entry) => entry.providerPolicy.policyId)).toEqual([POLICY_ID]);
+    expect(() => validateTurnkeyActualProviderState(record(), { whoami: identity(), organization: organization(), policies: [providerPolicy()], privateKeys: [providerKey()] }, eligible)).not.toThrow();
+    expect(pruneTurnkeySignedPolicyCatalog(catalog, owner.publicKey, { now: NOW }).records).toEqual([current]);
+  });
+
+  it('caps a signed catalog at 25 retained records', () => {
+    const owner = generateKeyPairSync('ed25519');
+    const records = Array.from({ length: 26 }, (_, index) => {
+      const ast = { ...enforcementPolicy(), scope: { ...enforcementPolicy().scope, policyId: `policy-${index}` } };
+      return signTurnkeyPolicyRecord(record(ast), owner.privateKey);
+    });
+    expect(() => verifyTurnkeySignedPolicyCatalog({ version: 1, context: 'mintbot.turnkey-policy-catalog/v1', records }, owner.publicKey, NOW)).toThrow('TURNKEY_POLICY_CATALOG_INVALID');
+    expect(pruneTurnkeySignedPolicyCatalog({ version: 1, context: 'mintbot.turnkey-policy-catalog/v1', records }, owner.publicKey, { now: NOW, retirePolicyIds: ['policy-25'] }).records).toHaveLength(25);
   });
 
   it.each([
@@ -169,6 +212,44 @@ describe('Turnkey signed canonical policy record', () => {
     const canonical = record();
     expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization(), policies: [providerPolicy(), { ...providerPolicy(), policyId: 'broad-policy', condition: 'true' }], privateKeys: [providerKey()] })).toThrow('TURNKEY_PROVIDER_POLICY_INVENTORY_NOT_ISOLATED');
     expect(() => validateTurnkeyActualProviderState(canonical, { whoami: identity(), organization: organization([USER]), policies: [providerPolicy()], privateKeys: [providerKey()] })).toThrow('TURNKEY_PROVIDER_RUNTIME_USER_MUST_BE_NON_ROOT');
+  });
+
+  it('accepts multiple exact allow policies only when every one has an owner-signed catalog record', () => {
+    const owner = generateKeyPairSync('ed25519');
+    const secondAst = {
+      ...enforcementPolicy(),
+      scope: { ...enforcementPolicy().scope, policyId: 'policy-2' },
+      transaction: { ...enforcementPolicy().transaction, data: '0x161ac220' as Hex },
+    };
+    const first = record();
+    const second = record(secondAst);
+    const catalog = {
+      version: 1,
+      context: 'mintbot.turnkey-policy-catalog/v1',
+      records: [signTurnkeyPolicyRecord(first, owner.privateKey), signTurnkeyPolicyRecord(second, owner.privateKey)],
+    };
+    const approved = verifyTurnkeySignedPolicyCatalog(catalog, owner.publicKey, NOW);
+    expect(() => validateTurnkeyActualProviderState(first, {
+      whoami: identity(),
+      organization: organization(),
+      policies: [providerPolicy(), providerPolicy(secondAst)],
+      privateKeys: [providerKey()],
+    }, approved)).not.toThrow();
+    expect(() => validateTurnkeyActualProviderState(first, {
+      whoami: identity(),
+      organization: organization(),
+      policies: [providerPolicy(), providerPolicy(secondAst), { ...providerPolicy(secondAst), policyId: 'unknown-policy' }],
+      privateKeys: [providerKey()],
+    }, approved)).toThrow('TURNKEY_PROVIDER_POLICY_NOT_APPROVED');
+  });
+
+  it('rejects catalog duplicates, mixed fleets, and a catalog that omits the active record', () => {
+    const owner = generateKeyPairSync('ed25519');
+    const signed = signTurnkeyPolicyRecord(record(), owner.privateKey);
+    expect(() => verifyTurnkeySignedPolicyCatalog({ version: 1, context: 'mintbot.turnkey-policy-catalog/v1', records: [signed, signed] }, owner.publicKey, NOW)).toThrow('TURNKEY_POLICY_CATALOG_BINDING_INVALID');
+    const secondAst = { ...enforcementPolicy(), scope: { ...enforcementPolicy().scope, policyId: 'policy-2' } };
+    const approved = [record(secondAst)];
+    expect(() => validateTurnkeyActualProviderState(record(), { whoami: identity(), organization: organization(), policies: [providerPolicy(secondAst)], privateKeys: [providerKey()] }, approved)).toThrow('TURNKEY_PROVIDER_POLICY_CATALOG_ACTIVE_RECORD_MISSING');
   });
 
   it('rejects a duplicate provider key, wallet binding drift, and an unbound embedded approver key', () => {

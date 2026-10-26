@@ -16,6 +16,7 @@ RELEASES=/opt/mint-bot/releases
 CURRENT=/opt/mint-bot/current
 PREVIOUS_FILE="$RELEASES/.previous"
 HISTORY_FILE="$RELEASES/.history"
+VERSION_COUNTER="$RELEASES/.version-counter"
 MAX_UNPACKED_BYTES=$((2 * 1024 * 1024 * 1024))
 
 say()  { printf '\n== %s\n' "$*"; }
@@ -55,6 +56,29 @@ write_file_atomically() { # path content
   printf '%s\n' "$2" > "$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$1"
+}
+
+next_install_version() { # release manifest
+  local manifest="$1" declared current_major current_minor current_build major minor
+  declared="$(grep -m1 '^product_version=' "$manifest" | cut -d= -f2- || true)"
+  [[ "$declared" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || stop "the release has no valid product_version marker."
+  major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
+  current_major=0; current_minor=0; current_build=0
+  if [ -f "$VERSION_COUNTER" ]; then
+    IFS=. read -r current_major current_minor current_build < "$VERSION_COUNTER"
+    [[ "${current_major:-}" =~ ^[0-9]+$ && "${current_minor:-}" =~ ^[0-9]+$ && "${current_build:-}" =~ ^[0-9]+$ ]] || stop "the installed version counter is invalid."
+  fi
+  # Product certification (major) and default-operation changes (minor) are
+  # explicit source decisions. Builds advance the patch within that line; a
+  # new major/minor line starts at patch 1.
+  if [ "$major" -lt "$current_major" ] || { [ "$major" -eq "$current_major" ] && [ "$minor" -lt "$current_minor" ]; }; then
+    stop "the release product version $declared is older than installed line $current_major.$current_minor."
+  fi
+  if [ "$major" -ne "$current_major" ] || [ "$minor" -ne "$current_minor" ]; then
+    printf '%s.%s.1' "$major" "$minor"
+  else
+    printf '%s.%s.%s' "$major" "$minor" "$((current_build + 1))"
+  fi
 }
 
 record() { # old new
@@ -191,8 +215,11 @@ if [ -e "$TARGET" ]; then
   [ "$(cat "$DIGEST_FILE" 2>/dev/null || true)" = "$EXPECTED" ] || stop "a different build of commit $COMMIT is already installed ($TARGET). Nothing was changed. Ask for help before replacing it."
   note "release $COMMIT is already installed (the same file)"
 else
+  INSTALL_VERSION="$(next_install_version "$STAGE/release/RELEASE")"
+  printf 'version=%s\n' "$INSTALL_VERSION" >> "$STAGE/release/RELEASE"
   mv -T "$STAGE/release" "$TARGET"
   write_file_atomically "$DIGEST_FILE" "$EXPECTED"
+  write_file_atomically "$VERSION_COUNTER" "$INSTALL_VERSION"
   note "installed $TARGET"
 fi
 valid_release_dir "$TARGET" || stop "$TARGET is not a valid release folder."

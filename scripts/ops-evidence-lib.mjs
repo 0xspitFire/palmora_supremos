@@ -6,6 +6,21 @@ import { createHash } from 'node:crypto';
  * the SHA-256 of every artifact, so a changed artifact is no longer accepted. A reserved path or a nonempty file is not proof.
  */
 export const KINDS = ['recovery', 'rotation_revocation', 'heap_core_dump', 'backup_restore', 'service_supervision'];
+export const OPS_EVIDENCE_ACCEPTANCE_VERSION = 2;
+/** Acceptance is re-witnessed weekly even when the installed release and artifact bytes have not changed. */
+export const OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Maximum age of each source artifact at every acceptance/runtime check. D-017 evidence is recollected in the weekly
+ * maintenance window; re-signing an unchanged acceptance must never make an older drill current again. These are separate
+ * per-kind limits so a future policy can shorten one kind without silently changing the others.
+ */
+export const OPS_EVIDENCE_MAX_AGE_MS = Object.freeze({
+  recovery: 7 * 24 * 60 * 60 * 1000,
+  rotation_revocation: 7 * 24 * 60 * 60 * 1000,
+  heap_core_dump: 7 * 24 * 60 * 60 * 1000,
+  backup_restore: 7 * 24 * 60 * 60 * 1000,
+  service_supervision: 7 * 24 * 60 * 60 * 1000,
+});
 
 /** Names every artifact of that kind must contain, each passing. A check that could not be made is a failure, never a skip. */
 export const REQUIRED_CHECKS = {
@@ -39,6 +54,9 @@ export function validateEvidence(value, expectedKind, now = new Date()) {
   const started = Date.parse(value.startedAt);
   const completed = Date.parse(value.completedAt);
   if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started || completed > now.getTime() + 60_000) problems.push('EVIDENCE_TIMES');
+  const maxAge = OPS_EVIDENCE_MAX_AGE_MS[expectedKind];
+  // The exact maximum age is valid; one millisecond beyond it is stale. A bad/future timestamp is already named above.
+  if (Number.isFinite(completed) && Number.isFinite(maxAge) && now.getTime() - completed > maxAge) problems.push('EVIDENCE_STALE');
   if (!Array.isArray(value.checks) || value.checks.length === 0) { problems.push('EVIDENCE_CHECKS_MISSING'); return problems; }
   const byName = new Map();
   for (const check of value.checks) {
@@ -64,7 +82,9 @@ export function acceptancePhrase(digests, designSha256) {
 }
 
 export function buildAcceptance({ digests, designSha256, witness, acceptedAt }) {
-  return { version: 1, type: 'ops-evidence-acceptance', acceptedAt, witness: { reference: witness }, design: { sha256: designSha256 }, artifacts: Object.fromEntries(KINDS.map((kind) => [kind, digests[kind]])) };
+  const acceptedTime = Date.parse(acceptedAt);
+  const expiresAt = Number.isFinite(acceptedTime) ? new Date(acceptedTime + OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS).toISOString() : '';
+  return { version: OPS_EVIDENCE_ACCEPTANCE_VERSION, type: 'ops-evidence-acceptance', acceptedAt, expiresAt, witness: { reference: witness }, design: { sha256: designSha256 }, artifacts: Object.fromEntries(KINDS.map((kind) => [kind, digests[kind]])) };
 }
 
 /**
@@ -73,8 +93,12 @@ export function buildAcceptance({ digests, designSha256, witness, acceptedAt }) 
  */
 export function verifyAcceptance(acceptance, artifacts, { currentCommit, hostId, now = new Date() }) {
   const problems = [];
-  if (!acceptance || acceptance.version !== 1 || acceptance.type !== 'ops-evidence-acceptance') return ['ACCEPTANCE_INVALID'];
-  if (!Number.isFinite(Date.parse(acceptance.acceptedAt)) || Date.parse(acceptance.acceptedAt) > now.getTime() + 60_000) problems.push('ACCEPTANCE_TIME');
+  if (!acceptance || acceptance.version !== OPS_EVIDENCE_ACCEPTANCE_VERSION || acceptance.type !== 'ops-evidence-acceptance') return ['ACCEPTANCE_INVALID'];
+  const acceptedTime = Date.parse(acceptance.acceptedAt);
+  const expiresTime = Date.parse(acceptance.expiresAt);
+  if (!Number.isFinite(acceptedTime) || acceptedTime > now.getTime() + 60_000) problems.push('ACCEPTANCE_TIME');
+  if (!Number.isFinite(expiresTime) || !Number.isFinite(acceptedTime) || expiresTime !== acceptedTime + OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS) problems.push('ACCEPTANCE_EXPIRY');
+  else if (now.getTime() >= expiresTime) problems.push('ACCEPTANCE_EXPIRED');
   if (typeof acceptance.witness?.reference !== 'string' || acceptance.witness.reference.trim().length < 3) problems.push('ACCEPTANCE_WITNESS_MISSING');
   if (!SHA256.test(String(acceptance.design?.sha256))) problems.push('ACCEPTANCE_DESIGN_DIGEST');
   for (const kind of KINDS) {

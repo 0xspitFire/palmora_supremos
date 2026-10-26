@@ -66,7 +66,7 @@ export class EvidenceService {
 }
 
 export function campaignInputDigest(campaign: Campaign): string {
-  const value = JSON.stringify({ chainId: campaign.chainId, contract: campaign.contract.toLowerCase(), strategy: campaign.strategy, quantity: campaign.quantity, mintPriceWei: campaign.mintPriceWei.toString(), feePolicy: campaign.feePolicy }, (_, item) => typeof item === 'bigint' ? item.toString() : item);
+  const value = JSON.stringify({ chainId: campaign.chainId, contract: campaign.contract.toLowerCase(), strategy: campaign.strategy, quantity: campaign.quantity, mintPriceWei: campaign.mintPriceWei.toString(), feePolicy: campaign.feePolicy, custodyPolicy: campaign.custodyPolicy }, (_, item) => typeof item === 'bigint' ? item.toString() : item);
   return createHash('sha256').update(value).digest('hex');
 }
 

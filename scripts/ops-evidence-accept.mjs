@@ -68,7 +68,7 @@ async function main() {
   const text = `${JSON.stringify(acceptance, null, 2)}\n`;
   const temporary = `${ACCEPTANCE_PATH}.${process.pid}.tmp`;
   try { await writeFile(temporary, text, { mode: 0o644, flag: 'wx' }); await rename(temporary, ACCEPTANCE_PATH); } finally { await unlink(temporary).catch(() => undefined); }
-  console.log(`\nAccepted. Record: ${ACCEPTANCE_PATH}\nSHA-256: ${sha256Hex(text)}`);
+  console.log(`\nAccepted until ${acceptance.expiresAt}. Record: ${ACCEPTANCE_PATH}\nSHA-256: ${sha256Hex(text)}`);
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url).pathname)) {

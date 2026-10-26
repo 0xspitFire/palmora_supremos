@@ -201,7 +201,7 @@ export class GuidedFlows {
     if (fee > limit) throw new Error(`MAX_FEE_GWEI_ABOVE_LIMIT: ${fee} ${fees.unit} is above the limit of ${limit} ${fees.unit}${fees.limit !== undefined ? ' set by your Turnkey policy' : ''}`);
   }
 
-  /** `/simulate <campaign>` typed in full: record the test mints now, then go straight on to choosing the wallets for the request. */
+  /** `/simulate <campaign>` typed in full: record the test mints now, then release before a request can be built. */
   public runSimulate(campaignId: string): Promise<FlowResult> {
     return this.serial(async () => {
       const flow = this.make('simulate', 1, { campaign: campaignId });
@@ -575,16 +575,17 @@ export class GuidedFlows {
     }
   }
 
-  /** Records the test mints, then goes straight on to choosing the wallets for the request (nothing to copy). */
+  /** Records the test mints, then requires the kill-switch release before choosing a live request (nothing to copy). */
   private async recordTestMints(campaignId: string): Promise<FlowResult> {
     const result = await this.deps.actions.simulateCampaign(campaignId);
-    // The test-mint result above already starts with the campaign id, so this first step does not repeat it.
-    const next = this.make('request', 1, { campaign: campaignId, idShown: true });
+    // Preparing and simulation happen with the kill switch engaged. Do not enqueue a request until the owner has
+    // released that exact engagement; otherwise the host can claim and stop it before readiness returns.
+    const next = this.make('release', 0, { campaign: campaignId, continueToRequest: true, idShown: true });
     let step: FlowResult;
     try { step = await this.render(next); } catch (error) {
-      // The test mints are recorded; only the wallet choices could not be shown. Say so, and keep the outcome true.
+      // The test mints are recorded; only the release status could not be shown. Say so, and keep the outcome true.
       this.flow = undefined;
-      return { reply: { text: `${result.text}\n\nThe wallet choices could not be shown (${this.deps.explain(error)}). The test mints are recorded; send /request to continue.` }, done: { command: 'simulate', outcome: 'ok' } };
+      return { reply: { text: `${result.text}\n\nThe kill-switch release could not be shown (${this.deps.explain(error)}). The test mints are recorded; send /release, then /request to continue.` }, done: { command: 'simulate', outcome: 'ok' } };
     }
     return { reply: { text: `${result.text}\n\n${step.reply.text}`, ...(step.reply.buttons ? { buttons: step.reply.buttons } : {}) }, done: { command: 'simulate', outcome: 'ok' } };
   }
@@ -613,7 +614,19 @@ export class GuidedFlows {
         return { reply: { text: `${prepared.text}\n\n${step.reply.text}`, ...(step.reply.buttons ? { buttons: step.reply.buttons } : {}) }, done: { command: 'prepare', outcome: 'ok' } };
       }
       let text: string;
-      if (flow.kind === 'release') text = await a.releaseNow(d.releasePhrase as string | undefined);
+      if (flow.kind === 'release') {
+        text = await a.releaseNow(d.releasePhrase as string | undefined);
+        if (d.continueToRequest === true && typeof d.campaign === 'string') {
+          const next = this.make('request', 1, { campaign: d.campaign });
+          try {
+            const step = await this.render(next);
+            return { reply: { text: `${text}\n\n${step.reply.text}`, ...(step.reply.buttons ? { buttons: step.reply.buttons } : {}) }, done: { command: 'release', outcome: 'ok' } };
+          } catch (error) {
+            this.flow = undefined;
+            return { reply: { text: `${text}\n\nThe request choices could not be shown (${this.deps.explain(error)}). The kill switch is released; send /request to continue.` }, done: { command: 'release', outcome: 'ok' } };
+          }
+        }
+      }
       else if (flow.kind === 'revoke') text = await a.revokeNow(String(d.chain), String(d.phrase ?? ''));
       else if (flow.kind === 'watchaccept') text = await a.watchAcceptNow(String(d.chain), String(d.address), String(d.phrase));
       else if (flow.kind === 'fire') text = await a.fireNow(String(d.campaign), String(d.walletsText), Number(d.fee), d.digest as string | undefined);

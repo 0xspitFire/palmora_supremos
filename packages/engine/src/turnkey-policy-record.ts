@@ -10,6 +10,7 @@ import { validateTurnkeyPolicyAst, type TurnkeyEnvironment, type TurnkeyPolicyAs
 
 const RECORD_CONTEXT = 'mintbot.turnkey-policy-record/v1' as const;
 const SIGNATURE_CONTEXT = 'mintbot.turnkey-policy-record/signature/v1\0';
+const CATALOG_CONTEXT = 'mintbot.turnkey-policy-catalog/v1' as const;
 
 export interface TurnkeyProviderTimestamp {
   readonly seconds: string;
@@ -79,6 +80,17 @@ export interface TurnkeySignedPolicyRecord {
   readonly recordDigest: `sha256:${string}`;
   readonly record: TurnkeyCanonicalPolicyRecord;
   readonly signature: string;
+}
+
+/**
+ * A catalog is deliberately only a container of independently owner-signed
+ * records. Adding an allow policy therefore still requires the offline owner
+ * signature, while removing an entry can only cause a fail-closed outage.
+ */
+export interface TurnkeySignedPolicyCatalog {
+  readonly version: 1;
+  readonly context: typeof CATALOG_CONTEXT;
+  readonly records: readonly TurnkeySignedPolicyRecord[];
 }
 
 export interface TurnkeyActualProviderState {
@@ -282,7 +294,7 @@ export function signTurnkeyPolicyRecord(record: unknown, privateKey: Verificatio
   };
 }
 
-export function verifyTurnkeySignedPolicyRecord(value: unknown, pinnedPublicKey: VerificationKey, now = new Date()): TurnkeyCanonicalPolicyRecord {
+function authenticateTurnkeySignedPolicyRecord(value: unknown, pinnedPublicKey: VerificationKey): TurnkeyCanonicalPolicyRecord {
   if (pinnedPublicKey instanceof KeyObject && pinnedPublicKey.type !== 'public') throw new Error('TURNKEY_POLICY_APPROVER_KEY_INVALID');
   const verifier = asPublicKey(pinnedPublicKey);
   const envelope = exactRecord(value, ['version', 'algorithm', 'keyId', 'recordDigest', 'record', 'signature'], 'TURNKEY_POLICY_SIGNATURE_INVALID');
@@ -292,17 +304,82 @@ export function verifyTurnkeySignedPolicyRecord(value: unknown, pinnedPublicKey:
   let signature: Buffer;
   try { signature = Buffer.from(envelope.signature, 'base64url'); } catch { throw new Error('TURNKEY_POLICY_SIGNATURE_INVALID'); }
   if (signature.length !== 64 || !verifyBytes(null, signaturePayload(record), verifier, signature)) throw new Error('TURNKEY_POLICY_SIGNATURE_INVALID');
+  return record;
+}
+
+export function verifyTurnkeySignedPolicyRecord(value: unknown, pinnedPublicKey: VerificationKey, now = new Date()): TurnkeyCanonicalPolicyRecord {
+  const record = authenticateTurnkeySignedPolicyRecord(value, pinnedPublicKey);
   const instant = now.getTime();
   if (!Number.isFinite(instant) || instant < Date.parse(record.issuedAt) || instant >= Date.parse(record.expiresAt)) throw new Error('TURNKEY_POLICY_RECORD_NOT_CURRENT');
   return record;
 }
 
-export function validateTurnkeyActualProviderState(recordValue: unknown, state: TurnkeyActualProviderState): void {
+function authenticateCatalog(value: unknown, pinnedPublicKey: VerificationKey, enforceRetentionLimit: boolean): { item: Record<string, unknown>; records: TurnkeyCanonicalPolicyRecord[] } {
+  const item = exactRecord(value, ['version', 'context', 'records'], 'TURNKEY_POLICY_CATALOG_INVALID');
+  if (item.version !== 1 || item.context !== CATALOG_CONTEXT || !Array.isArray(item.records) || item.records.length === 0 || item.records.length > 1_000 || (enforceRetentionLimit && item.records.length > 25)) throw new Error('TURNKEY_POLICY_CATALOG_INVALID');
+  const records = item.records.map((record) => authenticateTurnkeySignedPolicyRecord(record, pinnedPublicKey));
+  const first = records[0]!;
+  const policyIds = new Set<string>();
+  const recordDigests = new Set<string>();
+  for (const record of records) {
+    const digest = turnkeyPolicyRecordDigest(record);
+    if (
+      record.environment !== first.environment
+      || stableStringify(record.providerIdentity) !== stableStringify(first.providerIdentity)
+      || stableStringify(record.wallets) !== stableStringify(first.wallets)
+      || policyIds.has(record.providerPolicy.policyId)
+      || recordDigests.has(digest)
+    ) throw new Error('TURNKEY_POLICY_CATALOG_BINDING_INVALID');
+    policyIds.add(record.providerPolicy.policyId);
+    recordDigests.add(digest);
+  }
+  return { item, records };
+}
+
+export function verifyTurnkeySignedPolicyCatalog(value: unknown, pinnedPublicKey: VerificationKey, now = new Date()): readonly TurnkeyCanonicalPolicyRecord[] {
+  const { records } = authenticateCatalog(value, pinnedPublicKey, true);
+  const instant = now.getTime();
+  if (!Number.isFinite(instant)) throw new Error('TURNKEY_POLICY_RECORD_NOT_CURRENT');
+  return records.filter((record) => instant >= Date.parse(record.issuedAt) && instant < Date.parse(record.expiresAt));
+}
+
+/** Authenticates every retained entry, then removes expired/future records and explicit retirements. */
+export function pruneTurnkeySignedPolicyCatalog(value: unknown, pinnedPublicKey: VerificationKey, options: { now?: Date; retirePolicyIds?: readonly string[] } = {}): TurnkeySignedPolicyCatalog {
+  const { item } = authenticateCatalog(value, pinnedPublicKey, false);
+  const now = (options.now ?? new Date()).getTime();
+  const retired = new Set(options.retirePolicyIds ?? []);
+  const records = (item.records as TurnkeySignedPolicyRecord[]).filter((signed) => {
+    const record = authenticateTurnkeySignedPolicyRecord(signed, pinnedPublicKey);
+    return !retired.has(record.providerPolicy.policyId) && now >= Date.parse(record.issuedAt) && now < Date.parse(record.expiresAt);
+  });
+  if (records.length === 0) throw new Error('TURNKEY_POLICY_CATALOG_PRUNE_EMPTY');
+  if (records.length > 25) throw new Error('TURNKEY_POLICY_CATALOG_RETENTION_LIMIT');
+  return { version: 1, context: CATALOG_CONTEXT, records };
+}
+
+export function validateTurnkeyActualProviderState(recordValue: unknown, state: TurnkeyActualProviderState, approvedRecords?: readonly unknown[]): void {
   const record = validateTurnkeyCanonicalPolicyRecord(recordValue);
   if (stableStringify(projectTurnkeyProviderIdentity(state.whoami)) !== stableStringify(record.providerIdentity)) throw new Error('TURNKEY_PROVIDER_IDENTITY_DRIFT');
   const policies = state.policies.map(projectTurnkeyProviderPolicy);
   assertNonRootRuntimeUser(state.organization, record.providerIdentity);
-  if (policies.length !== 1) throw new Error('TURNKEY_PROVIDER_POLICY_INVENTORY_NOT_ISOLATED');
+  const approved = approvedRecords?.map(validateTurnkeyCanonicalPolicyRecord);
+  if (approved) {
+    if (approved.length === 0 || !approved.some((candidate) => turnkeyPolicyRecordDigest(candidate) === turnkeyPolicyRecordDigest(record))) throw new Error('TURNKEY_PROVIDER_POLICY_CATALOG_ACTIVE_RECORD_MISSING');
+    if (approved.some((candidate) => candidate.environment !== record.environment
+      || stableStringify(candidate.providerIdentity) !== stableStringify(record.providerIdentity)
+      || stableStringify(candidate.wallets) !== stableStringify(record.wallets))) throw new Error('TURNKEY_POLICY_CATALOG_BINDING_INVALID');
+    const approvedPolicies = new Map(approved.map((candidate) => [candidate.providerPolicy.policyId, candidate.providerPolicy]));
+    if (approvedPolicies.size !== approved.length) throw new Error('TURNKEY_POLICY_CATALOG_BINDING_INVALID');
+    for (const policy of policies) {
+      if (policy.effect !== 'EFFECT_ALLOW') continue;
+      const expected = approvedPolicies.get(policy.policyId);
+      if (!expected || stableStringify(policy) !== stableStringify(expected)) throw new Error('TURNKEY_PROVIDER_POLICY_NOT_APPROVED');
+    }
+    for (const expected of approvedPolicies.values()) {
+      const matches = policies.filter((candidate) => candidate.policyId === expected.policyId);
+      if (matches.length !== 1 || stableStringify(matches[0]) !== stableStringify(expected)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
+    }
+  } else if (policies.length !== 1) throw new Error('TURNKEY_PROVIDER_POLICY_INVENTORY_NOT_ISOLATED');
   const matches = policies.filter((policy) => policy.policyId === record.providerPolicy.policyId);
   if (matches.length !== 1 || stableStringify(matches[0]) !== stableStringify(record.providerPolicy)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
   const keys = state.privateKeys.map(projectTurnkeyProviderKey);
