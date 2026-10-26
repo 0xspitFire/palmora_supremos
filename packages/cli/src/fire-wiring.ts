@@ -49,8 +49,8 @@ export interface FireWiring {
   wallets(text: string): Promise<string[]>;
   /** Which wallets hold what one run needs (mint value plus the fee budget), and the exact top-up for the others. An unreadable balance counts as short. */
   fundingSplit(campaign: Campaign, wallets: readonly string[]): Promise<{ funded: string[]; short: Array<{ wallet: string; why: string }> }>;
-  /** The engine uses the first N wallets of the key list in order: of the ready wallets, the ones from the start of the list that can go (`used`, in list order) and the ones that wait behind an unready earlier wallet. `first` is the list's first wallet (what blocks when `used` is empty). */
-  readyPrefix(ready: readonly string[]): Promise<{ used: string[]; waiting: Array<{ wallet: string; why: string }>; first?: string }>;
+  /** D-073: of the ready wallets, the ones that are signing wallets (in key-list order, wherever they sit in it), and the ones that are not in the key list (named, left out). */
+  readyInListOrder(ready: readonly string[]): Promise<{ used: string[]; waiting: Array<{ wallet: string; why: string }> }>;
   /** Text for a preview: what would be minted, from how many wallets, and the most that can be spent. */
   describe(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number): string;
   fireNow(campaignId: string, wallets: readonly string[], maxFeeGwei: number): Promise<FireResult>;
@@ -126,15 +126,14 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     return { funded, short };
   };
 
-  // The engine mints with the first N wallets of the key list, in order. So only the ready wallets from the start of the list can go: the first one that is not ready ends the list, and the ready ones after it wait (named), never refused later as an error.
-  const readyPrefix: FireWiring['readyPrefix'] = async (ready) => {
+  // D-073: any ready wallet can be used, wherever it sits in the key list. They are taken in list order; a ready address that is not one of the signing wallets is left out by name.
+  const readyInListOrder: FireWiring['readyInListOrder'] = async (ready) => {
     const readySet = new Set(ready.map((wallet) => wallet.toLowerCase()));
     const ordered = (await deps.walletList()).map((wallet) => wallet.toLowerCase());
-    const used: string[] = [];
-    for (const wallet of ordered) { if (!readySet.has(wallet)) break; used.push(wallet); }
+    const used = ordered.filter((wallet) => readySet.has(wallet));
     const usedSet = new Set(used);
-    const waiting = ready.filter((wallet) => !usedSet.has(wallet.toLowerCase())).map((wallet) => ({ wallet, why: 'wallets are used in list order and an earlier wallet is not ready, so this one waits (fix the earlier one, see /funding)' }));
-    return { used, waiting, ...(ordered[0] ? { first: ordered[0] } : {}) };
+    const waiting = ready.filter((wallet) => !usedSet.has(wallet.toLowerCase())).map((wallet) => ({ wallet, why: 'it is not one of your signing wallets' }));
+    return { used, waiting };
   };
 
   const recordSimulations: FireDeps['recordSimulations'] = async (campaign, wallets) => {
@@ -154,8 +153,8 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   const withFunding = async (campaign: Campaign, result: { recorded: string[]; skipped: Array<{ wallet: string; why: string }> }): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }> => {
     const split = await fundingSplit(campaign, result.recorded);
     if (split.funded.length === 0) throw new Error(`FUNDING_NOT_ARRIVED: no wallet holds what a run needs. ${split.short.map((item) => `${item.wallet.slice(0, 6)}…${item.wallet.slice(-4)}: ${item.why}.`).join(' ')}`);
-    const { used, waiting, first } = await readyPrefix(split.funded);
-    if (used.length === 0) throw new Error(`WALLET_ORDER_NOT_READY: wallets are used in list order and the first wallet${first ? ` (${first.slice(0, 6)}…${first.slice(-4)})` : ''} is not ready. Fund or fix it first (see /funding), or the run cannot start.`);
+    const { used, waiting } = await readyInListOrder(split.funded);
+    if (used.length === 0) throw new Error(`WALLET_NOT_IN_FLEET: none of the ready wallets is one of your signing wallets. ${waiting.map((item) => `${item.wallet.slice(0, 6)}…${item.wallet.slice(-4)}: ${item.why}.`).join(' ')}`);
     return { recorded: used, skipped: [...result.skipped, ...split.short, ...waiting] };
   };
 
@@ -188,7 +187,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     fireDeps,
     mintState,
     fundingSplit,
-    readyPrefix,
+    readyInListOrder,
     async wallets(text) {
       const raw = text.toLowerCase() === 'all' ? await deps.walletList() : text.split(',').map((item) => item.trim()).filter(Boolean);
       const unique = [...new Set(raw.map((wallet) => wallet.toLowerCase()))];

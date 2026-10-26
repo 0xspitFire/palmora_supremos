@@ -159,38 +159,38 @@ describe('/fire', () => {
     } finally { await cleanup(t.directory); }
   });
 
-  it('the preview shows exactly what the fire will send: list order, a waiting later wallet named, an unready first wallet stopping it, nothing funded giving the plain funding reason', async () => {
+  it('the preview shows exactly what the fire will send: ready wallets in list order wherever they sit, and nothing funded giving the plain funding reason', async () => {
     const laterShort = await setup({ balances: { [B]: SHORT } });
     const firstShort = await setup({ balances: { [A]: SHORT } });
     const none = await setup({ balances: { [A]: SHORT, [B]: SHORT } });
     try {
-      const preview = await laterShort.actions.firePreview('campaign_abcdef12', 'all', 0.2);
-      expect(preview.wallets).toEqual([A]);
-      await expect(firstShort.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('WALLET_ORDER_NOT_READY');
+      expect((await laterShort.actions.firePreview('campaign_abcdef12', 'all', 0.2)).wallets).toEqual([A]);
+      expect((await firstShort.actions.firePreview('campaign_abcdef12', 'all', 0.2)).wallets).toEqual([B]);
       await expect(none.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('FUNDING_NOT_ARRIVED');
       await expect(none.actions.fireNow('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('FUNDING_NOT_ARRIVED');
     } finally { await cleanup(laterShort.directory); await cleanup(firstShort.directory); await cleanup(none.directory); }
   });
 
-  it('a later ready wallet waits behind an unready earlier one and is named (three wallets in list order)', async () => {
-    const t = await setup({ balances: { [B]: SHORT }, walletsInList: [A, B, '0x' + 'c'.repeat(40)] });
+  it('with three wallets, a short middle wallet is left out and the ready ones either side are both used (sized for several)', async () => {
+    const C = '0x' + 'c'.repeat(40);
+    const t = await setup({ balances: { [B]: SHORT }, walletsInList: [A, B, C], maxRunWei: 10n ** 18n });
     try {
       const text = await t.actions.fireNow('campaign_abcdef12', 'all', 0.2);
-      expect(t.requests).toEqual([expect.objectContaining({ wallets: [A] })]);
-      expect(text).toContain('an earlier wallet is not ready');
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [A, C] })]);
+      expect(text).toContain('send 0.000049 ETH more');
     } finally { await cleanup(t.directory); }
   });
 
-  it('a schedule for wallets that are not the first N of the list is refused when it is made, not when the window opens', async () => {
+  it('a schedule may name any signing wallet, wherever it sits; a stranger is refused when it is made', async () => {
     const t = await setup();
     try {
-      await expect(t.actions.schedulePreview('campaign_abcdef12', B, 0.2, ...WINDOW)).rejects.toThrow('WALLET_ORDER_NOT_READY');
-      await expect(t.actions.scheduleCreate('campaign_abcdef12', B, 0.2, ...WINDOW, 'x')).rejects.toThrow('WALLET_ORDER_NOT_READY');
-      await expect(t.actions.schedulePreview('campaign_abcdef12', 'all', 0.2, ...WINDOW)).resolves.toBeDefined();
+      await expect(t.actions.schedulePreview('campaign_abcdef12', B, 0.2, ...WINDOW)).resolves.toBeDefined();
+      await expect(t.actions.schedulePreview('campaign_abcdef12', '0x' + 'd'.repeat(40), 0.2, ...WINDOW)).rejects.toThrow('WALLET_NOT_IN_FLEET');
+      await expect(t.actions.scheduleCreate('campaign_abcdef12', '0x' + 'd'.repeat(40), 0.2, ...WINDOW, 'x')).rejects.toThrow('WALLET_NOT_IN_FLEET');
     } finally { await cleanup(t.directory); }
   });
 
-  it('the guided request offers the ready wallets from the start of the list, in list order', async () => {
+  it('the guided request offers the ready wallets, in list order, wherever they sit', async () => {
     const t = await setup({ balances: { [B]: SHORT } });
     try {
       await t.actions.simulateCampaign('campaign_abcdef12');
@@ -204,10 +204,10 @@ describe('/fire', () => {
     const t = await setup({ walletsUsed: [A.toLowerCase()] });
     const all = await setup({ walletsUsed: [A.toLowerCase(), B.toLowerCase()] });
     try {
-      // The first wallet is used up, so (list order) nothing can go; the reason names the fix.
-      await expect(t.actions.fireNow('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/WALLET_ORDER_NOT_READY/);
+      // The first wallet is used up, so the second goes; with both used up nothing can, and the reason names the fix.
+      await t.actions.fireNow('campaign_abcdef12', 'all', 0.2);
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [B] })]);
       await expect(all.actions.fireNow('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FUNDING_NOT_ARRIVED.*prepare a new campaign/);
-      expect(t.requests).toEqual([]);
       expect(all.requests).toEqual([]);
     } finally { await cleanup(t.directory); await cleanup(all.directory); }
   });
@@ -252,12 +252,13 @@ describe('a campaign sized for fewer wallets than pass (the screenshot bug)', ()
     } finally { await cleanup(t.directory); }
   });
 
-  it('when the first wallet fails its test mint nothing is requested (the engine uses wallets in list order); a campaign sized for none is refused with a clear reason', async () => {
+  it('when the first wallet fails its test mint, the next ready wallet is used (sized for 1); a campaign sized for none is refused with a clear reason', async () => {
     const t = await setup({ maxRunWei: ONE, failing: [A] });
     const none = await setup({ maxRunWei: 1_000n });
     try {
-      await expect(t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2)).rejects.toThrow('WALLET_ORDER_NOT_READY');
-      expect(t.requests).toEqual([]);
+      const text = await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(text).toContain('Request');
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [B] })]);
       await expect(none.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('CAMPAIGN_SIZED_FOR_NONE');
       await expect(none.actions.schedulePreview('campaign_abcdef12', 'all', 0.2, ...WINDOW)).rejects.toThrow('CAMPAIGN_SIZED_FOR_NONE');
     } finally { await Promise.all([cleanup(t.directory), cleanup(none.directory)]); }
@@ -309,33 +310,33 @@ describe('a campaign sized for fewer wallets than pass (the screenshot bug)', ()
 
 describe('a run needs each wallet to hold its full worst case (the second live attempt)', () => {
   // The campaign's worst case per wallet is its fee budget, 0.0002 ETH.
-  it('/fire leaves out a later wallet that holds less than a run needs, names the exact top-up, and fires the first; an unready first wallet stops it by name', async () => {
-    const t = await setup({ balances: { [B]: SHORT } });
-    const first = await setup({ balances: { [A]: SHORT } });
+  it('/fire leaves out a wallet that holds less than a run needs, names the exact top-up, and fires a ready one wherever it sits', async () => {
+    const laterShort = await setup({ balances: { [B]: SHORT } });
+    const firstShort = await setup({ balances: { [A]: SHORT } });
     try {
-      const preview = await t.actions.firePreview('campaign_abcdef12', `${A},${B}`, 0.2);
+      const preview = await laterShort.actions.firePreview('campaign_abcdef12', `${A},${B}`, 0.2);
       expect(preview.wallets).toEqual([A]);
       expect(preview.text).toContain('left out');
       expect(preview.text).toContain('it holds 0.000151 ETH and a run needs at least 0.0002 ETH: send 0.000049 ETH more first');
-      const text = await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(await laterShort.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2)).toContain('send 0.000049 ETH more');
+      expect(laterShort.requests).toEqual([expect.objectContaining({ wallets: [A] })]);
+      // D-073: a ready second wallet is used when the first is short.
+      const text = await firstShort.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
       expect(text).toContain('send 0.000049 ETH more');
-      expect(t.requests).toEqual([expect.objectContaining({ wallets: [A] })]);
-      // The engine uses wallets in list order, so a funded second wallet cannot stand in for an unready first one.
-      await expect(first.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2)).rejects.toThrow(/WALLET_ORDER_NOT_READY.*first wallet/);
-      expect(first.requests).toEqual([]);
-    } finally { await cleanup(t.directory); await cleanup(first.directory); }
+      expect(firstShort.requests).toEqual([expect.objectContaining({ wallets: [B] })]);
+    } finally { await cleanup(laterShort.directory); await cleanup(firstShort.directory); }
   });
-  it('a request with a wallet list (typed or chosen) is refused with the top-up when a listed wallet is short, and the fire stops by name when the first wallet is the short one', async () => {
+  it('a request with a wallet list (typed or chosen) is refused with the top-up when a listed wallet is short, and a ready later wallet is used when the first is short', async () => {
     const t = await setup({ balances: { [A]: SHORT }, maxRunWei: 200_000_000_000_000n });
     try {
       await t.actions.simulateCampaign('campaign_abcdef12');
       await expect(t.actions.requestPreview('campaign_abcdef12', A, 0.2)).rejects.toThrow(/FUNDING_NOT_ARRIVED.*send 0\.000049 ETH more first/);
-      // A funded second wallet alone is refused by name: the engine uses wallets in list order.
-      await expect(t.actions.requestPreview('campaign_abcdef12', B, 0.2)).rejects.toThrow(/WALLET_ORDER_NOT_READY.*first 1 wallet/);
-      await expect(t.actions.requestCreate('campaign_abcdef12', B, 0.2, 'x')).rejects.toThrow('WALLET_ORDER_NOT_READY');
-      // Sized for one wallet with the first short: the funded second wallet cannot stand in for it (the engine uses wallets in list order).
-      await expect(t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2)).rejects.toThrow('WALLET_ORDER_NOT_READY');
-      expect(t.requests).toEqual([]);
+      // D-073: a funded second wallet alone is fine, wherever it sits in the list; a stranger is refused by name.
+      await expect(t.actions.requestPreview('campaign_abcdef12', B, 0.2)).resolves.toMatchObject({ wallets: [B] });
+      await expect(t.actions.requestPreview('campaign_abcdef12', '0x' + 'd'.repeat(40), 0.2)).rejects.toThrow('WALLET_NOT_IN_FLEET');
+      // Sized for one wallet with the first short: the funded second wallet is used.
+      await t.actions.fireNow('campaign_abcdef12', `${A},${B}`, 0.2);
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [B] })]);
     } finally { await cleanup(t.directory); }
   });
 
@@ -345,8 +346,7 @@ describe('a run needs each wallet to hold its full worst case (the second live a
       const simulated = await t.actions.simulateCampaign('campaign_abcdef12');
       expect(simulated.text).toContain('needs funding');
       expect(simulated.text).toContain('send 0.000049 ETH more');
-      expect(await t.actions.requestWallets('campaign_abcdef12')).toMatchObject({ wallets: [], note: expect.stringContaining('left out') });
-      // (B is funded but waits: the first wallet is the short one and wallets are used in list order.)
+      expect(await t.actions.requestWallets('campaign_abcdef12')).toMatchObject({ wallets: [B], note: expect.stringContaining('left out') });
       const split = await t.fire.fundingSplit({ chainId: 4663, quantity: 1, mintPriceWei: 0n, feePolicy: { kind: 'free', configuredPriorityFeeWei: 0n, totalFeeBudgetWei: 200_000_000_000_000n } } as never, [A]);
       expect(split.short[0]!.why).toContain('send 0.000049 ETH more');
     } finally { await cleanup(t.directory); }

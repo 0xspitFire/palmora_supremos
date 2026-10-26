@@ -125,14 +125,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   };
   const robinhoodDryRun = async (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date): Promise<DryRunReport> => deps.robinhoodDryRun ? deps.robinhoodDryRun(contract, wallets, quantity, at) : dryRunDrop((await client(4663)) as never, contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at });
   const robinhoodBlock = async (): Promise<{ number: bigint; hash: string }> => deps.robinhoodLatestBlock ? deps.robinhoodLatestBlock() : (async () => { const block = await (await client(4663)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; })();
-  /** The engine mints with the first N wallets of the key list, so a chosen set must be exactly those: refuse a gap by name before anything is sent. */
+  /** D-073: any signing wallet can be chosen, wherever it sits in the key list; one that is not a signing wallet is refused by name before anything is sent. */
   const assertListOrder = async (wallets: readonly string[]): Promise<void> => {
-    const ordered = (await deps.walletList()).map((wallet) => wallet.toLowerCase());
-    const chosen = new Set(wallets.map((wallet) => wallet.toLowerCase()));
-    const prefix = ordered.slice(0, chosen.size);
-    if (prefix.length !== chosen.size || prefix.some((wallet) => !chosen.has(wallet))) {
-      throw new Error(`WALLET_ORDER_NOT_READY: wallets are used in list order, so the run must use the first ${chosen.size} wallet(s) of the list (${prefix.map(short).join(', ') || 'none'}). Pick those, or choose all.`);
-    }
+    const fleet = new Set((await deps.walletList()).map((wallet) => wallet.toLowerCase()));
+    const stranger = wallets.find((wallet) => !fleet.has(wallet.toLowerCase()));
+    if (stranger) throw new Error(`WALLET_NOT_IN_FLEET: ${short(stranger)} is not one of your signing wallets. Pick wallets from /wallets, or choose all.`);
   };
   const walletsFor = async (text: string): Promise<string[]> => text.toLowerCase() === 'all' ? deps.walletList() : text.split(',').map((item) => item.trim()).filter(Boolean);
 
@@ -350,8 +347,9 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       ].join('\n');
     },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
-      const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
-      await assertListOrder(preview.wallets);
+      const asked = await walletsFor(walletsText);
+      await assertListOrder(asked);
+      const preview = previewLiveRequest(deps.store.snapshot(), campaignId, asked, maxFeeGwei, now());
       // A wallet that holds less than a run needs would stop the whole run at arm: say so now, with the exact top-up, before anything is sent.
       if (deps.fire) {
         const split = await deps.fire.fundingSplit(campaign(campaignId), preview.wallets);
@@ -431,9 +429,9 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       // A wallet that does not hold what a run needs (mint value plus the fee budget) would stop the whole run at arm: it is left out here, with the exact top-up.
       const split = await wiring.fundingSplit(target, asked);
       if (split.funded.length === 0) throw new Error(`FUNDING_NOT_ARRIVED: no wallet holds what a run needs, so nothing can be fired yet. ${split.short.map((item) => `${short(item.wallet)}: ${item.why}.`).join(' ')}`);
-      // The engine uses wallets in list order, so only the ready ones from the start of the list go; the preview shows exactly what the fire will send.
-      const order = await wiring.readyPrefix(split.funded);
-      if (order.used.length === 0) throw new Error(`WALLET_ORDER_NOT_READY: wallets are used in list order and the first wallet${order.first ? ` (${short(order.first)})` : ''} is not ready. Fund or fix it first (see /funding), or the run cannot start.`);
+      // Any ready signing wallet can go, in list order wherever it sits (D-073); the preview shows exactly what the fire will send.
+      const order = await wiring.readyInListOrder(split.funded);
+      if (order.used.length === 0) throw new Error(`WALLET_NOT_IN_FLEET: none of the ready wallets is one of your signing wallets. Pick wallets from /wallets, or choose all.`);
       const wallets = order.used;
       split.short.push(...order.waiting);
       // A campaign sized for N wallets covers at most N: it uses the first N that pass their test mint, and the owner is told.
@@ -656,7 +654,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       // Only wallets that hold what a run needs can be in a request (the others would stop it at arm); the rest are named with their top-up.
       if (deps.fire) {
         const split = await deps.fire.fundingSplit(target, wallets);
-        const order = await deps.fire.readyPrefix(split.funded);
+        const order = await deps.fire.readyInListOrder(split.funded);
         wallets = order.used;
         const left = [...split.short, ...order.waiting];
         if (left.length > 0) note = left.map((item) => `✗ ${short(item.wallet)} left out: ${item.why}.`).join('\n');

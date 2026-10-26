@@ -126,34 +126,28 @@ async function loadWallets(path: string): Promise<Array<{ index: number; address
 }
 
 /**
- * The engine signs with the first N wallets of the key list, so the requested wallets must be exactly those N. The order
- * they arrive in does not matter (the database returns a run's wallets in no fixed order), only the set: the same set
- * of addresses, no repeats, no wallet outside the first N. Returns the wallet indexes in key-list order.
+ * D-073: the run signs with exactly the wallets it was approved for, wherever they sit in the key list. Each requested address
+ * must be in the key list once and be requested once; the order they arrive in does not matter (the database returns a run's
+ * wallets in no fixed order). Returns their key-list positions and addresses in key-list order, which the engine then checks
+ * against its own signer's list before signing.
  */
-export function selectKeyListPrefix(available: ReadonlyArray<{ index: number; address: string }>, addresses: readonly string[]): number[] {
+export interface KeyListSelection { readonly indexes: number[]; readonly addresses: string[] }
+
+export function selectKeyListWallets(available: ReadonlyArray<{ index: number; address: string }>, addresses: readonly string[]): KeyListSelection {
   if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
-  const selected = available.slice(0, addresses.length);
   const requested = new Set(addresses.map((address) => address.toLowerCase()));
-  // A key list that repeats an address in its first N cannot be matched exactly, so refuse it.
-  if (new Set(selected.map((wallet) => wallet.address.toLowerCase())).size !== selected.length) throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
-  if (selected.length !== addresses.length || requested.size !== addresses.length || selected.some((wallet) => !requested.has(wallet.address.toLowerCase()))) {
-    throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
-  }
-  return selected.map((wallet) => wallet.index);
+  if (requested.size !== addresses.length) throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
+  const picked = available.filter((wallet) => requested.has(wallet.address.toLowerCase()));
+  // Every requested wallet must be found exactly once: a missing one, or an address the key list repeats, cannot be matched safely.
+  if (picked.length !== addresses.length || new Set(picked.map((wallet) => wallet.address.toLowerCase())).size !== picked.length || new Set(picked.map((wallet) => wallet.index)).size !== picked.length) throw new Error('WALLET_SELECTION_NOT_REPRESENTABLE');
+  return { indexes: picked.map((wallet) => wallet.index), addresses: picked.map((wallet) => wallet.address.toLowerCase()) };
 }
 
-async function assertPrefixSelection(path: string, addresses: readonly string[]): Promise<number[]> {
+async function assertWalletSelection(options: MintEngineAdapterOptions, addresses: readonly string[]): Promise<KeyListSelection> {
   if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
-  return selectKeyListPrefix(await loadWallets(path), addresses);
-}
-
-async function assertWalletSelection(options: MintEngineAdapterOptions, addresses: readonly string[]): Promise<number[]> {
-  if (options.walletList) {
-    if (addresses.length === 0) throw new Error('EMPTY_EXECUTION_FLEET');
-    return selectKeyListPrefix(await options.walletList(), addresses);
-  }
+  if (options.walletList) return selectKeyListWallets(await options.walletList(), addresses);
   if (!options.walletFile) throw new Error('WALLET_SOURCE_REQUIRED');
-  return assertPrefixSelection(options.walletFile, addresses);
+  return selectKeyListWallets(await loadWallets(options.walletFile), addresses);
 }
 
 /**
@@ -179,7 +173,7 @@ export function baseGrantFrom(record: unknown, now: Date): BaseEnablementGrant |
   return valid ? Object.freeze({ expiresAt: valid.expiresAt, freeAllowed: true as const, paidAllowed: valid.paidAllowed }) : undefined;
 }
 
-export function engineConfigFromCampaign(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number): MintJobConfig {
+export function engineConfigFromCampaign(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number, selection?: KeyListSelection): MintJobConfig {
   const chain = chainName(campaign.chainId);
   const robinhoodGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : undefined;
   const baseGrant = campaign.chainId === 8453 ? baseGrantFrom(options.baseEnablement?.(), new Date()) : undefined;
@@ -188,7 +182,7 @@ export function engineConfigFromCampaign(campaign: Campaign, options: MintEngine
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
   return {
     target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id, ...(options.policyRef ? { policyRef: options.policyRef } : {}) },
-    fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets },
+    fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets, ...(selection ? { walletIndexes: selection.indexes, expectedAddresses: selection.addresses } : {}) },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
     fees: { maxFeePerGasGwei: options.maxFeePerGasGweiFor?.(campaign.id) ?? options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding },
     safety: {
@@ -350,8 +344,8 @@ export function preSignReservationGate<R extends { status: string; amountWei: bi
 
 export function createMintEngineAdapter(options: MintEngineAdapterOptions): EngineAdapter {
   const run = async (campaign: Campaign, wallets: readonly string[], dryRun: boolean, runId: string, intentId?: string, reservationProvider?: SpendReservationProvider): Promise<ExecutionResult> => {
-    await assertWalletSelection(options, wallets);
-    const config = engineConfigFromCampaign(campaign, options, dryRun, wallets.length);
+    const selection = await assertWalletSelection(options, wallets);
+    const config = engineConfigFromCampaign(campaign, options, dryRun, wallets.length, selection);
     const persistedRun = options.getState().runs.find((run) => run.id === runId);
     const engineOptions = {
       ...(reservationProvider ? { reservationProvider } : {}),

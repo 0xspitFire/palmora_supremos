@@ -17,6 +17,8 @@ describe('system messages (T-030)', () => {
     expect(reasonCode('A_B:C_D:E_F:G_H')).toBe('A_B:C_D:E_F');
     expect(reasonText('LIVE_REQUEST_FAILED:EACCES', 'x')).toContain('[LIVE_REQUEST_FAILED:EACCES]');
     expect(reasonText('LIVE_REQUEST_FAILED:EACCES', 'x')).toContain('safe hint');
+    expect(reasonText('WALLET_NOT_IN_FLEET', 'x')).toContain('not one of your signing wallets');
+    expect(reasonText('WALLET_SELECTION_NOT_REPRESENTABLE', 'x')).not.toContain('first wallets');
     expect(reasonText(undefined, 'a limit was reached')).toBe('a limit was reached');
     expect(reasonText('__proto__', 'fallback')).toBe('fallback [__proto__]');
     const hostile = render(spendCapCard({ notice: 'wallet 0xabc1230000000000000000000000000000000000 at https://user:pw@node.example/v2/KEY gave up', runId: 'run_1', at })).plain;

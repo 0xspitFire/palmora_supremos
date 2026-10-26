@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, engineConfigFromCampaign, freeMintReserveCapsFor, preSignReservationGate, selectKeyListPrefix } from './engine-adapter.js';
+import { assertWithinAdmittedExposure, baseReceiptFactsAgree, chainName, engineConfigFromCampaign, freeMintReserveCapsFor, preSignReservationGate, selectKeyListWallets } from './engine-adapter.js';
 import { canonicalExecutionIdentity, createBroadcaster } from '@mint-bot/engine';
 
 const campaign = { mintPriceWei: 1_000n, quantity: 2 };
@@ -141,21 +141,26 @@ describe('free-mint reserve caps per chain (D-042, D-057)', () => {
   });
 });
 
-describe('wallet selection ignores the order wallets arrive in (T-027 rehearsal finding)', () => {
+describe('wallet selection takes exactly the approved wallets, wherever they sit in the key list (D-073)', () => {
   const list = [{ index: 0, address: '0xAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaaAAaa' }, { index: 1, address: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }, { index: 2, address: '0xcccccccccccccccccccccccccccccccccccccccc' }];
-  it('accepts the first N wallets in any order and returns their indexes in key-list order', () => {
-    expect(selectKeyListPrefix(list, [list[0]!.address, list[1]!.address])).toEqual([0, 1]);
-    expect(selectKeyListPrefix(list, [list[1]!.address.toUpperCase().replace('0X', '0x'), list[0]!.address.toLowerCase()])).toEqual([0, 1]);
-    expect(selectKeyListPrefix(list, list.map((wallet) => wallet.address).reverse())).toEqual([0, 1, 2]);
+  it('returns positions and lower-case addresses in key-list order, whatever order or letter case they arrive in', () => {
+    expect(selectKeyListWallets(list, [list[0]!.address, list[1]!.address])).toEqual({ indexes: [0, 1], addresses: [list[0]!.address.toLowerCase(), list[1]!.address] });
+    expect(selectKeyListWallets(list, list.map((wallet) => wallet.address).reverse()).indexes).toEqual([0, 1, 2]);
+    // A later wallet alone, and a gap, are fine now.
+    expect(selectKeyListWallets(list, [list[2]!.address]).indexes).toEqual([2]);
+    expect(selectKeyListWallets(list, [list[2]!.address.toUpperCase().replace('0X', '0x'), list[0]!.address]).indexes).toEqual([0, 2]);
   });
-  it('still refuses a wallet outside the first N, a repeat, a stranger, an empty list and too many', () => {
-    expect(() => selectKeyListPrefix(list, [list[1]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE'); // wallet 1 alone is not the first wallet
-    expect(() => selectKeyListPrefix(list, [list[0]!.address, list[2]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
-    expect(() => selectKeyListPrefix(list, [list[0]!.address, list[0]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
-    expect(() => selectKeyListPrefix(list, [list[0]!.address, '0xdddddddddddddddddddddddddddddddddddddddd'])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
-    expect(() => selectKeyListPrefix(list, [])).toThrow('EMPTY_EXECUTION_FLEET');
-    // A key list with a repeated address among its first N is refused.
-    expect(() => selectKeyListPrefix([list[0]!, { index: 1, address: list[0]!.address.toLowerCase() }], [list[0]!.address, list[1]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
-    expect(() => selectKeyListPrefix(list.slice(0, 1), list.map((wallet) => wallet.address))).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+  it('still refuses a repeat, a stranger, an empty list, and a key list that repeats a requested address', () => {
+    expect(() => selectKeyListWallets(list, [list[0]!.address, list[0]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListWallets(list, [list[0]!.address.toLowerCase(), list[0]!.address.toUpperCase().replace('0X', '0x')])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListWallets(list, [list[0]!.address, '0xdddddddddddddddddddddddddddddddddddddddd'])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListWallets(list, [])).toThrow('EMPTY_EXECUTION_FLEET');
+    expect(() => selectKeyListWallets([list[0]!, { index: 1, address: list[0]!.address.toLowerCase() }], [list[0]!.address])).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+    expect(() => selectKeyListWallets(list.slice(0, 1), list.map((wallet) => wallet.address))).toThrow('WALLET_SELECTION_NOT_REPRESENTABLE');
+  });
+  it('hands the engine the positions and the approved addresses', () => {
+    const selection = selectKeyListWallets(list, [list[2]!.address]);
+    const config = engineConfigFromCampaign({ id: 'c', chainId: 1, contract: '0x3333333333333333333333333333333333333333', strategy: 'seadrop-v1-public', quantity: 1, spendPolicy: { maxRunWei: 10n ** 16n, dailyCapWei: 10n ** 16n, gasCeilingWei: 10n ** 15n }, feePolicy: { kind: 'free', configuredPriorityFeeWei: 0n, totalFeeBudgetWei: 1n } } as never, { maxFeePerGasGwei: 1, gasLimitPadding: 1, maxReplacementBumps: 0, killSwitchFile: '/x' } as never, true, 1, selection);
+    expect(config.fleet).toMatchObject({ maxWallets: 1, walletIndexes: [2], expectedAddresses: [list[2]!.address] });
   });
 });

@@ -554,6 +554,9 @@ export interface MintJobConfig {
   readonly fleet: {
     readonly walletFile: string;
     readonly maxWallets: number;
+    /** D-073: key-list positions to sign with (instead of the first `maxWallets`), with the approved address for each. */
+    readonly walletIndexes?: readonly number[];
+    readonly expectedAddresses?: readonly string[];
   };
   readonly timing: {
     readonly mintStartUnix: number | 'auto';
