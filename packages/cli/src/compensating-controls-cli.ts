@@ -48,7 +48,7 @@ export const TURNKEY_SIGNER_ENFORCES = { transactionMatch: true, signerRecovery:
 
 /**
  * Runs the provider probe. ANY failure (policy, key, identity or evidence drift, an expired record, or an unreachable provider)
- * engages the kill switch before the error is raised, which is D-058 control 7. The evidence it returns is only the fact that
+ * engages the kill switch before the error is raised, which is D-058 control 6 after D-071. The evidence it returns is only the fact that
  * the probe succeeded just now for this record.
  */
 export async function probeOrEngageKillSwitch(
@@ -102,7 +102,7 @@ export function buildCompensatingEvidence(input: EvidenceInputs): CompensatingCo
     providerProbe: input.probe,
     signatureChecks: { ...TURNKEY_SIGNER_ENFORCES },
     ...(input.rehearsal ? { rehearsal: { ...input.rehearsal } } : {}),
-    // The probe above engages the kill switch on any failure, so drift always stops the system (control 7).
+    // The probe above engages the kill switch on any failure, so drift always stops the system (control 6 after D-071).
     driftResponse: { killSwitchOnDrift: true },
   };
 }

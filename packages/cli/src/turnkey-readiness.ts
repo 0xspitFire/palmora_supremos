@@ -23,7 +23,7 @@ import { requiredPerWallet } from './fleet-funding-cli.js';
  *  2. The provider probe and the on-chain balances are taken in-process, just now, at every arm and execute, and recorded as the
  *     runtime's operational readiness by this code.
  *  3. The expected custody policy is derived from the verified record. Any probe failure engages the kill switch.
- *  4. Only the rehearsal record written earlier by a separate owner-run command is read, and they count only
+ *  4. Only the rehearsal record written earlier by a separate owner-run command is read, and it counts only
  *     when bound by digest to this record, wallet set and lockfile (the arm gate checks that).
  * Nothing here signs, broadcasts, funds or enables anything.
  */

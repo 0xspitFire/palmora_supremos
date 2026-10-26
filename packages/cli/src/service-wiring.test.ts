@@ -80,7 +80,7 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(block).toContain("startCoordinator: config.mode === 'host'");
   });
 
-  it('the release carries the lockfile, whose digest is one of the seven controls', () => {
+  it('the release carries the lockfile, whose digest is one of the six controls', () => {
     expect(build).toContain('pnpm-lock.yaml node_modules packages scripts');
     expect(build).toContain('node_modules package.json pnpm-lock.yaml; do');
   });

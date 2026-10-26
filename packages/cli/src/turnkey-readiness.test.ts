@@ -41,7 +41,6 @@ const rehearsalFile = (record = DIGEST) => ({
   type: 'turnkey-signing-rehearsal', recordedAt: new Date(NOW.getTime() - DAY).toISOString(), policyRecordDigest: record,
   walletSetDigest: computeWalletSetDigest([W1, W2]), lockfileDigest: LOCK, safety: { broadcastAttempted: false },
 });
-const trustFile = () => ({ version: 1, type: 'turnkey-trust-center-review', reviewedAt: new Date(NOW.getTime() - 10 * DAY).toISOString(), documents: [{ name: 'report', date: '2026-08-01T00:00:00.000Z', sha256: 'd'.repeat(64) }] });
 
 interface Harness { options: TurnkeyReadinessOptions; recorded: OperationalReadiness[]; kills: string[]; zeroized: { count: number }; probes: { count: number }; state: { record: VerifiedTurnkeyRecord; balances: bigint; probeDigest: string; probeFails: boolean; rehearsal: unknown; reconciledAt: string | undefined; now: Date } }
 
@@ -58,7 +57,7 @@ function harness(overrides: Partial<TurnkeyReadinessOptions> = {}): Harness {
   const options: TurnkeyReadinessOptions = {
     readSigned: async () => ({ signed: {}, publicKey: 'pinned' }),
     verifyRecord: () => state.record,
-    readOptional: async (name) => (name === 'rehearsal' ? state.rehearsal : trustFile()),
+    readOptional: async () => state.rehearsal,
     lockfileDigest: async () => LOCK,
     createSigner: async () => signer(),
     readBalances: async (_chain, addresses) => addresses.map((address) => ({ address, balanceWei: state.balances })),
