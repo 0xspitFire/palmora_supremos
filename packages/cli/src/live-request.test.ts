@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Campaign, SimulationEvidenceRecord } from '@mint-bot/backend';
-import { LIVE_REQUEST_LIFETIME_MS, previewLiveRequest, processLiveRunRequests, runLiveRequest, startLiveRequestPoller, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
+import { LIVE_REQUEST_LIFETIME_MS, describeFailure, previewLiveRequest, processLiveRunRequests, runLiveRequest, startLiveRequestPoller, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
 
 const NOW = new Date('2026-10-24T10:00:00.000Z');
 const WALLET_A = '0x1111111111111111111111111111111111111111';
@@ -226,5 +226,39 @@ describe('the code shown for a stopped request keeps the failing check visible (
     expect(await codeOf(Object.assign(new Error('x'), { code: 'not a code https://rpc.example/key' }))).toBe('LIVE_REQUEST_FAILED');
     expect(await codeOf('a thrown string')).toBe('LIVE_REQUEST_FAILED');
     expect(await codeOf(new Proxy(new Error('x'), { get() { throw new Error('boom'); } }))).toBe('LIVE_REQUEST_FAILED');
+  });
+});
+
+describe('the host journal describes an uncoded failure without leaking (T-081)', () => {
+  it('keeps the type, a cleaned message and function names with file:line, and drops addresses, hex, long numbers and folders', () => {
+    const error = new Error('request to https://rpc.example/v1/SECRETKEY failed for 0x1111111111111111111111111111111111111111 amount 123456789012 at\nsecond line');
+    const other = describeFailure(new Error('wss://node.example/ws?k=1 and /etc/some/folder/file and key ABCDEFGHIJKLMNOPQRSTUVWXYZ0123'));
+    expect(describeFailure(new Error('word '.repeat(100))).message.length).toBe(240);
+    expect(describeFailure(new Error('hash ' + 'ab'.repeat(20))).message).toBe('hash [hex]');
+    expect(other.message).toBe('[url] and [path] and key [token]');
+    error.name = 'Weird Error!';
+    const detail = describeFailure(error);
+    expect(detail.name).toBe('WeirdError');
+    expect(detail.message).toBe('request to [url] failed for [hex] amount [digits] at second line');
+    expect(detail.message).not.toContain('SECRETKEY');
+    expect(detail.frames.length).toBeGreaterThan(0);
+    for (const frame of detail.frames) expect(frame).toMatch(/^[A-Za-z0-9_.<>$ ]* \([^/\\ ]+:\d+\)$/);
+    expect(describeFailure('a string').name).toBe('string');
+    expect(describeFailure(new Proxy(new Error('x'), { get() { throw new Error('boom'); } }))).toEqual({ name: 'Unknown', message: '', frames: [] });
+  });
+
+  it('is told about an uncoded failure only, and a failing journal never changes the outcome', async () => {
+    const now = new Date();
+    const request = { id: 'live_request_1', campaignId: 'c', wallets: [WALLET_A], simulationIds: ['s'], approvalId: 'a', evidenceAt: now.toISOString(), maxFeeGwei: '0.2', requestedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+    const run = async (error: unknown, failed: LiveRequestProcessorDeps['failed']) => {
+      const records: Array<{ code?: string }> = [];
+      await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async () => { throw error; }, setFeeCeiling: () => undefined, record: async (event) => { records.push(event); }, ...(failed ? { failed } : {}), now: () => now });
+      return records[0]?.code;
+    };
+    const seen: string[] = [];
+    expect(await run(new Error('plain words from a library'), (id, detail) => { seen.push(`${id}:${detail.message}`); })).toBe('LIVE_REQUEST_FAILED');
+    expect(await run(new Error('KILLED'), (id) => { seen.push(id); })).toBe('KILLED');
+    expect(seen).toEqual(['live_request_1:plain words from a library']);
+    expect(await run(new Error('more words'), () => { throw new Error('journal down'); })).toBe('LIVE_REQUEST_FAILED');
   });
 });

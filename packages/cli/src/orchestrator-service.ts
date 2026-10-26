@@ -256,6 +256,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         // Each stopped request is its own alert (keyed by its id), so a repeat of the same reason is still told.
         if (state !== 'finished') await alerts.blocked(code ?? 'LIVE_REQUEST_STOPPED', runId, requestId).catch(() => undefined);
       },
+      failed: (requestId, detail) => logger.warn({ event: 'live_request_failure_detail', requestId, errorName: detail.name, errorMessage: detail.message, frames: detail.frames }, 'uncoded live request failure (host journal only)'),
       now: () => new Date(),
     }, { onError: (error) => logger.warn({ event: 'live_request_poll_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'LIVE_REQUEST_POLL_FAILED' }, 'live request poll failed') });
   }
