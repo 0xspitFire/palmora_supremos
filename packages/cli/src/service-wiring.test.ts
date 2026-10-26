@@ -44,6 +44,11 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(block).toContain('command: (name, input) => liveApplication.command(name, input)');
     expect(block).not.toContain('runtime.application');
     expect(service).toContain('liveRequests?.stop()');
+    expect(block).toContain('assertUnattendedReady: async () => { await assertOpsEvidenceAccepted({ environment }); }');
+    expect(service).toContain('sentTransactionsForRun(state.attempts, state.receipts, runId)');
+    expect(block).toContain("type: 'live_request_result'");
+    expect(block).toContain("if (followUp === 'blocked') await alerts.blocked");
+    expect(block).toContain("if (followUp === 'sent' && runId)");
   });
 
   it('Telegram commands run only when the owner turns them on, and the start fails without the owner, the token or the authenticator (T-061)', () => {

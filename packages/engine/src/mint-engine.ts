@@ -265,11 +265,15 @@ export class MintEngine {
       const chainConfig = await resolveChainByNameFromSecrets(this.config.target.chain, scope, secretRoot);
       const chainId = chainConfig.chainId;
       engineLog.info({ chain: chainConfig.name, chainId }, 'Chain resolved');
-      const durableOwnerGrant = chainId === 8453 ? this.config.safety.baseGrant !== undefined : chainId === 4663 ? this.config.safety.robinhoodGrant !== undefined : false;
-      if (!this.config.safety.dryRun && !chainConfig.executionEnabled && !durableOwnerGrant) {
+      // The admission assertion above has already proved that the relevant
+      // grant exists *and is current*.  Do not turn mere object presence into
+      // an authorization signal here: an expired object must never bypass the
+      // registry's disabled flag.
+      const ownerGrantAuthorized = !this.config.safety.dryRun && (chainId === 8453 || chainId === 4663);
+      if (!this.config.safety.dryRun && !chainConfig.executionEnabled && !ownerGrantAuthorized) {
         throw new MintError(MintErrorType.RPC_ERROR, `Execution is disabled for ${chainConfig.name} by the Phase 1 chain policy`);
       }
-      if (!this.config.safety.dryRun && chainConfig.verificationStatus !== 'verified' && !durableOwnerGrant) {
+      if (!this.config.safety.dryRun && chainConfig.verificationStatus !== 'verified' && !ownerGrantAuthorized) {
         throw new MintError(MintErrorType.RPC_ERROR, `Execution is blocked for ${chainConfig.name}: chain verification status is "${chainConfig.verificationStatus}"`);
       }
 

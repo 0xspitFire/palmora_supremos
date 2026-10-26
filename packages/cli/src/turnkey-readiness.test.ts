@@ -83,7 +83,7 @@ describe('Turnkey readiness at the service (T-042 requirements 1 to 4)', () => {
   it('derives the expected custody policy from the verified record only', async () => {
     const h = harness();
     const readiness = await createTurnkeyReadiness(h.options);
-    expect(readiness.expectedCustodyPolicy).toEqual({ provider: 'turnkey', providerIdentity: 'org-dev', policyReference: `turnkey:policy-1:0x${'ab'.repeat(32)}`, policyDigest: `0x${'ab'.repeat(32)}` });
+    expect(readiness.expectedCustodyPolicy).toEqual({ provider: 'turnkey', providerIdentity: 'org-dev', policyReference: `turnkey:policy-1:0x${'ab'.repeat(32)}`, policyDigest: `0x${'ab'.repeat(32)}`, recordDigest: DIGEST });
   });
 
   it('refuses to start when the record cannot be verified (bad signature or expired)', async () => {

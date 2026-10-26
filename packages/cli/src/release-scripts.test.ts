@@ -14,14 +14,28 @@ const hostDir = join(here, '..', '..', '..', 'ops', 'host');
 const read = (name: string): string => readFileSync(join(hostDir, name), 'utf8');
 const build = read('build-release.sh');
 const install = read('install-release.sh');
+const deploy = read('deploy-release.sh');
 const provision = read('provision-host.sh');
 
 describe('release scripts (T-047)', () => {
   it('are valid bash', () => {
-    for (const name of ['build-release.sh', 'install-release.sh', 'provision-host.sh']) {
+    for (const name of ['build-release.sh', 'install-release.sh', 'deploy-release.sh', 'provision-host.sh']) {
       const result = spawnSync('bash', ['-n', join(hostDir, name)], { encoding: 'utf8' });
       expect(result.status, `${name}: ${result.stderr}`).toBe(0);
     }
+  });
+
+  it('offers one-command GCP deployment while keeping the kill switch engaged and rolling back an unhealthy release', () => {
+    expect(deploy).toContain('gcloud compute scp');
+    expect(deploy).toContain('gcloud compute ssh');
+    expect(deploy).toContain('--tunnel-through-iap');
+    expect(deploy).toContain('sudo -u mintbot touch /var/lib/mint-bot/killswitch');
+    expect(deploy).toContain("'$REMOTE_INSTALLER' --rollback");
+    expect(deploy).toContain('DEPLOYMENT_HEALTHY_KILL_SWITCH_ENGAGED');
+    expect(deploy).toContain('git -C "$REPO" show "$COMMIT:ops/host/install-release.sh"');
+    expect(deploy).toContain('INSTALLER="$WORK/install-release.sh"');
+    expect(deploy).not.toContain('INSTALLER="$HERE/install-release.sh"');
+    expect(deploy).not.toMatch(/rm\s+[^\n]*killswitch/);
   });
 
   it('the builder uses committed files only, the same Node version as the server, and refuses secret-looking files in the source and in the result', () => {
@@ -34,6 +48,7 @@ describe('release scripts (T-047)', () => {
     // it checks the result is complete before packing and records how it was built
     for (const required of ['packages/cli/dist/orchestrator-service.js', 'scripts/backup-service.mjs', 'scripts/r2-upload.mjs']) expect(build).toContain(required);
     expect(build).toContain('method=%s');
+    expect(build).toContain('product_version=%s');
   });
 
   it('the builder pins what the lockfile cannot: the pnpm program, every native file, the commit, and the offline build has no network and a read-only store', () => {
@@ -97,6 +112,15 @@ describe('release scripts (T-047)', () => {
     expect(install).toContain('not an ordinary file, folder or link');
     expect(install).toContain('.history');
     expect(install).toContain('.previous');
+  });
+
+  it('assigns a semantic installed version and advances the build component for each distinct installed release', () => {
+    expect(install).toContain('VERSION_COUNTER="$RELEASES/.version-counter"');
+    expect(install).toContain('next_install_version');
+    expect(install).toContain('current_build + 1');
+    expect(install).toContain("printf '%s.%s.1'");
+    expect(install).toContain("printf 'version=%s\\n'");
+    expect(install.indexOf("printf 'version=%s\\n'")).toBeLessThan(install.indexOf('mv -T "$STAGE/release" "$TARGET"'));
   });
 
   it('the provisioning script can use a Node download made elsewhere, which must still match the pinned checksum', () => {

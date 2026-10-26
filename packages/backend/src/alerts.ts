@@ -5,9 +5,9 @@ import type { NotificationDispatcher } from './notifications.js';
 import type { AlertCard } from './alert-card.js';
 import { plainSystemText, type SystemCard } from './system-card.js';
 import { killEngagedCard, runProblemCard, spendCapCard } from './system-messages.js';
-import { mintSubmittedCard } from './live-run-messages.js';
+import { mintConfirmedCard, mintFailedCard, mintSubmittedCard } from './live-run-messages.js';
 
-export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder' | 'sent';
+export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder' | 'sent' | 'confirmed' | 'mint_failed';
 export type AlertPriority = 'immediate' | 'grouped';
 /** Phase 2 intelligence alerts (T-004, P2-06). Outbound only; never a permission or execution proof. */
 export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status' | 'quantity_reduced' | 'health' | 'funding_request' | 'excess_balance' | 'fleet_watch';
@@ -28,9 +28,10 @@ export interface IntelligenceAlertInput {
 /** `occurrence` makes one occurrence its own alert: a live request stopped at arm has no run, so without it every later stop for the same reason would be taken for a repeat and never sent. */
 /** A mint transaction that was sent (T-086): the facts the "mint submitted" card needs. The hash is shown shortened and linked. */
 export interface SentMintFacts { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string }
-export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; occurrence?: string; sent?: SentMintFacts; }
+export interface FinalMintFacts extends SentMintFacts { feePaid?: string }
+export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; occurrence?: string; sent?: SentMintFacts; final?: FinalMintFacts; }
 export interface AlertPolicy { retentionDays: number; immediateKinds: readonly AlertKind[]; groupedKinds: readonly AlertKind[]; }
-export const DEFAULT_ALERT_POLICY: AlertPolicy = { retentionDays: 30, immediateKinds: ['kill', 'cap', 'blocked', 'failed', 'sent'], groupedKinds: ['started', 'reminder'] };
+export const DEFAULT_ALERT_POLICY: AlertPolicy = { retentionDays: 30, immediateKinds: ['kill', 'cap', 'blocked', 'failed', 'sent', 'confirmed', 'mint_failed'], groupedKinds: ['started', 'reminder'] };
 export interface OperationalAlert { key: string; severity: 'warning' | 'critical'; reason: string; message: string; at: string; }
 
 export interface OperationalSnapshot {
@@ -68,6 +69,8 @@ function systemFor(input: AlertInput, at: string): SystemCard | undefined {
     if (input.kind === 'kill') return killEngagedCard({ ...(input.reason ? { reason: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
     if (input.kind === 'cap') return spendCapCard({ ...(input.reason ? { notice: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
     if (input.kind === 'sent' && input.sent && input.runId) return mintSubmittedCard({ runId: input.runId, ...input.sent, at });
+    if (input.kind === 'confirmed' && input.final && input.runId) return mintConfirmedCard({ runId: input.runId, ...input.final, at });
+    if (input.kind === 'mint_failed' && input.final && input.runId) return mintFailedCard({ runId: input.runId, ...input.final, ...(input.reason ? { reason: input.reason } : {}), at });
     if (input.kind === 'blocked' || input.kind === 'failed') return runProblemCard(input.kind, { ...(input.reason ? { reason: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
   } catch { /* presentation only: the alert still goes out as plain text */ }
   return undefined;
@@ -98,6 +101,9 @@ export class AlertManager {
   public async failed(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'failed', runId, reason }); }
   /** T-086: a mint transaction was sent. One message per transaction (the hash is the occurrence), immediate, never a permission or proof. */
   public async sent(runId: string, sent: SentMintFacts): Promise<void> { await this.emit({ kind: 'sent', runId, sent, occurrence: sent.hash }); }
+  /** Authoritative chain finality, emitted by reconciliation. Repeats and restarts dedupe by transaction hash and outcome. */
+  public async confirmed(runId: string, final: FinalMintFacts): Promise<void> { await this.emit({ kind: 'confirmed', runId, final, occurrence: final.hash }); }
+  public async mintFailed(runId: string, final: FinalMintFacts, reason = 'TRANSACTION_REVERTED'): Promise<void> { await this.emit({ kind: 'mint_failed', runId, final, reason, occurrence: final.hash }); }
 
   /** Records an intelligence alert once per dedupe identity; immediate ones are dispatched now, grouped ones join the next digest. */
   public async intelligence(input: IntelligenceAlertInput): Promise<boolean> {
@@ -169,7 +175,11 @@ export class AlertManager {
     const text = system ? plainSystemText(system) : alertText(input);
     const retentionUntil = new Date(Date.parse(at) + this.policy.retentionDays * 86_400_000).toISOString();
     const eventId = `alert_${type}_${input.runId ?? 'global'}_${Date.parse(at)}${input.occurrence ? `_${shortDigest(input.occurrence).slice(0, 8)}` : ''}`;
-    await this.store.transaction((current) => { current.events.push({ id: eventId, ...(input.runId ? { runId: input.runId } : {}), type, at, data: { ...input, text, retentionUntil, ...(system ? { system } : {}) } }); });
+    // Keep only presentation-safe finality facts in the durable alert. Wallets
+    // are already shortened in the card; the full transaction hash remains
+    // only where the explorer button needs it.
+    const stored = input.sent ? { ...input, sent: { ...input.sent, wallet: undefined } } : input.final ? { ...input, final: { ...input.final, wallet: undefined } } : input;
+    await this.store.transaction((current) => { current.events.push({ id: eventId, ...(input.runId ? { runId: input.runId } : {}), type, at, data: { ...stored, text, retentionUntil, ...(system ? { system } : {}) } }); });
     this.metrics?.recordNotification('pending');
     const priority: AlertPriority = this.policy.immediateKinds.includes(input.kind) ? 'immediate' : 'grouped';
     if (priority === 'grouped') this.grouped.add(eventId);

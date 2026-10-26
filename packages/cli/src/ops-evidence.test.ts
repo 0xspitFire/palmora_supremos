@@ -13,6 +13,9 @@ interface Check { name: string; result: string; observed: string }
 interface Lib {
   KINDS: string[];
   REQUIRED_CHECKS: Record<string, string[]>;
+  OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS: number;
+  OPS_EVIDENCE_ACCEPTANCE_VERSION: number;
+  OPS_EVIDENCE_MAX_AGE_MS: Record<string, number>;
   sha256Hex(data: string): string;
   sanitize(text: string, max?: number): string;
   validateEvidence(value: unknown, kind: string, now?: Date): string[];
@@ -21,12 +24,16 @@ interface Lib {
   verifyAcceptance(acceptance: unknown, artifacts: Record<string, unknown>, identity: { currentCommit: string; hostId: string; now?: Date }): string[];
 }
 interface Collector {
-  collect(kind: string, io: unknown, env?: Record<string, string>, options?: { restoreDrill?: string; recoveryDrill?: string }): Promise<{ artifact: { kind: string; environment: string; hostId: string; release: { commit: string }; checks: Check[]; references: Array<{ name: string }> }; failed: Check[]; problems: string[] }>;
+  collect(kind: string, io: unknown, env?: Record<string, string>, options?: { restoreDrill?: string; recoveryDrill?: string; rotationDrill?: string }): Promise<{ artifact: { kind: string; environment: string; hostId: string; release: { commit: string }; checks: Check[]; references: Array<{ name: string }> }; failed: Check[]; problems: string[] }>;
   hasRollback(entries: unknown): boolean;
   parseHistory(text: string): unknown;
 }
 const lib = (await import(join(scripts, 'ops-evidence-lib.mjs'))) as Lib;
 const collector = (await import(join(scripts, 'ops-evidence-collect.mjs'))) as Collector;
+const runtime = await import(join(scripts, 'ops-evidence-runtime.mjs')) as {
+  evaluateOpsEvidence(options?: Record<string, unknown>): Promise<{ humanEvidenceComplete: boolean; missing: string[]; acceptanceProblems: string[] }>;
+  assertOpsEvidenceAccepted(options?: Record<string, unknown>): Promise<unknown>;
+};
 
 const COMMIT = 'a'.repeat(40);
 const NOW = new Date('2026-10-23T12:00:00.000Z');
@@ -88,6 +95,15 @@ function fakeIo(overrides: { exec?: Responses; files?: Record<string, string>; h
 describe('evidence rules', () => {
   const good = () => ({ version: 1, kind: 'heap_core_dump', environment: 'production', hostId: 'palmora-prod-1', release: { commit: COMMIT }, startedAt: '2026-10-23T11:00:00.000Z', completedAt: '2026-10-23T11:01:00.000Z', checks: (lib.REQUIRED_CHECKS.heap_core_dump ?? []).map((name) => ({ name, result: 'pass', observed: 'ok' })), references: [] });
   it('accepts a complete passing artifact', () => { expect(lib.validateEvidence(good(), 'heap_core_dump', NOW)).toEqual([]); });
+  it('accepts each artifact at its exact documented maximum age and rejects it one millisecond later', () => {
+    for (const kind of lib.KINDS) {
+      const maxAge = lib.OPS_EVIDENCE_MAX_AGE_MS[kind]!;
+      const completedAt = new Date(NOW.getTime() - maxAge).toISOString();
+      const value = { ...good(), kind, startedAt: completedAt, completedAt, checks: (lib.REQUIRED_CHECKS[kind] ?? []).map((name) => ({ name, result: 'pass', observed: 'ok' })) };
+      expect(lib.validateEvidence(value, kind, NOW), kind).not.toContain('EVIDENCE_STALE');
+      expect(lib.validateEvidence(value, kind, new Date(NOW.getTime() + 1)), kind).toContain('EVIDENCE_STALE');
+    }
+  });
   it('names every problem: wrong kind, environment, placeholder host, bad commit, failed or missing check, secret-shaped text, future time', () => {
     const bad = { ...good(), kind: 'recovery', environment: 'test', hostId: 'REPLACE-WITH-STABLE-HOST-ID', release: { commit: 'abc' }, completedAt: '2027-01-01T00:00:00.000Z' };
     bad.checks = [{ name: 'core_limit_unit', result: 'fail', observed: 'see https://example.test/x' }, { name: 'x', result: 'pass', observed: 'a'.repeat(70).replace(/a/g, 'b') }];
@@ -176,14 +192,112 @@ describe('collectors (fake host)', () => {
     expect((await collector.collect('recovery', withDrill(''), {}, {})).failed.map((item) => item.name)).toEqual(['restored_from_offhost', 'integrity_ok', 'schema_current', 'post_recovery_reconciliation']);
   });
 
-  it('rotation and revocation has no collector yet and refuses rather than produce a placeholder', async () => {
-    await expect(collector.collect('rotation_revocation', fakeIo(), {})).rejects.toThrow('COLLECTOR_NOT_AVAILABLE:rotation_revocation');
+  it('rotation and revocation accepts only a recent, independently supplied redacted drill with every supporting digest', async () => {
+    const references = ['canonical-policy-record', 'production-wallet-map', 'bounded-funding-profile', 'no-broadcast-rehearsal', 'old-reference-exclusion']
+      .map((name, index) => ({ name, sha256: String(index + 1).repeat(64) }));
+    const drill = (overrides: Record<string, unknown> = {}) => JSON.stringify({
+      version: 1,
+      type: 'mintbot-rotation-revocation-drill',
+      environment: 'production',
+      status: 'ok',
+      completedAt: new Date(NOW.getTime() - 3_600_000).toISOString(),
+      checks: {
+        fresh_wallet_inventory: { pass: true, observed: 'fresh wallet inventory matches the approved policy-bound record' },
+        funding_profile_bounded: { pass: true, observed: 'wallet funding stays within the approved production envelope' },
+        old_references_excluded: { pass: true, observed: 'old unattended wallet and policy references are excluded' },
+      },
+      references,
+      ...overrides,
+    });
+    const withDrill = (text: string) => fakeIo({ files: { '/home/o/rotation.json': text } });
+    const passed = await collector.collect('rotation_revocation', withDrill(drill()), {}, { rotationDrill: '/home/o/rotation.json' });
+    expect(passed.problems).toEqual([]);
+    expect(passed.artifact.references.map((reference) => reference.name)).toEqual(['rotation-revocation-drill-output', ...references.map((reference) => reference.name)]);
+
+    const absent = await collector.collect('rotation_revocation', fakeIo(), {}, {});
+    expect(absent.failed.map((item) => item.name)).toEqual(['fresh_wallet_inventory', 'funding_profile_bounded', 'old_references_excluded']);
+    const stale = await collector.collect('rotation_revocation', withDrill(drill({ completedAt: new Date(NOW.getTime() - 25 * 3_600_000).toISOString() })), {}, { rotationDrill: '/home/o/rotation.json' });
+    expect(stale.failed).toHaveLength(3);
+    const missingReference = await collector.collect('rotation_revocation', withDrill(drill({ references: references.slice(1) })), {}, { rotationDrill: '/home/o/rotation.json' });
+    expect(missingReference.failed).toHaveLength(3);
+    const unredactedShape = await collector.collect('rotation_revocation', withDrill(drill({ providerResponse: { unexpected: 'must not be copied into this contract' } })), {}, { rotationDrill: '/home/o/rotation.json' });
+    expect(unredactedShape.failed).toHaveLength(3);
+    const unsafe = await collector.collect('rotation_revocation', withDrill(drill({ checks: { fresh_wallet_inventory: { pass: true, observed: 'see https://provider.example/secret' }, funding_profile_bounded: { pass: true, observed: 'bounded' }, old_references_excluded: { pass: true, observed: 'excluded' } } })), {}, { rotationDrill: '/home/o/rotation.json' });
+    expect(unsafe.failed.map((item) => item.name)).toContain('fresh_wallet_inventory');
+    const oneFailed = await collector.collect('rotation_revocation', withDrill(drill({ checks: { fresh_wallet_inventory: { pass: true, observed: 'fresh inventory' }, funding_profile_bounded: { pass: false, observed: 'not bounded' }, old_references_excluded: { pass: true, observed: 'excluded' } } })), {}, { rotationDrill: '/home/o/rotation.json' });
+    expect(oneFailed.failed.map((item) => item.name)).toEqual(['funding_profile_bounded']);
   });
 
   it('history parsing: a rollback is a move back to the release the previous move left', () => {
     expect(collector.hasRollback(collector.parseHistory('t1 none -> A\nt2 A -> B\nt3 B -> A\n'))).toBe(true);
     expect(collector.hasRollback(collector.parseHistory('t1 none -> A\nt2 A -> B\nt3 B -> C\n'))).toBe(false);
     expect(collector.hasRollback(collector.parseHistory('garbage'))).toBe(false);
+  });
+});
+
+describe('runtime acceptance API', () => {
+  const artifact = (kind: string) => {
+    const json = { version: 1, kind, environment: 'production', hostId: 'palmora-prod-1', release: { commit: COMMIT }, startedAt: '2026-10-23T11:00:00.000Z', completedAt: '2026-10-23T11:01:00.000Z', checks: (lib.REQUIRED_CHECKS[kind] ?? []).map((name) => ({ name, result: 'pass', observed: 'ok' })), references: [] };
+    return { bytes: JSON.stringify(json), json };
+  };
+  const artifacts = Object.fromEntries(lib.KINDS.map((kind) => [kind, artifact(kind)]));
+  const acceptance = lib.buildAcceptance({
+    digests: Object.fromEntries(lib.KINDS.map((kind) => [kind, lib.sha256Hex(artifacts[kind]!.bytes)])),
+    designSha256: 'd'.repeat(64),
+    witness: 'Product Owner, 2026-10-23',
+    acceptedAt: NOW.toISOString(),
+  });
+  const environment = {
+    MINT_BOT_RECOVERY_EVIDENCE_PATH: '/e/recovery.json',
+    MINT_BOT_ROTATION_REVOCATION_EVIDENCE_PATH: '/e/rotation.json',
+    MINT_BOT_HEAP_CORE_POLICY_PATH: '/e/heap.json',
+    MINT_BOT_BACKUP_RESTORE_EVIDENCE_PATH: '/e/backup.json',
+    MINT_BOT_SERVICE_SUPERVISION_EVIDENCE_PATH: '/e/service.json',
+    MINT_BOT_OPS_EVIDENCE_ACCEPTANCE_PATH: '/e/acceptance.json',
+  };
+  const regular = async () => ({ isFile: () => true, isSymbolicLink: () => false, size: 10 });
+  const options = {
+    environment,
+    now: NOW,
+    statPath: regular,
+    readText: async () => JSON.stringify(acceptance),
+    artifactsReader: async () => artifacts,
+    identityReader: async () => ({ commit: COMMIT, hostId: 'palmora-prod-1' }),
+  };
+
+  it('is reusable at an unattended boundary and accepts only the exact current host/release evidence', async () => {
+    await expect(runtime.evaluateOpsEvidence(options)).resolves.toMatchObject({ humanEvidenceComplete: true, missing: [], acceptanceProblems: [] });
+    await expect(runtime.assertOpsEvidenceAccepted(options)).resolves.toMatchObject({ humanEvidenceComplete: true });
+    await expect(runtime.assertOpsEvidenceAccepted({ ...options, identityReader: async () => ({ commit: 'b'.repeat(40), hostId: 'palmora-prod-1' }) })).rejects.toThrow(/OPS_EVIDENCE_NOT_ACCEPTED:ARTIFACT_NOT_FOR_INSTALLED_RELEASE/);
+    await expect(runtime.assertOpsEvidenceAccepted({ ...options, now: new Date(NOW.getTime() + lib.OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS) })).rejects.toThrow(/OPS_EVIDENCE_NOT_ACCEPTED:ACCEPTANCE_EXPIRED/);
+  });
+
+  it('does not let a fresh weekly acceptance bless stale source artifacts', async () => {
+    const stale = structuredClone(artifacts);
+    const old = new Date(NOW.getTime() - lib.OPS_EVIDENCE_MAX_AGE_MS.recovery! - 1).toISOString();
+    stale.recovery!.json.startedAt = old;
+    stale.recovery!.json.completedAt = old;
+    stale.recovery!.bytes = JSON.stringify(stale.recovery!.json);
+    const freshlyAccepted = lib.buildAcceptance({
+      digests: Object.fromEntries(lib.KINDS.map((kind) => [kind, lib.sha256Hex(stale[kind]!.bytes)])),
+      designSha256: 'd'.repeat(64), witness: 'Product Owner, fresh witness', acceptedAt: NOW.toISOString(),
+    });
+    await expect(runtime.assertOpsEvidenceAccepted({ ...options, readText: async () => JSON.stringify(freshlyAccepted), artifactsReader: async () => stale })).rejects.toThrow(/recovery:EVIDENCE_STALE/);
+  });
+
+  it('fails closed for missing paths, symlinks, malformed acceptance and unreadable state without exposing paths', async () => {
+    const missing = await runtime.evaluateOpsEvidence({ ...options, environment: { ...environment, MINT_BOT_RECOVERY_EVIDENCE_PATH: '' } });
+    expect(missing).toMatchObject({ humanEvidenceComplete: false, missing: ['recovery'] });
+    await expect(runtime.assertOpsEvidenceAccepted({ ...options, environment: { ...environment, MINT_BOT_RECOVERY_EVIDENCE_PATH: '' } })).rejects.toThrow('ARTIFACT_MISSING:recovery');
+    const symlink = await runtime.evaluateOpsEvidence({ ...options, statPath: async (path: string) => ({ isFile: () => true, isSymbolicLink: () => path.endsWith('rotation.json'), size: 10 }) });
+    expect(symlink.missing).toContain('rotation_revocation');
+    const malformed = await runtime.evaluateOpsEvidence({ ...options, readText: async () => '{bad json' });
+    expect(malformed.acceptanceProblems).toEqual(['ACCEPTANCE_INVALID']);
+    const relativeAcceptance = await runtime.evaluateOpsEvidence({ ...options, environment: { ...environment, MINT_BOT_OPS_EVIDENCE_ACCEPTANCE_PATH: 'acceptance.json' } });
+    expect(relativeAcceptance.acceptanceProblems).toEqual(['ACCEPTANCE_NOT_RECORDED']);
+    const message = await runtime.assertOpsEvidenceAccepted({ ...options, environment: { ...environment, MINT_BOT_RECOVERY_EVIDENCE_PATH: '/secret/location.json\nforged' } }).catch((error: Error) => error.message);
+    expect(message).toContain('OPS_EVIDENCE_NOT_ACCEPTED');
+    expect(message).not.toContain('/secret/');
   });
 });
 
@@ -224,7 +338,26 @@ describe('owner acceptance', () => {
     expect(lib.verifyAcceptance({ ...base, design: { sha256: 'nope' } }, artifacts, identity)).toContain('ACCEPTANCE_DESIGN_DIGEST');
     expect(lib.verifyAcceptance({ ...base, acceptedAt: '2030-01-01T00:00:00.000Z' }, artifacts, identity)).toContain('ACCEPTANCE_TIME');
     expect(lib.verifyAcceptance({ type: 'other' }, artifacts, identity)).toEqual(['ACCEPTANCE_INVALID']);
+    expect(lib.verifyAcceptance({ ...base, version: 1 }, artifacts, identity)).toEqual(['ACCEPTANCE_INVALID']);
     expect(lib.verifyAcceptance(null, artifacts, identity)).toEqual(['ACCEPTANCE_INVALID']);
+  });
+
+  it('acceptance is valid before its fixed weekly expiry and refused exactly at and after it', () => {
+    const artifacts = all();
+    for (const entry of Object.values(artifacts)) {
+      entry.json.startedAt = NOW.toISOString();
+      entry.json.completedAt = NOW.toISOString();
+      entry.bytes = JSON.stringify(entry.json);
+    }
+    const acceptance = accept(artifacts);
+    const expires = Date.parse(String(acceptance.expiresAt));
+    expect(expires).toBe(NOW.getTime() + lib.OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS);
+    expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires - 1) })).toEqual([]);
+    expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires) })).toContain('ACCEPTANCE_EXPIRED');
+    expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires + 1) })).toContain('ACCEPTANCE_EXPIRED');
+    expect(lib.verifyAcceptance({ ...acceptance, expiresAt: new Date(expires + 1).toISOString() }, artifacts, identity)).toContain('ACCEPTANCE_EXPIRY');
+    const withoutExpiry = { ...acceptance }; delete withoutExpiry.expiresAt;
+    expect(lib.verifyAcceptance(withoutExpiry, artifacts, identity)).toContain('ACCEPTANCE_EXPIRY');
   });
 
   it('the typed phrase changes when any artifact or the design document changes', () => {

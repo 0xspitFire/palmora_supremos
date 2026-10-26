@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { BackendStore } from './store.js';
-import type { AttemptRecord, BackendState, Campaign, CampaignState, EngineAdapter, EventRecord, IntentRecord, ReceiptRecord, Reservation, RunRecord, ValidatedCampaign } from './types.js';
+import type { AttemptRecord, BackendState, Campaign, CampaignState, EngineAdapter, EventRecord, ExecutionResult, IntentRecord, ReceiptRecord, Reservation, RunRecord, ValidatedCampaign } from './types.js';
 import { SpendLedger } from './spend-ledger.js';
 import { EvidenceService, liveRequestDigest } from './evidence.js';
 import { rebindExecutionResult, type CanonicalExecutionStore } from './canonical-store.js';
@@ -21,6 +21,11 @@ export function receiptAuthorizesSettlement(chainId: 1 | 8453 | 4663, receipt: P
   return chainId !== 4663 || receipt.robinhoodFinality === 'final';
 }
 
+/** A pending aggregate may contain a terminal failure in another wallet. */
+export function partialFleetFailurePending(result: Pick<ExecutionResult, 'state' | 'attempts' | 'receipts'>): boolean {
+  return result.state === 'Pending' && (result.attempts.some((attempt) => attempt.state === 'Failed') || result.receipts.some((receipt) => receipt.state === 'Failed'));
+}
+
 export class ExecutionCoordinator {
   readonly ledger: SpendLedger;
   private readonly evidence: EvidenceService;
@@ -28,7 +33,7 @@ export class ExecutionCoordinator {
   constructor(
     private readonly store: BackendStore,
     private readonly engine: EngineAdapter,
-    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding; /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: AssuranceRun) => CompensatingAssuranceConfig); /** T-042 requirement 2: awaited before every live arm and execute so readiness is observed in-process just now, never read from an earlier observation. A failure refuses the run (fail closed). */ refreshReadiness?: (run: AssuranceRun) => Promise<void>; /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void> } } = {},
+    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding | ((run: AssuranceRun) => CustodyPolicyBinding); /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: AssuranceRun) => CompensatingAssuranceConfig); /** T-042 requirement 2: awaited before every live arm and execute so readiness is observed in-process just now, never read from an earlier observation. A failure refuses the run (fail closed). */ refreshReadiness?: (run: AssuranceRun) => Promise<void>; /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void>; failed?(reason: string, runId?: string): Promise<void>; confirmed?(runId: string, facts: { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string; feePaid?: string }): Promise<void>; mintFailed?(runId: string, facts: { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string; feePaid?: string }, reason?: string): Promise<void> } } = {},
   ) {
     // T-044 security re-review (D1): the compensated profile counts on the watcher to see what the other checks cannot, so
     // configuring one without the other is a start-up error, not a silently weaker arm gate.
@@ -44,6 +49,11 @@ export class ExecutionCoordinator {
     // arrival (D-059 item 3, D-060) would silently not be enforced.
     if (config && typeof this.options.compensatingAssurance === 'function' && !wallets.every(wallet => config.runEnvelopeWei?.[wallet.toLowerCase()] !== undefined && config.minimumBalanceWei?.[wallet.toLowerCase()] !== undefined)) throw new Error('COMPENSATING_ASSURANCE_FUNDING_MISSING');
     return config ? { config, chainId, wallets } : undefined;
+  }
+
+  private expectedCustodyPolicy(campaign: Campaign, wallets: readonly string[]): CustodyPolicyBinding | undefined {
+    const expected = this.options.expectedCustodyPolicy;
+    return typeof expected === 'function' ? expected({ chainId: campaign.chainId, wallets, campaign }) : expected;
   }
 
   /** Fresh readiness for a live arm or execute. Without the hook the stored observation is used as before. */
@@ -72,6 +82,11 @@ export class ExecutionCoordinator {
     await this.store.transaction(state => {
       state.runtime = { ...state.runtime, startupState: 'Reconciling', blockingReasons: ['RECONCILIATION_IN_PROGRESS'] };
     });
+    // A host crash can land after a live request arms its run but before execute admits or signs anything. Only this
+    // request-owned shape is auto-closed, and the canonical store must prove there is no attempt of any kind.
+    for (const run of this.store.snapshot().runs.filter(item => item.state === 'Armed' && item.mode === 'live' && item.idempotencyKey?.startsWith('live-request:'))) {
+      await this.closeUnsentRun(run.id, 'STARTUP_UNSENT_LIVE_REQUEST');
+    }
     await this.reconcile();
     await this.store.transaction(state => {
       const unresolved = state.runs
@@ -94,6 +109,10 @@ export class ExecutionCoordinator {
     if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
     const canonicalInput: ValidatedCampaign = { ...input, campaign };
     if (mode === 'live' && campaign.dryRun) throw new Error('LIVE_REQUIRES_NON_DRY_CAMPAIGN');
+    // Campaign history is immutable. A Turnkey campaign created before exact
+    // signed-record binding existed must be recreated; a policy reference alone
+    // is never treated as a wildcard during live admission.
+    if (mode === 'live' && campaign.custodyPolicy?.provider === 'turnkey' && !/^sha256:[0-9a-f]{64}$/.test(campaign.custodyPolicy.recordDigest ?? '')) throw new Error('TURNKEY_CAMPAIGN_POLICY_BINDING_REQUIRED');
     let simulationIds = input.simulationIds ?? [];
     if (mode === 'live') {
       if (initial.runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED');
@@ -103,7 +122,7 @@ export class ExecutionCoordinator {
       // The refresh can take seconds; a kill set meanwhile must still stop this arm.
       if (readiness.killed) throw new Error('KILLED');
       if (!readiness.runtime.operational?.secretStoreReference || !readiness.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
-      assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.assuranceContext(campaign, input.wallets ?? []));
+      assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.expectedCustodyPolicy(campaign, input.wallets ?? []), this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.assuranceContext(campaign, input.wallets ?? []));
       this.assertWalletWatch(campaign.chainId, input.wallets ?? []);
       simulationIds = this.evidence.assertLiveEvidence(canonicalInput);
       if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
@@ -158,7 +177,7 @@ export class ExecutionCoordinator {
     const readiness = (await this.refreshReadiness(campaign, intent.wallets)) ? this.store.snapshot() : current;
     if (readiness.killed) throw new Error('KILLED');
     if (!readiness.runtime.operational?.secretStoreReference || !readiness.runtime.operational.storePath) throw new Error('RUNTIME_READINESS_REQUIRED');
-    assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.options.expectedCustodyPolicy, this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined, this.assuranceContext(campaign, intent.wallets));
+    assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.expectedCustodyPolicy(campaign, intent.wallets), this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: intent.wallets } : undefined, this.assuranceContext(campaign, intent.wallets));
     this.assertWalletWatch(campaign.chainId, intent.wallets);
     this.evidence.assertLiveEvidence({ campaign, wallets: intent.wallets, simulationIds: intent.simulationIds, evidenceAt: intent.evidenceAt });
     if (wallets.length !== intent.wallets.length || wallets.some(wallet => !intent.wallets.some(armed => armed.toLowerCase() === wallet.toLowerCase()))) throw new Error('EXECUTION_FLEET_MISMATCH');
@@ -234,6 +253,10 @@ export class ExecutionCoordinator {
       else if (persistedRun && result.state === 'Confirmed' && campaign.chainId === 1) this.transition(persistedRun, 'Completed');
       this.applyAccountingToState(after, campaign, runId, result.attempts, result.receipts);
     });
+    // A mixed fleet can have one wallet fail before broadcast while another
+    // remains pending. The aggregate must remain Pending so reconciliation
+    // continues, but that must not make the already-known failure silent.
+    if (partialFleetFailurePending(result)) await this.raiseExecutionNotice(runId, 'PARTIAL_FLEET_FAILURE_PENDING');
     if (canonical && killedAfterExecution) await canonical.abortRemaining('KILLED');
     return result;
   }
@@ -253,6 +276,13 @@ export class ExecutionCoordinator {
     catch { /* event persistence cannot replace the fail-closed admission error */ }
     try { await this.options.alerts?.cap(reason, runId); }
     catch { /* alert delivery cannot replace the fail-closed admission error */ }
+  }
+
+  private async raiseExecutionNotice(runId: string, reason: string): Promise<void> {
+    try { await this.store.transaction(state => { state.events.push(this.event('execution_notice', runId, { reason })); }); }
+    catch { /* a notice cannot alter execution truth */ }
+    try { await this.options.alerts?.failed?.(reason, runId); }
+    catch { /* notification delivery cannot alter execution truth */ }
   }
 
   async kill(reason: string): Promise<void> {
@@ -298,7 +328,12 @@ export class ExecutionCoordinator {
     const snapshot = this.store.snapshot();
     // D-072: a completed run whose latest reconciliation is already final cannot change any more, so it is not read again every pass.
     const settledFinal = (runId: string): boolean => snapshot.reconciliations.filter(item => item.runId === runId).at(-1)?.result === 'final';
-    const candidates = snapshot.runs.filter(run => (['Armed', 'Active'].includes(run.state) || (run.state === 'Completed' && !settledFinal(run.id))) || (run.state === 'Aborted' && snapshot.attempts.some(attempt => attempt.runId === run.id && attempt.hash)));
+    const hasUnreportedRobinhoodFinality = (run: RunRecord): boolean => {
+      const intent = snapshot.intents.find(item => item.runId === run.id);
+      if (intent?.campaignSnapshot.chainId !== 4663 || (!this.options.alerts?.confirmed && !this.options.alerts?.mintFailed)) return false;
+      return snapshot.receipts.some(receipt => receipt.runId === run.id && receipt.finalityStage === 'ethereum_final' && receipt.robinhoodFinality === 'final' && (receipt.state === 'Confirmed' || receipt.state === 'Failed') && !snapshot.events.some(event => event.type === 'robinhood_finality_reported' && event.runId === run.id && event.data.receiptId === receipt.id));
+    };
+    const candidates = snapshot.runs.filter(run => (['Armed', 'Active'].includes(run.state) || (run.state === 'Completed' && !settledFinal(run.id))) || (run.state === 'Aborted' && snapshot.attempts.some(attempt => attempt.runId === run.id && attempt.hash)) || hasUnreportedRobinhoodFinality(run));
     for (const candidate of candidates) {
       const snapshot = this.store.snapshot();
       const run = snapshot.runs.find(item => item.id === candidate.id);
@@ -327,6 +362,26 @@ export class ExecutionCoordinator {
         }
         this.applyAccountingToState(state, intent.campaignSnapshot, run.id, update.attempts, update.receipts);
       });
+      // Robinhood has staged finality. Tell the owner only after reconciliation
+      // proves Ethereum finality; an alert failure never changes chain truth.
+      if (intent.campaignSnapshot.chainId === 4663) {
+        const latest = this.store.snapshot();
+        const attempts = latest.attempts.filter(item => item.runId === run.id);
+        for (const receipt of latest.receipts.filter(item => item.runId === run.id && item.finalityStage === 'ethereum_final' && item.robinhoodFinality === 'final' && (item.state === 'Confirmed' || item.state === 'Failed') && !latest.events.some(event => event.type === 'robinhood_finality_reported' && event.runId === run.id && event.data.receiptId === item.id))) {
+          // A replacement may share the execution id. Finality belongs to the
+          // exact transaction-attempt id named by the authoritative receipt.
+          const attempt = receipt.transactionAttemptId ? attempts.find(item => item.id === receipt.transactionAttemptId && item.hash) : undefined;
+          if (!attempt?.hash) continue;
+          const facts = { chainId: 4663, collection: `${intent.campaignSnapshot.contract.slice(0, 6)}…${intent.campaignSnapshot.contract.slice(-4)}`, wallet: attempt.wallet, quantity: intent.campaignSnapshot.quantity, hash: attempt.hash, feePaid: `${receipt.actualSpendWei ?? 0n} wei` };
+          try {
+            if (receipt.state === 'Confirmed') await this.options.alerts?.confirmed?.(run.id, facts);
+            else await this.options.alerts?.mintFailed?.(run.id, facts, update.reason ?? 'TRANSACTION_REVERTED');
+            await this.store.transaction(state => {
+              if (!state.events.some(event => event.type === 'robinhood_finality_reported' && event.runId === run.id && event.data.receiptId === receipt.id)) state.events.push(this.event('robinhood_finality_reported', run.id, { receiptId: receipt.id, transactionAttemptId: attempt.id, outcome: receipt.state }));
+            });
+          } catch { /* delivery does not alter reconciliation or settlement */ }
+        }
+      }
     }
   }
 

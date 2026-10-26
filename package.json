@@ -1,6 +1,6 @@
 {
   "name": "nft-mint-bot",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "private": true,
   "description": "Headless NFT public-mint execution engine",
   "type": "module",
@@ -33,6 +33,8 @@
     "ops:service-config": "corepack pnpm build && node scripts/service-config.mjs",
     "ops:orchestrator": "corepack pnpm build && node scripts/orchestrator.mjs",
     "ops:evidence": "node scripts/ops-evidence.mjs",
+    "ops:evidence:collect": "node scripts/ops-evidence-collect.mjs",
+    "ops:evidence:accept": "node scripts/ops-evidence-accept.mjs",
     "lint": "node scripts/lint.mjs",
     "typecheck": "corepack pnpm --filter @mint-bot/database build && corepack pnpm --filter @mint-bot/engine build && corepack pnpm --filter @mint-bot/backend build && corepack pnpm --filter @mint-bot/web build && corepack pnpm --filter @mint-bot/cli build && corepack pnpm --filter @mint-bot/engine exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/backend exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/cli exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/database exec tsc --noEmit -p tsconfig.json && corepack pnpm --filter @mint-bot/web exec tsc --noEmit -p tsconfig.json",
     "ops:health:harness": "pnpm typecheck && node scripts/ops-health.mjs",

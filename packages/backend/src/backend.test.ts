@@ -8,7 +8,7 @@ import { ReadinessService } from './readiness.js';
 import { NotificationDispatcher } from './notifications.js';
 import { normalizeError } from './errors.js';
 import { BackendApplication } from './application.js';
-import { ExecutionCoordinator } from './coordinator.js';
+import { ExecutionCoordinator, partialFleetFailurePending } from './coordinator.js';
 import { Phase2ReadModelService } from './read-model-v1.js';
 import { normalizeTotalFeeBudget } from './fees.js';
 import { resolveWalletPath } from './keystore-path.js';
@@ -45,6 +45,15 @@ async function readyLiveInput(store: DurableStore) {
 }
 
 describe('backend Phase 1 blockers', () => {
+  it('keeps mixed pending fleets reconcilable while detecting their terminal wallet failure', () => {
+    const mixed = { state: 'Pending' as const, attempts: [
+      { id: 'failed', executionId: 'e1', runId: 'run', wallet: 'w1', state: 'Failed' as const, createdAt: 'x', updatedAt: 'x' },
+      { id: 'pending', executionId: 'e2', runId: 'run', wallet: 'w2', nonce: 1, hash: '0xhash', state: 'Pending' as const, createdAt: 'x', updatedAt: 'x' },
+    ], receipts: [] };
+    expect(partialFleetFailurePending(mixed)).toBe(true);
+    expect(partialFleetFailurePending({ ...mixed, state: 'Failed' })).toBe(false);
+  });
+
   it('atomically enforces run spend exposure', async () => {
     const store = new DurableStore(); const ledger = new SpendLedger(store);
     await ledger.reserve('run-a', 'campaign-a', 'wallet-1', 70n, 100n);
@@ -80,6 +89,25 @@ describe('backend Phase 1 blockers', () => {
     const coordinator = new ExecutionCoordinator(store, engine()); const input = { campaign, evidenceAt: new Date().toISOString() };
     const first = await coordinator.arm(input, 'dry-run', 'same-request'); const second = await coordinator.arm(input, 'dry-run', 'same-request');
     expect(second.id).toBe(first.id); expect(first.mode).toBe('dry-run'); expect(store.snapshot().intents).toHaveLength(1);
+  });
+
+  it('does not require a live custody policy selection to create a dry-run campaign', async () => {
+    const store = new DurableStore();
+    const custodyPolicyFor = vi.fn(async () => { throw new Error('LIVE_POLICY_REQUIRED'); });
+    const app = new BackendApplication(store, undefined as never, { custodyPolicyFor });
+    const campaign = await app.createCampaign({ chainId: 1, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, dryRun: true, maxRunWei: 100n, dailyCapWei: 200n, gasCeilingWei: 40n, chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, endpointReference: 'ETHEREUM_RPC_REFERENCE' }, feePolicy });
+    expect(campaign.dryRun).toBe(true);
+    expect(campaign).not.toHaveProperty('custodyPolicy');
+    expect(custodyPolicyFor).not.toHaveBeenCalled();
+  });
+
+  it('refuses a legacy live Turnkey campaign that has no exact signed-record digest', async () => {
+    const store = new ReadyStore();
+    const campaign = await new BackendApplication(store, undefined as never).createCampaign({ chainId: 1, contract: '0xabc', strategy: 'seadrop-v1-public', quantity: 1, dryRun: false, maxRunWei: 100n, dailyCapWei: 200n, gasCeilingWei: 40n, chainVerification: { chainId: 1, status: 'verified', seaDropCompatible: true, endpointReference: 'ETHEREUM_RPC_REFERENCE' }, feePolicy });
+    await store.transaction(state => { (state.campaigns[0] as unknown as { custodyPolicy: unknown }).custodyPolicy = { provider: 'turnkey', policyReference: `turnkey:policy:0x${'1'.repeat(64)}`, policyDigest: `0x${'1'.repeat(64)}` }; });
+    const persisted = store.snapshot().campaigns[0]!;
+    await expect(new ExecutionCoordinator(store, engine()).arm({ campaign: persisted, evidenceAt: new Date().toISOString() }, 'live')).rejects.toThrow('TURNKEY_CAMPAIGN_POLICY_BINDING_REQUIRED');
+    expect(campaign.id).toBe(persisted.id);
   });
 
   it('uses prepare and never execute for dry-run', async () => {
@@ -194,6 +222,8 @@ describe('backend Phase 1 blockers', () => {
     const expected = { provider: 'turnkey' as const, providerIdentity: 'turnkey-test-org', policyReference: 'turnkey-approved-policy', policyDigest: `0x${'2'.repeat(64)}` };
     expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, providerIdentity: 'turnkey-other-org' } }, new Date('2026-08-29T00:00:00.000Z'), expected)).toThrow('CUSTODY_PROVIDER_MISMATCH');
     expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, policyReference: 'turnkey-wrong-policy', policyDigest: expected.policyDigest } }, new Date('2026-08-29T00:00:00.000Z'), expected)).toThrow('CUSTODY_POLICY_MISMATCH');
+    const recordExpected = { provider: 'turnkey' as const, providerIdentity: operational.custody.providerIdentity, policyReference: operational.custody.policyReference, policyDigest: operational.custody.policyDigest, recordDigest: `sha256:${'a'.repeat(64)}` };
+    expect(() => assertLiveOperationalReadiness({ ...operational, custody: { ...operational.custody, recordDigest: `sha256:${'b'.repeat(64)}` } }, new Date('2026-08-29T00:00:00.000Z'), recordExpected)).toThrow('CUSTODY_POLICY_MISMATCH');
   });
 
   it('rejects local signer live admission and keeps Robinhood execution disabled', async () => {
@@ -249,6 +279,30 @@ describe('backend Phase 1 blockers', () => {
     await setResult('final');
     await coordinator.reconcile();
     expect(reads).toBe(1);
+  });
+
+  it('retries an unreported Robinhood final outcome after restart and reports the exact finalized replacement hash', async () => {
+    const store = new ReadyStore(); const input = await readyLiveInput(store);
+    const oldHash = `0x${'a'.repeat(64)}`; const finalHash = `0x${'b'.repeat(64)}`;
+    const run = await new ExecutionCoordinator(store, engine()).arm(input, 'live');
+    await store.transaction(state => {
+      state.runs.find(item => item.id === run.id)!.state = 'Active';
+      state.attempts.push({ id: 'attempt-old', executionId: 'execution-1', runId: run.id, wallet: 'wallet-1', nonce: 1, hash: oldHash, state: 'Pending', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    });
+    const update = { result: 'final' as const, attempts: [{ id: 'attempt-final', executionId: 'execution-1', runId: run.id, wallet: 'wallet-1', nonce: 1, hash: finalHash, state: 'Confirmed' as const, robinhoodFinality: 'final' as const, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], receipts: [{ id: 'receipt-final', executionId: 'execution-1', transactionAttemptId: 'attempt-final', runId: run.id, state: 'Confirmed' as const, finalityStage: 'ethereum_final' as const, robinhoodFinality: 'final' as const, blockNumber: 2n, blockHash: '0xfinal', actualSpendWei: 12n, observedAt: new Date().toISOString() }] };
+    let calls = 0; const reported: string[] = [];
+    const alerts = { cap: async () => undefined, confirmed: async (_runId: string, facts: { hash: string }) => { calls += 1; if (calls === 1) throw new Error('delivery interrupted'); reported.push(facts.hash); } };
+    const coordinator = new ExecutionCoordinator(store, engine({ reconcile: async () => update }), { alerts });
+    await coordinator.reconcile();
+    expect(store.snapshot().runs.find(item => item.id === run.id)?.state).toBe('Completed');
+    expect(store.snapshot().events.some(event => event.type === 'robinhood_finality_reported')).toBe(false);
+    // The completed/final run remains a reconciliation candidate until the
+    // durable reporting marker exists.
+    await coordinator.reconcile();
+    expect(reported).toEqual([finalHash]);
+    expect(store.snapshot().events.filter(event => event.type === 'robinhood_finality_reported')).toHaveLength(1);
+    await coordinator.reconcile();
+    expect(calls).toBe(2);
   });
 
   it('two reconcile calls at the same time share ONE pass, so receipts are never read or accounted twice (T-086)', async () => {

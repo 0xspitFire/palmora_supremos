@@ -1,12 +1,28 @@
 import { execFile } from 'node:child_process';
 import { readFile, statfs } from 'node:fs/promises';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { HealthSample } from '@mint-bot/backend';
 
 const run = promisify(execFile);
 
-/** Short commit of the running code for the start message, or `unknown`. Never throws and never shows anything but a hex id. */
+const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+
+/**
+ * Product version of the installed release. Production archives deliberately
+ * contain no .git directory, so RELEASE is authoritative there. A source
+ * checkout falls back to package.json and finally its short commit.
+ */
 export async function codeVersion(projectRoot: string): Promise<string> {
+  try {
+    const release = await readFile(join(projectRoot, 'RELEASE'), 'utf8');
+    const version = /^version=(.+)$/m.exec(release)?.[1]?.trim();
+    if (version && SEMVER.test(version)) return version;
+  } catch { /* development checkout */ }
+  try {
+    const pkg = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8')) as { version?: unknown };
+    if (typeof pkg.version === 'string' && SEMVER.test(pkg.version)) return pkg.version;
+  } catch { /* use the development commit below */ }
   try {
     const { stdout } = await run('git', ['rev-parse', '--short=8', 'HEAD'], { cwd: projectRoot, timeout: 2_000, windowsHide: true });
     const id = stdout.trim();

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { formatEth, type BackendState, type Campaign, type ValidatedCampaign } from '@mint-bot/backend';
+import { formatEth, type AttemptRecord, type BackendState, type Campaign, type ReceiptRecord, type ValidatedCampaign } from '@mint-bot/backend';
 
 /**
  * T-058 (owner-approved 2026-10-24): the owner asks the host service to arm and run one specific live mint.
@@ -27,7 +27,7 @@ export interface LiveRequestPreview {
   evidenceAt: string;
 }
 
-type RequestState = Pick<BackendState, 'campaigns' | 'simulations'>;
+type RequestState = Pick<BackendState, 'campaigns' | 'simulations' | 'runtime'>;
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
@@ -88,7 +88,7 @@ export function liveRequestConfirmationDigest(phrase: string, preview: Pick<Live
 
 export interface LiveRequestStore {
   snapshot(): RequestState & Pick<BackendState, 'events'>;
-  recordLiveRunRequest(input: { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string }): void;
+  recordLiveRunRequest(input: { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string; provenance?: { kind: 'attended' } | { kind: 'schedule'; scheduleId: string } }): void;
 }
 
 /** The owner command. `status` only reads; `create` records the approval and the request after the exact phrase. */
@@ -102,6 +102,7 @@ export async function runLiveRequest(input: {
   store: LiveRequestStore;
   approve: (validated: ValidatedCampaign) => Promise<{ id: string }>;
   newId?: () => string;
+  provenance?: { kind: 'schedule'; scheduleId: string };
 }): Promise<Record<string, unknown>> {
   const preview = previewLiveRequest(input.store.snapshot(), input.campaignId, input.wallets, input.maxFeeGwei, input.now);
   if (input.action === 'status' || input.confirm === undefined) {
@@ -113,17 +114,20 @@ export async function runLiveRequest(input: {
     };
   }
   if (input.confirm !== preview.phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run live-request status and copy the phrase it prints exactly');
+  // A preview is read-only and remains useful while the kill switch is on. The final create is different: refusing here
+  // prevents the service from claiming a request during its post-release reconciliation window.
+  if (input.store.snapshot().runtime.startupState !== 'Ready') throw new Error('STARTUP_RECONCILIATION_REQUIRED: release the kill switch and wait for the service to report Ready before sending the request');
   const validated: ValidatedCampaign = { campaign: input.store.snapshot().campaigns.find((item) => item.id === preview.campaignId) as Campaign, wallets: preview.wallets, simulationIds: preview.simulationIds, evidenceAt: preview.evidenceAt };
   const approval = await input.approve(validated);
   const id = input.newId?.() ?? `live_request_${randomBytes(8).toString('hex')}`;
   const requestedAt = input.now.toISOString();
-  input.store.recordLiveRunRequest({ id, campaignId: preview.campaignId, wallets: preview.wallets, simulationIds: preview.simulationIds, approvalId: approval.id, evidenceAt: preview.evidenceAt, maxFeeGwei: String(preview.maxFeeGwei), confirmationDigest: liveRequestConfirmationDigest(preview.phrase, preview), requestedAt, expiresAt: new Date(input.now.getTime() + LIVE_REQUEST_LIFETIME_MS).toISOString() });
+  input.store.recordLiveRunRequest({ id, campaignId: preview.campaignId, wallets: preview.wallets, simulationIds: preview.simulationIds, approvalId: approval.id, evidenceAt: preview.evidenceAt, maxFeeGwei: String(preview.maxFeeGwei), confirmationDigest: liveRequestConfirmationDigest(preview.phrase, preview), requestedAt, expiresAt: new Date(input.now.getTime() + LIVE_REQUEST_LIFETIME_MS).toISOString(), ...(input.provenance ? { provenance: input.provenance } : {}) });
   return { state: 'Requested', requestId: id, message: 'The service picks this up within a few seconds when it runs in live (host) mode. Follow it with `summary` or the dashboard; the kill switch stops everything at once.' };
 }
 
 /** What the host service needs to process requests. */
 export interface LiveRequestProcessorDeps {
-  unclaimed(): Array<{ id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; requestedAt: string; expiresAt: string }>;
+  unclaimed(): Array<{ id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; requestedAt: string; expiresAt: string; provenance?: { kind: 'legacy' } | { kind: 'attended' } | { kind: 'schedule'; scheduleId: string } }>;
   claim(requestId: string, outcome: 'started' | 'expired'): boolean;
   campaign(campaignId: string): Campaign | undefined;
   /** The service's own application (not read-only), so `arm` and `run` apply every gate exactly as the guided live run does. */
@@ -135,12 +139,29 @@ export interface LiveRequestProcessorDeps {
   sentTransactions?(runId: string): Array<{ hash: string; wallet: string }>;
   /** D-074: closes the run this request armed when the request failed, if the store proves nothing of it was sent. Best effort: a failure here never changes the outcome. */
   closeRun?(runId: string): Promise<'closed' | 'left' | 'absent'>;
+  /** D-017: required only for scheduled provenance; checked directly before arm and again directly before execute. */
+  assertUnattendedReady?(): Promise<void>;
   /** Host journal only (never Telegram or the stored result): what an uncoded failure looked like, cleaned by `describeFailure`. */
   failed?(requestId: string, detail: FailureDetail): void | Promise<void>;
   now(): Date;
 }
 
 export interface FailureDetail { name: string; message: string; frames: string[] }
+
+/** Transactions that the host can truthfully report as sent, deduplicated across signed/provider lifecycle rows. */
+export function sentTransactionsForRun(attempts: readonly AttemptRecord[], receipts: readonly ReceiptRecord[], runId: string): Array<{ hash: string; wallet: string }> {
+  const receiptAttempts = new Set(receipts.filter((receipt) => receipt.runId === runId && receipt.transactionAttemptId).map((receipt) => receipt.transactionAttemptId!));
+  const sentStates = new Set<AttemptRecord['state']>(['Submitted', 'Pending', 'Confirmed', 'Reorged', 'Replaced']);
+  const unique = new Map<string, { hash: string; wallet: string }>();
+  for (const attempt of attempts) {
+    if (attempt.runId !== runId || !attempt.hash || attempt.nonce === undefined) continue;
+    if (!sentStates.has(attempt.state) && !receiptAttempts.has(attempt.id)) continue;
+    const hash = attempt.hash.toLowerCase();
+    const key = `${attempt.executionId}:${attempt.nonce}:${hash}`;
+    if (!unique.has(key)) unique.set(key, { hash: attempt.hash, wallet: attempt.wallet });
+  }
+  return [...unique.values()];
+}
 
 /**
  * A cleaned description of a failure for the host journal, so an uncoded error can be found without ever reaching a chat:
@@ -151,7 +172,7 @@ export function describeFailure(error: unknown): FailureDetail {
   try {
     const name = error instanceof Error ? error.name.replace(/[^A-Za-z0-9_]/g, '').slice(0, 60) || 'Error' : typeof error;
     const raw = error instanceof Error ? error.message : String(error);
-    const message = raw.replace(/\b[a-z][a-z0-9+.-]{1,12}:\/\/\S+/gi, '[url]').replace(/(?:^|\s)(?:\/[\w.@-]+){2,}/g, ' [path]').replace(/0x[0-9a-fA-F]{16,}/g, '[hex]').replace(/\b[0-9a-fA-F]{32,}\b/g, '[hex]').replace(/\d{9,}/g, '[digits]').replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[token]').replace(/[\r\n\t]+/g, ' ').slice(0, 240);
+    const message = raw.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[url]').replace(/(?:^|\s)(?:\/[\w.@-]+){2,}/g, ' [path]').replace(/0x[0-9a-fA-F]{16,}/g, '[hex]').replace(/\b[0-9a-fA-F]{32,}\b/g, '[hex]').replace(/\d{9,}/g, '[digits]').replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[token]').replace(/[\r\n\t]+/g, ' ').slice(0, 240);
     const frames = (error instanceof Error ? (error.stack ?? '').split('\n').slice(1) : [])
       .map((line) => line.trim().match(/^at (?:(.+?) \()?(?:.*[\\/])?([^\\/:()]+:\d+):\d+\)?$/))
       .filter((match): match is RegExpMatchArray => match !== null)
@@ -213,12 +234,20 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
       if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
       const maxFeeGwei = Number(request.maxFeeGwei);
       if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500) throw new Error('MAX_FEE_GWEI_INVALID');
+      if (request.provenance?.kind === 'legacy') throw new Error('LEGACY_REQUEST_PROVENANCE_UNVERIFIED');
+      if (request.provenance?.kind === 'schedule') {
+        if (!deps.assertUnattendedReady) throw new Error('OPS_EVIDENCE_CHECK_REQUIRED');
+        await deps.assertUnattendedReady();
+      }
       const validated: ValidatedCampaign = { campaign, wallets: request.wallets, simulationIds: request.simulationIds, evidenceAt: request.evidenceAt };
       const armed = await deps.command('arm', { validated, mode: 'live', approvalId: request.approvalId, idempotencyKey: `live-request:${request.id}` });
       runId = armed.id;
       deps.setFeeCeiling(request.campaignId, maxFeeGwei);
       let ran: { state?: string };
-      try { ran = await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` }); } finally { deps.setFeeCeiling(request.campaignId, undefined); }
+      try {
+        if (request.provenance?.kind === 'schedule') await deps.assertUnattendedReady!();
+        ran = await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` });
+      } finally { deps.setFeeCeiling(request.campaignId, undefined); }
       // A completed run is finished. A run still Active was sent and is waiting for the chain to settle it (Robinhood: until Ethereum finality):
       // the request did its job, so it is finished with the code RUN_ACTIVE, never reported as blocked. Any other end is stopped under its state name.
       sent = runId ? (deps.sentTransactions?.(runId) ?? []) : [];

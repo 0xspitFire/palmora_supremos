@@ -10,7 +10,7 @@ import { liveRequestDigest } from './evidence.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, type FleetSpendPolicy } from './fleet-policy.js';
 
 export interface CommandResponse<T> { id: string; state: string; nextAction: string; createdAt: string; retryable: boolean; blockingReason?: string; data?: T; }
-export interface CampaignInput { chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; }
+export interface CampaignInput { chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; custodyPolicy?: Campaign['custodyPolicy']; }
 export interface ApprovalCommandInput { validated: ValidatedCampaign; idempotencyKey?: string; }
 export interface ArmCommandInput { validated: ValidatedCampaign; mode: 'dry-run' | 'live'; idempotencyKey?: string; approvalId?: string; }
 export interface RunCommandInput { runId: string; wallets: string[]; idempotencyKey?: string; }
@@ -21,7 +21,7 @@ export type TypedCommandInput = ApprovalCommandInput | ArmCommandInput | RunComm
 export const MAX_FREE_TIP_WEI = 2_000_000_000n;
 
 export class BackendApplication {
-  constructor(private readonly store: BackendStore, private readonly coordinator: ExecutionCoordinator, private readonly options: { phase2ReadOnly?: boolean; fleetPolicy?: FleetSpendPolicy } = {}) {}
+  constructor(private readonly store: BackendStore, private readonly coordinator: ExecutionCoordinator, private readonly options: { phase2ReadOnly?: boolean; fleetPolicy?: FleetSpendPolicy; custodyPolicyFor?: (input: CampaignInput) => Promise<Campaign['custodyPolicy']> } = {}) {}
   async command<T = unknown>(name: CommandName, input: Record<string, unknown> = {}): Promise<CommandResponse<T>> {
     const now = new Date().toISOString();
     if (this.options.phase2ReadOnly === true && ['approve', 'arm', 'run', 'execute', 'fund', 'kill'].includes(name)) throw new Error('PHASE2_MUTATION_DISABLED');
@@ -118,6 +118,7 @@ export class BackendApplication {
     throw new Error(`${String(name).toUpperCase()}_UNSUPPORTED`);
   }
   async createCampaign(input: CampaignInput): Promise<Campaign> {
+    const custodyPolicy = input.custodyPolicy ?? (input.dryRun === false ? await this.options.custodyPolicyFor?.(input) : undefined);
     if (input.quantity < 1 || !Number.isSafeInteger(input.quantity)) throw new Error('INVALID_QUANTITY');
     if (input.openingAt !== undefined && !Number.isFinite(Date.parse(input.openingAt))) throw new Error('INVALID_OPENING_TIME');
     if (input.tMinusMs !== undefined && (!Number.isFinite(input.tMinusMs) || input.tMinusMs < 0)) throw new Error('INVALID_T_MINUS');
@@ -130,6 +131,7 @@ export class BackendApplication {
     if (input.chainId === 1 && input.broadcastMode === 'sequencer') throw new Error('SEQUENCER_ROBINHOOD_ONLY');
     if (input.chainVerification.chainId !== input.chainId) throw new Error('CHAIN_VERIFICATION_MISMATCH');
     if (input.feePolicy.configuredPriorityFeeWei < 0n) throw new Error('INVALID_PRIORITY_FEE_POLICY');
+    if (custodyPolicy && (custodyPolicy.provider !== 'turnkey' || !/^turnkey:[^:]+:0x[0-9a-f]{64}$/i.test(custodyPolicy.policyReference) || !/^0x[0-9a-f]{64}$/i.test(custodyPolicy.policyDigest) || !/^sha256:[0-9a-f]{64}$/.test(custodyPolicy.recordDigest) || !custodyPolicy.policyReference.toLowerCase().endsWith(`:${custodyPolicy.policyDigest.toLowerCase()}`))) throw new Error('CUSTODY_POLICY_SELECTION_INVALID');
     const l2Budget = input.feePolicy.l2ExecutionGasBudgetWei; const l1Budget = input.feePolicy.l1DataGasBudgetWei;
     if (l2Budget === undefined || l1Budget === undefined || l2Budget < 0n || l1Budget < 0n) throw new Error('GAS_COMPONENT_BUDGETS_REQUIRED');
     const totalFeeBudget = input.feePolicy.configuredPriorityFeeWei + l2Budget + l1Budget;
@@ -162,7 +164,7 @@ export class BackendApplication {
       if (input.chainId === 4663 && input.dailyCapWei > ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI) throw new Error('ROBINHOOD_ACTIVE_PERIOD_CAP_EXCEEDED');
       if (input.chainId === 8453 && (input.dailyCapWei > BASE_PERSONAL_LIVE_FLEET_POLICY.freeDailyCapWei || totalFeeBudget > BASE_PERSONAL_LIVE_FLEET_POLICY.freeFeeAllowanceWei)) throw new Error('BASE_FREE_CAP_EXCEEDED');
     }
-    const now = new Date().toISOString(); const campaign: Campaign = { id: `cmp_${randomUUID()}`, state: 'Draft', chainId: input.chainId, contract: input.contract, strategy: input.strategy, quantity: input.quantity, dryRun: input.dryRun ?? true, spendPolicy: { maxRunWei: input.maxRunWei, dailyCapWei: input.dailyCapWei, gasCeilingWei: input.gasCeilingWei }, chainVerification: input.chainVerification, mintPriceWei, feePolicy: input.feePolicy, ...(input.broadcastMode ? { broadcastMode: input.broadcastMode } : {}), ...(input.openingAt ? { openingAt: input.openingAt } : {}), ...(input.tMinusMs === undefined ? {} : { tMinusMs: input.tMinusMs }), createdAt: now, updatedAt: now };
+    const now = new Date().toISOString(); const campaign: Campaign = { id: `cmp_${randomUUID()}`, state: 'Draft', chainId: input.chainId, contract: input.contract, strategy: input.strategy, quantity: input.quantity, dryRun: input.dryRun ?? true, spendPolicy: { maxRunWei: input.maxRunWei, dailyCapWei: input.dailyCapWei, gasCeilingWei: input.gasCeilingWei }, chainVerification: input.chainVerification, mintPriceWei, feePolicy: input.feePolicy, ...(input.broadcastMode ? { broadcastMode: input.broadcastMode } : {}), ...(input.openingAt ? { openingAt: input.openingAt } : {}), ...(input.tMinusMs === undefined ? {} : { tMinusMs: input.tMinusMs }), ...(custodyPolicy ? { custodyPolicy } : {}), createdAt: now, updatedAt: now };
     await this.store.transaction(state => { state.campaigns.push(campaign); }); return campaign;
   }
 }

@@ -117,7 +117,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
   };
 
   const startup = await loadRecord();
-  const binding: CustodyPolicyBinding = { provider: 'turnkey', providerIdentity: startup.organizationId, policyReference: startup.policyReference, policyDigest: startup.policyDigest };
+  const binding: CustodyPolicyBinding = { provider: 'turnkey', providerIdentity: startup.organizationId, policyReference: startup.policyReference, policyDigest: startup.policyDigest, recordDigest: startup.digest };
   // One observation per chain, so a refresh on one chain never replaces the one another chain's arm is about to use.
   const observations = new Map<number, { at: number; balances: Map<string, bigint>; record: VerifiedTurnkeyRecord; lockfileDigest: string }>();
 
@@ -207,6 +207,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
           providerIdentity: record.organizationId,
           policyReference: record.policyReference,
           policyDigest: record.policyDigest,
+          recordDigest: record.digest,
           policyStatus: 'approved',
           healthStatus: 'healthy',
           attestationStatus: 'unknown',

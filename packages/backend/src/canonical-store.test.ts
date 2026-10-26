@@ -369,6 +369,29 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  it('closes only a provably-unsent Armed live-request run during startup', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const prepared = await armed(value, await campaign(value, ETHEREUM), [WALLET_ONE], [], '', 'live-request:request-1');
+      await new ExecutionCoordinator(value.store, noopEngine).start();
+      expect(value.store.snapshot().runs.find((run) => run.id === prepared.run.id)?.state).toBe('Aborted');
+      expect(value.store.snapshot().events).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'run_closed_unsent', runId: prepared.run.id })]));
+      expect(value.store.snapshot().runtime.startupState).toBe('Ready');
+    } finally { await close(value); }
+  });
+
+  it('leaves an Armed live-request unresolved when any signing attempt exists', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const prepared = await armed(value, await campaign(value, ETHEREUM), [WALLET_ONE], [], '', 'live-request:request-2');
+      const admitted = await value.store.admitExecution(prepared.input);
+      value.db.prepare("UPDATE execution SET state = 'signed' WHERE id = ?").run(admitted.executions[0]!.executionId);
+      await new ExecutionCoordinator(value.store, noopEngine).start();
+      expect(value.store.snapshot().runs.find((run) => run.id === prepared.run.id)?.state).not.toBe('Aborted');
+      expect(value.store.snapshot().runtime).toMatchObject({ startupState: 'Blocked', blockingReasons: ['UNRESOLVED_EXECUTIONS'] });
+    } finally { await close(value); }
+  });
+
   it('blocks live admission and projects stale verified evidence as blocked', async () => {
     const value = await fixture(ETHEREUM, false, true, '2020-01-01T00:00:00.000Z');
     try {

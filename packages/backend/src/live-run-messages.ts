@@ -5,9 +5,10 @@ import { durationText, reasonCode, reasonText } from './system-messages.js';
 /**
  * Message templates for live runs (T-030, D-045), written now for Phase 3.
  *
- * WIRED ONLY FOR "MINT SUBMITTED" (T-086): the alert manager sends `mintSubmittedCard` when a live request finishes with a recorded
- * transaction. The other builders are still not called. They only turn facts that a caller passes in into a card; they never
- * read the store, a key or a node, and they decide nothing.
+ * `mintSubmittedCard` is sent when a live request records a transaction.
+ * Robinhood reconciliation sends `mintConfirmedCard` or `mintFailedCard` only
+ * after its authoritative Ethereum-final result. The remaining builders turn
+ * caller-supplied facts into cards; they never read a store, key or node.
  *
  * A transaction hash is shown shortened in the text (the redaction filter treats a full 64-digit hash as a secret)
  * and the full hash is reachable only through the explorer button, which is built from the validated hash.

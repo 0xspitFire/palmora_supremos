@@ -484,6 +484,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async schedulePreview(campaignId, walletsText, maxFeeGwei, fromText, untilText) {
       const wiring = fireWiring();
+      await wiring.assertUnattendedReady();
       const target = fireCampaign(campaignId, maxFeeGwei);
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
@@ -496,6 +497,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async scheduleCreate(campaignId, walletsText, maxFeeGwei, fromText, untilText, phrase, digest) {
       const wiring = fireWiring();
+      await wiring.assertUnattendedReady();
       const target = fireCampaign(campaignId, maxFeeGwei);
       if (digest !== undefined && wiring.campaignDigest(target) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; start the schedule again');
       const { from, until } = wiring.parseWindow(fromText, untilText);

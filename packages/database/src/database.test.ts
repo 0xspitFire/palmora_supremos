@@ -68,7 +68,7 @@ describe('database migrations and spend reservations', () => {
   it('applies migrations idempotently and enables integrity pragmas', () => {
     const db = fixture();
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 36 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 37 });
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(db.pragma('journal_mode', { simple: true })).toBe('memory');
     expect(() => db.prepare("INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES ('other', 'chain', '0xABC', 'kms://other', '2026-01-01T00:00:00.000Z')").run()).toThrow();
@@ -102,7 +102,7 @@ describe('database migrations and spend reservations', () => {
       worker.once('error', (error: Error) => resolve(`error:${error.message}`));
     });
     const results = await Promise.all([run(), run()]);
-    expect(results.sort()).toEqual(['36', '36']);
+    expect(results.sort()).toEqual(['37', '37']);
     rmSync(directory, { recursive: true, force: true });
   });
 
@@ -300,12 +300,12 @@ describe('database migrations and spend reservations', () => {
     const destination = join(directory, 'state.sqlite');
     await backupDatabase(source, destination);
     const verification = verifyBackup(destination);
-    expect(verification.schemaVersion).toBe(36);
+    expect(verification.schemaVersion).toBe(37);
     expect(verification.integrityCheck).toBe('ok');
     expect(verification.foreignKeyViolations).toBe(0);
     const restoredDestination = join(directory, 'restored.sqlite');
     const restoredVerification = await restoreDatabase(destination, restoredDestination);
-    expect(restoredVerification).toMatchObject({ schemaVersion: 36, integrityCheck: 'ok', foreignKeyViolations: 0 });
+    expect(restoredVerification).toMatchObject({ schemaVersion: 37, integrityCheck: 'ok', foreignKeyViolations: 0 });
     const staleDestination = join(directory, 'stale.sqlite');
     copyFileSync(destination, staleDestination);
     const staleDb = new BetterSqlite3(staleDestination);
@@ -323,7 +323,7 @@ describe('database migrations and spend reservations', () => {
     const repository = new DurableRepository(restored);
     repository.saveBackupPolicy({ id: 'backup-policy', approvalOwner: 'product-owner', approvedAt: '2026-01-01T00:00:00.000Z' });
     expect(restored.prepare('SELECT retention_days, encryption_required FROM backup_policy WHERE id = ?').get('backup-policy')).toEqual({ retention_days: 30, encryption_required: 1 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: destination, backupReference: 's3://test/backup', sha256: verification.sha256, schemaVersion: 36, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: verification.sha256, evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:00.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence', storeReference: destination, backupReference: 's3://test/backup', sha256: verification.sha256, schemaVersion: 37, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: verification.sha256, evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:00.000Z' });
     restored.close();
     source.close();
     rmSync(directory, { recursive: true, force: true });
@@ -422,9 +422,30 @@ describe('database migrations and spend reservations', () => {
     const db = legacyFixture();
     migrate(db);
     migrate(db);
-    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 36 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({ count: 37 });
     expect(db.prepare('SELECT reserved_amount_wei, request_fingerprint FROM spend_reservation WHERE id = ?').get('legacy-reservation')).toMatchObject({ reserved_amount_wei: '10' });
     expect(db.prepare('SELECT execution_enabled, success_finality_stage FROM chain_profile WHERE id = ?').get('legacy-chain')).toEqual({ execution_enabled: 0, success_finality_stage: 'ethereum_final' });
+    db.close();
+  });
+
+  it('migrates every pre-037 live request to refused legacy provenance instead of inferring attended', () => {
+    const db = new BetterSqlite3(':memory:');
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)');
+    const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+    const files = readdirSync(migrationsDirectory).filter((file) => /^\d+_.+\.sql$/.test(file) && Number(file.slice(0, 3)) <= 36).sort();
+    for (const file of files) {
+      db.exec(readFileSync(join(migrationsDirectory, file), 'utf8'));
+      db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(Number(file.slice(0, 3)), file, '2026-01-01T00:00:00.000Z');
+    }
+    db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES ('legacy-request-chain', 1, 'Ethereum', '[]', 2, '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO contract (id, chain_profile_id, address, kind) VALUES ('legacy-request-contract', 'legacy-request-chain', '0xlegacy', 'nft')").run();
+    db.prepare("INSERT INTO collection (id, contract_id, name) VALUES ('legacy-request-collection', 'legacy-request-contract', 'legacy')").run();
+    db.prepare("INSERT INTO \"drop\" (id, collection_id, strategy, mint_price_wei, observed_at) VALUES ('legacy-request-drop', 'legacy-request-collection', 'test', '0', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO campaign (id, drop_id, state, created_at) VALUES ('legacy-request-campaign', 'legacy-request-drop', 'draft', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO live_run_request (id, campaign_id, wallets_json, simulation_ids_json, approval_id, evidence_at, max_fee_gwei, requested_by, confirmation_digest, requested_at, expires_at) VALUES ('legacy-request', 'legacy-request-campaign', '[\"0x1111111111111111111111111111111111111111\"]', '[\"sim\"]', 'approval', '2026-10-24T10:00:00.000Z', '5', 'owner-cli', ?, '2026-10-24T10:00:00.000Z', '2026-10-24T10:30:00.000Z')").run('a'.repeat(64));
+    migrate(db);
+    expect(new DurableRepository(db).unclaimedLiveRunRequests()[0]!.provenance).toEqual({ kind: 'legacy' });
+    expect(() => db.prepare("INSERT INTO live_run_request (id, campaign_id, wallets_json, simulation_ids_json, approval_id, evidence_at, max_fee_gwei, requested_by, confirmation_digest, requested_at, expires_at) SELECT 'legacy-request-copy', campaign_id, wallets_json, simulation_ids_json, approval_id, evidence_at, max_fee_gwei, requested_by, confirmation_digest, requested_at, expires_at FROM live_run_request WHERE id = 'legacy-request'").run()).toThrow(/incomplete/);
     db.close();
   });
 
@@ -583,7 +604,7 @@ describe('database migrations and spend reservations', () => {
     repository.recordRetentionEvidence({ id: 'retention-evidence', policyId: 'raw-observation-30d', entityType: 'raw_observation', cutoffAt: '2026-01-01T00:00:00.000Z', rowsDeleted: 3, rowsRetained: 1, outcome: 'passed', recordedAt: '2026-01-01T00:00:01.000Z' });
     expect(db.prepare('SELECT entity_type, rows_deleted, rows_retained, outcome FROM retention_evidence WHERE id = ?').get('retention-evidence')).toEqual({ entity_type: 'raw_observation', rows_deleted: 3, rows_retained: 1, outcome: 'passed' });
     expect(db.prepare('SELECT retention_days, retain_indefinitely FROM retention_policy WHERE entity_type = ?').get('raw_observation')).toEqual({ retention_days: 30, retain_indefinitely: 0 });
-    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 36, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
+    repository.recordBackupRestoreEvidence({ id: 'backup-evidence-integrity', storeReference: 's3://test/store', backupReference: 's3://test/backup', sha256: 'a'.repeat(64), schemaVersion: 37, operation: 'verification', outcome: 'passed', killSwitchEngaged: true, encryptionVerified: true, integrityCheck: 'ok', verificationSha256: 'a'.repeat(64), evidence: { offHost: true, restoreVerified: true, postRestoreReconciliation: true, retentionDays: 30 }, recordedAt: '2026-01-01T00:00:02.000Z' });
     expect(db.prepare('SELECT encryption_verified, integrity_check FROM backup_restore_evidence WHERE id = ?').get('backup-evidence-integrity')).toEqual({ encryption_verified: 1, integrity_check: 'ok' });
     expect(() => repository.recordAuditEvent({ id: 'secret-audit', entityType: 'run', entityId: 'run', actor: 'test', reason: 'secret boundary', policySnapshot: { privateKey: 'not-written' }, occurredAt: '2026-01-01T00:00:03.000Z' })).toThrow('approved secret store');
     expect(() => db.prepare("UPDATE retention_evidence SET rows_deleted = 4 WHERE id = 'retention-evidence'").run()).toThrow('retention evidence is append-only');

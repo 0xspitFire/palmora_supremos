@@ -124,7 +124,7 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
       const a = attempt('1');
       await store.transaction((state: BackendState) => {
         state.runs.push({ ...run });
-        state.intents.push({ id: 'int1', runId: 'run1', campaignId: 'c1', campaignSnapshot: { chainId: 4663, mintPriceWei: 0n, quantity: 1 }, wallets: [a.wallet] } as never);
+        state.intents.push({ id: 'int1', runId: 'run1', campaignId: 'c1', campaignSnapshot: { chainId: 4663, contract: '0x2222222222222222222222222222222222222222', mintPriceWei: 0n, quantity: 1 }, wallets: [a.wallet] } as never);
         state.attempts.push(a);
         state.reservations.push({ id: 'res1', runId: 'run1', campaignId: 'c1', chainId: 4663, wallet: a.wallet, amountWei: reservationWei, accountingDate: '2026-10-17', status: 'reserved', createdAt: NOW, updatedAt: NOW });
       });
@@ -133,16 +133,23 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
         execute: async () => { throw new Error('unused'); },
         reconcile: (r) => reconcileRobinhood({ run: r, attempts: store.snapshot().attempts.filter((x) => x.runId === r.id), mintPriceWei: 0n, quantity: 1, readReceipt: async () => receipt(receiptOver), observe: async () => (typeof finality === 'function' ? finality() : finality) }),
       };
-      return { store, coordinator: new ExecutionCoordinator(store, adapter) };
+      const finalAlerts: string[] = [];
+      return { store, finalAlerts, coordinator: new ExecutionCoordinator(store, adapter, { alerts: {
+        cap: async () => undefined,
+        confirmed: async (_runId, facts) => { finalAlerts.push(`confirmed:${facts.hash}`); },
+        mintFailed: async (_runId, facts) => { finalAlerts.push(`failed:${facts.hash}`); },
+      } }) };
     }
 
     it('final: settles the reservation at the observed cost and completes the run', async () => {
-      const { store, coordinator } = await harness(final);
+      const { store, coordinator, finalAlerts } = await harness(final);
+      await coordinator.reconcile();
       await coordinator.reconcile();
       const state = store.snapshot();
       expect(state.reservations[0]).toMatchObject({ status: 'settled', actualAmountWei: 200_000n * 20_000_000n });
       expect(state.runs[0]?.state).toBe('Completed');
       expect(state.receipts).toHaveLength(1);
+      expect(finalAlerts).toEqual([`confirmed:${attempt('1').hash}`]);
     });
 
     it('posted and soft: the loop does not throw, the reservation stays held and the run is not completed', async () => {
@@ -156,10 +163,11 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
     });
 
     it('reverted: settles the gas only and fails the run', async () => {
-      const { store, coordinator } = await harness(final, { status: 'reverted' });
+      const { store, coordinator, finalAlerts } = await harness(final, { status: 'reverted' });
       await coordinator.reconcile();
       expect(store.snapshot().reservations[0]).toMatchObject({ status: 'settled', actualAmountWei: 200_000n * 20_000_000n });
       expect(store.snapshot().runs[0]?.state).toBe('Failed');
+      expect(finalAlerts).toEqual([`failed:${attempt('1').hash}`]);
     });
 
     it('reorged: marks the reservation reorged (held for the owner) and fails the run', async () => {

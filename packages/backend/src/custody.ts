@@ -13,6 +13,7 @@ export interface CustodyReadiness {
   providerIdentity: string;
   policyReference: string;
   policyDigest: string;
+  recordDigest?: string;
   policyStatus: CustodyPolicyStatus;
   healthStatus: CustodyHealthStatus;
   attestationStatus: CustodyAttestationStatus;
@@ -40,9 +41,11 @@ export interface CustodyPolicyBinding {
   providerIdentity: string;
   policyReference: string;
   policyDigest: string;
+  recordDigest?: string;
 }
 
 const DIGEST = /^0x[0-9a-f]{64}$/i;
+const RECORD_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SECRET_NAME = /(?:private|secret|credential|token|password|mnemonic|seed|api[_-]?key)/i;
 
 function validTimestamp(value: string): boolean {
@@ -114,8 +117,9 @@ export function assertCustodyReadiness(
   const expires = Date.parse(evidence.expiresAt);
   if (expires <= now.getTime() || observed > now.getTime() || expires <= observed) throw new Error('CUSTODY_EVIDENCE_STALE');
   if (expected) {
+    if (expected.recordDigest !== undefined && (!RECORD_DIGEST.test(expected.recordDigest) || !RECORD_DIGEST.test(evidence.recordDigest ?? ''))) throw new Error('CUSTODY_POLICY_RECORD_DIGEST_REQUIRED');
     if (evidence.provider !== expected.provider || evidence.providerIdentity !== expected.providerIdentity) throw new Error('CUSTODY_PROVIDER_MISMATCH');
-    if (evidence.policyReference !== expected.policyReference || evidence.policyDigest.toLowerCase() !== expected.policyDigest.toLowerCase()) throw new Error('CUSTODY_POLICY_MISMATCH');
+    if (evidence.policyReference !== expected.policyReference || evidence.policyDigest.toLowerCase() !== expected.policyDigest.toLowerCase() || (expected.recordDigest !== undefined && evidence.recordDigest !== expected.recordDigest)) throw new Error('CUSTODY_POLICY_MISMATCH');
   }
 }
 

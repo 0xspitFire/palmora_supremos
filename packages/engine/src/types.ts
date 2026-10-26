@@ -550,6 +550,7 @@ export interface MintJobConfig {
     readonly quantity: number;
     readonly campaignId?: string;
     readonly policyRef?: string;
+    readonly policyRecordDigest?: string;
   };
   readonly fleet: {
     readonly walletFile: string;

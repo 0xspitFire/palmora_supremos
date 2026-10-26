@@ -134,6 +134,23 @@ describe('phase 2 operations', () => {
     expect(JSON.stringify(events[0]!.data['system'])).toContain('txLinks');
   });
 
+  it('sends one final Robinhood card per authoritative transaction outcome', async () => {
+    const store = new DurableStore();
+    await store.open();
+    const delivered: string[] = [];
+    const dispatcher = new NotificationDispatcher(store, { send: async ({ text }) => { delivered.push(text); } });
+    const alerts = new AlertManager(store, dispatcher, undefined, { now: () => new Date('2026-01-01T00:00:00.000Z') });
+    const facts = { chainId: 4663, collection: '0x21d0…3383', wallet: '0x365952eb1e8209bf2bcc2db5ed213111a87d061e', quantity: 1, hash: `0x${'c'.repeat(64)}`, feePaid: '2000000000000 wei' };
+    await alerts.confirmed('run_final', facts);
+    await alerts.confirmed('run_final', facts);
+    await alerts.mintFailed('run_failed', { ...facts, hash: `0x${'d'.repeat(64)}` });
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toContain('MINT CONFIRMED');
+    expect(delivered[1]).toContain('MINT FAILED');
+    const event = store.snapshot().events.find((item) => item.type === 'alert_confirmed');
+    expect((event?.data['final'] as { wallet?: string }).wallet).toBeUndefined();
+  });
+
   it('a stopped live request is told every time, even for the same reason, while a repeat of the same occurrence is still ignored', async () => {
     const store = new DurableStore();
     await store.open();

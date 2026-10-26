@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Campaign, SimulationEvidenceRecord } from '@mint-bot/backend';
-import { LIVE_REQUEST_LIFETIME_MS, describeFailure, liveRequestFollowUp, previewLiveRequest, processLiveRunRequests, runLiveRequest, startLiveRequestPoller, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
+import type { AttemptRecord, Campaign, ReceiptRecord, SimulationEvidenceRecord } from '@mint-bot/backend';
+import { LIVE_REQUEST_LIFETIME_MS, describeFailure, liveRequestFollowUp, previewLiveRequest, processLiveRunRequests, runLiveRequest, sentTransactionsForRun, startLiveRequestPoller, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
 
 const NOW = new Date('2026-10-24T10:00:00.000Z');
 const WALLET_A = '0x1111111111111111111111111111111111111111';
@@ -27,7 +27,7 @@ const simulation = (wallet: string, id: string, overrides: Partial<SimulationEvi
   id, campaignId: 'cmp_0000000000000000abcdef12', wallet, inputDigest: 'd', success: true, sourceBlock: 1n, sourceBlockHash: '0x', checkedAt: '2026-10-24T09:55:00.000Z', expiresAt: '2026-10-24T10:25:00.000Z', worstCaseFeeWei: 0n, ...overrides,
 });
 
-const state = (simulations: SimulationEvidenceRecord[], campaigns = [campaign()]) => ({ campaigns, simulations, events: [] });
+const state = (simulations: SimulationEvidenceRecord[], campaigns = [campaign()], startupState: 'Ready' | 'Blocked' = 'Ready') => ({ campaigns, simulations, events: [], runtime: { startupState, blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } } });
 
 describe('live-request preview (T-058)', () => {
   it('binds the exact wallets to their newest fresh passing simulation and names the most that can be spent', () => {
@@ -88,6 +88,36 @@ describe('live-request create (T-058)', () => {
     expect(approved).toEqual([expect.objectContaining({ wallets: [WALLET_A], simulationIds: ['a'], evidenceAt: NOW.toISOString() })]);
     expect(recorded).toEqual([expect.objectContaining({ id: 'request-1', approvalId: 'approval-1', simulationIds: ['a'], maxFeeGwei: '5', requestedAt: NOW.toISOString(), expiresAt: new Date(NOW.getTime() + LIVE_REQUEST_LIFETIME_MS).toISOString() })]);
     expect(recorded[0]!.confirmationDigest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('refuses create before approval when startup reconciliation is not Ready', async () => {
+    const recorded: Parameters<LiveRequestStore['recordLiveRunRequest']>[0][] = [];
+    const blocked = state([simulation(WALLET_A, 'a')], undefined, 'Blocked');
+    const value: LiveRequestStore = { snapshot: () => blocked, recordLiveRunRequest: (input) => { recorded.push(input); } };
+    const preview = previewLiveRequest(blocked, 'cmp_0000000000000000abcdef12', [WALLET_A], 5, NOW);
+    let approvals = 0;
+    await expect(runLiveRequest({ action: 'create', campaignId: preview.campaignId, wallets: [WALLET_A], maxFeeGwei: 5, confirm: preview.phrase, now: NOW, store: value, approve: async () => { approvals += 1; return { id: 'approval' }; } })).rejects.toThrow('STARTUP_RECONCILIATION_REQUIRED');
+    expect(approvals).toBe(0);
+    expect(recorded).toEqual([]);
+  });
+});
+
+describe('sent transaction projection', () => {
+  const attempt = (id: string, hash: string, state: AttemptRecord['state'], nonce = 7): AttemptRecord => ({ id, executionId: 'execution-1', runId: 'run-1', wallet: WALLET_A, nonce, hash, state, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+  it('excludes signed-only facts, deduplicates lifecycle copies, and retains replacements with the same nonce', () => {
+    const hashA = `0x${'a'.repeat(64)}`;
+    const hashB = `0x${'b'.repeat(64)}`;
+    const attempts = [attempt('signed-a', hashA, 'Signed'), attempt('provider-a', hashA, 'Submitted'), attempt('provider-a-copy', hashA.toUpperCase().replace('0X', '0x'), 'Pending'), attempt('replacement-b', hashB, 'Submitted'), attempt('other-run', hashA, 'Submitted')];
+    attempts[4]!.runId = 'run-2';
+    expect(sentTransactionsForRun(attempts, [], 'run-1')).toEqual([{ hash: hashA, wallet: WALLET_A }, { hash: hashB, wallet: WALLET_A }]);
+  });
+
+  it('includes a failed attempt only when a receipt proves it was sent', () => {
+    const hash = `0x${'c'.repeat(64)}`;
+    const failed = attempt('failed-on-chain', hash, 'Failed');
+    const receipt: ReceiptRecord = { id: 'receipt-1', executionId: failed.executionId, runId: failed.runId, transactionAttemptId: failed.id, state: 'Failed', blockNumber: 2n, blockHash: '0xblock', actualSpendWei: 1n, observedAt: NOW.toISOString() };
+    expect(sentTransactionsForRun([failed], [], 'run-1')).toEqual([]);
+    expect(sentTransactionsForRun([failed], [receipt], 'run-1')).toEqual([{ hash, wallet: WALLET_A }]);
   });
 });
 
@@ -172,6 +202,39 @@ describe('live-request processing in the host service (T-058)', () => {
     expect(ceilings.at(-1)).toEqual(['cmp_0000000000000000abcdef12', undefined]);
     expect(events).toEqual([{ requestId: 'request-1', runId: 'run-1', state: 'stopped', code: 'KILL_SWITCH_ACTIVE' }]);
   });
+
+  it('rechecks unattended evidence before arm and execute, and closes an unsent run when it changes after arm', async () => {
+    let checks = 0;
+    const closed: string[] = [];
+    const scheduled = { ...pending, provenance: { kind: 'schedule' as const, scheduleId: 'fire_schedule_1' } };
+    const { value, calls, events } = deps({
+      unclaimed: () => [scheduled],
+      assertUnattendedReady: async () => { checks += 1; if (checks === 2) throw new Error('OPS_EVIDENCE_NOT_ACCEPTED:ACCEPTANCE_EXPIRED'); },
+      closeRun: async (runId) => { closed.push(runId); return 'closed'; },
+    });
+    await processLiveRunRequests(value);
+    expect(checks).toBe(2);
+    expect(calls).toEqual(['claim:request-1', 'arm:live-request:request-1:approval-1']);
+    expect(closed).toEqual(['run-1']);
+    expect(events).toEqual([{ requestId: 'request-1', runId: 'run-1', state: 'stopped', code: 'OPS_EVIDENCE_NOT_ACCEPTED:ACCEPTANCE_EXPIRED', runClosed: 'closed' }]);
+  });
+
+  it('refuses scheduled provenance without the runtime evidence checker while attended requests remain unchanged', async () => {
+    const scheduled = deps({ unclaimed: () => [{ ...pending, provenance: { kind: 'schedule' as const, scheduleId: 'fire_schedule_1' } }] });
+    await processLiveRunRequests(scheduled.value);
+    expect(scheduled.calls).toEqual(['claim:request-1']);
+    expect(scheduled.events).toEqual([{ requestId: 'request-1', state: 'stopped', code: 'OPS_EVIDENCE_CHECK_REQUIRED' }]);
+    const attended = deps({ assertUnattendedReady: async () => { throw new Error('SHOULD_NOT_RUN'); } });
+    await processLiveRunRequests(attended.value);
+    expect(attended.events).toEqual([{ requestId: 'request-1', runId: 'run-1', state: 'finished' }]);
+  });
+
+  it('never executes a migrated request whose attended/scheduled provenance was not recorded', async () => {
+    const legacy = deps({ unclaimed: () => [{ ...pending, provenance: { kind: 'legacy' as const } }] });
+    await processLiveRunRequests(legacy.value);
+    expect(legacy.calls).toEqual(['claim:request-1']);
+    expect(legacy.events).toEqual([{ requestId: 'request-1', state: 'stopped', code: 'LEGACY_REQUEST_PROVENANCE_UNVERIFIED' }]);
+  });
 });
 
 describe('the request poller keeps every nudge (T-067)', () => {
@@ -232,10 +295,11 @@ describe('the code shown for a stopped request keeps the failing check visible (
 describe('the host journal describes an uncoded failure without leaking (T-081)', () => {
   it('keeps the type, a cleaned message and function names with file:line, and drops addresses, hex, long numbers and folders', () => {
     const error = new Error('request to https://rpc.example/v1/SECRETKEY failed for 0x1111111111111111111111111111111111111111 amount 123456789012 at\nsecond line');
-    const other = describeFailure(new Error('wss://node.example/ws?k=1 and /etc/some/folder/file and key ABCDEFGHIJKLMNOPQRSTUVWXYZ0123'));
+    const other = describeFailure(new Error('wss://node.example/ws?k=1 and custom+very-long-transport.scheme://private.example/value and /etc/some/folder/file and key ABCDEFGHIJKLMNOPQRSTUVWXYZ0123'));
+    expect(other.message).not.toContain('private.example');
     expect(describeFailure(new Error('word '.repeat(100))).message.length).toBe(240);
     expect(describeFailure(new Error('hash ' + 'ab'.repeat(20))).message).toBe('hash [hex]');
-    expect(other.message).toBe('[url] and [path] and key [token]');
+    expect(other.message).toBe('[url] and [url] and [path] and key [token]');
     error.name = 'Weird Error!';
     const detail = describeFailure(error);
     expect(detail.name).toBe('WeirdError');

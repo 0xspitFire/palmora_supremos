@@ -18,6 +18,7 @@ import {
   validateTurnkeyActualProviderState,
   validateTurnkeyCanonicalPolicyRecord,
   verifyTurnkeySignedPolicyRecord,
+  verifyTurnkeySignedPolicyCatalog,
   type TurnkeyCanonicalPolicyRecord,
 } from './turnkey-policy-record.js';
 import {
@@ -31,6 +32,7 @@ import {
   type TurnkeyPolicyAst,
   type TurnkeyProviderBinding,
 } from './turnkey-policy.js';
+import { validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
 
 export interface TurnkeyWalletReference {
   index: number;
@@ -53,6 +55,8 @@ export interface TurnkeySecretConfig {
   walletMapPath: string;
   policyRecordPath: string;
   policyApproverPublicKeyPath: string;
+  policyCatalogPath?: string;
+  policyBundlePath?: string;
   appName?: string;
   attestationPath?: string;
   attestationActivityId?: string;
@@ -127,6 +131,7 @@ export interface TurnkeySignerOptions {
   userId: string;
   wallets: readonly TurnkeyWalletReference[];
   policyRecord: TurnkeyCanonicalPolicyRecord;
+  approvedPolicyRecords?: readonly TurnkeyCanonicalPolicyRecord[];
   client: TurnkeySignerClient;
   generateAppProofs?: boolean;
 }
@@ -139,6 +144,49 @@ export interface TurnkeyHealthReport {
   policyId: string;
   policyDigest: Hex;
   policyRecordDigest: `sha256:${string}`;
+}
+
+export interface TurnkeyPolicySelection {
+  readonly policyReference: string;
+  readonly policyDigest: Hex;
+  readonly recordDigest: `sha256:${string}`;
+}
+
+export function turnkeyPolicySelection(record: TurnkeyCanonicalPolicyRecord): TurnkeyPolicySelection {
+  const policyDigest = canonicalPolicyDigest(record.enforcementPolicy);
+  return {
+    policyReference: turnkeyPolicyRef(record.enforcementPolicy.scope.policyId, policyDigest),
+    policyDigest,
+    recordDigest: turnkeyPolicyRecordDigest(record),
+  };
+}
+
+export function selectTurnkeyPolicyRecord(records: readonly TurnkeyCanonicalPolicyRecord[], policyReference: string, recordDigest?: string): TurnkeyCanonicalPolicyRecord {
+  const matches = records.filter((record) => {
+    const selection = turnkeyPolicySelection(record);
+    return selection.policyReference === policyReference && (recordDigest === undefined || selection.recordDigest === recordDigest);
+  });
+  if (matches.length !== 1) throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
+  return matches[0]!;
+}
+
+/** Reads the owner-approved catalog without constructing a signing client. */
+export async function readTurnkeyApprovedPolicyRecords(scope: SecretScope = 'mainnet', root = 'Rets'): Promise<readonly TurnkeyCanonicalPolicyRecord[]> {
+  const config = await readTurnkeySecretConfig(root, scope);
+  const publicKey = await readOwnerOnlyFile(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+  if (config.policyBundlePath) {
+    let bundle: unknown;
+    try { bundle = JSON.parse(await readOwnerOnlyFile(config.policyBundlePath, 'TURNKEY_POLICY_BUNDLE_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_BUNDLE_INVALID'); }
+    return verifyTurnkeySignedPolicyCatalog(validateTurnkeyPolicyBundle(bundle, publicKey).catalog, publicKey);
+  }
+  if (config.policyCatalogPath) {
+    let catalog: unknown;
+    try { catalog = JSON.parse(await readOwnerOnlyFile(config.policyCatalogPath, 'TURNKEY_POLICY_CATALOG_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_CATALOG_INVALID'); }
+    return verifyTurnkeySignedPolicyCatalog(catalog, publicKey);
+  }
+  let signed: unknown;
+  try { signed = JSON.parse(await readOwnerOnlyFile(config.policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_RECORD_INVALID'); }
+  return [verifyTurnkeySignedPolicyRecord(signed, publicKey)];
 }
 
 export function createTurnkeyClient(
@@ -236,11 +284,15 @@ export async function readTurnkeySecretConfig(root = 'Rets', scope: SecretScope 
   const policyRecordPath = expandPath(policyRecordReference ?? resolve(secretRoot, 'turnkey-policy-record.json'));
   const approverKeyReference = values.get('TURNKEY_POLICY_APPROVER_PUBLIC_KEY_PATH');
   const policyApproverPublicKeyPath = expandPath(approverKeyReference ?? resolve(secretRoot, 'turnkey-policy-approver.pub'));
+  const policyCatalogReference = values.get('TURNKEY_POLICY_CATALOG_PATH');
+  const policyCatalogPath = policyCatalogReference ? expandPath(policyCatalogReference) : undefined;
+  const policyBundleReference = values.get('TURNKEY_POLICY_BUNDLE_PATH');
+  const policyBundlePath = policyBundleReference ? expandPath(policyBundleReference) : undefined;
   const attestationReference = values.get('TURNKEY_ATTESTATION_PATH');
   const attestationPath = attestationReference ? expandPath(attestationReference) : undefined;
   const attestationActivityId = values.get('TURNKEY_ATTESTATION_ACTIVITY_ID');
   if (!organizationId || !apiPublicKey || !apiPrivateKey || !userId || !walletMapPath) throw new Error('TURNKEY_SECRET_REQUIRED');
-  if (!pathWithin(secretRoot, walletMapPath) || !pathWithin(secretRoot, policyRecordPath) || !pathWithin(secretRoot, policyApproverPublicKeyPath) || (attestationPath && !pathWithin(secretRoot, attestationPath))) throw new Error('TURNKEY_SECRET_PATH_INVALID');
+  if (!pathWithin(secretRoot, walletMapPath) || !pathWithin(secretRoot, policyRecordPath) || !pathWithin(secretRoot, policyApproverPublicKeyPath) || (policyCatalogPath && !pathWithin(secretRoot, policyCatalogPath)) || (policyBundlePath && !pathWithin(secretRoot, policyBundlePath)) || (attestationPath && !pathWithin(secretRoot, attestationPath))) throw new Error('TURNKEY_SECRET_PATH_INVALID');
   return {
     organizationId,
     environment: scope === 'mainnet' ? 'production' : 'testnet',
@@ -250,6 +302,8 @@ export async function readTurnkeySecretConfig(root = 'Rets', scope: SecretScope 
     walletMapPath,
     policyRecordPath,
     policyApproverPublicKeyPath,
+    ...(policyCatalogPath ? { policyCatalogPath } : {}),
+    ...(policyBundlePath ? { policyBundlePath } : {}),
     ...(values.get('TURNKEY_APP_NAME') ? { appName: values.get('TURNKEY_APP_NAME') } : {}),
     ...(attestationPath ? { attestationPath } : {}),
     ...(attestationActivityId ? { attestationActivityId } : {}),
@@ -321,6 +375,7 @@ export class TurnkeySigner implements Signer {
   private readonly policyDigest: Hex;
   private readonly policy: TurnkeyPolicyAst;
   private readonly policyRecord: TurnkeyCanonicalPolicyRecord;
+  private readonly approvedPolicyRecords?: readonly TurnkeyCanonicalPolicyRecord[];
   private readonly policyRecordDigest: `sha256:${string}`;
   private readonly policyNotBefore: number;
   private readonly policyExpiresAt: number;
@@ -349,6 +404,7 @@ export class TurnkeySigner implements Signer {
     this.policyDigest = canonicalPolicyDigest(policy);
     this.policy = policy;
     this.policyRecord = record;
+    this.approvedPolicyRecords = options.approvedPolicyRecords?.map(validateTurnkeyCanonicalPolicyRecord);
     this.policyRecordDigest = turnkeyPolicyRecordDigest(record);
     this.policyNotBefore = Date.parse(record.issuedAt);
     this.policyExpiresAt = Date.parse(record.expiresAt);
@@ -357,20 +413,50 @@ export class TurnkeySigner implements Signer {
     this.generateAppProofs = options.generateAppProofs ?? true;
   }
 
-  public static async fromSecrets(scope: SecretScope = 'mainnet', root = 'Rets'): Promise<TurnkeySigner> {
-    const { organizationId, apiPublicKey, apiPrivateKey, userId, environment, walletMapPath: mapPath, policyRecordPath, policyApproverPublicKeyPath } = await readTurnkeySecretConfig(root, scope);
-    const map = await readTurnkeyWalletMap(mapPath);
+  public static async fromSecrets(scope: SecretScope = 'mainnet', root = 'Rets', policyReference?: string, recordDigest?: string): Promise<TurnkeySigner> {
+    if (policyReference && !recordDigest) throw new Error('TURNKEY_POLICY_RECORD_DIGEST_REQUIRED');
+    const { organizationId, apiPublicKey, apiPrivateKey, userId, environment, walletMapPath: mapPath, policyRecordPath, policyApproverPublicKeyPath, policyCatalogPath, policyBundlePath } = await readTurnkeySecretConfig(root, scope);
+    let map = policyBundlePath ? undefined : await readTurnkeyWalletMap(mapPath);
     let signedRecord: unknown;
-    try { signedRecord = JSON.parse(await readOwnerOnlyFile(policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_RECORD_INVALID'); }
+    let bundledCatalog: unknown;
+    if (policyBundlePath) {
+      let raw: unknown;
+      try { raw = JSON.parse(await readOwnerOnlyFile(policyBundlePath, 'TURNKEY_POLICY_BUNDLE_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_BUNDLE_INVALID'); }
+      const approverPublicKey = await readOwnerOnlyFile(policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+      const bundle = validateTurnkeyPolicyBundle(raw, approverPublicKey);
+      signedRecord = bundle.activeRecord;
+      bundledCatalog = bundle.catalog;
+      map = validateTurnkeyWalletMap(bundle.walletMap);
+    } else {
+      try { signedRecord = JSON.parse(await readOwnerOnlyFile(policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_RECORD_INVALID'); }
+    }
     const approverPublicKey = await readOwnerOnlyFile(policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
-    const record = verifyTurnkeySignedPolicyRecord(signedRecord, approverPublicKey);
-    if (turnkeyPolicyRecordDigest(record) !== map.policyRecordDigest) throw new Error('TURNKEY_POLICY_RECORD_DIGEST_MISMATCH');
+    const activeRecord = verifyTurnkeySignedPolicyRecord(signedRecord, approverPublicKey);
+    let record = activeRecord;
+    let approvedPolicyRecords: readonly TurnkeyCanonicalPolicyRecord[] | undefined;
+    if (bundledCatalog || policyCatalogPath) {
+      let catalog: unknown;
+      if (bundledCatalog) catalog = bundledCatalog;
+      else try { catalog = JSON.parse(await readOwnerOnlyFile(policyCatalogPath!, 'TURNKEY_POLICY_CATALOG_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_CATALOG_INVALID'); }
+      approvedPolicyRecords = verifyTurnkeySignedPolicyCatalog(catalog, approverPublicKey);
+      if (!approvedPolicyRecords.some((candidate) => turnkeyPolicyRecordDigest(candidate) === turnkeyPolicyRecordDigest(activeRecord))) throw new Error('TURNKEY_PROVIDER_POLICY_CATALOG_ACTIVE_RECORD_MISSING');
+      if (policyReference) record = selectTurnkeyPolicyRecord(approvedPolicyRecords, policyReference, recordDigest);
+    } else if ((policyReference && turnkeyPolicySelection(activeRecord).policyReference !== policyReference) || (recordDigest !== undefined && turnkeyPolicyRecordDigest(activeRecord) !== recordDigest)) {
+      throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
+    }
+    if (recordDigest !== undefined && turnkeyPolicyRecordDigest(record) !== recordDigest) throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
+    if (!map) throw new Error('TURNKEY_WALLET_MAP_INVALID');
+    const mapRecordAllowed = approvedPolicyRecords
+      ? approvedPolicyRecords.some((candidate) => turnkeyPolicyRecordDigest(candidate) === map.policyRecordDigest)
+      : turnkeyPolicyRecordDigest(record) === map.policyRecordDigest;
+    if (!mapRecordAllowed) throw new Error('TURNKEY_POLICY_RECORD_DIGEST_MISMATCH');
     return new TurnkeySigner({
       organizationId,
       environment,
       userId,
       wallets: map.wallets,
       policyRecord: record,
+      ...(approvedPolicyRecords ? { approvedPolicyRecords } : {}),
       client: createTurnkeyClient(organizationId, apiPublicKey, apiPrivateKey),
     });
   }
@@ -505,7 +591,7 @@ export class TurnkeySigner implements Signer {
       client.getPolicies({ organizationId: this.organizationId }),
       client.getPrivateKeys({ organizationId: this.organizationId }),
     ]);
-    validateTurnkeyActualProviderState(this.policyRecord, { whoami, organization, policies: policies.policies, privateKeys: keyResponse.privateKeys });
+    validateTurnkeyActualProviderState(this.policyRecord, { whoami, organization, policies: policies.policies, privateKeys: keyResponse.privateKeys }, this.approvedPolicyRecords);
     return {
       status: 'ok',
       provider: 'turnkey',

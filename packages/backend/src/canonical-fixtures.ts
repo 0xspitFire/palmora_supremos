@@ -79,8 +79,8 @@ export async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM |
   return campaignValue;
 }
 
-export async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = [], runSuffix = ''): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
-  const run: RunRecord = { id: `run-${campaignValue.id}${runSuffix}`, intentId: `intent-${campaignValue.id}${runSuffix}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', createdAt: NOW, updatedAt: NOW };
+export async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = [], runSuffix = '', idempotencyKey?: string): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {
+  const run: RunRecord = { id: `run-${campaignValue.id}${runSuffix}`, intentId: `intent-${campaignValue.id}${runSuffix}`, campaignId: campaignValue.id, mode: 'live', requestDigest: `fingerprint-${campaignValue.id}`, state: 'Armed', ...(idempotencyKey ? { idempotencyKey } : {}), createdAt: NOW, updatedAt: NOW };
   const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaignValue.id, campaignSnapshot: structuredClone(campaignValue), wallets: [...wallets], policy: structuredClone(campaignValue.spendPolicy), feePolicy: structuredClone(campaignValue.feePolicy), chainVerification: structuredClone(campaignValue.chainVerification), simulationIds: [...simulationIds], evidenceAt: NOW, createdAt: NOW };
   for (const [index, address] of wallets.entries()) {
     const existing = fixtureValue.db.prepare('SELECT id FROM wallet WHERE chain_profile_id = ? AND address = ?').get(`profile-${campaignValue.chainId}`, address) as { id: string } | undefined;

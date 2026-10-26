@@ -46,6 +46,8 @@ export interface MintEngineAdapterOptions {
   readonly walletFile?: string;
   readonly walletList?: () => Promise<WalletInfo[]>;
   readonly signerFactory?: SignerFactory;
+  /** Creates a signer for the immutable policy reference recorded on this campaign. */
+  readonly signerFactoryFor?: (policyReference: string, recordDigest: string) => SignerFactory;
   readonly passphraseProvider?: () => Promise<string>;
   readonly policyRef?: string;
   readonly killSwitchFile: string;
@@ -183,7 +185,7 @@ export function engineConfigFromCampaign(campaign: Campaign, options: MintEngine
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
   return {
-    target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id, ...(options.policyRef ? { policyRef: options.policyRef } : {}) },
+    target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id, ...((campaign.custodyPolicy?.policyReference ?? options.policyRef) ? { policyRef: campaign.custodyPolicy?.policyReference ?? options.policyRef } : {}), ...(campaign.custodyPolicy ? { policyRecordDigest: campaign.custodyPolicy.recordDigest } : {}) },
     fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets, ...(selection ? { walletIndexes: selection.indexes, expectedAddresses: selection.addresses } : {}) },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
     fees: { maxFeePerGasGwei: options.maxFeePerGasGweiFor?.(campaign.id) ?? options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding },
@@ -330,13 +332,19 @@ export function preSignReservationGate<R extends { status: string; amountWei: bi
 
 export function createMintEngineAdapter(options: MintEngineAdapterOptions): EngineAdapter {
   const run = async (campaign: Campaign, wallets: readonly string[], dryRun: boolean, runId: string, intentId?: string, reservationProvider?: SpendReservationProvider): Promise<ExecutionResult> => {
+    assertCampaignCustodySelection(campaign, dryRun, options.signerFactoryFor !== undefined);
     const selection = await assertWalletSelection(options, wallets);
     const config = engineConfigFromCampaign(campaign, options, dryRun, wallets.length, selection);
     const persistedRun = options.getState().runs.find((run) => run.id === runId);
+    const selectedPolicyReference = campaign.custodyPolicy?.policyReference;
+    if (selectedPolicyReference && !options.signerFactoryFor && options.policyRef !== selectedPolicyReference) throw new Error('TURNKEY_POLICY_SELECTION_UNAVAILABLE');
+    const signerFactory = selectedPolicyReference && options.signerFactoryFor
+      ? options.signerFactoryFor(selectedPolicyReference, campaign.custodyPolicy!.recordDigest)
+      : options.signerFactory;
     const engineOptions = {
       ...(reservationProvider ? { reservationProvider } : {}),
       ...(options.lifecycleStore ? { lifecycleStore: options.lifecycleStore } : {}),
-      ...(options.signerFactory ? { signerFactory: options.signerFactory } : {}),
+      ...(signerFactory ? { signerFactory } : {}),
       runId,
       ...(intentId ? { intentId } : {}),
       requestId: persistedRun?.idempotencyKey ?? runId,
@@ -504,4 +512,8 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       return { result: receipts.every((receipt) => receipt.state === 'Confirmed') ? 'confirmed' : 'failed', attempts: updatedAttempts, receipts };
     },
   };
+}
+
+export function assertCampaignCustodySelection(campaign: Campaign, dryRun: boolean, usesPerPolicySigner: boolean): void {
+  if (!dryRun && usesPerPolicySigner && (!campaign.custodyPolicy?.policyReference || !campaign.custodyPolicy.recordDigest)) throw new Error('TURNKEY_CAMPAIGN_POLICY_BINDING_REQUIRED');
 }

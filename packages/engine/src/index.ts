@@ -59,7 +59,7 @@ export type { BaseAgreementClient } from './base-provider-agreement.js';
 export { getChainConfig, getChainByName, getAllChains, resolveChainId, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS, OPENSEA_FEE_COLLECTOR } from './chains.js';
 
 // Strategies
-export { SeaDropV1PublicStrategy } from './strategies/seadrop-v1-public.js';
+export { SeaDropV1PublicStrategy, buildSeaDropPublicMintCalldata, resolveSeaDropFeeRecipient } from './strategies/seadrop-v1-public.js';
 
 // Drop reader
 export { readAndValidateDrop, simulateMint, getStrategy, registerStrategy } from './drop-reader.js';
@@ -77,8 +77,10 @@ export {
 // Signer
 export { LocalEncryptedSigner, generateAndEncryptWallets, importAndEncryptWallets, zeroizePrivateKeyArray } from './signer.js';
 export type { WalletImportRecord } from './signer.js';
-export { TurnkeySigner, createTurnkeyClient, isSecureTurnkeyFileAccess, readTurnkeySecretConfig, readTurnkeyWalletMap, validateTurnkeyWalletMap } from './turnkey-signer.js';
-export type { TurnkeyClient, TurnkeyHealthReport, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeySigningActivity, TurnkeySigningEvidence, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
+export { TurnkeySigner, createTurnkeyClient, isSecureTurnkeyFileAccess, readTurnkeyApprovedPolicyRecords, readTurnkeySecretConfig, readTurnkeyWalletMap, selectTurnkeyPolicyRecord, turnkeyPolicySelection, validateTurnkeyWalletMap } from './turnkey-signer.js';
+export type { TurnkeyClient, TurnkeyHealthReport, TurnkeyPolicySelection, TurnkeySecretConfig, TurnkeySignerClient, TurnkeySignerOptions, TurnkeySigningActivity, TurnkeySigningEvidence, TurnkeyWalletMap, TurnkeyWalletReference } from './turnkey-signer.js';
+export { installTurnkeyPolicyBundleAtomic, validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
+export type { TurnkeyPolicyBundle } from './turnkey-bundle.js';
 export {
   canonicalPolicyDigest,
   canonicalPolicyJson,
@@ -105,12 +107,14 @@ export {
   projectTurnkeyProviderIdentity,
   projectTurnkeyProviderKey,
   projectTurnkeyProviderPolicy,
+  pruneTurnkeySignedPolicyCatalog,
   signTurnkeyPolicyRecord,
   turnkeyPolicyApproverKeyId,
   turnkeyPolicyRecordDigest,
   turnkeyProviderPolicyExpressions,
   validateTurnkeyActualProviderState,
   validateTurnkeyCanonicalPolicyRecord,
+  verifyTurnkeySignedPolicyCatalog,
   verifyTurnkeySignedPolicyRecord,
 } from './turnkey-policy-record.js';
 export type {
@@ -123,6 +127,7 @@ export type {
   TurnkeyProviderPolicyProjection,
   TurnkeyProviderTimestamp,
   TurnkeySignedPolicyRecord,
+  TurnkeySignedPolicyCatalog,
 } from './turnkey-policy-record.js';
 export { importPrivateKeyToTurnkey, validateImportedTurnkeyKey } from './turnkey-import.js';
 export type { TurnkeyImportBinding, TurnkeyImportClient, TurnkeyPrivateKeyImport } from './turnkey-import.js';

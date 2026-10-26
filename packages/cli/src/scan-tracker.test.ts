@@ -68,8 +68,8 @@ describe('host facts (T-030)', () => {
     expect(await diskFacts(join(tmpdir(), 'mintbot-no-such-directory'))).toBeUndefined();
   });
 
-  it('gives a short hex commit, or "unknown" outside a repository, and never throws', async () => {
-    expect(await codeVersion(process.cwd())).toMatch(/^([0-9a-f]{7,40}|unknown)$/);
+  it('gives the installed/package semantic version, a short commit fallback, or unknown, and never throws', async () => {
+    expect(await codeVersion(process.cwd())).toMatch(/^(\d+\.\d+\.\d+|[0-9a-f]{7,40}|unknown)$/);
     expect(await codeVersion(join(tmpdir(), 'mintbot-no-such-directory'))).toBe('unknown');
   });
 });

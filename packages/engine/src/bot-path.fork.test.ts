@@ -183,10 +183,10 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
   // A fork keeps the base fee it inherited, which can sit above the engine's capped max fee; pin it low on the fork only.
   const lowBaseFee = async (): Promise<void> => { await rpc('anvil_setNextBlockBaseFeePerGas', ['0x2faf080']); await rpc('evm_mine'); };
 
-  async function run(signer: Signer, provider: SpendReservationProvider, store: EngineLifecycleStore, kill: string, runId: string, observer: FinalityObserver | undefined = chainId === 4663 || chainId === 8453 ? finality('ethereum_final') : undefined) {
+  async function run(signer: Signer, provider: SpendReservationProvider, store: EngineLifecycleStore, kill: string, runId: string, observer: FinalityObserver | undefined = chainId === 4663 || chainId === 8453 ? finality('ethereum_final') : undefined, fleet?: MintJobConfig['fleet']) {
     await lowBaseFee();
     const { MintEngine } = await import('./mint-engine.js');
-    return new MintEngine(config(kill), {
+    return new MintEngine({ ...config(kill), ...(fleet ? { fleet } : {}) }, {
       reservationProvider: provider, lifecycleStore: store, signerFactory: async () => signer, ...(observer ? { finalityObserver: observer } : {}), runId, intentId: `${runId}-intent`, requestId: runId,
       ...(rehearsalNow ? { now: () => rehearsalNow } : {}),
       identityForWallet: (wallet, id) => ({ executionId: `${id}:wallet:${wallet.index}`, transactionIntentId: `${id}:intent:${wallet.index}` }) as never,
@@ -213,6 +213,20 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     }
     expect(attempts.length).toBeGreaterThanOrEqual(2);
     expect(receipts.length).toBe(2);
+  }, 60_000);
+
+  it('the full MintEngine signs exactly a later approved key-list position', async () => {
+    const signer = new RehearsalSigner(accounts);
+    const { provider } = reservationProvider();
+    const { store } = lifecycleStore();
+    const result = await run(signer, provider, store, killFile('selection'), 'rehearsal-selection', undefined, {
+      walletFile: join(directory, 'unused'),
+      maxWallets: 1,
+      walletIndexes: [1],
+      expectedAddresses: [accounts[1]!.address],
+    });
+    expect(signer.signed).toEqual([1]);
+    expect(result.walletResults.map((wallet) => wallet.address.toLowerCase())).toEqual([accounts[1]!.address.toLowerCase()]);
   }, 60_000);
 
   it('stops further signing when the kill switch trips after the first reservation, and releases it', async () => {
