@@ -52,6 +52,8 @@ export interface TelegramActions extends GuidedActions {
   requestCreate(campaignId: string, wallets: string, maxFeeGwei: number, phrase: string): Promise<string>;
   requests(): Promise<string>;
   runs(): Promise<string>;
+  /** T-086: checks the chain now for runs waiting to settle and says where each stands. Reads the chain; sends nothing. */
+  reconcile(): Promise<string>;
   run(runId: string): Promise<string>;
   watchlist(): Promise<string>;
   track(address: string, label: string | undefined): Promise<string>;
@@ -130,6 +132,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   requests: { tier: 'read', roles: OWNER, usage: '/requests', help: 'Pending and recent requests' },
   runs: { tier: 'read', roles: OWNER, usage: '/runs', help: 'Recent runs' },
   run: { tier: 'read', roles: OWNER, usage: '/run', help: 'Result, spend and receipts of a run (pick it with a button)' },
+  reconcile: { tier: 'change', roles: OWNER, usage: '/reconcile', help: 'Check the chain now for runs that are waiting to settle (reads the chain, sends nothing)' },
   watchlist: { tier: 'read', roles: BOTH, usage: '/watchlist', help: 'Tracked whale wallets' },
   track: { tier: 'change', roles: OWNER, usage: '/track <address> [label]', help: 'Track a whale wallet' },
   untrack: { tier: 'change', roles: OWNER, usage: '/untrack <address>', help: 'Stop tracking a wallet' },
@@ -339,6 +342,7 @@ export class TelegramCommandRouter {
       case 'schedules': return reply(await a.schedules());
       case 'requests': return reply(await a.requests());
       case 'runs': return reply(await a.runs());
+      case 'reconcile': return reply(await a.reconcile());
       case 'run': return args.length === 0 ? this.startFlow(incoming, 'run') : reply(await a.run(args[0]!));
       case 'watchlist': return reply(await a.watchlist());
       case 'limits': return reply(await a.limits());

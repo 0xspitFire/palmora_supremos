@@ -5,8 +5,9 @@ import type { NotificationDispatcher } from './notifications.js';
 import type { AlertCard } from './alert-card.js';
 import { plainSystemText, type SystemCard } from './system-card.js';
 import { killEngagedCard, runProblemCard, spendCapCard } from './system-messages.js';
+import { mintSubmittedCard } from './live-run-messages.js';
 
-export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder';
+export type AlertKind = 'started' | 'kill' | 'cap' | 'blocked' | 'failed' | 'reminder' | 'sent';
 export type AlertPriority = 'immediate' | 'grouped';
 /** Phase 2 intelligence alerts (T-004, P2-06). Outbound only; never a permission or execution proof. */
 export type IntelligenceAlertKind = 'opportunity' | 'opening_soon' | 'eligible_ready' | 'underfunded' | 'price_above_limit' | 'status' | 'quantity_reduced' | 'health' | 'funding_request' | 'excess_balance' | 'fleet_watch';
@@ -25,9 +26,11 @@ export interface IntelligenceAlertInput {
   at?: string;
 }
 /** `occurrence` makes one occurrence its own alert: a live request stopped at arm has no run, so without it every later stop for the same reason would be taken for a repeat and never sent. */
-export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; occurrence?: string; }
+/** A mint transaction that was sent (T-086): the facts the "mint submitted" card needs. The hash is shown shortened and linked. */
+export interface SentMintFacts { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string }
+export interface AlertInput { kind: AlertKind; runId?: string; reason?: string; walletCount?: number; at?: string; occurrence?: string; sent?: SentMintFacts; }
 export interface AlertPolicy { retentionDays: number; immediateKinds: readonly AlertKind[]; groupedKinds: readonly AlertKind[]; }
-export const DEFAULT_ALERT_POLICY: AlertPolicy = { retentionDays: 30, immediateKinds: ['kill', 'cap', 'blocked', 'failed'], groupedKinds: ['started', 'reminder'] };
+export const DEFAULT_ALERT_POLICY: AlertPolicy = { retentionDays: 30, immediateKinds: ['kill', 'cap', 'blocked', 'failed', 'sent'], groupedKinds: ['started', 'reminder'] };
 export interface OperationalAlert { key: string; severity: 'warning' | 'critical'; reason: string; message: string; at: string; }
 
 export interface OperationalSnapshot {
@@ -64,6 +67,7 @@ function systemFor(input: AlertInput, at: string): SystemCard | undefined {
   try {
     if (input.kind === 'kill') return killEngagedCard({ ...(input.reason ? { reason: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
     if (input.kind === 'cap') return spendCapCard({ ...(input.reason ? { notice: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
+    if (input.kind === 'sent' && input.sent && input.runId) return mintSubmittedCard({ runId: input.runId, ...input.sent, at });
     if (input.kind === 'blocked' || input.kind === 'failed') return runProblemCard(input.kind, { ...(input.reason ? { reason: input.reason } : {}), ...(input.runId ? { runId: input.runId } : {}), at });
   } catch { /* presentation only: the alert still goes out as plain text */ }
   return undefined;
@@ -92,6 +96,8 @@ export class AlertManager {
   public async cap(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'cap', runId, reason }); }
   public async blocked(reason: string, runId?: string, occurrence?: string): Promise<void> { await this.emit({ kind: 'blocked', runId, reason, ...(occurrence ? { occurrence } : {}) }); }
   public async failed(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'failed', runId, reason }); }
+  /** T-086: a mint transaction was sent. One message per transaction (the hash is the occurrence), immediate, never a permission or proof. */
+  public async sent(runId: string, sent: SentMintFacts): Promise<void> { await this.emit({ kind: 'sent', runId, sent, occurrence: sent.hash }); }
 
   /** Records an intelligence alert once per dedupe identity; immediate ones are dispatched now, grouped ones join the next digest. */
   public async intelligence(input: IntelligenceAlertInput): Promise<boolean> {

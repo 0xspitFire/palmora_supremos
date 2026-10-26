@@ -5,9 +5,9 @@ import { durationText, reasonCode, reasonText } from './system-messages.js';
 /**
  * Message templates for live runs (T-030, D-045), written now for Phase 3.
  *
- * NOT WIRED: nothing in the coordinator, the engine or the live-run command calls these builders, and no message
- * from them is sent today. Wiring them is Phase 3 work and a separate, reviewed change. They only turn facts that a
- * caller passes in into a card; they never read the store, a key or a node, and they decide nothing.
+ * WIRED ONLY FOR "MINT SUBMITTED" (T-086): the alert manager sends `mintSubmittedCard` when a live request finishes with a recorded
+ * transaction. The other builders are still not called. They only turn facts that a caller passes in into a card; they never
+ * read the store, a key or a node, and they decide nothing.
  *
  * A transaction hash is shown shortened in the text (the redaction filter treats a full 64-digit hash as a secret)
  * and the full hash is reachable only through the explorer button, which is built from the validated hash.

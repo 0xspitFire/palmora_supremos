@@ -56,7 +56,7 @@ describe('live-run message templates (T-030, Phase 3, not wired)', () => {
     expect(bad).toContain('At least one mint is unsettled.');
   });
 
-  it('is not wired: no production file outside the barrel imports the templates', () => {
+  it('is wired only for the "mint submitted" message (T-086): only the barrel and the alert manager import the templates', () => {
     const importers: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -66,6 +66,6 @@ describe('live-run message templates (T-030, Phase 3, not wired)', () => {
       }
     };
     walk(join(__dirname, '..', '..'));
-    expect(importers.sort()).toEqual(['index.ts']);
+    expect(importers.sort()).toEqual(['alerts.ts', 'index.ts']);
   });
 });

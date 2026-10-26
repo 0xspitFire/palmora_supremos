@@ -130,7 +130,9 @@ export interface LiveRequestProcessorDeps {
   command(name: 'arm' | 'run', input: Record<string, unknown>): Promise<{ id: string; state?: string }>;
   /** The fee ceiling the engine signs with for this campaign's run. */
   setFeeCeiling(campaignId: string, gwei: number | undefined): void;
-  record(event: { requestId: string; runId?: string; state: 'finished' | 'stopped' | 'expired'; code?: string; runClosed?: 'closed' | 'left' | 'absent' }): Promise<void>;
+  record(event: { requestId: string; runId?: string; campaignId?: string; state: 'finished' | 'stopped' | 'expired'; code?: string; runClosed?: 'closed' | 'left' | 'absent'; sent?: Array<{ hash: string; wallet: string }> }): Promise<void>;
+  /** T-086: the transactions the store shows as sent for a run (a hash was recorded), so a run is only reported as sent when one really exists. */
+  sentTransactions?(runId: string): Array<{ hash: string; wallet: string }>;
   /** D-074: closes the run this request armed when the request failed, if the store proves nothing of it was sent. Best effort: a failure here never changes the outcome. */
   closeRun?(runId: string): Promise<'closed' | 'left' | 'absent'>;
   /** Host journal only (never Telegram or the stored result): what an uncoded failure looked like, cleaned by `describeFailure`. */
@@ -157,6 +159,15 @@ export function describeFailure(error: unknown): FailureDetail {
       .map((match) => `${(match[1] ?? '<anonymous>').replace(/[^A-Za-z0-9_.<>$ ]/g, '').slice(0, 60)} (${match[2]})`);
     return { name, message, frames };
   } catch { return { name: 'Unknown', message: '', frames: [] }; }
+}
+
+/**
+ * What the owner is told when a live request ends (T-086): a stopped request is a "blocked" alert, a finished one with a recorded
+ * transaction is a "mint sent" message, and anything else (a finished request with nothing sent to report) says nothing more.
+ */
+export function liveRequestFollowUp(event: { state: 'finished' | 'stopped' | 'expired'; sent?: ReadonlyArray<unknown> }): 'blocked' | 'sent' | 'none' {
+  if (event.state !== 'finished') return 'blocked';
+  return event.sent && event.sent.length > 0 ? 'sent' : 'none';
 }
 
 /** Only fixed upper-case codes are kept; provider or library text never is. */
@@ -196,6 +207,7 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
     handled += 1;
     let runId: string | undefined;
     let result: { state: 'finished' | 'stopped'; code?: string };
+    let sent: Array<{ hash: string; wallet: string }> = [];
     try {
       const campaign = deps.campaign(request.campaignId);
       if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
@@ -209,7 +221,9 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
       try { ran = await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` }); } finally { deps.setFeeCeiling(request.campaignId, undefined); }
       // A completed run is finished. A run still Active was sent and is waiting for the chain to settle it (Robinhood: until Ethereum finality):
       // the request did its job, so it is finished with the code RUN_ACTIVE, never reported as blocked. Any other end is stopped under its state name.
-      result = ran.state === 'Completed' ? { state: 'finished' } : ran.state === 'Active' ? { state: 'finished', code: 'RUN_ACTIVE' } : { state: 'stopped', code: `RUN_${safeCode(new Error(String(ran.state ?? 'UNKNOWN').toUpperCase()))}` };
+      sent = runId ? (deps.sentTransactions?.(runId) ?? []) : [];
+      // An Active run counts as sent only when the store shows a recorded transaction hash for it; without one it is stopped (and offered for closing), never silently "settling".
+      result = ran.state === 'Completed' ? { state: 'finished' } : ran.state === 'Active' && sent.length > 0 ? { state: 'finished', code: 'RUN_ACTIVE' } : ran.state === 'Active' ? { state: 'stopped', code: 'RUN_ACTIVE_NO_SENT_TRANSACTION' } : { state: 'stopped', code: `RUN_${safeCode(new Error(String(ran.state ?? 'UNKNOWN').toUpperCase()))}` };
     } catch (error) {
       result = { state: 'stopped', code: safeCode(error) };
       // Only an uncoded failure is described for the journal; a coded one already says everything.
@@ -218,7 +232,7 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
     // D-074: a request that failed after its run was armed must not leave the run open (it would block the service and, if admitted, hold reserved money).
     let closed: 'closed' | 'left' | 'absent' | undefined;
     if (result.state === 'stopped' && runId && deps.closeRun) { try { closed = await deps.closeRun(runId); } catch { closed = undefined; } }
-    await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), ...result, ...(closed ? { runClosed: closed } : {}) });
+    await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), ...result, ...(closed ? { runClosed: closed } : {}), ...(sent.length > 0 ? { sent, campaignId: request.campaignId } : {}) });
   }
   return handled;
 }

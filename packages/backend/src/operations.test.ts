@@ -116,6 +116,24 @@ describe('phase 2 operations', () => {
     expect(delivered).toHaveLength(2);
   });
 
+  it('a sent mint is told at once as a "mint submitted" card with its explorer link, once per transaction (T-086)', async () => {
+    const store = new DurableStore();
+    await store.open();
+    const delivered: string[] = [];
+    const dispatcher = new NotificationDispatcher(store, { send: async ({ text }) => { delivered.push(text); } });
+    const alerts = new AlertManager(store, dispatcher, undefined, { now: () => new Date('2026-01-01T00:00:00.000Z') });
+    const first = { chainId: 4663, collection: '0x21d0…3383', wallet: '0x365952eb1e8209bf2bcc2db5ed213111a87d061e', quantity: 1, hash: `0x${'a'.repeat(64)}` };
+    await alerts.sent('run_1', first);
+    await alerts.sent('run_1', first);
+    await alerts.sent('run_1', { ...first, hash: `0x${'b'.repeat(64)}` });
+    const events = store.snapshot().events.filter((event) => event.type === 'alert_sent');
+    expect(events).toHaveLength(2);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toContain('MINT SUBMITTED');
+    expect(delivered[0]).not.toContain('a'.repeat(64));
+    expect(JSON.stringify(events[0]!.data['system'])).toContain('txLinks');
+  });
+
   it('a stopped live request is told every time, even for the same reason, while a repeat of the same occurrence is still ignored', async () => {
     const store = new DurableStore();
     await store.open();

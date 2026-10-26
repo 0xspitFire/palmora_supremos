@@ -15,6 +15,7 @@ import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, reco
 import { previewLiveRequest, runLiveRequest, sizedWalletCount } from './live-request.js';
 import { ROBINHOOD_DEFAULT_TIP_GWEI, buildRobinhoodPlan, type RobinhoodPlan, recordRobinhoodSimulationsAction, robinhoodConfirmationPhrase, robinhoodPrepareAction } from './robinhood-live.js';
 import { describeLiveRunResult } from './live-run.js';
+import { unresolvedRunIds } from '@mint-bot/backend';
 import { planCampaignFunding, renderFundingPlan } from './fleet-funding-cli.js';
 import { runRobinhoodEnable, type EnableStore } from './robinhood-enable.js';
 import { runBaseEnable, type BaseEnableStore } from './base-enable.js';
@@ -57,6 +58,8 @@ export interface TelegramActionDeps {
   /** The service's own application (not the read-only one), for health, approval and campaign records. */
   application: BackendApplication;
   coordinator: Pick<ExecutionCoordinator, 'kill'>;
+  /** T-086: one reconcile pass (the same one the service runs every 30 seconds). Absent in practice mode. */
+  reconcileNow?: () => Promise<void>;
   projectRoot: string;
   secretRoot: string;
   killSwitchPath: string;
@@ -95,6 +98,8 @@ export interface TelegramActionDeps {
 }
 
 export function createTelegramActions(deps: TelegramActionDeps): TelegramActions {
+  let reconcileRunning = false;
+  let lastReconcileAt = 0;
   const now = deps.now ?? (() => new Date());
   const bridge = deps.store as CanonicalStoreBridge;
   const endpoints = async (chainId: ChainId): Promise<string[]> => [...(await resolveChainConfigFromSecrets(chainId, 'mainnet', deps.secretRoot)).rpcEndpoints];
@@ -389,6 +394,30 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       return ['Recent runs (newest first):', ...runs.map((run) => `• ${run.id} — ${run.mode}, ${run.state}, ${minutes(run.createdAt)} UTC`), '', 'To look at one, send /run and tap it.'].join('\n');
     },
     async run(runId) { return describeLiveRunResult(deps.store.snapshot(), runId).summary; },
+    async reconcile() {
+      if (!deps.reconcileNow) return 'Checking the chain is not available here (practice mode).';
+      // One check at a time, and not more often than every 15 seconds: it asks the chain provider about every waiting run.
+      const nowMs = now().getTime();
+      if (reconcileRunning) return 'A check is already running. Send /reconcile again in a few seconds.';
+      if (nowMs - lastReconcileAt < 15_000) return 'Checked a moment ago. Send /reconcile again in a few seconds.';
+      reconcileRunning = true;
+      let failure: string | undefined;
+      try { await deps.reconcileNow(); lastReconcileAt = now().getTime(); } catch (error) { failure = error instanceof Error && /^[A-Z][A-Z0-9_]{2,80}(?::[A-Z0-9_]{1,80})*$/.test(error.message) ? error.message : 'RECONCILE_FAILED'; } finally { reconcileRunning = false; }
+      const state = deps.store.snapshot();
+      const waiting = unresolvedRunIds(state);
+      const stage = (result: string | undefined): string => result === 'soft' ? 'mined, not yet posted to Ethereum' : result === 'posted' ? 'posted to Ethereum, waiting for it to be final' : result === 'final' || result === 'confirmed' ? 'final' : result === 'failed' ? 'failed on the chain' : result === 'reorged' ? 'the chain changed; being re-checked' : result === 'unknown' ? 'not yet proven by the chain' : 'not checked yet';
+      const lines = waiting.map((runId) => {
+        const last = state.reconciliations.filter((item) => item.runId === runId).at(-1);
+        const reason = last?.result === 'unknown' && last.reason ? ` (${last.reason})` : '';
+        return [`• ${runId} — ${stage(last?.result)}${reason}${last ? `, checked ${minutes(last.observedAt)} UTC` : ''}`, `  ${describeLiveRunResult(state, runId).summary}`].join('\n');
+      });
+      return [
+        failure ? `The check could not finish (${failure}); nothing was changed. This is what was last known:` : 'Checked the chain just now (nothing was sent or changed except what the chain proved).',
+        '',
+        ...(lines.length === 0 ? ['Nothing is waiting to settle.'] : lines),
+        ...(lines.length > 0 ? ['', 'A mint on Robinhood is final only after Ethereum finalises it, which can take some time. The bot settles it by itself; this just shows where it stands.'] : []),
+      ].join('\n');
+    },
     async watchlist() {
       const rows = deps.intelligence().observedAddresses(1);
       return rows.length === 0 ? 'No wallets are tracked. Add one with /track <address> [label].' : ['Tracked wallets (Ethereum):', ...rows.map((row) => `• ${row.address}${row.label ? ` — ${row.label}` : ''}`)].join('\n');
