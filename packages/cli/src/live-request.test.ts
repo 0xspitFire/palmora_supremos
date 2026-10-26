@@ -290,6 +290,11 @@ describe('a failed request closes the run it armed, if the store proves nothing 
     expect(record?.runClosed).toBeUndefined();
   });
 
+  it('a run that stays Active (a send that is still settling) is offered for closing, and the store leaves it because attempts exist', async () => {
+    const record = await go(async (name) => (name === 'arm' ? { id: 'run_5' } : { id: 'run_5', state: 'Active' }), async () => 'left');
+    expect(record).toMatchObject({ state: 'stopped', runClosed: 'left' });
+  });
+
   it('a run that ended any other way than completed is a stopped request and is offered for closing too', async () => {
     const closed: string[] = [];
     const record = await go(async (name) => (name === 'arm' ? { id: 'run_4' } : { id: 'run_4', state: 'Failed' }), async (runId) => { closed.push(runId); return 'left'; });

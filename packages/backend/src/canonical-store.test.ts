@@ -324,6 +324,29 @@ describe('CanonicalStoreBridge', () => {
       } finally { await close(value); }
     });
 
+    it('ExecutionCoordinator.closeUnsentRun closes through the store, records the event, and reports absent without a canonical store', async () => {
+      const value = await fixture(ETHEREUM);
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM));
+        const coordinator = new ExecutionCoordinator(value.store, noopEngine);
+        expect(await coordinator.closeUnsentRun(prepared.run.id, 'REQUEST_FAILED')).toBe('closed');
+        expect(value.store.snapshot().events.some((event) => event.type === 'run_closed_unsent' && event.runId === prepared.run.id)).toBe(true);
+        expect(await coordinator.closeUnsentRun(prepared.run.id, 'REQUEST_FAILED')).toBe('absent');
+      } finally { await close(value); }
+    });
+
+    it('also counts an attempt that is tied to the execution only through its intent (fail closed)', async () => {
+      const value = await fixture(ETHEREUM);
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM));
+        const admitted = await value.store.admitExecution(prepared.input);
+        const row = value.db.prepare('SELECT transaction_intent_id AS intent, wallet_id AS wallet FROM execution WHERE id = ?').get(admitted.executions[0]!.executionId) as { intent: string; wallet: string };
+        const chain = value.db.prepare('SELECT chain_profile_id AS id FROM wallet WHERE id = ?').get(row.wallet) as { id: string };
+        value.db.prepare("INSERT INTO transaction_attempt (id, transaction_intent_id, endpoint, response_class, attempted_at, chain_profile_id) VALUES ('orphan-attempt', ?, 'test', 'unknown', ?, ?)").run(row.intent, NOW, chain.id);
+        expect(await value.store.abortRunIfUnsent(prepared.run.id, 'REQUEST_FAILED')).toBe('left');
+      } finally { await close(value); }
+    });
+
     it('leaves a run alone when an execution is past prepared (signed or submitted)', async () => {
       const value = await fixture(ETHEREUM);
       try {

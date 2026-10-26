@@ -828,7 +828,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     try {
       const run = this.db.prepare('SELECT state FROM execution_run WHERE id = ?').get(runId) as { state: string } | undefined;
       if (!run || !['prepared', 'active', 'recovering'].includes(run.state)) { this.db.exec('COMMIT'); return 'absent'; }
-      const rows = this.db.prepare('SELECT e.id, e.state, EXISTS (SELECT 1 FROM transaction_attempt a WHERE a.execution_id = e.id) AS attempted FROM execution e WHERE e.run_id = ?').all(runId) as Array<{ id: string; state: string; attempted: number }>;
+      const rows = this.db.prepare('SELECT e.id, e.state, EXISTS (SELECT 1 FROM transaction_attempt a WHERE a.execution_id = e.id OR a.transaction_intent_id = e.transaction_intent_id) AS attempted FROM execution e WHERE e.run_id = ?').all(runId) as Array<{ id: string; state: string; attempted: number }>;
       if (rows.some((row) => row.attempted === 1 || !['prepared', 'aborted'].includes(row.state))) { this.db.exec('COMMIT'); return 'left'; }
       for (const row of rows) {
         if (row.state !== 'aborted') this.transitionExecution(row.id, 'aborted', 'request failed', reason);
