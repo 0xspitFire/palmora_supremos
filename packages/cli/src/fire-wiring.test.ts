@@ -12,10 +12,11 @@ const CONTRACT = '0xa686fde3299d5451af22382240e0dff62f7b94db';
 const A = '0x365952eb1e8209bf2bcc2db5ed213111a87d061e';
 const B = '0x81c104dcb898416fd4f81ead091dba5b8f46f37a';
 // The test mints are stamped by the real clock, so the test clock starts at the real time (whole minutes).
+const SHORT = 151_000_000_000_000n; // 0.000151 ETH, like the real wallet
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string } = {}) {
+async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -46,12 +47,12 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
   const fire = createFireWiring({
     mode: 'host', store: store as never, approve: async (validated) => { approvals.push(validated); return { id: 'approval_1' }; }, killSwitchPath,
     readTimeoutMs: options.readTimeoutMs, fireSchedules: () => schedules, startedRequests: () => (options.started ?? []).map((item) => ({ ...item, claimedAt: options.claimedAt ?? NOW.toISOString() })), unclaimedRequests: () => requests.map((request) => ({ campaignId: String(request.campaignId), expiresAt: String(request.expiresAt) })),
-    walletList: async () => [A, B], evmPort: async () => { throw new Error('not used'); }, evmLatestBlock: async () => { throw new Error('not used'); },
+    walletList: async () => options.walletsInList ?? [A, B], evmPort: async () => { throw new Error('not used'); }, evmLatestBlock: async () => { throw new Error('not used'); },
     robinhoodDryRun, robinhoodLatestBlock: async () => options.slowRead ? new Promise<{ number: bigint; hash: string }>(() => undefined) : ({ number: 99n, hash: '0xabc' }), balanceOf: async (_chain, address) => options.balances?.[address.toLowerCase()] ?? 400_000_000_000_000n, kick: () => { kicks.push('kick'); }, now: () => NOW,
   });
   const base: TelegramActionDeps = {
     mode: 'host', custody: 'turnkey', store: store as never, application: { command: async () => ({ id: 'approval_1' }) } as never, coordinator: { kill: async () => undefined }, projectRoot: '/nonexistent', secretRoot: '/nonexistent', killSwitchPath,
-    backupStatusPath: '/nonexistent/status.json', startedAt: NOW, walletList: async () => [A, B], watchedWallets: () => [], watcherHealthy: () => undefined, intelligence: () => ({}) as never, gasAlerts: () => ({}) as never,
+    backupStatusPath: '/nonexistent/status.json', startedAt: NOW, walletList: async () => options.walletsInList ?? [A, B], watchedWallets: () => [], watcherHealthy: () => undefined, intelligence: () => ({}) as never, gasAlerts: () => ({}) as never,
     fire, fireSchedulesRepository: () => schedules, now: () => NOW, robinhoodDryRun, robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }),
   };
   return { actions: createTelegramActions(base), fire, schedules, simulations, requests, approvals, kicks, directory, practice: createTelegramActions({ ...base, mode: 'dry-run' }) };
@@ -158,6 +159,47 @@ describe('/fire', () => {
     } finally { await cleanup(t.directory); }
   });
 
+  it('the preview shows exactly what the fire will send: list order, a waiting later wallet named, an unready first wallet stopping it, nothing funded giving the plain funding reason', async () => {
+    const laterShort = await setup({ balances: { [B]: SHORT } });
+    const firstShort = await setup({ balances: { [A]: SHORT } });
+    const none = await setup({ balances: { [A]: SHORT, [B]: SHORT } });
+    try {
+      const preview = await laterShort.actions.firePreview('campaign_abcdef12', 'all', 0.2);
+      expect(preview.wallets).toEqual([A]);
+      await expect(firstShort.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('WALLET_ORDER_NOT_READY');
+      await expect(none.actions.firePreview('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('FUNDING_NOT_ARRIVED');
+      await expect(none.actions.fireNow('campaign_abcdef12', 'all', 0.2)).rejects.toThrow('FUNDING_NOT_ARRIVED');
+    } finally { await cleanup(laterShort.directory); await cleanup(firstShort.directory); await cleanup(none.directory); }
+  });
+
+  it('a later ready wallet waits behind an unready earlier one and is named (three wallets in list order)', async () => {
+    const t = await setup({ balances: { [B]: SHORT }, walletsInList: [A, B, '0x' + 'c'.repeat(40)] });
+    try {
+      const text = await t.actions.fireNow('campaign_abcdef12', 'all', 0.2);
+      expect(t.requests).toEqual([expect.objectContaining({ wallets: [A] })]);
+      expect(text).toContain('an earlier wallet is not ready');
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('a schedule for wallets that are not the first N of the list is refused when it is made, not when the window opens', async () => {
+    const t = await setup();
+    try {
+      await expect(t.actions.schedulePreview('campaign_abcdef12', B, 0.2, ...WINDOW)).rejects.toThrow('WALLET_ORDER_NOT_READY');
+      await expect(t.actions.scheduleCreate('campaign_abcdef12', B, 0.2, ...WINDOW, 'x')).rejects.toThrow('WALLET_ORDER_NOT_READY');
+      await expect(t.actions.schedulePreview('campaign_abcdef12', 'all', 0.2, ...WINDOW)).resolves.toBeDefined();
+    } finally { await cleanup(t.directory); }
+  });
+
+  it('the guided request offers the ready wallets from the start of the list, in list order', async () => {
+    const t = await setup({ balances: { [B]: SHORT } });
+    try {
+      await t.actions.simulateCampaign('campaign_abcdef12');
+      const found = await t.actions.requestWallets('campaign_abcdef12');
+      expect(found.wallets).toEqual([A]);
+      expect(found.note).toContain('left out');
+    } finally { await cleanup(t.directory); }
+  });
+
   it('refuses before the mint opens or after it ended (suggesting /schedule), with the kill switch on, in practice mode, and for a second fire', async () => {
     const early = await setup({ status: 'upcoming' });
     const ended = await setup({ status: 'ended' });
@@ -255,7 +297,6 @@ describe('a campaign sized for fewer wallets than pass (the screenshot bug)', ()
 
 describe('a run needs each wallet to hold its full worst case (the second live attempt)', () => {
   // The campaign's worst case per wallet is its fee budget, 0.0002 ETH.
-  const SHORT = 151_000_000_000_000n; // 0.000151 ETH, like the real wallet
   it('/fire leaves out a later wallet that holds less than a run needs, names the exact top-up, and fires the first; an unready first wallet stops it by name', async () => {
     const t = await setup({ balances: { [B]: SHORT } });
     const first = await setup({ balances: { [A]: SHORT } });
@@ -292,7 +333,8 @@ describe('a run needs each wallet to hold its full worst case (the second live a
       const simulated = await t.actions.simulateCampaign('campaign_abcdef12');
       expect(simulated.text).toContain('needs funding');
       expect(simulated.text).toContain('send 0.000049 ETH more');
-      expect(await t.actions.requestWallets('campaign_abcdef12')).toMatchObject({ wallets: [B], note: expect.stringContaining('left out') });
+      expect(await t.actions.requestWallets('campaign_abcdef12')).toMatchObject({ wallets: [], note: expect.stringContaining('left out') });
+      // (B is funded but waits: the first wallet is the short one and wallets are used in list order.)
       const split = await t.fire.fundingSplit({ chainId: 4663, quantity: 1, mintPriceWei: 0n, feePolicy: { kind: 'free', configuredPriorityFeeWei: 0n, totalFeeBudgetWei: 200_000_000_000_000n } } as never, [A]);
       expect(split.short[0]!.why).toContain('send 0.000049 ETH more');
     } finally { await cleanup(t.directory); }
