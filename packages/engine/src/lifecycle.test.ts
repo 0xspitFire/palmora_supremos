@@ -3,6 +3,7 @@ import type { Address, Hash } from 'viem';
 import {
   assertDirectChainExecutionPolicy,
   authorizedBaseExecutionProfile,
+  authorizedRobinhoodExecutionProfile,
   assertDurableReservationProvider,
   assertSimulationFresh,
   assertTimingWindow,
@@ -130,6 +131,25 @@ describe('Gate 3 lifecycle boundaries', () => {
     expect(mapChainStatus({ chainId: 4663, receiptVisible: true, receiptStatus: 'success', finalityStage: 'posted' })).toBe('posted');
   });
 
+  it('derives an executable Robinhood profile only from a current owner grant (D-075), and still fails closed without one', () => {
+    const profile: ChainConfig = { chainId: 4663, name: 'Robinhood', blockTimeMs: 250, confirmationDepth: 1, rpcEndpoints: [], isL2: true, verificationStatus: 'unverified', executionEnabled: false } as unknown as ChainConfig;
+    const now = new Date('2026-10-20T00:00:00.000Z');
+    const grant = { expiresAt: '2026-10-21T00:00:00.000Z', paidAllowed: false };
+    // A current grant for a free mint opens the profile; the original is not changed.
+    expect(authorizedRobinhoodExecutionProfile(profile, false, grant, now, 0n)).toMatchObject({ verificationStatus: 'verified', executionEnabled: true });
+    expect(profile.executionEnabled).toBe(false);
+    // No grant, an expired grant and a malformed grant all fail closed for a live run.
+    expect(() => authorizedRobinhoodExecutionProfile(profile, false, undefined, now)).toThrow('All Robinhood 4663 live execution is disabled');
+    expect(() => authorizedRobinhoodExecutionProfile(profile, false, { expiresAt: now.toISOString(), paidAllowed: false }, now)).toThrow('All Robinhood 4663 live execution is disabled');
+    expect(() => authorizedRobinhoodExecutionProfile(profile, false, { expiresAt: 'soon' } as never, now)).toThrow('All Robinhood 4663 live execution is disabled');
+    // A paid mint is still blocked by the policy unless the grant allows paid.
+    expect(() => authorizedRobinhoodExecutionProfile(profile, false, grant, now, 1n)).toThrow('Paid Robinhood execution is hard-blocked');
+    // A dry run never broadcasts, so its profile is unchanged.
+    expect(authorizedRobinhoodExecutionProfile(profile, true, undefined, now)).toBe(profile);
+    // Only chain 4663.
+    expect(() => authorizedRobinhoodExecutionProfile({ ...profile, chainId: 1 } as ChainConfig, false, grant, now)).toThrow('requires chain 4663');
+  });
+
   it('derives an executable Base profile only from dry-run policy or a current owner grant', () => {
     const profile: ChainConfig = { chainId: 8453, name: 'Base', blockTimeMs: 2_000, confirmationDepth: 1, rpcEndpoints: [], isL2: true, verificationStatus: 'unverified', finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final', notes: 'test' }, executionEnabled: false };
     const now = new Date('2026-10-20T00:00:00.000Z');
@@ -198,13 +218,13 @@ describe('Robinhood enablement grant (D-040, Key 2): refused unless a current ow
 });
 
 describe('the engine hands its Robinhood grant to the policy at every check', () => {
-  it('passes safety.robinhoodGrant at all five call sites (four run-level checks and one per wallet before preparing and signing) and reads no environment variable for it', async () => {
+  it('passes safety.robinhoodGrant at all five policy call sites (four run-level checks and one per wallet before preparing and signing) and to the broadcast profile (D-075), and reads no environment variable for it', async () => {
     const { readFile } = await import('node:fs/promises');
     const source = await readFile(new URL('./mint-engine.ts', import.meta.url), 'utf8');
     const calls = source.match(/assertDirectChainExecutionPolicy\(/g)?.length ?? 0;
     const granted = source.match(/this\.config\.safety\.robinhoodGrant/g)?.length ?? 0;
     expect(calls).toBe(5);
-    expect(granted).toBe(6);
+    expect(granted).toBe(7);
     expect(source).not.toMatch(/process\.env[^\n]*(ROBINHOOD|GRANT)/i);
   });
 });
