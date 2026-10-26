@@ -251,6 +251,23 @@ describe('backend Phase 1 blockers', () => {
     expect(reads).toBe(1);
   });
 
+  it('two reconcile calls at the same time share ONE pass, so receipts are never read or accounted twice (T-086)', async () => {
+    const store = new ReadyStore(); const input = await readyLiveInput(store);
+    let reads = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const coordinator = new ExecutionCoordinator(store, engine({ reconcile: async () => { reads += 1; await gate; return unknownUpdate; } }));
+    await coordinator.arm(input, 'live');
+    const first = coordinator.reconcile();
+    const second = coordinator.reconcile();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release!();
+    await Promise.all([first, second]);
+    expect(reads).toBe(1);
+    await coordinator.reconcile();
+    expect(reads).toBe(2);
+  });
+
   it('does not execute Robinhood even when synthetic finality facts are supplied', async () => {
     const store = new ReadyStore(); const input = await readyLiveInput(store);
     const adapter = engine({

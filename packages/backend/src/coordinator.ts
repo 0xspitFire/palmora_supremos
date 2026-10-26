@@ -281,7 +281,20 @@ export class ExecutionCoordinator {
     return outcome;
   }
 
+  private reconcilePass?: Promise<void>;
+
+  /**
+   * One reconcile pass at a time, shared by every caller (the service timer and the owner's `/reconcile`): a call that arrives while a
+   * pass is running waits for that pass instead of starting a second one, so the same receipts are never written or accounted twice.
+   */
   async reconcile(): Promise<void> {
+    if (this.reconcilePass) return this.reconcilePass;
+    const pass = this.reconcileOnce().finally(() => { if (this.reconcilePass === pass) this.reconcilePass = undefined; });
+    this.reconcilePass = pass;
+    return pass;
+  }
+
+  private async reconcileOnce(): Promise<void> {
     const snapshot = this.store.snapshot();
     // D-072: a completed run whose latest reconciliation is already final cannot change any more, so it is not read again every pass.
     const settledFinal = (runId: string): boolean => snapshot.reconciliations.filter(item => item.runId === runId).at(-1)?.result === 'final';

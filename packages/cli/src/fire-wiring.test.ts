@@ -16,7 +16,7 @@ const SHORT = 151_000_000_000_000n; // 0.000151 ETH, like the real wallet
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; walletsUsed?: string[]; reconciliations?: Array<{ runId: string; result: string; reason?: string; observedAt: string }>; reconcileNow?: () => Promise<void>; plainReconcile?: boolean; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string } = {}) {
+async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; walletsUsed?: string[]; reconciliations?: Array<{ runId: string; result: string; reason?: string; observedAt: string }>; reconcileNow?: () => Promise<void>; reconcileTimeoutMs?: number; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -53,7 +53,7 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
   const base: TelegramActionDeps = {
     mode: 'host', custody: 'turnkey', store: store as never, application: { command: async () => ({ id: 'approval_1' }) } as never, coordinator: { kill: async () => undefined }, projectRoot: '/nonexistent', secretRoot: '/nonexistent', killSwitchPath,
     backupStatusPath: '/nonexistent/status.json', startedAt: NOW, walletList: async () => options.walletsInList ?? [A, B], watchedWallets: () => [], watcherHealthy: () => undefined, intelligence: () => ({}) as never, gasAlerts: () => ({}) as never,
-    fire, ...(options.reconcileNow ? { reconcileNow: options.reconcileNow } : {}), fireSchedulesRepository: () => schedules, now: () => NOW, robinhoodDryRun, robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }),
+    fire, ...(options.reconcileNow ? { reconcileNow: options.reconcileNow } : {}), ...(options.reconcileTimeoutMs ? { reconcileTimeoutMs: options.reconcileTimeoutMs } : {}), fireSchedulesRepository: () => schedules, now: () => NOW, robinhoodDryRun, robinhoodLatestBlock: async () => ({ number: 99n, hash: '0xabc' }),
   };
   return { actions: createTelegramActions(base), fire, schedules, simulations, requests, approvals, kicks, directory, practice: createTelegramActions({ ...base, mode: 'dry-run' }) };
 }
@@ -227,7 +227,7 @@ describe('/fire', () => {
       expect(text).toContain('run_wait1');
       expect(text).toContain('not yet proven by the chain');
       expect(text).toContain('could not be proven');
-      expect(text).toContain('Robinhood is final only after Ethereum finalises it');
+      expect(text).toContain('a mint is final only after Ethereum finalises it');
       // A second call right away is not sent to the chain again.
       expect(await t.actions.reconcile()).toContain('Checked a moment ago');
       expect(calls).toBe(1);
@@ -238,6 +238,24 @@ describe('/fire', () => {
       expect(failed).not.toContain('rpc.example');
       expect(await practice.actions.reconcile()).toContain('not available here');
     } finally { await cleanup(t.directory); await cleanup(quiet.directory); await cleanup(broken.directory); await cleanup(practice.directory); }
+  });
+
+  it('/reconcile also works with the kill switch on, is limited even when the check fails, and gives up on a hung provider with a fixed code (T-086)', async () => {
+    let calls = 0;
+    const killed = await setup({ kill: true, reconcileNow: async () => { calls += 1; } });
+    const failing = await setup({ reconcileNow: async () => { calls += 1; throw new Error('PROVIDER SAID SOMETHING IN CAPITALS'); } });
+    const hung = await setup({ reconcileNow: () => new Promise<void>(() => undefined), reconcileTimeoutMs: 30 });
+    try {
+      expect(await killed.actions.reconcile()).toContain('Checked the chain just now');
+      expect(calls).toBe(1);
+      const failedText = await failing.actions.reconcile();
+      expect(failedText).toContain('RECONCILE_FAILED');
+      expect(failedText).not.toContain('CAPITALS');
+      expect(await failing.actions.reconcile()).toContain('Checked a moment ago');
+      expect(calls).toBe(2);
+      const hungText = await hung.actions.reconcile();
+      expect(hungText).toContain('RECONCILE_TIMED_OUT');
+    } finally { await cleanup(killed.directory); await cleanup(failing.directory); await cleanup(hung.directory); }
   });
 
   it('refuses before the mint opens or after it ended (suggesting /schedule), with the kill switch on, in practice mode, and for a second fire', async () => {

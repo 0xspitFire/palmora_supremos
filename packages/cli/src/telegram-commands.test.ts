@@ -121,7 +121,7 @@ describe('viewers (D-063 item 8)', () => {
     await admitViewer(t);
     const allowed = Object.entries(COMMANDS).filter(([, spec]) => spec.roles.includes('viewer')).map(([name]) => name).sort();
     expect(allowed).toEqual(['calendar', 'check', 'drops', 'gas', 'help', 'menu', 'start', 'status', 'watchlist']);
-    for (const name of ['wallets', 'funding', 'runs', 'run', 'requests', 'request', 'plan', 'health', 'kill', 'unlock', 'release', 'invite', 'users', 'broadcast', 'track', 'prepare', 'cancel', 'revoke', 'limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts', 'gasalert']) {
+    for (const name of ['reconcile', 'wallets', 'funding', 'runs', 'run', 'requests', 'request', 'plan', 'health', 'kill', 'unlock', 'release', 'invite', 'users', 'broadcast', 'track', 'prepare', 'cancel', 'revoke', 'limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts', 'gasalert']) {
       t.calls.length = 0;
       await t.send(t.message(VIEWER, `/${name} x y z`));
       expect(t.calls, name).toEqual([]);

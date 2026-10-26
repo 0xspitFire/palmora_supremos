@@ -56,10 +56,10 @@ export function mintSubmittedCard(facts: RunFacts & { hash: string; priceWei?: s
     title: 'MINT SUBMITTED',
     severity: 'info',
     lines: [
-      { label: 'What happened', value: 'a mint transaction was sent to the network.', strong: true },
+      { label: 'What happened', value: 'a mint transaction was submitted to the network.', strong: true },
       ...runLines(facts),
       { label: 'Transaction', value: shortHash(facts.hash) },
-      { label: 'What it means', value: 'it is not final yet. You will get a message when it is confirmed or fails.' },
+      { label: 'What it means', value: 'it is not final yet. Follow it with /run, or ask the bot to check the chain now with /reconcile.' },
     ],
     steps: [],
     txLinks: [{ text: 'Transaction', chainId: facts.chainId, hash: facts.hash }],

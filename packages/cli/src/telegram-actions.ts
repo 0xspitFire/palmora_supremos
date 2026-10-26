@@ -60,6 +60,8 @@ export interface TelegramActionDeps {
   coordinator: Pick<ExecutionCoordinator, 'kill'>;
   /** T-086: one reconcile pass (the same one the service runs every 30 seconds). Absent in practice mode. */
   reconcileNow?: () => Promise<void>;
+  /** How long `/reconcile` waits for the pass (default 60 seconds; tests shorten it). */
+  reconcileTimeoutMs?: number;
   projectRoot: string;
   secretRoot: string;
   killSwitchPath: string;
@@ -396,26 +398,31 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async run(runId) { return describeLiveRunResult(deps.store.snapshot(), runId).summary; },
     async reconcile() {
       if (!deps.reconcileNow) return 'Checking the chain is not available here (practice mode).';
-      // One check at a time, and not more often than every 15 seconds: it asks the chain provider about every waiting run.
+      // One check at a time, and not more often than every 15 seconds (counted from the attempt, so a failing provider is limited too).
+      // Unlike the service's own 30-second pass it also runs while the kill switch is on, so work that was already sent can still be settled.
       const nowMs = now().getTime();
       if (reconcileRunning) return 'A check is already running. Send /reconcile again in a few seconds.';
       if (nowMs - lastReconcileAt < 15_000) return 'Checked a moment ago. Send /reconcile again in a few seconds.';
       reconcileRunning = true;
+      lastReconcileAt = nowMs;
       let failure: string | undefined;
-      try { await deps.reconcileNow(); lastReconcileAt = now().getTime(); } catch (error) { failure = error instanceof Error && /^[A-Z][A-Z0-9_]{2,80}(?::[A-Z0-9_]{1,80})*$/.test(error.message) ? error.message : 'RECONCILE_FAILED'; } finally { reconcileRunning = false; }
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([deps.reconcileNow(), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('RECONCILE_TIMED_OUT')), deps.reconcileTimeoutMs ?? 60_000); timer.unref?.(); })]);
+      } catch (error) { failure = error instanceof Error && error.message === 'RECONCILE_TIMED_OUT' ? 'RECONCILE_TIMED_OUT' : 'RECONCILE_FAILED'; } finally { if (timer) clearTimeout(timer); reconcileRunning = false; }
       const state = deps.store.snapshot();
       const waiting = unresolvedRunIds(state);
       const stage = (result: string | undefined): string => result === 'soft' ? 'mined, not yet posted to Ethereum' : result === 'posted' ? 'posted to Ethereum, waiting for it to be final' : result === 'final' || result === 'confirmed' ? 'final' : result === 'failed' ? 'failed on the chain' : result === 'reorged' ? 'the chain changed; being re-checked' : result === 'unknown' ? 'not yet proven by the chain' : 'not checked yet';
       const lines = waiting.map((runId) => {
         const last = state.reconciliations.filter((item) => item.runId === runId).at(-1);
-        const reason = last?.result === 'unknown' && last.reason ? ` (${last.reason})` : '';
+        const reason = last?.result === 'unknown' && last.reason && /^[A-Za-z0-9 ,.;:()'-]{1,200}$/.test(last.reason) ? ` (${last.reason})` : '';
         return [`• ${runId} — ${stage(last?.result)}${reason}${last ? `, checked ${minutes(last.observedAt)} UTC` : ''}`, `  ${describeLiveRunResult(state, runId).summary}`].join('\n');
       });
       return [
         failure ? `The check could not finish (${failure}); nothing was changed. This is what was last known:` : 'Checked the chain just now (nothing was sent or changed except what the chain proved).',
         '',
         ...(lines.length === 0 ? ['Nothing is waiting to settle.'] : lines),
-        ...(lines.length > 0 ? ['', 'A mint on Robinhood is final only after Ethereum finalises it, which can take some time. The bot settles it by itself; this just shows where it stands.'] : []),
+        ...(lines.length > 0 ? ['', 'On Robinhood a mint is final only after Ethereum finalises it, which can take some time. The bot settles it by itself; this just shows where it stands.'] : []),
       ].join('\n');
     },
     async watchlist() {
