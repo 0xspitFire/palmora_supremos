@@ -429,7 +429,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       // A wallet that does not hold what a run needs (mint value plus the fee budget) would stop the whole run at arm: it is left out here, with the exact top-up.
       const split = await wiring.fundingSplit(target, asked);
       if (split.funded.length === 0) throw new Error(`FUNDING_NOT_ARRIVED: no wallet holds what a run needs, so nothing can be fired yet. ${split.short.map((item) => `${short(item.wallet)}: ${item.why}.`).join(' ')}`);
-      // The engine uses wallets in list order, so only the ready ones from the start of the list go; the preview shows exactly what the fire will send.
+      // Any ready signing wallet can go, in list order wherever it sits (D-073); the preview shows exactly what the fire will send.
       const order = await wiring.readyInListOrder(split.funded);
       if (order.used.length === 0) throw new Error(`WALLET_NOT_IN_FLEET: none of the ready wallets is one of your signing wallets. Pick wallets from /wallets, or choose all.`);
       const wallets = order.used;

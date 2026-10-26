@@ -1201,7 +1201,7 @@ export class MintEngine {
   private sanitizeConfig(): Record<string, unknown> {
     return {
       target: this.config.target,
-      fleet: { maxWallets: this.config.fleet.maxWallets, ...(this.config.fleet.walletIndexes ? { walletIndexes: this.config.fleet.walletIndexes } : {}) },
+      fleet: { maxWallets: this.config.fleet.maxWallets, ...(this.config.fleet.walletIndexes ? { walletIndexes: this.config.fleet.walletIndexes, expectedAddresses: this.config.fleet.expectedAddresses } : {}) },
       timing: this.config.timing,
       fees: this.config.fees,
       safety: {

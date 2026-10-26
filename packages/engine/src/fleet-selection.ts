@@ -15,6 +15,7 @@ export function selectFleetWallets<T extends { readonly index: number; readonly 
   const expected = fleet.expectedAddresses;
   if (indexes.length === 0 || indexes.length > fleet.maxWallets || indexes.some((index) => !Number.isSafeInteger(index) || index < 0) || new Set(indexes).size !== indexes.length) throw new Error('FLEET_SELECTION_INVALID');
   if (!expected || expected.length !== indexes.length) throw new Error('FLEET_SELECTION_ADDRESSES_REQUIRED');
+  if (new Set(expected.map((address) => String(address).toLowerCase())).size !== expected.length) throw new Error('FLEET_SELECTION_INVALID');
   const byIndex = new Map(all.map((wallet) => [wallet.index, wallet] as const));
   const picked = indexes.map((index, position) => {
     const wallet = byIndex.get(index);

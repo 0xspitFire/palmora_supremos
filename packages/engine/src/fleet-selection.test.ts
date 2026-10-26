@@ -19,6 +19,7 @@ describe('which wallets of the key list a run signs with (D-073)', () => {
     expect(() => selectFleetWallets(wallets, { ...ok, expectedAddresses: [wallets[1]!.address, wallets[3]!.address] })).toThrow('FLEET_SELECTION_ADDRESS_MISMATCH');
     expect(() => selectFleetWallets(wallets, { ...ok, walletIndexes: [1, 9] })).toThrow('FLEET_SELECTION_INVALID');
     expect(() => selectFleetWallets(wallets, { ...ok, walletIndexes: [1, 1] })).toThrow('FLEET_SELECTION_INVALID');
+    expect(() => selectFleetWallets(wallets, { ...ok, expectedAddresses: [wallets[1]!.address, wallets[1]!.address.toUpperCase().replace('0X', '0x')] })).toThrow('FLEET_SELECTION_INVALID');
     expect(() => selectFleetWallets(wallets, { ...ok, maxWallets: 1 })).toThrow('FLEET_SELECTION_INVALID');
     expect(() => selectFleetWallets(wallets, { ...ok, walletIndexes: [-1, 2] })).toThrow('FLEET_SELECTION_INVALID');
     expect(() => selectFleetWallets(wallets, { ...ok, walletIndexes: [1.5, 2] })).toThrow('FLEET_SELECTION_INVALID');
