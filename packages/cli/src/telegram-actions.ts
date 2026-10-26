@@ -125,6 +125,15 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   };
   const robinhoodDryRun = async (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date): Promise<DryRunReport> => deps.robinhoodDryRun ? deps.robinhoodDryRun(contract, wallets, quantity, at) : dryRunDrop((await client(4663)) as never, contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at });
   const robinhoodBlock = async (): Promise<{ number: bigint; hash: string }> => deps.robinhoodLatestBlock ? deps.robinhoodLatestBlock() : (async () => { const block = await (await client(4663)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; })();
+  /** The engine mints with the first N wallets of the key list, so a chosen set must be exactly those: refuse a gap by name before anything is sent. */
+  const assertListOrder = async (wallets: readonly string[]): Promise<void> => {
+    const ordered = (await deps.walletList()).map((wallet) => wallet.toLowerCase());
+    const chosen = new Set(wallets.map((wallet) => wallet.toLowerCase()));
+    const prefix = ordered.slice(0, chosen.size);
+    if (prefix.length !== chosen.size || prefix.some((wallet) => !chosen.has(wallet))) {
+      throw new Error(`WALLET_ORDER_NOT_READY: wallets are used in list order, so the run must use the first ${chosen.size} wallet(s) of the list (${prefix.map(short).join(', ') || 'none'}). Pick those, or choose all.`);
+    }
+  };
   const walletsFor = async (text: string): Promise<string[]> => text.toLowerCase() === 'all' ? deps.walletList() : text.split(',').map((item) => item.trim()).filter(Boolean);
 
   const fireWiring = (): FireWiring => {
@@ -342,6 +351,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async requestPreview(campaignId, walletsText, maxFeeGwei) {
       const preview = previewLiveRequest(deps.store.snapshot(), campaignId, await walletsFor(walletsText), maxFeeGwei, now());
+      await assertListOrder(preview.wallets);
       // A wallet that holds less than a run needs would stop the whole run at arm: say so now, with the exact top-up, before anything is sent.
       if (deps.fire) {
         const split = await deps.fire.fundingSplit(campaign(campaignId), preview.wallets);
@@ -352,7 +362,9 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async requestCreate(campaignId, walletsText, maxFeeGwei, phrase) {
       if (deps.mode !== 'host') throw new Error('LIVE_MODE_REQUIRED: the service is in practice mode, so nothing would run this request');
       if (deps.fireSchedulesRepository?.().open(campaignId).length) throw new Error('FIRE_CONFLICT: a scheduled mint is open for this campaign; cancel it first with /schedules and /cancel');
-      const result = await runLiveRequest({ action: 'create', campaignId, wallets: await walletsFor(walletsText), maxFeeGwei, confirm: phrase, now: now(), store: deps.store as never, approve: (validated) => deps.application.command('approve', { validated }) });
+      const chosenWallets = await walletsFor(walletsText);
+      await assertListOrder(chosenWallets);
+      const result = await runLiveRequest({ action: 'create', campaignId, wallets: chosenWallets, maxFeeGwei, confirm: phrase, now: now(), store: deps.store as never, approve: (validated) => deps.application.command('approve', { validated }) });
       return sections([`Campaign: ${campaignId}`], [`Request ${String(result.requestId)} sent. The service starts it within a few seconds; follow it with /requests and /runs. /kill stops everything.`]);
     },
     async requests() {
@@ -419,7 +431,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       // A wallet that does not hold what a run needs (mint value plus the fee budget) would stop the whole run at arm: it is left out here, with the exact top-up.
       const split = await wiring.fundingSplit(target, asked);
       if (split.funded.length === 0) throw new Error(`FUNDING_NOT_ARRIVED: no wallet holds what a run needs, so nothing can be fired yet. ${split.short.map((item) => `${short(item.wallet)}: ${item.why}.`).join(' ')}`);
-      const wallets = split.funded;
+      // The engine uses wallets in list order, so only the ready ones from the start of the list go; the preview shows exactly what the fire will send.
+      const order = await wiring.readyPrefix(split.funded);
+      if (order.used.length === 0) throw new Error(`WALLET_ORDER_NOT_READY: wallets are used in list order and the first wallet${order.first ? ` (${short(order.first)})` : ''} is not ready. Fund or fix it first (see /funding), or the run cannot start.`);
+      const wallets = order.used;
+      split.short.push(...order.waiting);
       // A campaign sized for N wallets covers at most N: it uses the first N that pass their test mint, and the owner is told.
       const sized = sizedWalletCount(target);
       if (sized < 1) throw new Error('CAMPAIGN_SIZED_FOR_NONE: this campaign was sized for no wallet (its run limit is below what one wallet can spend). Prepare a new one.');
@@ -437,6 +453,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const target = fireCampaign(campaignId, maxFeeGwei);
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
+      await assertListOrder(wallets);
       const sized = sizedWalletCount(target);
       if (sized < 1) throw new Error('CAMPAIGN_SIZED_FOR_NONE: this campaign was sized for no wallet (its run limit is below what one wallet can spend). Prepare a new one.');
       const conflict = wiring.conflict(campaignId);
@@ -449,6 +466,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (digest !== undefined && wiring.campaignDigest(target) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; start the schedule again');
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
+      await assertListOrder(wallets);
       if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: the schedule changed since the preview. Send /schedule to start again');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
@@ -638,8 +656,10 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       // Only wallets that hold what a run needs can be in a request (the others would stop it at arm); the rest are named with their top-up.
       if (deps.fire) {
         const split = await deps.fire.fundingSplit(target, wallets);
-        wallets = split.funded;
-        if (split.short.length > 0) note = split.short.map((item) => `✗ ${short(item.wallet)} left out: ${item.why}.`).join('\n');
+        const order = await deps.fire.readyPrefix(split.funded);
+        wallets = order.used;
+        const left = [...split.short, ...order.waiting];
+        if (left.length > 0) note = left.map((item) => `✗ ${short(item.wallet)} left out: ${item.why}.`).join('\n');
       }
       return { wallets, sized: Math.max(1, sizedWalletCount(target)), ...(note ? { note } : {}) };
     },
