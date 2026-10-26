@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Campaign, SimulationEvidenceRecord } from '@mint-bot/backend';
-import { LIVE_REQUEST_LIFETIME_MS, describeFailure, previewLiveRequest, processLiveRunRequests, runLiveRequest, startLiveRequestPoller, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
+import { LIVE_REQUEST_LIFETIME_MS, describeFailure, liveRequestFollowUp, previewLiveRequest, processLiveRunRequests, runLiveRequest, startLiveRequestPoller, type LiveRequestProcessorDeps, type LiveRequestStore } from './live-request.js';
 
 const NOW = new Date('2026-10-24T10:00:00.000Z');
 const WALLET_A = '0x1111111111111111111111111111111111111111';
@@ -290,13 +290,31 @@ describe('a failed request closes the run it armed, if the store proves nothing 
     expect(record?.runClosed).toBeUndefined();
   });
 
-  it('a run that stays Active (sent, still settling on the chain) is a finished request with RUN_ACTIVE, is never offered for closing, and is not reported as stopped (first live mint)', async () => {
+  it('a run that stays Active with a recorded transaction is a finished request with RUN_ACTIVE and the transaction, is never offered for closing, and is not reported as stopped (first live mint)', async () => {
     const closed: string[] = [];
-    const records: Array<{ state: string; code?: string; runClosed?: string }> = [];
-    await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async (name) => (name === 'arm' ? { id: 'run_5' } : { id: 'run_5', state: 'Active' }), setFeeCeiling: () => undefined, record: async (event) => { records.push(event); }, closeRun: async (runId) => { closed.push(runId); return 'closed'; }, now: () => now });
-    expect(records).toEqual([expect.objectContaining({ state: 'finished', code: 'RUN_ACTIVE' })]);
+    const records: Array<{ state: string; code?: string; runClosed?: string; sent?: Array<{ hash: string; wallet: string }>; campaignId?: string }> = [];
+    await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async (name) => (name === 'arm' ? { id: 'run_5' } : { id: 'run_5', state: 'Active' }), setFeeCeiling: () => undefined, sentTransactions: (runId) => (runId === 'run_5' ? [{ hash: `0x${'a'.repeat(64)}`, wallet: WALLET_A }] : []), record: async (event) => { records.push(event); }, closeRun: async (runId) => { closed.push(runId); return 'closed'; }, now: () => now });
+    expect(records).toEqual([expect.objectContaining({ state: 'finished', code: 'RUN_ACTIVE', campaignId: 'c', sent: [{ hash: `0x${'a'.repeat(64)}`, wallet: WALLET_A }] })]);
     expect(records[0]?.runClosed).toBeUndefined();
     expect(closed).toEqual([]);
+  });
+
+  it('a run that is Active but has no recorded transaction is stopped (fail closed) and offered for closing', async () => {
+    const closed: string[] = [];
+    for (const sentTransactions of [undefined, () => []] as const) {
+      const records: Array<{ state: string; code?: string }> = [];
+      await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async (name) => (name === 'arm' ? { id: 'run_6' } : { id: 'run_6', state: 'Active' }), setFeeCeiling: () => undefined, ...(sentTransactions ? { sentTransactions } : {}), record: async (event) => { records.push(event); }, closeRun: async (runId) => { closed.push(runId); return 'left'; }, now: () => now });
+      expect(records).toEqual([expect.objectContaining({ state: 'stopped', code: 'RUN_ACTIVE_NO_SENT_TRANSACTION' })]);
+    }
+    expect(closed).toEqual(['run_6', 'run_6']);
+  });
+
+  it('tells the owner what to expect: stopped is a blocked alert, finished with a transaction is a mint-sent message, anything else is silent', () => {
+    expect(liveRequestFollowUp({ state: 'stopped' })).toBe('blocked');
+    expect(liveRequestFollowUp({ state: 'expired' })).toBe('blocked');
+    expect(liveRequestFollowUp({ state: 'finished', sent: [{ hash: 'x' }] })).toBe('sent');
+    expect(liveRequestFollowUp({ state: 'finished', sent: [] })).toBe('none');
+    expect(liveRequestFollowUp({ state: 'finished' })).toBe('none');
   });
 
   it('a run that ended any other way than completed is a stopped request and is offered for closing too', async () => {

@@ -32,7 +32,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
     status: ok('status'), health: ok('health'), rpc: ok('rpc'), gas: ok('gas'), backup: ok('backup'), wallets: ok('wallets'), funding: ok('funding'), enablement: ok('enablement'), drops: ok('drops'), calendar: ok('calendar'),
     check: ok('check'),
     requestPreview: async (campaignId, wallets, gwei) => { calls.push(`requestPreview(${campaignId}|${wallets}|${gwei})`); return { text: 'preview', wallets: ['0x1111111111111111111111111111111111111111'], phrase: `LIVE-REQUEST ${campaignId.slice(-8)} 1-WALLETS 0.0002 ${gwei}-GWEI` }; },
-    requestCreate: ok('requestCreate'), requests: ok('requests'), runs: ok('runs'), run: ok('run'), watchlist: ok('watchlist'), track: ok('track'), untrack: ok('untrack'),
+    requestCreate: ok('requestCreate'), requests: ok('requests'), runs: ok('runs'), reconcile: ok('reconcile'), run: ok('run'), watchlist: ok('watchlist'), track: ok('track'), untrack: ok('untrack'),
     limits: ok('limits'), history: ok('history'), eligible: ok('eligible'), activity: ok('activity'), holdings: ok('holdings'), gasAlerts: ok('gasAlerts'), gasAlertSet: ok('gasAlertSet'), gasAlertRemove: ok('gasAlertRemove'),
     prepare: async (...args: unknown[]) => { calls.push(`prepare(${args.filter((arg) => arg !== undefined).join('|')})`); return 'Campaign recorded: cmp_11111111-1111-1111-1111-111111111111'; }, simulate: ok('simulate'), cancel: ok('cancel'), kill: ok('kill'), revoke: ok('revoke'), release: ok('release'), watchAccept: ok('watchAccept'),
     firePreview: async (campaignId, wallets, gwei) => { calls.push(`firePreview(${campaignId}|${wallets}|${gwei})`); return { text: 'fire preview', wallets: ['0x1111111111111111111111111111111111111111'] }; },
@@ -121,7 +121,7 @@ describe('viewers (D-063 item 8)', () => {
     await admitViewer(t);
     const allowed = Object.entries(COMMANDS).filter(([, spec]) => spec.roles.includes('viewer')).map(([name]) => name).sort();
     expect(allowed).toEqual(['calendar', 'check', 'drops', 'gas', 'help', 'menu', 'start', 'status', 'watchlist']);
-    for (const name of ['wallets', 'funding', 'runs', 'run', 'requests', 'request', 'plan', 'health', 'kill', 'unlock', 'release', 'invite', 'users', 'broadcast', 'track', 'prepare', 'cancel', 'revoke', 'limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts', 'gasalert']) {
+    for (const name of ['reconcile', 'wallets', 'funding', 'runs', 'run', 'requests', 'request', 'plan', 'health', 'kill', 'unlock', 'release', 'invite', 'users', 'broadcast', 'track', 'prepare', 'cancel', 'revoke', 'limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts', 'gasalert']) {
       t.calls.length = 0;
       await t.send(t.message(VIEWER, `/${name} x y z`));
       expect(t.calls, name).toEqual([]);

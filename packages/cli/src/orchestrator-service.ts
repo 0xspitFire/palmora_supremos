@@ -40,7 +40,7 @@ import { chainRpcSecretNames, failoverTransport, readTurnkeySecretConfig, resolv
 import { startDependencyFlags } from './dependency-flags.js';
 import { createPublicClient, formatGwei } from 'viem';
 import { startGasAlerts } from './gas-alert-service.js';
-import { startLiveRequestPoller } from './live-request.js';
+import { liveRequestFollowUp, startLiveRequestPoller } from './live-request.js';
 import { createFireWiring, type FireWiring } from './fire-wiring.js';
 import { dryRunDrop } from './robinhood-readonly.js';
 import { createBlockscoutPortfolio, type PortfolioProvider } from './portfolio-provider.js';
@@ -251,11 +251,18 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       command: (name, input) => liveApplication.command(name, input),
       setFeeCeiling: (campaignId, gwei) => runtime.setFeeCeiling(campaignId, gwei),
       closeRun: (runId) => runtime.coordinator.closeUnsentRun(runId, 'REQUEST_FAILED'),
-      record: async ({ requestId, runId, state, code, runClosed }) => {
+      sentTransactions: (runId) => runtime.store.snapshot().attempts.filter((attempt) => attempt.runId === runId && typeof attempt.hash === 'string' && attempt.hash.length > 0).map((attempt) => ({ hash: attempt.hash!, wallet: attempt.wallet })),
+      record: async ({ requestId, runId, campaignId, state, code, runClosed, sent }) => {
         await runtime.store.transaction((current) => { current.events.push({ id: `live_request_result_${randomUUID()}`, type: 'live_request_result', ...(runId ? { runId } : {}), at: new Date().toISOString(), data: { requestId, state, ...(code ? { code } : {}) } }); });
         logger.info({ event: 'live_request_result', requestId, state, ...(code ? { code } : {}), ...(runClosed ? { runClosed } : {}) }, 'live request processed');
         // Each stopped request is its own alert (keyed by its id), so a repeat of the same reason is still told.
-        if (state !== 'finished') await alerts.blocked(code ?? 'LIVE_REQUEST_STOPPED', runId, requestId).catch(() => undefined);
+        const followUp = liveRequestFollowUp({ state, ...(sent ? { sent } : {}) });
+        if (followUp === 'blocked') await alerts.blocked(code ?? 'LIVE_REQUEST_STOPPED', runId, requestId).catch(() => undefined);
+        // T-086: a mint that was sent says so, once per transaction, with the explorer link (the hash is shortened in the text).
+        if (followUp === 'sent' && runId) {
+          const campaign = runtime.store.snapshot().campaigns.find((item) => item.id === campaignId);
+          if (campaign) for (const tx of (sent ?? []).slice(0, 5)) await alerts.sent(runId, { chainId: campaign.chainId, collection: `${campaign.contract.slice(0, 6)}…${campaign.contract.slice(-4)}`, wallet: tx.wallet, quantity: campaign.quantity, hash: tx.hash }).catch(() => undefined);
+        }
       },
       failed: (requestId, detail) => logger.warn({ event: 'live_request_failure_detail', requestId, errorName: detail.name, errorMessage: detail.message, frames: detail.frames }, 'uncoded live request failure (host journal only)'),
       now: () => new Date(),
@@ -351,6 +358,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       store: runtime.store,
       application: ownerApplication,
       coordinator: runtime.coordinator,
+      reconcileNow: () => runtime.coordinator.reconcile(),
       projectRoot: config.projectRoot,
       secretRoot,
       killSwitchPath: config.killSwitchPath,
