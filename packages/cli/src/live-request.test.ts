@@ -232,6 +232,10 @@ describe('the code shown for a stopped request keeps the failing check visible (
 describe('the host journal describes an uncoded failure without leaking (T-081)', () => {
   it('keeps the type, a cleaned message and function names with file:line, and drops addresses, hex, long numbers and folders', () => {
     const error = new Error('request to https://rpc.example/v1/SECRETKEY failed for 0x1111111111111111111111111111111111111111 amount 123456789012 at\nsecond line');
+    const other = describeFailure(new Error('wss://node.example/ws?k=1 and /etc/some/folder/file and key ABCDEFGHIJKLMNOPQRSTUVWXYZ0123'));
+    expect(describeFailure(new Error('word '.repeat(100))).message.length).toBe(240);
+    expect(describeFailure(new Error('hash ' + 'ab'.repeat(20))).message).toBe('hash [hex]');
+    expect(other.message).toBe('[url] and [path] and key [token]');
     error.name = 'Weird Error!';
     const detail = describeFailure(error);
     expect(detail.name).toBe('WeirdError');

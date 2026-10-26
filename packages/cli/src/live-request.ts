@@ -132,7 +132,7 @@ export interface LiveRequestProcessorDeps {
   setFeeCeiling(campaignId: string, gwei: number | undefined): void;
   record(event: { requestId: string; runId?: string; state: 'finished' | 'stopped' | 'expired'; code?: string }): Promise<void>;
   /** Host journal only (never Telegram or the stored result): what an uncoded failure looked like, cleaned by `describeFailure`. */
-  failed?(requestId: string, detail: FailureDetail): void;
+  failed?(requestId: string, detail: FailureDetail): void | Promise<void>;
   now(): Date;
 }
 
@@ -147,7 +147,7 @@ export function describeFailure(error: unknown): FailureDetail {
   try {
     const name = error instanceof Error ? error.name.replace(/[^A-Za-z0-9_]/g, '').slice(0, 60) || 'Error' : typeof error;
     const raw = error instanceof Error ? error.message : String(error);
-    const message = raw.replace(/\bhttps?:\/\/\S+/gi, '[url]').replace(/0x[0-9a-fA-F]{16,}/g, '[hex]').replace(/\b[0-9a-fA-F]{32,}\b/g, '[hex]').replace(/\d{9,}/g, '[digits]').replace(/[\r\n\t]+/g, ' ').slice(0, 240);
+    const message = raw.replace(/\b[a-z][a-z0-9+.-]{1,12}:\/\/\S+/gi, '[url]').replace(/(?:^|\s)(?:\/[\w.@-]+){2,}/g, ' [path]').replace(/0x[0-9a-fA-F]{16,}/g, '[hex]').replace(/\b[0-9a-fA-F]{32,}\b/g, '[hex]').replace(/\d{9,}/g, '[digits]').replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[token]').replace(/[\r\n\t]+/g, ' ').slice(0, 240);
     const frames = (error instanceof Error ? (error.stack ?? '').split('\n').slice(1) : [])
       .map((line) => line.trim().match(/^at (?:(.+?) \()?(?:.*[\\/])?([^\\/:()]+:\d+):\d+\)?$/))
       .filter((match): match is RegExpMatchArray => match !== null)
@@ -210,7 +210,7 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
     } catch (error) {
       result = { state: 'stopped', code: safeCode(error) };
       // Only an uncoded failure is described for the journal; a coded one already says everything.
-      if (result.code === 'LIVE_REQUEST_FAILED' || result.code?.startsWith('LIVE_REQUEST_FAILED:')) { try { deps.failed?.(request.id, describeFailure(error)); } catch { /* the journal never changes the outcome */ } }
+      if (result.code === 'LIVE_REQUEST_FAILED' || result.code?.startsWith('LIVE_REQUEST_FAILED:')) { try { void Promise.resolve(deps.failed?.(request.id, describeFailure(error))).catch(() => undefined); } catch { /* the journal never changes the outcome */ } }
     }
     await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), ...result });
   }
