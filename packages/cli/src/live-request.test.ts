@@ -290,9 +290,13 @@ describe('a failed request closes the run it armed, if the store proves nothing 
     expect(record?.runClosed).toBeUndefined();
   });
 
-  it('a run that stays Active (a send that is still settling) is offered for closing, and the store leaves it because attempts exist', async () => {
-    const record = await go(async (name) => (name === 'arm' ? { id: 'run_5' } : { id: 'run_5', state: 'Active' }), async () => 'left');
-    expect(record).toMatchObject({ state: 'stopped', runClosed: 'left' });
+  it('a run that stays Active (sent, still settling on the chain) is a finished request with RUN_ACTIVE, is never offered for closing, and is not reported as stopped (first live mint)', async () => {
+    const closed: string[] = [];
+    const records: Array<{ state: string; code?: string; runClosed?: string }> = [];
+    await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async (name) => (name === 'arm' ? { id: 'run_5' } : { id: 'run_5', state: 'Active' }), setFeeCeiling: () => undefined, record: async (event) => { records.push(event); }, closeRun: async (runId) => { closed.push(runId); return 'closed'; }, now: () => now });
+    expect(records).toEqual([expect.objectContaining({ state: 'finished', code: 'RUN_ACTIVE' })]);
+    expect(records[0]?.runClosed).toBeUndefined();
+    expect(closed).toEqual([]);
   });
 
   it('a run that ended any other way than completed is a stopped request and is offered for closing too', async () => {

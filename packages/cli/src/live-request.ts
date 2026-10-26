@@ -207,8 +207,9 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
       deps.setFeeCeiling(request.campaignId, maxFeeGwei);
       let ran: { state?: string };
       try { ran = await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` }); } finally { deps.setFeeCeiling(request.campaignId, undefined); }
-      // Only a completed run is finished; a run that ended any other way is stopped under its state name.
-      result = ran.state === 'Completed' ? { state: 'finished' } : { state: 'stopped', code: `RUN_${safeCode(new Error(String(ran.state ?? 'UNKNOWN').toUpperCase()))}` };
+      // A completed run is finished. A run still Active was sent and is waiting for the chain to settle it (Robinhood: until Ethereum finality):
+      // the request did its job, so it is finished with the code RUN_ACTIVE, never reported as blocked. Any other end is stopped under its state name.
+      result = ran.state === 'Completed' ? { state: 'finished' } : ran.state === 'Active' ? { state: 'finished', code: 'RUN_ACTIVE' } : { state: 'stopped', code: `RUN_${safeCode(new Error(String(ran.state ?? 'UNKNOWN').toUpperCase()))}` };
     } catch (error) {
       result = { state: 'stopped', code: safeCode(error) };
       // Only an uncoded failure is described for the journal; a coded one already says everything.
