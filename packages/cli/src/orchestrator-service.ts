@@ -250,9 +250,10 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       campaign: (campaignId) => runtime.store.snapshot().campaigns.find((item) => item.id === campaignId),
       command: (name, input) => liveApplication.command(name, input),
       setFeeCeiling: (campaignId, gwei) => runtime.setFeeCeiling(campaignId, gwei),
-      record: async ({ requestId, runId, state, code }) => {
+      closeRun: (runId) => runtime.coordinator.closeUnsentRun(runId, 'REQUEST_FAILED'),
+      record: async ({ requestId, runId, state, code, runClosed }) => {
         await runtime.store.transaction((current) => { current.events.push({ id: `live_request_result_${randomUUID()}`, type: 'live_request_result', ...(runId ? { runId } : {}), at: new Date().toISOString(), data: { requestId, state, ...(code ? { code } : {}) } }); });
-        logger.info({ event: 'live_request_result', requestId, state, ...(code ? { code } : {}) }, 'live request processed');
+        logger.info({ event: 'live_request_result', requestId, state, ...(code ? { code } : {}), ...(runClosed ? { runClosed } : {}) }, 'live request processed');
         // Each stopped request is its own alert (keyed by its id), so a repeat of the same reason is still told.
         if (state !== 'finished') await alerts.blocked(code ?? 'LIVE_REQUEST_STOPPED', runId, requestId).catch(() => undefined);
       },
@@ -309,6 +310,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       killSwitchPath: config.killSwitchPath,
       fireSchedules: () => bridge.fireScheduleRepository(),
       unclaimedRequests: () => bridge.unclaimedLiveRunRequests(),
+      campaignWalletsUsed: (campaignId) => bridge.campaignWalletsUsed(campaignId),
       startedRequests: () => bridge.recentLiveRunRequests(20).filter((row) => row.outcome === 'started').map((row) => ({ id: row.id, campaignId: row.campaignId, ...(row.claimedAt ? { claimedAt: row.claimedAt } : {}) })),
       walletList: walletAddresses,
       evmPort: async (chainId) => EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]),

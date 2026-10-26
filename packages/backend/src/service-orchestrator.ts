@@ -91,8 +91,11 @@ export class OrchestratorService {
     this.recordReconciliationMetrics();
     this.running = true;
     this.metrics.recordRestart();
+    const startedAt = Date.now();
     try {
       await this.coordinator.start();
+      // D-072: how long the start-up check took (a number only), so a slow start shows in the journal.
+      this.options.logger?.info({ event: 'startup_reconciliation_done', durationMs: Date.now() - startedAt, startupState: this.store.snapshot().runtime.startupState }, 'start-up reconciliation finished');
     } catch (error) {
       this.options.logger?.error({ error }, 'orchestrator_reconciliation_failed');
       await this.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'RECONCILIATION_FAILED'])] }; });
@@ -177,6 +180,15 @@ export class OrchestratorService {
           await this.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILL_SWITCH_ENGAGED'])] }; });
           return;
         }
+      }
+      // D-072: a stored UNRESOLVED_EXECUTIONS block is lifted as soon as the very rule that set it (the start-up check and
+      // `kill-release` use the same one) finds no unresolved run. Any other reason, and the kill switch, keep the service Blocked.
+      if (this.store.snapshot().runtime.blockingReasons.includes('UNRESOLVED_EXECUTIONS')) {
+        await this.store.transaction((state) => {
+          if (!state.runtime.blockingReasons.includes('UNRESOLVED_EXECUTIONS') || state.killed || unresolvedRunIds(state).length > 0) return;
+          const blockingReasons = state.runtime.blockingReasons.filter((reason) => reason !== 'UNRESOLVED_EXECUTIONS');
+          state.runtime = { ...state.runtime, startupState: blockingReasons.length === 0 ? 'Ready' : state.runtime.startupState, blockingReasons };
+        });
       }
       if (this.store.snapshot().runtime.startupState !== 'Ready') return;
       if (capacity === 0) return;

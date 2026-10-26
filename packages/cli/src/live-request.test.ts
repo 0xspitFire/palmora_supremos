@@ -262,3 +262,43 @@ describe('the host journal describes an uncoded failure without leaking (T-081)'
     expect(await run(new Error('more words'), () => { throw new Error('journal down'); })).toBe('LIVE_REQUEST_FAILED');
   });
 });
+
+describe('a failed request closes the run it armed, if the store proves nothing was sent (D-074)', () => {
+  const now = new Date();
+  const request = { id: 'live_request_1', campaignId: 'c', wallets: [WALLET_A], simulationIds: ['s'], approvalId: 'a', evidenceAt: now.toISOString(), maxFeeGwei: '0.2', requestedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+  const go = async (command: LiveRequestProcessorDeps['command'], closeRun?: LiveRequestProcessorDeps['closeRun']) => {
+    const records: Array<{ state: string; runClosed?: string }> = [];
+    await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command, setFeeCeiling: () => undefined, record: async (event) => { records.push(event); }, ...(closeRun ? { closeRun } : {}), now: () => now });
+    return records[0];
+  };
+
+  it('closes the armed run when the run step fails, and reports the outcome', async () => {
+    const closed: string[] = [];
+    const record = await go(async (name) => { if (name === 'arm') return { id: 'run_1' }; throw new Error('boom'); }, async (runId) => { closed.push(runId); return 'closed'; });
+    expect(closed).toEqual(['run_1']);
+    expect(record).toMatchObject({ state: 'stopped', runClosed: 'closed' });
+  });
+
+  it('does not try when arm itself failed (no run), nor when the run finished, and a failing close never changes the outcome', async () => {
+    const closed: string[] = [];
+    const closeRun = async (runId: string) => { closed.push(runId); return 'closed' as const; };
+    await go(async () => { throw new Error('KILLED'); }, closeRun);
+    await go(async (name) => (name === 'arm' ? { id: 'run_2' } : { id: 'run_2', state: 'Completed' }), closeRun);
+    expect(closed).toEqual([]);
+    const record = await go(async (name) => { if (name === 'arm') return { id: 'run_3' }; throw new Error('KILLED'); }, async () => { throw new Error('store down'); });
+    expect(record).toMatchObject({ state: 'stopped' });
+    expect(record?.runClosed).toBeUndefined();
+  });
+
+  it('a run that stays Active (a send that is still settling) is offered for closing, and the store leaves it because attempts exist', async () => {
+    const record = await go(async (name) => (name === 'arm' ? { id: 'run_5' } : { id: 'run_5', state: 'Active' }), async () => 'left');
+    expect(record).toMatchObject({ state: 'stopped', runClosed: 'left' });
+  });
+
+  it('a run that ended any other way than completed is a stopped request and is offered for closing too', async () => {
+    const closed: string[] = [];
+    const record = await go(async (name) => (name === 'arm' ? { id: 'run_4' } : { id: 'run_4', state: 'Failed' }), async (runId) => { closed.push(runId); return 'left'; });
+    expect(closed).toEqual(['run_4']);
+    expect(record).toMatchObject({ state: 'stopped', runClosed: 'left' });
+  });
+});
