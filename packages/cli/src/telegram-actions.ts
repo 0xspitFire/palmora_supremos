@@ -373,7 +373,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       for (const event of deps.store.snapshot().events) if (event.type === 'live_request_result') results.set(String(event.data['requestId']), { state: String(event.data['state']), ...(event.data['code'] ? { code: String(event.data['code']) } : {}) });
       const status = (row: (typeof rows)[number]): string => {
         const result = results.get(row.id);
-        if (result?.state === 'finished') return 'finished';
+        if (result?.state === 'finished') return result.code === 'RUN_ACTIVE' ? 'sent, settling on the chain (see /runs)' : 'finished';
         if (result?.state === 'stopped') return `stopped before minting${result.code ? `: ${result.code}` : ''}`;
         if (result?.state === 'expired') return 'expired, never started';
         return row.outcome ?? (Date.parse(row.expiresAt) <= now().getTime() ? 'expired (not claimed)' : 'waiting for the service');

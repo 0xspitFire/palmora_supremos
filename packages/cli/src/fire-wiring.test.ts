@@ -112,15 +112,17 @@ describe('/fire', () => {
   });
 
   it('/requests says what became of each request, and that a stopped one minted nothing', async () => {
-    const t = await setup({ events: [{ type: 'live_request_result', data: { requestId: 'live_request_a', state: 'stopped', code: 'FUNDING_NOT_ARRIVED' } }, { type: 'live_request_result', data: { requestId: 'live_request_b', state: 'finished' } }] });
+    const t = await setup({ events: [{ type: 'live_request_result', data: { requestId: 'live_request_a', state: 'stopped', code: 'FUNDING_NOT_ARRIVED' } }, { type: 'live_request_result', data: { requestId: 'live_request_b', state: 'finished' } }, { type: 'live_request_result', data: { requestId: 'live_request_d', state: 'finished', code: 'RUN_ACTIVE' } }] });
     try {
       t.requests.push({ id: 'live_request_a', campaignId: 'campaign_abcdef12', wallets: [A], maxFeeGwei: '0.2', outcome: 'started' });
       t.requests.push({ id: 'live_request_b', campaignId: 'campaign_abcdef12', wallets: [A], maxFeeGwei: '0.2', outcome: 'started' });
       t.requests.push({ id: 'live_request_c', campaignId: 'campaign_abcdef12', wallets: [A], maxFeeGwei: '0.2' });
+      t.requests.push({ id: 'live_request_d', campaignId: 'campaign_abcdef12', wallets: [A], maxFeeGwei: '0.2', outcome: 'started' });
       const text = await t.actions.requests();
       expect(text).toContain('live_request_a — stopped before minting: FUNDING_NOT_ARRIVED');
       expect(text).toContain('live_request_b — finished');
       expect(text).toContain('live_request_c — waiting for the service');
+      expect(text).toContain('live_request_d — sent, settling on the chain (see /runs)');
       expect(text).toContain('A request that stopped did not mint anything');
     } finally { await cleanup(t.directory); }
   });
