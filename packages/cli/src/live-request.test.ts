@@ -211,4 +211,19 @@ describe('the code shown for a stopped request keeps the failing check visible (
     expect(await codeFor('KILLED')).toBe('KILLED');
     expect(await codeFor('some provider said something about https://rpc.example/key')).toBe('LIVE_REQUEST_FAILED');
   });
+
+  it('an uncoded failure keeps only a system error code or a standard error type as a hint, never the text', async () => {
+    const now = new Date();
+    const request = { id: 'live_request_1', campaignId: 'c', wallets: ['0x1111111111111111111111111111111111111111'], simulationIds: ['s'], approvalId: 'a', evidenceAt: now.toISOString(), maxFeeGwei: '0.2', requestedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+    const codeOf = async (error: unknown): Promise<string | undefined> => {
+      const records: Array<{ code?: string }> = [];
+      await processLiveRunRequests({ unclaimed: () => [request], claim: () => true, campaign: () => ({ id: 'c' }) as Campaign, command: async () => { throw error; }, setFeeCeiling: () => undefined, record: async (event) => { records.push(event); }, now: () => now });
+      return records[0]?.code;
+    };
+    expect(await codeOf(Object.assign(new Error('open /some/folder/file failed'), { code: 'EACCES' }))).toBe('LIVE_REQUEST_FAILED:EACCES');
+    expect(await codeOf(Object.assign(new Error('fetch https://rpc.example/key failed'), { code: 'ETIMEDOUT', name: 'TimeoutError' }))).toBe('LIVE_REQUEST_FAILED:ETIMEDOUT:TIMEOUTERROR');
+    expect(await codeOf(new TypeError('cannot read properties of undefined'))).toBe('LIVE_REQUEST_FAILED:TYPEERROR');
+    expect(await codeOf(Object.assign(new Error('x'), { code: 'not a code https://rpc.example/key' }))).toBe('LIVE_REQUEST_FAILED');
+    expect(await codeOf('a thrown string')).toBe('LIVE_REQUEST_FAILED');
+  });
 });
