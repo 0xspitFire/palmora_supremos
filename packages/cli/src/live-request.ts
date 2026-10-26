@@ -131,7 +131,30 @@ export interface LiveRequestProcessorDeps {
   /** The fee ceiling the engine signs with for this campaign's run. */
   setFeeCeiling(campaignId: string, gwei: number | undefined): void;
   record(event: { requestId: string; runId?: string; state: 'finished' | 'stopped' | 'expired'; code?: string }): Promise<void>;
+  /** Host journal only (never Telegram or the stored result): what an uncoded failure looked like, cleaned by `describeFailure`. */
+  failed?(requestId: string, detail: FailureDetail): void;
   now(): Date;
+}
+
+export interface FailureDetail { name: string; message: string; frames: string[] }
+
+/**
+ * A cleaned description of a failure for the host journal, so an uncoded error can be found without ever reaching a chat:
+ * the error type name (letters only), the message with web addresses, long hex values and long digit runs removed and cut at
+ * 240 characters, and up to six stack frames reduced to `function (file:line)` with no folders.
+ */
+export function describeFailure(error: unknown): FailureDetail {
+  try {
+    const name = error instanceof Error ? error.name.replace(/[^A-Za-z0-9_]/g, '').slice(0, 60) || 'Error' : typeof error;
+    const raw = error instanceof Error ? error.message : String(error);
+    const message = raw.replace(/\bhttps?:\/\/\S+/gi, '[url]').replace(/0x[0-9a-fA-F]{16,}/g, '[hex]').replace(/\b[0-9a-fA-F]{32,}\b/g, '[hex]').replace(/\d{9,}/g, '[digits]').replace(/[\r\n\t]+/g, ' ').slice(0, 240);
+    const frames = (error instanceof Error ? (error.stack ?? '').split('\n').slice(1) : [])
+      .map((line) => line.trim().match(/^at (?:(.+?) \()?(?:.*[\\/])?([^\\/:()]+:\d+):\d+\)?$/))
+      .filter((match): match is RegExpMatchArray => match !== null)
+      .slice(0, 6)
+      .map((match) => `${(match[1] ?? '<anonymous>').replace(/[^A-Za-z0-9_.<>$ ]/g, '').slice(0, 60)} (${match[2]})`);
+    return { name, message, frames };
+  } catch { return { name: 'Unknown', message: '', frames: [] }; }
 }
 
 /** Only fixed upper-case codes are kept; provider or library text never is. */
@@ -186,6 +209,8 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
       result = ran.state === 'Completed' ? { state: 'finished' } : { state: 'stopped', code: `RUN_${safeCode(new Error(String(ran.state ?? 'UNKNOWN').toUpperCase()))}` };
     } catch (error) {
       result = { state: 'stopped', code: safeCode(error) };
+      // Only an uncoded failure is described for the journal; a coded one already says everything.
+      if (result.code === 'LIVE_REQUEST_FAILED' || result.code?.startsWith('LIVE_REQUEST_FAILED:')) { try { deps.failed?.(request.id, describeFailure(error)); } catch { /* the journal never changes the outcome */ } }
     }
     await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), ...result });
   }
