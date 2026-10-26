@@ -8,7 +8,8 @@ import { chainDisplay } from './alert-card.js';
  * that matches the code pattern is shown.
  */
 
-const CODE = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/;
+// A code, optionally followed by up to two fixed upper-case detail parts (READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED), so the failing step shows on the card.
+const CODE = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?::[A-Z][A-Z0-9_]{2,80}){0,2}\b/;
 
 /** Reason code → what it means, in words. Unknown codes are shown as the code alone. */
 export const REASON_WORDS: Readonly<Record<string, string>> = {
@@ -27,6 +28,12 @@ export const REASON_WORDS: Readonly<Record<string, string>> = {
   HEAD_UNAVAILABLE: 'the bot could not read the latest block',
   LOGS_UNAVAILABLE: 'the bot could not read the mint events',
   ENGINE_ERROR: 'the execution engine reported an error',
+  READINESS_REFRESH_FAILED: 'a readiness check failed before the run could start (the part after the colon names which)',
+  FUNDING_NOT_ARRIVED: 'a wallet does not hold enough to cover the run',
+  WALLET_ORDER_NOT_READY: 'wallets are used in list order and an earlier wallet is not ready',
+  WALLET_SELECTION_NOT_REPRESENTABLE: 'the wallets chosen are not the first wallets of the list, which is what the engine uses',
+  STARTUP_RECONCILIATION_REQUIRED: 'the service is still finishing its start-up check; wait a minute and try again',
+  LIVE_REQUEST_FAILED: 'the run failed with an error the bot does not show (the part after the colon is a safe hint)',
 };
 
 /** The first code-shaped word in a notice, if any. Nothing else of the notice is used. */
@@ -36,7 +43,8 @@ export function reasonCode(notice: string | undefined): string | undefined {
 
 export function reasonText(code: string | undefined, fallback: string): string {
   if (!code) return fallback;
-  const words = Object.hasOwn(REASON_WORDS, code) ? REASON_WORDS[code] : undefined;
+  const head = code.split(':')[0]!;
+  const words = Object.hasOwn(REASON_WORDS, head) ? REASON_WORDS[head] : undefined;
   return words ? `${words} [${code}]` : `${fallback} [${code}]`;
 }
 

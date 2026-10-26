@@ -11,6 +11,12 @@ describe('system messages (T-030)', () => {
     expect(reasonCode('run_1: DAILY_SPEND_CAP_EXCEEDED by 3')).toBe('DAILY_SPEND_CAP_EXCEEDED');
     expect(reasonText('SPEND_CAP_EXCEEDED', 'x')).toBe('it would exceed your per-mint limit [SPEND_CAP_EXCEEDED]');
     expect(reasonText('SOME_NEW_CODE', 'a limit was reached')).toBe('a limit was reached [SOME_NEW_CODE]');
+    // The detail parts of a stopped request survive on the card, and the words come from the first part.
+    expect(reasonCode('READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED')).toBe('READINESS_REFRESH_FAILED:FUNDING_NOT_ARRIVED');
+    expect(reasonCode('LIVE_REQUEST_FAILED:EACCES')).toBe('LIVE_REQUEST_FAILED:EACCES');
+    expect(reasonCode('A_B:C_D:E_F:G_H')).toBe('A_B:C_D:E_F');
+    expect(reasonText('LIVE_REQUEST_FAILED:EACCES', 'x')).toContain('[LIVE_REQUEST_FAILED:EACCES]');
+    expect(reasonText('LIVE_REQUEST_FAILED:EACCES', 'x')).toContain('safe hint');
     expect(reasonText(undefined, 'a limit was reached')).toBe('a limit was reached');
     expect(reasonText('__proto__', 'fallback')).toBe('fallback [__proto__]');
     const hostile = render(spendCapCard({ notice: 'wallet 0xabc1230000000000000000000000000000000000 at https://user:pw@node.example/v2/KEY gave up', runId: 'run_1', at })).plain;
