@@ -14,7 +14,6 @@ import {
  * D-058 / D-059 evidence assembly for `turnkey-compensating-controls`. Everything here is read-only except
  * `engageKillSwitchFile`, which only ever makes the system safer. Nothing here signs, broadcasts, funds or enables anything.
  */
-const SHA256_HEX = /^[0-9a-f]{64}$/i;
 
 export const sha256Hex = (data: string | Uint8Array): string => createHash('sha256').update(data).digest('hex');
 
@@ -26,39 +25,6 @@ export async function lockfileDigest(projectRoot: string): Promise<string> {
   const content = await readFile(join(projectRoot, 'pnpm-lock.yaml')).catch(() => undefined);
   if (!content || content.length === 0) throw new Error('COMPENSATING_LOCKFILE_UNAVAILABLE');
   return `sha256:${sha256Hex(content)}`;
-}
-
-export interface TrustCenterRecord {
-  version: 1;
-  type: 'turnkey-trust-center-review';
-  reviewedAt: string;
-  documents: Array<{ name: string; date: string; sha256: string }>;
-}
-
-/** Only names, dates and digests are kept. The documents themselves are never stored. */
-export function createTrustCenterRecord(input: { reviewedAt: string; documents: ReadonlyArray<{ name: string; date: string; bytes: Uint8Array }> }): TrustCenterRecord {
-  if (!Number.isFinite(Date.parse(input.reviewedAt))) throw new Error('TRUST_CENTER_REVIEW_TIME_INVALID');
-  if (input.documents.length === 0 || input.documents.length > 20) throw new Error('TRUST_CENTER_DOCUMENTS_REQUIRED');
-  return {
-    version: 1,
-    type: 'turnkey-trust-center-review',
-    reviewedAt: new Date(input.reviewedAt).toISOString(),
-    documents: input.documents.map((document) => {
-      if (!document.name || document.name.length > 200 || /[\r\n]/.test(document.name)) throw new Error('TRUST_CENTER_DOCUMENT_NAME_INVALID');
-      if (!Number.isFinite(Date.parse(document.date))) throw new Error('TRUST_CENTER_DOCUMENT_DATE_INVALID');
-      if (document.bytes.length === 0) throw new Error('TRUST_CENTER_DOCUMENT_EMPTY');
-      return { name: document.name, date: new Date(document.date).toISOString(), sha256: sha256Hex(document.bytes) };
-    }),
-  };
-}
-
-export function parseTrustCenterRecord(value: unknown): TrustCenterRecord {
-  const record = value as Partial<TrustCenterRecord> | null;
-  if (!record || record.version !== 1 || record.type !== 'turnkey-trust-center-review' || typeof record.reviewedAt !== 'string' || !Array.isArray(record.documents)) throw new Error('TRUST_CENTER_RECORD_INVALID');
-  for (const document of record.documents) {
-    if (!document || typeof document.name !== 'string' || typeof document.date !== 'string' || typeof document.sha256 !== 'string' || !SHA256_HEX.test(document.sha256)) throw new Error('TRUST_CENTER_RECORD_INVALID');
-  }
-  return record as TrustCenterRecord;
 }
 
 export interface RehearsalEvidence {
@@ -82,7 +48,7 @@ export const TURNKEY_SIGNER_ENFORCES = { transactionMatch: true, signerRecovery:
 
 /**
  * Runs the provider probe. ANY failure (policy, key, identity or evidence drift, an expired record, or an unreachable provider)
- * engages the kill switch before the error is raised, which is D-058 control 7. The evidence it returns is only the fact that
+ * engages the kill switch before the error is raised, which is D-058 control 6 after D-071. The evidence it returns is only the fact that
  * the probe succeeded just now for this record.
  */
 export async function probeOrEngageKillSwitch(
@@ -114,7 +80,6 @@ export interface EvidenceInputs {
   probe: { observedAt: string; status: 'ok'; policyRecordDigest: string };
   balances: ReadonlyArray<{ address: string; balanceWei: bigint }>;
   rehearsal?: RehearsalEvidence;
-  trustCenter?: TrustCenterRecord;
   now: Date;
   /** Seconds the balance observation stays valid. */
   balanceValiditySeconds?: number;
@@ -137,8 +102,7 @@ export function buildCompensatingEvidence(input: EvidenceInputs): CompensatingCo
     providerProbe: input.probe,
     signatureChecks: { ...TURNKEY_SIGNER_ENFORCES },
     ...(input.rehearsal ? { rehearsal: { ...input.rehearsal } } : {}),
-    ...(input.trustCenter ? { trustCenter: { reviewedAt: input.trustCenter.reviewedAt, documents: input.trustCenter.documents.map((document) => ({ ...document })) } } : {}),
-    // The probe above engages the kill switch on any failure, so drift always stops the system (control 7).
+    // The probe above engages the kill switch on any failure, so drift always stops the system (control 6 after D-071).
     driftResponse: { killSwitchOnDrift: true },
   };
 }
@@ -149,15 +113,14 @@ const CONTROL_LABELS: Record<(typeof COMPENSATING_CONTROL_IDS)[number], string> 
   'provider-probe': 'Fresh provider check (3)',
   'signature-verification': 'Every signature checked locally (4)',
   rehearsal: 'No-broadcast rehearsal after the last change (5)',
-  'trust-center-review': 'Quarterly Trust Center review (6)',
-  'drift-response': 'Stop on drift (7)',
+  'drift-response': 'Stop on drift (6)',
 };
 
 /** Plain-language readout. It never says "TVC verified". */
 export function renderCompensatingStatus(results: readonly ControlResult[]): string {
   const lines = ['CUSTODY ASSURANCE: compensating controls (this is NOT Turnkey TVC attestation)'];
   for (const result of results) lines.push(`${result.ok ? 'OK     ' : 'MISSING'} ${CONTROL_LABELS[result.id]}${result.ok ? '' : `: ${result.reason ?? 'not satisfied'}`}`);
-  lines.push(results.every((result) => result.ok) ? 'Result: all seven controls are current. A run may arm if the service accepts this evidence kind.' : 'Result: NOT valid. A run cannot arm until every control above is OK.');
+  lines.push(results.every((result) => result.ok) ? 'Result: all six controls are current. A run may arm if the service accepts this evidence kind.' : 'Result: NOT valid. A run cannot arm until every control above is OK.');
   return lines.join('\n');
 }
 

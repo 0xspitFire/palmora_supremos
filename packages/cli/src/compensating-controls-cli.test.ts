@@ -4,12 +4,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   buildCompensatingEvidence,
-  createTrustCenterRecord,
   engageKillSwitchFile,
   evaluateStatus,
   lockfileDigest,
   parseRehearsalEvidence,
-  parseTrustCenterRecord,
   probeOrEngageKillSwitch,
   walletSetDigest,
 } from './compensating-controls-cli.js';
@@ -36,17 +34,6 @@ describe('compensating controls evidence assembly (D-058, D-059)', () => {
       await writeFile(join(root, 'pnpm-lock.yaml'), 'a: 2\n');
       expect(await lockfileDigest(root)).not.toBe(first);
     } finally { await rm(root, { recursive: true, force: true }); }
-  });
-
-  it('keeps only names, dates and digests of Trust Center documents', () => {
-    const record = createTrustCenterRecord({ reviewedAt: NOW.toISOString(), documents: [{ name: 'SOC 2', date: '2026-09-01', bytes: new TextEncoder().encode('secret report body') }] });
-    expect(JSON.stringify(record)).not.toContain('secret report body');
-    expect(record.documents[0]?.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(parseTrustCenterRecord(JSON.parse(JSON.stringify(record)))).toEqual(record);
-    expect(() => createTrustCenterRecord({ reviewedAt: NOW.toISOString(), documents: [] })).toThrow('TRUST_CENTER_DOCUMENTS_REQUIRED');
-    expect(() => createTrustCenterRecord({ reviewedAt: 'bad', documents: [{ name: 'x', date: '2026-09-01', bytes: new Uint8Array([1]) }] })).toThrow('TRUST_CENTER_REVIEW_TIME_INVALID');
-    expect(() => createTrustCenterRecord({ reviewedAt: NOW.toISOString(), documents: [{ name: 'x', date: '2026-09-01', bytes: new Uint8Array() }] })).toThrow('TRUST_CENTER_DOCUMENT_EMPTY');
-    expect(() => parseTrustCenterRecord({ version: 1, type: 'turnkey-trust-center-review', reviewedAt: NOW.toISOString(), documents: [{ name: 'x', date: 'd', sha256: 'zz' }] })).toThrow('TRUST_CENTER_RECORD_INVALID');
   });
 
   it('rejects rehearsal evidence written before the two digests existed, so the rehearsal must be repeated', () => {
@@ -89,13 +76,12 @@ describe('compensating controls evidence assembly (D-058, D-059)', () => {
       probe: { observedAt: NOW.toISOString(), status: 'ok', policyRecordDigest: RECORD },
       balances: [{ address: W1, balanceWei: 300_000_000_000_000n }, { address: W2, balanceWei: 0n }],
       rehearsal: { recordedAt: '2026-10-21T00:00:00.000Z', policyRecordDigest: RECORD, walletSetDigest: walletSetDigest([W1, W2]), lockfileDigest: `sha256:${'c'.repeat(64)}`, broadcastAttempted: false },
-      trustCenter: createTrustCenterRecord({ reviewedAt: '2026-10-10T00:00:00.000Z', documents: [{ name: 'SOC 2', date: '2026-09-01', bytes: new Uint8Array([1, 2, 3]) }] }),
       now: NOW,
       ...over,
     });
     const config = { ceilings: { 1: { walletMaxWei: 400_000_000_000_000n, fleetMaxWei: 2_000_000_000_000_000n } }, expected: { recordDigest: RECORD, walletSetDigest: walletSetDigest([W1, W2]), lockfileDigest: `sha256:${'c'.repeat(64)}` } };
 
-    it('is valid with all seven inputs and the status text never says TVC verified', () => {
+    it('is valid with all six inputs and the status text never says TVC verified', () => {
       const status = evaluateStatus(build(), config, NOW);
       expect(status.valid).toBe(true);
       expect(status.text).toContain('NOT Turnkey TVC attestation');
@@ -106,7 +92,7 @@ describe('compensating controls evidence assembly (D-058, D-059)', () => {
       const missingRehearsal = evaluateStatus(build({ rehearsal: undefined }), config, NOW);
       expect(missingRehearsal.valid).toBe(false);
       expect(missingRehearsal.text).toContain('MISSING No-broadcast rehearsal');
-      expect(evaluateStatus(build({ trustCenter: undefined }), config, NOW).text).toContain('MISSING Quarterly Trust Center review');
+      expect(evaluateStatus(build(), config, NOW).text).not.toContain('Trust Center');
       expect(evaluateStatus(undefined, config, NOW).valid).toBe(false);
     });
 

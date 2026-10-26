@@ -30,7 +30,6 @@ const controls = (): CompensatingControlsEvidence => ({
   providerProbe: { observedAt: iso(-MIN), status: 'ok', policyRecordDigest: RECORD },
   signatureChecks: { transactionMatch: true, signerRecovery: true },
   rehearsal: { recordedAt: iso(-DAY), policyRecordDigest: RECORD, walletSetDigest: WALLET_SET, lockfileDigest: LOCK, broadcastAttempted: false },
-  trustCenter: { reviewedAt: iso(-10 * DAY), documents: [{ name: 'report', date: '2026-08-01T00:00:00.000Z', sha256: 'd'.repeat(64) }] },
   driftResponse: { killSwitchOnDrift: true },
 });
 

@@ -100,7 +100,7 @@ export function assertCustodyReadiness(
   if (evidence.healthStatus !== 'healthy') throw new Error('CUSTODY_HEALTH_NOT_READY');
   if (evidence.assuranceKind === COMPENSATING_ASSURANCE_KIND) {
     // D-058/D-059: a different assurance kind. It must be explicitly accepted by the caller, may only describe Turnkey custody,
-    // never claims TVC verification, and needs every one of the seven controls to be current.
+    // never claims TVC verification, and needs every one of the six controls to be current.
     if (evidence.provider !== 'turnkey') throw new Error('CUSTODY_COMPENSATING_ASSURANCE_PROVIDER_MISMATCH');
     if (!expected) throw new Error('CUSTODY_EXPECTED_POLICY_REQUIRED');
     if (evidence.attestationStatus === 'verified') throw new Error('CUSTODY_COMPENSATED_MUST_NOT_CLAIM_TVC');

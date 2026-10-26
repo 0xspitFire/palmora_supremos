@@ -12,7 +12,7 @@ import {
   type OperationalReadiness,
 } from '@mint-bot/backend';
 import { canonicalPolicyDigest, turnkeyPolicyRecordDigest, turnkeyPolicyRef, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
-import { buildCompensatingEvidence, parseRehearsalEvidence, parseTrustCenterRecord, probeOrEngageKillSwitch } from './compensating-controls-cli.js';
+import { buildCompensatingEvidence, parseRehearsalEvidence, probeOrEngageKillSwitch } from './compensating-controls-cli.js';
 import { requiredPerWallet } from './fleet-funding-cli.js';
 
 /**
@@ -23,7 +23,7 @@ import { requiredPerWallet } from './fleet-funding-cli.js';
  *  2. The provider probe and the on-chain balances are taken in-process, just now, at every arm and execute, and recorded as the
  *     runtime's operational readiness by this code.
  *  3. The expected custody policy is derived from the verified record. Any probe failure engages the kill switch.
- *  4. Only the rehearsal and Trust Center records written earlier by separate owner-run commands are read, and they count only
+ *  4. Only the rehearsal record written earlier by a separate owner-run command is read, and it counts only
  *     when bound by digest to this record, wallet set and lockfile (the arm gate checks that).
  * Nothing here signs, broadcasts, funds or enables anything.
  */
@@ -46,7 +46,7 @@ export interface ReadinessSigner {
 
 export interface TurnkeyReadinessOptions {
   readSigned: () => Promise<{ signed: unknown; publicKey: string }>;
-  readOptional: (name: 'rehearsal' | 'trust-center') => Promise<unknown | undefined>;
+  readOptional: (name: 'rehearsal') => Promise<unknown | undefined>;
   lockfileDigest: () => Promise<string>;
   createSigner: () => Promise<ReadinessSigner>;
   readBalances: (chainId: number, addresses: readonly string[]) => Promise<ReadonlyArray<{ address: string; balanceWei: bigint }>>;
@@ -182,9 +182,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
       const balances = await step('READINESS_BALANCES_UNREADABLE', () => options.readBalances(run.chainId, record.addresses));
       const lockfileDigest = await step('READINESS_LOCKFILE_UNREADABLE', () => options.lockfileDigest());
       const rehearsalRaw = await options.readOptional('rehearsal').catch(() => undefined);
-      const trustRaw = await options.readOptional('trust-center').catch(() => undefined);
       const rehearsal = (() => { try { return rehearsalRaw === undefined ? undefined : parseRehearsalEvidence(rehearsalRaw); } catch { return undefined; } })();
-      const trustCenter = (() => { try { return trustRaw === undefined ? undefined : parseTrustCenterRecord(trustRaw); } catch { return undefined; } })();
       const evidence = await step('READINESS_EVIDENCE_FAILED', () => buildCompensatingEvidence({
         chainId: run.chainId,
         record: { digest: record.digest, issuedAt: record.issuedAt, expiresAt: record.expiresAt, wallets: record.addresses },
@@ -192,7 +190,6 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
         probe: providerProbe,
         balances,
         ...(rehearsal ? { rehearsal } : {}),
-        ...(trustCenter ? { trustCenter } : {}),
         now: at,
         balanceValiditySeconds: Math.floor(COMPENSATING_OBSERVATION_MAX_AGE_MS / 1000),
       }));
