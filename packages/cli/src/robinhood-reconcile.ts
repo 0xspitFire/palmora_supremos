@@ -39,6 +39,22 @@ export interface RobinhoodReconcileInput {
 
 const unknown = (attempts: AttemptRecord[], receipts: ReceiptRecord[], reason: string): ReconciliationUpdate => ({ result: 'unknown', attempts, receipts, reason });
 
+/**
+ * Lifecycle persistence records both the signed transaction and provider
+ * responses. Those records can describe the same canonical transaction, so
+ * reconciliation observes it once and prefers the provider-facing attempt as
+ * the receipt linkage.
+ */
+export function uniqueSubmittedAttempts(attempts: readonly AttemptRecord[]): AttemptRecord[] {
+  const unique = new Map<string, AttemptRecord>();
+  for (const attempt of attempts) {
+    const key = `${attempt.executionId}:${attempt.nonce ?? 'unknown'}:${attempt.hash?.toLowerCase() ?? attempt.id}`;
+    const existing = unique.get(key);
+    if (!existing || (existing.state === 'Signed' && attempt.state !== 'Signed')) unique.set(key, attempt);
+  }
+  return [...unique.values()];
+}
+
 /** Parses a receipt field that may arrive as a bigint, number or hex/decimal string. Anything else is "not observed". */
 export function parseGasUsedForL1(value: unknown): bigint | undefined {
   try {
@@ -59,7 +75,7 @@ export async function reconcileRobinhood(input: RobinhoodReconcileInput): Promis
   let final = 0;
   let pending = 0;
   let lowestPending: 'soft' | 'posted' = 'posted';
-  const submitted = input.attempts.filter((attempt) => attempt.hash && attempt.nonce !== undefined);
+  const submitted = uniqueSubmittedAttempts(input.attempts.filter((attempt) => attempt.hash && attempt.nonce !== undefined));
   if (submitted.length === 0) return unknown([], [], 'no persisted transaction attempts');
   for (const attempt of submitted) {
     let receipt: ObservedReceipt | null = null;

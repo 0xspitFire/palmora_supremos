@@ -25,6 +25,17 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
     expect(update.receipts[0]).toMatchObject({ state: 'Confirmed', robinhoodFinality: 'final', finalityStage: 'ethereum_final', actualSpendWei: 200_000n * 20_000_000n });
   });
 
+  it('reconciles signed and provider-accepted records for one transaction only once', async () => {
+    const signed = { ...attempt('1'), id: 'exe1:attempt:signed', state: 'Signed' as const };
+    const accepted = { ...signed, id: 'exe1:attempt:accepted', state: 'Submitted' as const };
+    const update = await run1({ attempts: [signed, accepted] });
+    expect(update.result).toBe('final');
+    expect(update.attempts).toHaveLength(1);
+    expect(update.attempts[0]?.id).toBe(accepted.id);
+    expect(update.receipts).toHaveLength(1);
+    expect(update.receipts[0]?.transactionAttemptId).toBe(accepted.id);
+  });
+
   it('adds the mint value times quantity for a successful paid-style mint and never estimates anything', async () => {
     const update = await run1({ price: 3_000_000_000_000_000n, quantity: 2 });
     expect(update.receipts[0]?.actualSpendWei).toBe(6_000_000_000_000_000n + 200_000n * 20_000_000n);
