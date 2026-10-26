@@ -34,7 +34,9 @@ import type {
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY, validBaseEnablement, validRobinhoodEnablement } from '@mint-bot/backend';
 import { promptHiddenPassphrase } from './secure-prompt.js';
 import { createNitroFinalitySources } from './robinhood-readonly.js';
-import { parseGasUsedForL1, reconcileRobinhood } from './robinhood-reconcile.js';
+import { parseGasUsedForL1, reconcileRobinhood, uniqueSubmittedAttempts } from './robinhood-reconcile.js';
+
+export { uniqueSubmittedAttempts } from './robinhood-reconcile.js';
 
 interface WalletFile {
   wallets?: Array<{ index?: number; address?: string }>;
@@ -281,22 +283,6 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
     receipts,
     state: result.dryRun ? 'Prepared' : hasPending ? 'Pending' : hasFailed ? 'Failed' : 'Confirmed',
   };
-}
-
-/**
- * Lifecycle persistence records both the signed transaction and every provider
- * response. A signed and an accepted attempt can therefore describe the same
- * canonical transaction. Reconciliation observes that transaction once and
- * prefers the provider-facing attempt as the receipt linkage.
- */
-export function uniqueSubmittedAttempts(attempts: readonly AttemptRecord[]): AttemptRecord[] {
-  const unique = new Map<string, AttemptRecord>();
-  for (const attempt of attempts) {
-    const key = `${attempt.executionId}:${attempt.nonce ?? 'unknown'}:${attempt.hash?.toLowerCase() ?? attempt.id}`;
-    const existing = unique.get(key);
-    if (!existing || (existing.state === 'Signed' && attempt.state !== 'Signed')) unique.set(key, attempt);
-  }
-  return [...unique.values()];
 }
 
 /**
