@@ -189,6 +189,7 @@ export {
   LifecycleGateError,
   assertDirectChainExecutionPolicy,
   authorizedBaseExecutionProfile,
+  authorizedRobinhoodExecutionProfile,
   assertDurableReservationProvider,
   assertSimulationFresh,
   assertTimingWindow,

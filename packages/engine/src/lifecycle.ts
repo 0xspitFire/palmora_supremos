@@ -51,6 +51,25 @@ export function authorizedBaseExecutionProfile(
 }
 
 /**
+ * Derive an executable Robinhood profile only after the owner's current grant passes the Engine gate (D-075). The early engine gate
+ * already lets 4663 through on a grant, but the broadcaster factory reads the profile's own `executionEnabled` flag, so without this
+ * the grant is honoured at one check and refused at the next. A dry run keeps the profile unchanged (it never broadcasts); a live
+ * run without a current, unexpired grant throws exactly as the policy does; a paid mint is still blocked by the policy.
+ */
+export function authorizedRobinhoodExecutionProfile(
+  config: ChainConfig,
+  dryRun: boolean,
+  grant: RobinhoodEnablementGrant | undefined,
+  now: Date = new Date(),
+  mintValueWei?: bigint,
+): ChainConfig {
+  if (config.chainId !== 4663) throw new LifecycleGateError('ROBINHOOD_PROFILE_REQUIRED', 'admission', 'Robinhood execution profile requires chain 4663');
+  assertDirectChainExecutionPolicy(4663, mintValueWei, dryRun, grant, now);
+  if (dryRun) return config;
+  return Object.freeze({ ...config, verificationStatus: 'verified' as const, executionEnabled: true });
+}
+
+/**
  * Hard chain policy. A mutable runtime flag may never turn 4663 into a live execution path: only a current, owner-written
  * grant passed in by the caller can, and without one the answer is exactly what it has always been. Dry-run inspection is
  * intentionally allowed so the chain can be characterized without signing or broadcasting.
