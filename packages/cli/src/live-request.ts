@@ -136,6 +136,9 @@ export interface LiveRequestProcessorDeps {
 
 /** Only fixed upper-case codes are kept; provider or library text never is. */
 const safeCode = (error: unknown): string => {
+  try { return safeCodeOf(error); } catch { return 'LIVE_REQUEST_FAILED'; }
+};
+const safeCodeOf = (error: unknown): string => {
   const message = error instanceof Error ? error.message : '';
   // Up to three fixed `UPPER_CASE` parts (for example READINESS_REFRESH_FAILED:FUNDING_PLAN_BLOCKED:WALLET_ABOVE_RUN_ENVELOPE) so the failing check is visible; anything else is dropped.
   const parts: string[] = [];
@@ -143,10 +146,12 @@ const safeCode = (error: unknown): string => {
   if (parts.length > 0) return parts.join(':');
   // Uncoded text (a provider, library or system error) is never kept. Only two fixed-vocabulary hints survive, so the owner can tell a permission problem from a network one: a system error code (EACCES, ETIMEDOUT) and a standard error type name.
   const hints: string[] = [];
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === 'string' && /^E[A-Z0-9]{2,20}$/.test(code)) hints.push(code);
-  const name = error instanceof Error ? error.name : '';
-  if (['TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'AbortError', 'TimeoutError'].includes(name)) hints.push(name.toUpperCase());
+  try {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (typeof code === 'string' && /^E[A-Z0-9]{2,20}$/.test(code)) hints.push(code);
+    const name = error instanceof Error ? error.name : '';
+    if (['TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'AbortError', 'TimeoutError'].includes(name)) hints.push(name.toUpperCase());
+  } catch { /* an error object that throws when read gives no hint */ }
   return ['LIVE_REQUEST_FAILED', ...hints.slice(0, 2)].join(':');
 };
 

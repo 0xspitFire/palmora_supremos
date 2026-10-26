@@ -225,5 +225,6 @@ describe('the code shown for a stopped request keeps the failing check visible (
     expect(await codeOf(new TypeError('cannot read properties of undefined'))).toBe('LIVE_REQUEST_FAILED:TYPEERROR');
     expect(await codeOf(Object.assign(new Error('x'), { code: 'not a code https://rpc.example/key' }))).toBe('LIVE_REQUEST_FAILED');
     expect(await codeOf('a thrown string')).toBe('LIVE_REQUEST_FAILED');
+    expect(await codeOf(new Proxy(new Error('x'), { get() { throw new Error('boom'); } }))).toBe('LIVE_REQUEST_FAILED');
   });
 });
