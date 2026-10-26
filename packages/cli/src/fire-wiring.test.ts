@@ -16,7 +16,7 @@ const SHORT = 151_000_000_000_000n; // 0.000151 ETH, like the real wallet
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string } = {}) {
+async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; walletsUsed?: string[]; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -46,7 +46,7 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
   const kicks: string[] = [];
   const fire = createFireWiring({
     mode: 'host', store: store as never, approve: async (validated) => { approvals.push(validated); return { id: 'approval_1' }; }, killSwitchPath,
-    readTimeoutMs: options.readTimeoutMs, fireSchedules: () => schedules, startedRequests: () => (options.started ?? []).map((item) => ({ ...item, claimedAt: options.claimedAt ?? NOW.toISOString() })), unclaimedRequests: () => requests.map((request) => ({ campaignId: String(request.campaignId), expiresAt: String(request.expiresAt) })),
+    readTimeoutMs: options.readTimeoutMs, campaignWalletsUsed: () => options.walletsUsed ?? [], fireSchedules: () => schedules, startedRequests: () => (options.started ?? []).map((item) => ({ ...item, claimedAt: options.claimedAt ?? NOW.toISOString() })), unclaimedRequests: () => requests.map((request) => ({ campaignId: String(request.campaignId), expiresAt: String(request.expiresAt) })),
     walletList: async () => options.walletsInList ?? [A, B], evmPort: async () => { throw new Error('not used'); }, evmLatestBlock: async () => { throw new Error('not used'); },
     robinhoodDryRun, robinhoodLatestBlock: async () => options.slowRead ? new Promise<{ number: bigint; hash: string }>(() => undefined) : ({ number: 99n, hash: '0xabc' }), balanceOf: async (_chain, address) => options.balances?.[address.toLowerCase()] ?? 400_000_000_000_000n, kick: () => { kicks.push('kick'); }, now: () => NOW,
   });
@@ -198,6 +198,18 @@ describe('/fire', () => {
       expect(found.wallets).toEqual([A]);
       expect(found.note).toContain('left out');
     } finally { await cleanup(t.directory); }
+  });
+
+  it('a wallet that already has an attempt on the campaign is left out by name before anything is sent (prepare a new campaign)', async () => {
+    const t = await setup({ walletsUsed: [A.toLowerCase()] });
+    const all = await setup({ walletsUsed: [A.toLowerCase(), B.toLowerCase()] });
+    try {
+      // The first wallet is used up, so (list order) nothing can go; the reason names the fix.
+      await expect(t.actions.fireNow('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/WALLET_ORDER_NOT_READY/);
+      await expect(all.actions.fireNow('campaign_abcdef12', 'all', 0.2)).rejects.toThrow(/FUNDING_NOT_ARRIVED.*prepare a new campaign/);
+      expect(t.requests).toEqual([]);
+      expect(all.requests).toEqual([]);
+    } finally { await cleanup(t.directory); await cleanup(all.directory); }
   });
 
   it('refuses before the mint opens or after it ended (suggesting /schedule), with the kill switch on, in practice mode, and for a second fire', async () => {

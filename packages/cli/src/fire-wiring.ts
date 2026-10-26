@@ -26,6 +26,8 @@ export interface FireWiringDeps {
   unclaimedRequests(): Array<{ campaignId: string; expiresAt: string }>;
   /** Requests the service has picked up (claimed as started), newest first, with when. */
   startedRequests(): Array<{ id: string; campaignId: string; claimedAt?: string }>;
+  /** Wallets (lower-case) that already have an execution record for the campaign; such a wallet cannot be used again on it. */
+  campaignWalletsUsed?(campaignId: string): string[];
   /** How long a chain read may take before the step fails by name (default 20 seconds; tests shorten it). */
   readTimeoutMs?: number;
   walletList(): Promise<string[]>;
@@ -112,7 +114,9 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     const required = requiredPerWallet(campaign);
     const funded: string[] = [];
     const short: Array<{ wallet: string; why: string }> = [];
+    const used = new Set(deps.campaignWalletsUsed?.((campaign as { id: string }).id) ?? []);
     for (const wallet of wallets) {
+      if (used.has(wallet.toLowerCase())) { short.push({ wallet, why: 'this campaign already has an attempt for this wallet (kept as a permanent record), so it cannot be used again on it: prepare a new campaign with /prepare' }); continue; }
       let balance: bigint | undefined;
       try { balance = await read(() => deps.balanceOf(campaign.chainId, wallet)); } catch { balance = undefined; }
       if (balance === undefined) short.push({ wallet, why: 'its balance could not be read' });

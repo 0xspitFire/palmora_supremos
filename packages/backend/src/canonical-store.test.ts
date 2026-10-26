@@ -268,6 +268,73 @@ describe('CanonicalStoreBridge', () => {
     } finally { await close(value); }
   });
 
+  describe('closing a failed run that sent nothing (D-074)', () => {
+    const policy = (overrides: Partial<FleetSpendPolicy>): FleetSpendPolicy => ({ ...OPEN_FLEET_POLICY, ...overrides });
+    it('closes an armed run that never reached admission, and the service then starts clean', async () => {
+      const value = await fixture(ETHEREUM);
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM));
+        expect(await value.store.abortRunIfUnsent(prepared.run.id, 'REQUEST_FAILED')).toBe('closed');
+        expect(value.store.snapshot().runs.find((run) => run.id === prepared.run.id)?.state).toBe('Aborted');
+        expect(await value.store.abortRunIfUnsent(prepared.run.id, 'REQUEST_FAILED')).toBe('absent');
+        await new ExecutionCoordinator(value.store, noopEngine).start();
+        expect(value.store.snapshot().runtime.startupState).toBe('Ready');
+      } finally { await close(value); }
+    });
+
+    it('closes an admitted run with no attempt, releases only its reserved money, and frees the budget', async () => {
+      const value = await fixture(ETHEREUM, false, true, undefined, true, policy({ freeDailyCapWei: 34n }));
+      try {
+        const first = await armed(value, await campaign(value, ETHEREUM));
+        const other = await armed(value, await campaign(value, ETHEREUM));
+        await value.store.admitExecution(first.input);
+        expect(await value.store.abortRunIfUnsent(first.run.id, 'REQUEST_FAILED')).toBe('closed');
+        const rows = value.db.prepare('SELECT e.state AS execution, r.status AS reservation FROM execution e JOIN spend_reservation r ON r.execution_id = e.id').all() as Array<{ execution: string; reservation: string }>;
+        expect(rows).toEqual([{ execution: 'aborted', reservation: 'released' }]);
+        // The other armed run is untouched, and the released budget can be used again.
+        expect(value.store.snapshot().runs.find((run) => run.id === other.run.id)?.state).not.toBe('Aborted');
+        expect((await value.store.admitExecution(other.input)).reservations).toHaveLength(1);
+      } finally { await close(value); }
+    });
+
+    it('leaves a run alone when any attempt exists, even one without a hash, or a hash was recorded (fail closed)', async () => {
+      const value = await fixture(ETHEREUM, false, true, undefined, true, policy({}));
+      try {
+        const noHash = await armed(value, await campaign(value, ETHEREUM));
+        const admitted = await value.store.admitExecution(noHash.input);
+        const attempt: AttemptRecord = { id: 'attempt-no-hash', executionId: admitted.executions[0]!.executionId, runId: noHash.run.id, wallet: WALLET_ONE, nonce: 1, state: 'Prepared', createdAt: NOW, updatedAt: NOW } as AttemptRecord;
+        await value.store.transaction((state) => { state.attempts.push(attempt); });
+        expect(await value.store.abortRunIfUnsent(noHash.run.id, 'REQUEST_FAILED')).toBe('left');
+        expect(value.db.prepare("SELECT status FROM spend_reservation WHERE execution_id = ?").get(admitted.executions[0]!.executionId)).toEqual({ status: 'reserved' });
+        expect(value.store.snapshot().runs.find((run) => run.id === noHash.run.id)?.state).not.toBe('Aborted');
+        expect(await value.store.abortRunIfUnsent('run-that-does-not-exist', 'REQUEST_FAILED')).toBe('absent');
+      } finally { await close(value); }
+    });
+
+    it('a second run for the same campaign and wallet is refused with a plain code, not a database error', async () => {
+      const value = await fixture(ETHEREUM);
+      try {
+        const campaignValue = await campaign(value, ETHEREUM);
+        const first = await armed(value, campaignValue);
+        await value.store.admitExecution(first.input);
+        expect(await value.store.abortRunIfUnsent(first.run.id, 'REQUEST_FAILED')).toBe('closed');
+        expect(value.store.campaignWalletsUsed(campaignValue.id)).toEqual([WALLET_ONE.toLowerCase()]);
+        const second = await armed(value, campaignValue, [WALLET_ONE], [], '-retry');
+        await expect(value.store.admitExecution(second.input)).rejects.toThrow('CAMPAIGN_WALLET_ALREADY_USED');
+      } finally { await close(value); }
+    });
+
+    it('leaves a run alone when an execution is past prepared (signed or submitted)', async () => {
+      const value = await fixture(ETHEREUM);
+      try {
+        const prepared = await armed(value, await campaign(value, ETHEREUM));
+        const admitted = await value.store.admitExecution(prepared.input);
+        value.db.prepare("UPDATE execution SET state = 'signed' WHERE id = ?").run(admitted.executions[0]!.executionId);
+        expect(await value.store.abortRunIfUnsent(prepared.run.id, 'REQUEST_FAILED')).toBe('left');
+      } finally { await close(value); }
+    });
+  });
+
   it('keeps startup blocked when an armed run has no authoritative reconciliation', async () => {
     const value = await fixture(ETHEREUM);
     try {

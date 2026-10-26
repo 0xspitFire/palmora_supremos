@@ -130,7 +130,9 @@ export interface LiveRequestProcessorDeps {
   command(name: 'arm' | 'run', input: Record<string, unknown>): Promise<{ id: string; state?: string }>;
   /** The fee ceiling the engine signs with for this campaign's run. */
   setFeeCeiling(campaignId: string, gwei: number | undefined): void;
-  record(event: { requestId: string; runId?: string; state: 'finished' | 'stopped' | 'expired'; code?: string }): Promise<void>;
+  record(event: { requestId: string; runId?: string; state: 'finished' | 'stopped' | 'expired'; code?: string; runClosed?: 'closed' | 'left' | 'absent' }): Promise<void>;
+  /** D-074: closes the run this request armed when the request failed, if the store proves nothing of it was sent. Best effort: a failure here never changes the outcome. */
+  closeRun?(runId: string): Promise<'closed' | 'left' | 'absent'>;
   /** Host journal only (never Telegram or the stored result): what an uncoded failure looked like, cleaned by `describeFailure`. */
   failed?(requestId: string, detail: FailureDetail): void | Promise<void>;
   now(): Date;
@@ -212,7 +214,10 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
       // Only an uncoded failure is described for the journal; a coded one already says everything.
       if (result.code === 'LIVE_REQUEST_FAILED' || result.code?.startsWith('LIVE_REQUEST_FAILED:')) { try { void Promise.resolve(deps.failed?.(request.id, describeFailure(error))).catch(() => undefined); } catch { /* the journal never changes the outcome */ } }
     }
-    await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), ...result });
+    // D-074: a request that failed after its run was armed must not leave the run open (it would block the service and, if admitted, hold reserved money).
+    let closed: 'closed' | 'left' | 'absent' | undefined;
+    if (result.state === 'stopped' && runId && deps.closeRun) { try { closed = await deps.closeRun(runId); } catch { closed = undefined; } }
+    await deps.record({ requestId: request.id, ...(runId ? { runId } : {}), ...result, ...(closed ? { runClosed: closed } : {}) });
   }
   return handled;
 }

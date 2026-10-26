@@ -75,6 +75,8 @@ export interface CanonicalAdmissionResult {
 export interface CanonicalExecutionStore extends BackendStore {
   admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult>;
   abortRemaining(reason: string): Promise<void>;
+  /** D-074: closes ONE run that provably sent nothing (see the implementation); any doubt leaves it for reconciliation. */
+  abortRunIfUnsent?(runId: string, reason: string): Promise<'closed' | 'left' | 'absent'>;
   /** Key 2 for Robinhood (D-040): the owner's enablement record, or undefined when there is none. */
   robinhoodEnablement?(): unknown;
   baseEnablement?(): unknown;
@@ -739,7 +741,13 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         if (existing?.status === 'released' || existing?.status === 'expired') throw new Error('RESERVATION_IDEMPOTENCY_REPLAY');
         if (existing && existing.request_fingerprint !== null && existing.request_fingerprint !== requestFingerprint) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
         if (!this.db.prepare('SELECT id FROM execution WHERE id = ?').get(executionId)) {
-          this.databaseStore.saveExecution({ id: executionId, campaignId: input.campaign.id, walletId: canonicalWallet.walletId, transactionIntentId: intentId, state: 'prepared', runId: input.run.id, createdAt: admissionIso, updatedAt: admissionIso });
+          try {
+  this.databaseStore.saveExecution({ id: executionId, campaignId: input.campaign.id, walletId: canonicalWallet.walletId, transactionIntentId: intentId, state: 'prepared', runId: input.run.id, createdAt: admissionIso, updatedAt: admissionIso });
+          } catch (error) {
+            // One execution record per campaign and wallet is kept for good (it stops a second mint for the same campaign); say so plainly (D-074 part 3).
+            if (error instanceof Error && error.message.includes('UNIQUE constraint failed: execution.campaign_id, execution.wallet_id')) throw new Error('CAMPAIGN_WALLET_ALREADY_USED');
+            throw error;
+          }
           this.recordLifecycle({ id: `transition_${randomUUID()}`, entityType: 'execution', entityId: executionId, newState: 'prepared', actor: this.actor, source: 'backend-admission', reason: 'pre-action execution persisted before reservation and engine side effect', policyVersion: 'phase1', occurredAt: admissionIso });
         }
         if (!existing) {
@@ -801,6 +809,35 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       this.db.prepare("UPDATE execution_run SET state = 'aborted', updated_at = ? WHERE state IN ('prepared', 'active', 'recovering')").run(this.now().toISOString());
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'state_transition', entityId: 'global', newState: 'aborted', actor: this.actor, reason, policySnapshot: { kind: 'event', eventType: 'kill', eventData: { reason } }, occurredAt: this.now().toISOString() });
       this.db.exec('COMMIT');
+    } catch (error) {
+      if (this.db.inTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /**
+   * D-074: closes one open run after its request failed, but only when nothing of it can have been sent. Every execution of the
+   * run must still be `prepared` (or already `aborted`) and have NO transaction attempt row at all, not even one without a hash:
+   * any attempt, any later state, or any doubt leaves the run exactly as it is for reconciliation. For a run that qualifies the
+   * unsent executions are aborted and their still-`reserved` money is released (a run that never reached admission has neither).
+   * It never engages the kill switch and never touches another run.
+   */
+  public async abortRunIfUnsent(runId: string, reason: string): Promise<'closed' | 'left' | 'absent'> {
+    this.ensureOpen();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const run = this.db.prepare('SELECT state FROM execution_run WHERE id = ?').get(runId) as { state: string } | undefined;
+      if (!run || !['prepared', 'active', 'recovering'].includes(run.state)) { this.db.exec('COMMIT'); return 'absent'; }
+      const rows = this.db.prepare('SELECT e.id, e.state, EXISTS (SELECT 1 FROM transaction_attempt a WHERE a.execution_id = e.id) AS attempted FROM execution e WHERE e.run_id = ?').all(runId) as Array<{ id: string; state: string; attempted: number }>;
+      if (rows.some((row) => row.attempted === 1 || !['prepared', 'aborted'].includes(row.state))) { this.db.exec('COMMIT'); return 'left'; }
+      for (const row of rows) {
+        if (row.state !== 'aborted') this.transitionExecution(row.id, 'aborted', 'request failed', reason);
+        this.db.prepare("UPDATE spend_reservation SET status = 'released' WHERE execution_id = ? AND status = 'reserved'").run(row.id);
+      }
+      this.db.prepare("UPDATE execution_run SET state = 'aborted', updated_at = ? WHERE id = ?").run(this.now().toISOString(), runId);
+      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution_run', entityId: runId, newState: 'aborted', actor: this.actor, reason, policySnapshot: { kind: 'event', eventType: 'run_closed_unsent', eventData: { reason } }, occurredAt: this.now().toISOString() });
+      this.db.exec('COMMIT');
+      return 'closed';
     } catch (error) {
       if (this.db.inTransaction) this.db.exec('ROLLBACK');
       throw error;
@@ -1339,6 +1376,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   /** T-058: owner command only. */
   public recordLiveRunRequest(input: LiveRunRequestRecord): void { this.ensureOpen(); this.databaseStore.recordLiveRunRequest(input); }
   /** T-058: the host service's view of requests it has not claimed. */
+  /** D-074 part 3: the wallets (lower-case) that already have an execution record for this campaign. Read only. */
+  public campaignWalletsUsed(campaignId: string): string[] {
+    this.ensureOpen();
+    return (this.db.prepare('SELECT DISTINCT lower(w.address) AS address FROM execution e JOIN wallet w ON w.id = e.wallet_id WHERE e.campaign_id = ?').all(campaignId) as Array<{ address: string }>).map((row) => row.address);
+  }
   public unclaimedLiveRunRequests(): LiveRunRequestRecord[] { this.ensureOpen(); return this.databaseStore.unclaimedLiveRunRequests(); }
   public claimLiveRunRequest(requestId: string, outcome: 'started' | 'expired' | 'cancelled'): boolean { this.ensureOpen(); return this.databaseStore.claimLiveRunRequest(requestId, outcome, this.now().toISOString()); }
   /** T-061: the newest live requests and what happened to each, for the owner's `/requests`. */

@@ -33,6 +33,7 @@ export const REASON_WORDS: Readonly<Record<string, string>> = {
   WALLET_ORDER_NOT_READY: 'wallets are used in list order and an earlier wallet is not ready',
   WALLET_SELECTION_NOT_REPRESENTABLE: 'the wallets chosen are not the first wallets of the list, which is what the engine uses',
   STARTUP_RECONCILIATION_REQUIRED: 'the service is still finishing its start-up check; wait a minute and try again',
+  CAMPAIGN_WALLET_ALREADY_USED: 'this campaign already has an attempt for this wallet, so it cannot be used again on it; prepare a new campaign',
   LIVE_REQUEST_FAILED: 'the run failed with an error the bot does not show (the part after the colon is a safe hint)',
 };
 

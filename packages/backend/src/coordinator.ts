@@ -269,9 +269,23 @@ export class ExecutionCoordinator {
     });
   }
 
+  /**
+   * D-074: after a live request failed, closes that one run if nothing of it can have been sent (the store decides, and any doubt
+   * leaves the run for reconciliation). It is not the kill switch and never touches another run.
+   */
+  async closeUnsentRun(runId: string, reason: string): Promise<'closed' | 'left' | 'absent'> {
+    const canonical = this.canonicalStore();
+    if (!canonical?.abortRunIfUnsent) return 'absent';
+    const outcome = await canonical.abortRunIfUnsent(runId, reason);
+    if (outcome === 'closed') await this.store.transaction(state => { state.events.push(this.event('run_closed_unsent', runId, { reason })); });
+    return outcome;
+  }
+
   async reconcile(): Promise<void> {
     const snapshot = this.store.snapshot();
-    const candidates = snapshot.runs.filter(run => ['Armed', 'Active', 'Completed'].includes(run.state) || (run.state === 'Aborted' && snapshot.attempts.some(attempt => attempt.runId === run.id && attempt.hash)));
+    // D-072: a completed run whose latest reconciliation is already final cannot change any more, so it is not read again every pass.
+    const settledFinal = (runId: string): boolean => snapshot.reconciliations.filter(item => item.runId === runId).at(-1)?.result === 'final';
+    const candidates = snapshot.runs.filter(run => (['Armed', 'Active'].includes(run.state) || (run.state === 'Completed' && !settledFinal(run.id))) || (run.state === 'Aborted' && snapshot.attempts.some(attempt => attempt.runId === run.id && attempt.hash)));
     for (const candidate of candidates) {
       const snapshot = this.store.snapshot();
       const run = snapshot.runs.find(item => item.id === candidate.id);

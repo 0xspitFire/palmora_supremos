@@ -322,16 +322,44 @@ describe('phase 2 operations', () => {
     });
 
     it('keeps any other blocking reason after the file is removed (fail closed)', async () => {
-      const { root, store, orchestrator, release } = await setup({ reasons: ['UNRESOLVED_EXECUTIONS'] });
+      const { root, store, orchestrator, release } = await setup({ reasons: ['RECONCILIATION_FAILED'] });
       try {
         await orchestrator.start();
         await orchestrator.tick();
         release();
         await orchestrator.tick();
         expect(store.snapshot().runtime.startupState).toBe('Blocked');
-        expect(store.snapshot().runtime.blockingReasons).toEqual(['UNRESOLVED_EXECUTIONS']);
+        expect(store.snapshot().runtime.blockingReasons).toEqual(['RECONCILIATION_FAILED']);
         await orchestrator.stop();
       } finally { await rm(root, { recursive: true, force: true }); }
+    });
+
+    it('lifts a stale UNRESOLVED_EXECUTIONS block once no run is unresolved (D-072), and only that reason', async () => {
+      const { root, store, orchestrator, release } = await setup({ reasons: ['UNRESOLVED_EXECUTIONS'] });
+      try {
+        await orchestrator.start();
+        await orchestrator.tick();
+        release();
+        await orchestrator.tick();
+        expect(store.snapshot().runtime).toMatchObject({ startupState: 'Ready', blockingReasons: [] });
+        await orchestrator.stop();
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+
+    it('keeps UNRESOLVED_EXECUTIONS while a run really is unresolved, or another reason or the kill command remains (fail closed)', async () => {
+      const running = await setup({ reasons: ['UNRESOLVED_EXECUTIONS'], activeRun: true });
+      const other = await setup({ reasons: ['UNRESOLVED_EXECUTIONS', 'RECONCILIATION_FAILED'] });
+      const killed = await setup({ reasons: ['UNRESOLVED_EXECUTIONS'], killed: true });
+      try {
+        for (const item of [running, other, killed]) { await item.orchestrator.start(); item.release(); await item.orchestrator.tick(); await item.orchestrator.tick(); }
+        expect(running.store.snapshot().runtime.startupState).toBe('Blocked');
+        expect(running.store.snapshot().runtime.blockingReasons).toContain('UNRESOLVED_EXECUTIONS');
+        expect(other.store.snapshot().runtime.startupState).toBe('Blocked');
+        expect(other.store.snapshot().runtime.blockingReasons).toEqual(['RECONCILIATION_FAILED']);
+        expect(killed.store.snapshot().runtime.startupState).toBe('Blocked');
+        expect(killed.store.snapshot().runtime.blockingReasons).toContain('UNRESOLVED_EXECUTIONS');
+        for (const item of [running, other, killed]) await item.orchestrator.stop();
+      } finally { await Promise.all([running, other, killed].map((item) => rm(item.root, { recursive: true, force: true }))); }
     });
   });
 });

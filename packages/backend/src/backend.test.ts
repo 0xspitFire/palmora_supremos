@@ -237,6 +237,20 @@ describe('backend Phase 1 blockers', () => {
     expect(store.snapshot().runtime.startupState).toBe('Blocked'); expect(store.snapshot().runtime.blockingReasons).toContain('UNRESOLVED_EXECUTIONS');
   });
 
+  it('periodic reconcile no longer reads a completed run whose latest result is final (D-072), but still reads one that is not', async () => {
+    const store = new ReadyStore(); const input = await readyLiveInput(store);
+    let reads = 0;
+    const coordinator = new ExecutionCoordinator(store, engine({ reconcile: async () => { reads += 1; return unknownUpdate; } }));
+    const run = await coordinator.arm(input, 'live');
+    const setResult = (result: 'final' | 'confirmed') => store.transaction(state => { const current = state.runs.find(item => item.id === run.id)!; current.state = 'Completed'; state.reconciliations.push({ id: `rec_${result}`, runId: run.id, result, observedAt: new Date().toISOString() }); });
+    await setResult('confirmed');
+    await coordinator.reconcile();
+    expect(reads).toBe(1);
+    await setResult('final');
+    await coordinator.reconcile();
+    expect(reads).toBe(1);
+  });
+
   it('does not execute Robinhood even when synthetic finality facts are supplied', async () => {
     const store = new ReadyStore(); const input = await readyLiveInput(store);
     const adapter = engine({
