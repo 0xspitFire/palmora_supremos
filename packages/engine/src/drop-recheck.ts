@@ -18,17 +18,29 @@ const plain = (value: unknown): string => JSON.stringify(value, (_key, item: unk
   return item;
 });
 
+/**
+ * Only keys the contract itself sets are compared. `totalSupplyKnown` / `maxSupplyKnown` describe whether an OPTIONAL read worked,
+ * and the fee recipient falls back to a default when the allowed-recipient read fails, so none of those can prove a change: a
+ * flaky node must never stop a good mint. The fee recipient is covered through `restrictFeeRecipients` and `feeBps`.
+ */
+const STABLE_SETTINGS = ['feeBps', 'restrictFeeRecipients', 'seaDropAddress'] as const;
+const OPTIONAL_READ_FLAGS = ['totalSupplyKnown', 'maxSupplyKnown'] as const;
+
+/** True when an optional read worked for one reading but not the other, so supply-based comparisons would be meaningless. */
+export function isPartialReading(initial: DropConfig, current: DropConfig): boolean {
+  return OPTIONAL_READ_FLAGS.some((key) => initial.extra?.[key] !== current.extra?.[key]);
+}
+
 /** Names (never values) of what changed, or undefined when nothing that matters changed. */
 export function describeDropChange(initial: DropConfig, current: DropConfig, validation: DropValidation): string | undefined {
   const changed: string[] = [];
   if (initial.nftContract.toLowerCase() !== current.nftContract.toLowerCase()) changed.push('contract');
   if (initial.mintPrice !== current.mintPrice) changed.push('price');
   if (initial.maxTotalMintableByWallet !== current.maxTotalMintableByWallet) changed.push('per-wallet limit');
-  if (initial.maxTokenSupply !== current.maxTokenSupply) changed.push('supply');
+  if (initial.extra?.['maxSupplyKnown'] === true && current.extra?.['maxSupplyKnown'] === true && initial.maxTokenSupply !== current.maxTokenSupply) changed.push('supply');
   if (initial.startTime !== current.startTime) changed.push('start time');
   if (initial.endTime !== current.endTime) changed.push('end time');
-  if (initial.feePayer.toLowerCase() !== current.feePayer.toLowerCase()) changed.push('fee recipient');
-  if (plain(initial.extra ?? {}) !== plain(current.extra ?? {})) changed.push('contract settings');
+  if (STABLE_SETTINGS.some((key) => plain(initial.extra?.[key]) !== plain(current.extra?.[key]))) changed.push('contract settings');
   if (!validation.valid) changed.push('drop no longer valid (ended or sold out)');
   return changed.length > 0 ? changed.join(', ') : undefined;
 }
@@ -47,14 +59,21 @@ export function createDropRecheck(options: DropRecheckOptions): () => Promise<st
   const now = options.now ?? (() => Date.now());
   const reuseMs = options.reuseMs ?? DROP_RECHECK_REUSE_MS;
   let cached: { at: number; result: Promise<string | undefined | 'unknown'> } | undefined;
+  // Once a change is seen the run stays stopped: a later read that happens to match the original (a flaky or lagging node) must not un-stop it.
+  let latched: string | undefined;
   const run = async (): Promise<string | undefined | 'unknown'> => {
+    if (latched) return latched;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const read = await Promise.race([
         options.read(),
         new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('DROP_RECHECK_TIMEOUT')), options.timeoutMs ?? DROP_RECHECK_TIMEOUT_MS); }),
       ]);
-      return describeDropChange(options.initial, read.drop, read.validation);
+      // A partly failed reading (an optional supply read worked before but not now, or the reverse) is "unknown", never a change.
+      if (isPartialReading(options.initial, read.drop)) { options.onUnavailable?.(); return 'unknown'; }
+      const change = describeDropChange(options.initial, read.drop, read.validation);
+      if (change) latched = change;
+      return change;
     } catch {
       options.onUnavailable?.();
       return 'unknown';

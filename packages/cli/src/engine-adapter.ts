@@ -235,6 +235,9 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
     const transactionIntentId = wallet.transactionIntentId;
     if (!executionId || !transactionIntentId) {
       if (result.dryRun) continue;
+      // A wallet stopped before anything was prepared (for example CAMPAIGN_CHANGED_MID_RUN, D-081) has no execution, attempt or
+      // reservation. It must not make the wallets that WERE sent unmappable. Anything that may have been signed or sent still throws.
+      if ((wallet.status === 'skipped' || wallet.status === 'killed') && wallet.txHash === undefined && (wallet.attemptIds?.length ?? 0) === 0 && wallet.reservationId === undefined) { hasFailed = true; continue; }
       throw new Error('ENGINE_IDENTITY_REQUIRED');
     }
     const attemptIds = [...(wallet.attemptIds ?? [])];
