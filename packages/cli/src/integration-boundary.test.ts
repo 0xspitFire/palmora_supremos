@@ -26,6 +26,19 @@ describe('CLI integration boundary', () => {
     const incomplete = { ...result, walletResults: [{ ...result.walletResults[0]!, executionId: undefined, transactionIntentId: undefined }] };
     expect(() => mapResult(incomplete, 'backend-run', campaign)).toThrow('ENGINE_IDENTITY_REQUIRED');
     expect(mapResult({ ...incomplete, dryRun: true }, 'backend-run', campaign).executionIds).toEqual([]);
+
+    // D-081: a wallet stopped before anything was prepared must not make the sent wallet unmappable.
+    const stopped = { walletIndex: 1, address: '0x2222222222222222222222222222222222222222' as `0x${string}`, status: 'skipped' as const, error: 'CAMPAIGN_CHANGED_MID_RUN: price', durationMs: 1 };
+    const mixed = mapResult({ ...result, walletResults: [...result.walletResults, stopped] }, 'backend-run', campaign);
+    expect(mixed.executionIds).toEqual(['execution-canonical']);
+    expect(mixed.attempts.map((attempt) => attempt.id)).toEqual(['execution-canonical:attempt:signed', 'execution-canonical:attempt:broadcast']);
+    expect(mixed.state).toBe('Pending');
+    const onlyStopped = mapResult({ ...result, walletResults: [stopped] }, 'backend-run', campaign);
+    expect(onlyStopped).toMatchObject({ executionIds: [], state: 'Failed' });
+    // Anything that may have been signed or sent, or that holds a reservation, still fails closed without an identity.
+    for (const unsafe of [{ ...stopped, txHash: `0x${'a'.repeat(64)}` as `0x${string}` }, { ...stopped, attemptIds: ['a'] }, { ...stopped, reservationId: 'r' }, { ...stopped, status: 'failed' as const }, { ...stopped, status: 'timeout' as const }]) {
+      expect(() => mapResult({ ...result, walletResults: [unsafe] }, 'backend-run', campaign)).toThrow('ENGINE_IDENTITY_REQUIRED');
+    }
   });
 
   it('does not retain the direct engine execution bypass', async () => {

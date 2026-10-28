@@ -15,6 +15,7 @@
 
 import { keccak256, type Hex, type Hash } from 'viem';
 import type { Broadcaster, BroadcastResult, BroadcastOptions } from '../types.js';
+import { sendSignal } from './send-timeout.js';
 
 /** Pre-computed blast payload for a single endpoint. */
 interface BlastPayload {
@@ -85,6 +86,7 @@ export class BlastBroadcaster implements Broadcaster {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: warmupBody,
+          signal: sendSignal(),
         });
       } catch {
         // Warmup failure is non-fatal — the endpoint may still work at fire time
@@ -107,6 +109,7 @@ export class BlastBroadcaster implements Broadcaster {
           method: 'POST',
           headers: payload.headers,
           body: payload.body,
+          signal: sendSignal(),
         });
 
         const data = await response.json() as { result?: Hash; error?: { message: string } };
