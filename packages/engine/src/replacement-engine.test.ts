@@ -323,6 +323,18 @@ describe('T-094 replacement through the real engine flow', () => {
     await running;
   });
 
+  it('also re-runs the store live gate inside the admission gate right before signing', async () => {
+    let calls = 0;
+    const h = harness(config(), { reconfirmRefuses: () => { calls += 1; return calls === 2; } }); // passes the pre-check, refuses the in-gate re-run
+    const running = h.run();
+    await tick(20_000);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(h.signed).toHaveLength(1);
+    h.mine(h.hashOf(0));
+    await tick(1_500);
+    await running;
+  });
+
   it('refuses to replace when the store provider has no live gate to re-run (fail closed)', async () => {
     const h = harness(config(), { noReconfirm: true });
     const running = h.run();

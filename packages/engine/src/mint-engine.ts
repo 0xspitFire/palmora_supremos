@@ -1038,6 +1038,8 @@ export class MintEngine {
               gateRelease = release;
               try {
                 this.checkKill();
+                // Inside the admission gate, right before signing: the store's live gate once more, so a revocation between the pre-checks and now is seen.
+                await this.reservationProvider?.reconfirm?.(reserveRequest);
                 if (next.maxFeePerGas > replacement.ceiling.maxFeePerGas || next.maxPriorityFeePerGas > replacement.ceiling.maxPriorityFeePerGas) throw new Error('REPLACEMENT_ABOVE_CEILING');
                 // Only the fees differ from the checked, reserved transaction: calldata, value, gas limit, nonce and sender are the same.
                 const replacementIntent: TransactionIntent = { ...intent, maxFeePerGas: next.maxFeePerGas, maxPriorityFeePerGas: next.maxPriorityFeePerGas };
@@ -1271,7 +1273,7 @@ export class MintEngine {
               originalHash: submittedHash,
               // T-094: once a replacement was sent, the nonce being used may be OUR replacement, which is not a foreign transaction.
               // Without replacements nothing is passed and the old behaviour is unchanged.
-              ...(Object.keys(attemptHashes).length > 0 ? { ownHashes: [submittedHash, ...Object.values(attemptHashes)] } : {}),
+              ...(new Set(Object.values(attemptHashes).map((hash) => hash.toLowerCase())).size > 1 ? { ownHashes: [submittedHash, ...Object.values(attemptHashes)] } : {}),
               observedHash: submittedHash,
               receiptVisible: false,
               nonceConsumedByDifferentHash,
