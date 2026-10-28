@@ -62,7 +62,7 @@ import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js
 import { CAMPAIGN_CHANGED_MID_RUN, createDropRecheck } from './drop-recheck.js';
 import { assertSignedMatchesIntent, reserveThenSign, robinhoodL1DataGasWei } from './pre-sign.js';
 import { runReplacementLadder, type LadderDeps } from './replacement-ladder.js';
-import { requiredCeiling, type Fees } from './replacement-policy.js';
+import { ceilingWithinPolicy, requiredCeiling, type Fees } from './replacement-policy.js';
 import { quoteBaseFeeBound } from './base-fees.js';
 import { NonceManagerImpl } from './nonce-manager.js';
 import { ReceiptReorgedError, ReceiptTimeoutError, ReceiptWatcherImpl } from './receipt-watcher.js';
@@ -198,6 +198,8 @@ export class MintEngine {
   private readonly requestFingerprint?: string;
   private readonly identityForWallet?: MintEngineOptions['identityForWallet'];
   private readonly now: () => Date;
+  /** T-094: executions whose replacement ladder already ran in this process. A ladder never starts twice for one execution, so its bump count cannot be reset. */
+  private readonly laddersStarted = new Set<string>();
 
   constructor(config: MintJobConfig, options?: MintEngineOptions) {
     this.config = config;
@@ -907,8 +909,8 @@ export class MintEngine {
         let broadcastResults: BroadcastResult[];
         try {
           broadcastResults = await broadcaster.broadcast([signedTx], broadcaster.name === 'flashbots'
-            ? { targetBlock: (await publicClient.getBlockNumber()) + 1n, maxBumps: this.config.safety.maxReplacementBumps }
-            : { maxBumps: this.config.safety.maxReplacementBumps });
+            ? { targetBlock: (await publicClient.getBlockNumber()) + 1n, maxBumps: replacement ? 0 : this.config.safety.maxReplacementBumps }
+            : { maxBumps: replacement ? 0 : this.config.safety.maxReplacementBumps });
           const observed = broadcastResults.find((result) => result.success || result.ambiguous || classifyBroadcastResult(result) === 'ambiguous' || classifyBroadcastResult(result) === 'timeout');
           if (observed) submittedHash = observed.txHash !== '0x' ? observed.txHash : signedHash;
         } catch (error) {
@@ -993,7 +995,8 @@ export class MintEngine {
         const acceptedAttemptByHash = new Map<string, string>([[firstHash.toLowerCase(), submissionAttemptId ?? attemptIds[0]!]]);
         let watched: import('viem').Hash[] = [firstHash];
         let winnerHint: import('viem').Hash | undefined;
-        if (replacement) {
+        if (replacement && !this.laddersStarted.has(executionId!)) {
+          this.laddersStarted.add(executionId!);
           // Both are set long before a transaction can be sent; captured here so the closures below keep their types.
           const exId = executionId!;
           const intId = transactionIntentId!;
@@ -1015,8 +1018,14 @@ export class MintEngine {
                 this.checkKill();
                 assertDirectChainExecutionPolicy(chainId, drop.mintPrice * BigInt(this.config.target.quantity), this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
               } catch (error) { return error instanceof MintError ? error.type : 'REPLACEMENT_NOT_PERMITTED'; }
-              const changed = await recheckDrop?.();
-              if (changed && changed !== 'unknown') return `${CAMPAIGN_CHANGED_MID_RUN}: ${changed}`;
+              // The store's own live gate, exactly as before the first signature: stored owner enablement still current, store kill flag, reservation still held.
+              const provider = this.reservationProvider;
+              if (!provider?.reconfirm) return 'REPLACEMENT_GATE_UNAVAILABLE';
+              try { await provider.reconfirm(reserveRequest); } catch (error) { return `REPLACEMENT_GATE_REFUSED: ${redactProviderError(error instanceof Error ? error.message : String(error)).slice(0, 80)}`; }
+              try {
+                const changed = await recheckDrop?.();
+                if (changed && changed !== 'unknown') return `${CAMPAIGN_CHANGED_MID_RUN}: ${changed}`;
+              } catch { /* an unreadable drop never adds a refusal; the simulation below still gates the replacement */ }
               try {
                 const fresh = await simulateMint(publicClient, strategy, drop, walletAddress, this.config.target.quantity, value, walletIndex, this.now());
                 if (!fresh.success) return 'REPLACEMENT_SIMULATION_FAILED';
@@ -1051,6 +1060,8 @@ export class MintEngine {
                 attemptIds.push(signedAttemptId);
                 attemptHashes[signedAttemptId] = replacementHash;
                 attemptReplacements[signedAttemptId] = replacesAttemptId;
+                // Until a broadcast attempt is stored, this signed attempt (same hash) is the one a receipt for this hash links to.
+                acceptedAttemptByHash.set(replacementHash.toLowerCase(), signedAttemptId);
                 return { signedTx: replacementSigned, hash: replacementHash, attemptId: signedAttemptId };
               } catch (error) {
                 gateRelease = undefined;
@@ -1258,6 +1269,9 @@ export class MintEngine {
             ? { state: 'reorged' as const, reason: err.message, blockNumber: err.blockNumber }
             : reconcileByHashAndNonce({
               originalHash: submittedHash,
+              // T-094: once a replacement was sent, the nonce being used may be OUR replacement, which is not a foreign transaction.
+              // Without replacements nothing is passed and the old behaviour is unchanged.
+              ...(Object.keys(attemptHashes).length > 0 ? { ownHashes: [submittedHash, ...Object.values(attemptHashes)] } : {}),
               observedHash: submittedHash,
               receiptVisible: false,
               nonceConsumedByDifferentHash,
@@ -1380,6 +1394,18 @@ export class MintEngine {
     try { needed = requiredCeiling(first, maxBumps); } catch { throw new MintError(MintErrorType.INVALID_CONFIG, 'Replacement settings are invalid'); }
     if (needed.maxFeePerGas > ceiling.maxFeePerGas || needed.maxPriorityFeePerGas > ceiling.maxPriorityFeePerGas || ceiling.maxPriorityFeePerGas > ceiling.maxFeePerGas) {
       throw new MintError(MintErrorType.INVALID_CONFIG, 'Replacement ceiling is too low for the configured number of replacements');
+    }
+    // The signed provider policy pins a maximum for each fee. The ceiling is fixed here and used for the whole run (never re-read from live config).
+    const limits = configured.policyLimits;
+    const policy: Fees | undefined = limits ? { maxFeePerGas: parseGwei(limits.maxFeePerGasGwei.toString()), maxPriorityFeePerGas: parseGwei(limits.maxPriorityFeePerGasGwei.toString()) } : undefined;
+    if (!policy || !ceilingWithinPolicy(ceiling, policy)) {
+      throw new MintError(MintErrorType.INVALID_CONFIG, 'Replacement ceiling is not inside the signed provider policy limits');
+    }
+    // And inside what the owner themselves approved for this campaign.
+    const cap = configured.ownerCap;
+    const owner: Fees | undefined = cap ? { maxFeePerGas: parseGwei(cap.maxFeePerGasGwei.toString()), maxPriorityFeePerGas: parseGwei(cap.maxPriorityFeePerGasGwei.toString()) } : undefined;
+    if (!owner || !ceilingWithinPolicy(ceiling, owner)) {
+      throw new MintError(MintErrorType.INVALID_CONFIG, 'Replacement ceiling is above the owner fee cap for this campaign');
     }
     return { ceiling, maxBumps, stuckAfterMs: Math.max(configured.stuckAfterMs, 6_000) };
   }

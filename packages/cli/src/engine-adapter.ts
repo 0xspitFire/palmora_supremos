@@ -59,7 +59,7 @@ export interface MintEngineAdapterOptions {
   readonly gasLimitPadding: number;
   readonly maxReplacementBumps: number;
   /** T-094 / D-080: bounded replacement settings. Unset (the default) means nothing is ever replaced, whatever `maxReplacementBumps` says. Not wired to any host setting yet; enabling it in production needs a fork rehearsal and the owner's go-ahead. */
-  readonly replacement?: { readonly ceilingMaxFeePerGasGwei: number; readonly ceilingMaxPriorityFeePerGasGwei: number; readonly stuckAfterMs: number };
+  readonly replacement?: { readonly ceilingMaxFeePerGasGwei: number; readonly ceilingMaxPriorityFeePerGasGwei: number; readonly stuckAfterMs: number; readonly policyLimits: { readonly maxFeePerGasGwei: number; readonly maxPriorityFeePerGasGwei: number }; readonly ownerCap: { readonly maxFeePerGasGwei: number; readonly maxPriorityFeePerGasGwei: number } };
   readonly getState: () => BackendState;
   readonly transact: <T>(mutate: (state: BackendState) => T) => Promise<T>;
   readonly lifecycleStore?: EngineLifecycleStore;
@@ -372,17 +372,21 @@ export function createMintEngineAdapter(options: MintEngineAdapterOptions): Engi
       if (!intent) throw new Error('INTENT_NOT_FOUND');
       const reservations = state.reservations.filter((reservation) => reservation.runId === runId && reservationIds.includes(reservation.id));
       if (reservationIds.length === 0 || reservations.length !== reservationIds.length || reservationIds.some((id) => !reservations.some((reservation) => reservation.id === id))) throw new Error('DURABLE_RESERVATION_REQUIRED');
+      const gateNow = (input: Parameters<SpendReservationProvider['reserve']>[0]) => {
+        const current = options.getState();
+        const freshByWallet = new Map(current.reservations.filter((candidate) => candidate.runId === runId && reservationIds.includes(candidate.id)).map((candidate) => [candidate.wallet.toLowerCase(), candidate]));
+        const liveGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : campaign.chainId === 8453 ? baseGrantFrom(options.baseEnablement?.(), new Date()) : undefined;
+        const enablement = campaign.chainId === 4663 || campaign.chainId === 8453 ? { current: liveGrant !== undefined, paidAllowed: liveGrant?.paidAllowed === true } : undefined;
+        return preSignReservationGate({ killed: current.killed, byWallet: freshByWallet, runId, intentId, campaign, input, ...(enablement ? { enablement } : {}) });
+      };
       const provider: SpendReservationProvider = {
         durable: true,
         storeKind: 'normalized-sqlite',
+        // T-021: read the reservations again now, not the copy taken when execute started, so a release or settlement that happened in
+        // between is seen before anything is signed. Also re-run before every replacement (T-094) so a revocation after the first send stops it.
+        reconfirm: async (input) => { gateNow(input); },
         reserve: async (input) => {
-          // T-021: read the reservations again now, not the copy taken when execute started, so a release or
-          // settlement that happened in between is seen before anything is signed.
-          const current = options.getState();
-          const freshByWallet = new Map(current.reservations.filter((candidate) => candidate.runId === runId && reservationIds.includes(candidate.id)).map((candidate) => [candidate.wallet.toLowerCase(), candidate]));
-          const liveGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : campaign.chainId === 8453 ? baseGrantFrom(options.baseEnablement?.(), new Date()) : undefined;
-          const enablement = campaign.chainId === 4663 || campaign.chainId === 8453 ? { current: liveGrant !== undefined, paidAllowed: liveGrant?.paidAllowed === true } : undefined;
-          const reservation = preSignReservationGate({ killed: current.killed, byWallet: freshByWallet, runId, intentId, campaign, input, ...(enablement ? { enablement } : {}) });
+          const reservation = gateNow(input);
           const settleTotal = async (components: ReservationSettlementComponents): Promise<void> => {
             if (options.settleComponents) {
               await options.settleComponents(reservation.id, components);

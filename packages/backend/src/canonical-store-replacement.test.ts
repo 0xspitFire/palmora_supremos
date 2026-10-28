@@ -67,6 +67,17 @@ describe('T-094 replacement lineage on the real schema', () => {
     } finally { store.close(); proven.close(); await close(value); }
   });
 
+  it('a replacement attempt, even a rejected one, never moves the execution: it stays submitted', async () => {
+    const { value, proven, store, base, executionId } = await setup();
+    try {
+      const state = () => (value.db.prepare('SELECT state FROM execution WHERE id = ?').get(executionId) as { state: string }).state;
+      expect(state()).toBe('submitted');
+      await store.persistEngineAttempt({ ...base, id: 's1', responseClass: 'signed', txHash: H2, replacementOfId: 's0' });
+      await store.persistEngineAttempt({ ...base, id: 'a1', responseClass: 'rejected', txHash: H2, replacementOfId: 's0' });
+      expect(state()).toBe('submitted');
+    } finally { store.close(); proven.close(); await close(value); }
+  });
+
   it('reconciles the WINNING attempt as matched; the loser has no reconciliation row (the schema has no replaced state) and stays visible in the recovery view', async () => {
     const { value, proven, store, base, executionId } = await setup();
     try {

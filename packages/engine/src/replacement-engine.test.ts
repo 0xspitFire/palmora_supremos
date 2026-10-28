@@ -30,14 +30,14 @@ function config(opts: { replacement?: boolean; bumps?: number } = {}): MintJobCo
     target: { chain: 'robinhood', contract: CONTRACT, strategy: STRATEGY, quantity: 1, campaignId: 'campaign-t094' },
     fleet: { walletFile: '/tmp/never-read-wallet-file', maxWallets: 1 },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
-    fees: { maxFeePerGasGwei: 1, maxPriorityFeePerGasGwei: 0.1, gasLimitPadding: 1.1, ...(opts.replacement === false ? {} : { replacement: { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000 } }) },
+    fees: { maxFeePerGasGwei: 1, maxPriorityFeePerGasGwei: 0.1, gasLimitPadding: 1.1, ...(opts.replacement === false ? {} : { replacement: { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000, policyLimits: { maxFeePerGasGwei: 1.3, maxPriorityFeePerGasGwei: 0.13 }, ownerCap: { maxFeePerGasGwei: 1.3, maxPriorityFeePerGasGwei: 0.13 } } }) },
     safety: { maxSpendEth: 1, dailySpendCapEth: 1, maxReplacementBumps: opts.bumps ?? 2, dryRun: false, killSwitchFile: `/tmp/mintbot-t094-engine-${process.pid}-kill`, robinhoodGrant: { expiresAt: '2099-01-01T00:00:00.000Z', freeAllowed: true, paidAllowed: false } },
     broadcast: { mode: 'sequencer', rpcEndpoints: [], blastParallel: false },
     observability: { logLevel: 'silent', logFile: '/tmp/mintbot-t094-engine.log' },
   } as unknown as MintJobConfig;
 }
 
-function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => boolean; nonceOnChain?: () => number; broadcastOutcome?: (call: number) => 'accepted' | 'rejected'; receiptReadError?: boolean } = {}) {
+function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => boolean; nonceOnChain?: () => number; broadcastOutcome?: (call: number) => 'accepted' | 'rejected'; receiptReadError?: boolean; persistAttemptFails?: (id: string) => boolean; reconfirmRefuses?: () => boolean; noReconfirm?: boolean } = {}) {
   const log: string[] = [];
   const signed: Hex[] = [];
   const intents: TransactionIntent[] = [];
@@ -48,6 +48,7 @@ function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => 
   const reconciliations: Array<Record<string, unknown>> = [];
   const mined = new Map<string, MintReceipt>();
   const waiters = new Map<string, Array<(receipt: MintReceipt) => void>>();
+  const rejecters: Array<(error: Error) => void> = [];
   let broadcasts = 0;
 
   const signer = {
@@ -86,7 +87,8 @@ function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => 
   };
   const nonceManager = { getNonce: async () => 4, consumeNonce: () => undefined, resetNonce: async () => 4 };
   const receiptWatcher = {
-    waitForReceipt: (hash: Hash) => new Promise<MintReceipt>((resolve) => {
+    waitForReceipt: (hash: Hash) => new Promise<MintReceipt>((resolve, reject) => {
+      rejecters.push(reject);
       const found = mined.get(hash.toLowerCase());
       if (found) { resolve(found); return; }
       waiters.set(hash.toLowerCase(), [...(waiters.get(hash.toLowerCase()) ?? []), resolve]);
@@ -94,13 +96,18 @@ function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => 
   };
   const lifecycleStore = {
     persistIntent: async () => { log.push('persistIntent'); },
-    persistAttempt: async (record: Record<string, unknown>) => { log.push(`attempt:${String(record['id'])}`); attempts.push(record); },
+    persistAttempt: async (record: Record<string, unknown>) => {
+      if (behaviour.persistAttemptFails?.(String(record['id']))) throw new Error('store unavailable');
+      log.push(`attempt:${String(record['id'])}`);
+      attempts.push(record);
+    },
     persistReceipt: async (record: Record<string, unknown>) => { receipts.push(record); },
     persistReconciliation: async (record: Record<string, unknown>) => { reconciliations.push(record); },
   };
   const reservationProvider = {
     durable: true as const,
     storeKind: 'normalized-sqlite' as const,
+    ...(behaviour.noReconfirm ? {} : { reconfirm: async () => { log.push('reconfirm'); if (behaviour.reconfirmRefuses?.()) throw new Error('CHAIN_ENABLEMENT_NOT_CURRENT'); } }),
     reserve: async (request: { maxGasCostWei: bigint; l2ExecutionGasWei: bigint; priorityFeeComponentWei: bigint }) => {
       log.push('reserve');
       reservations.push(request);
@@ -119,7 +126,8 @@ function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => 
     new Map([[0, GAS_LIMIT]]), new Map([[0, { walletIndex: 0, address: account.address, sourceBlock: 1n, checkedAt: new Date(Date.now()), success: true }]]),
     (engine as unknown as { logger: unknown }).logger,
   );
-  return { engine, run, mine, log, signed, intents, reservations, settled, attempts, receipts, reconciliations, broadcastCount: () => broadcasts, hashOf: (index: number) => keccak256(signed[index]!) };
+  const failWaiters = (error: Error) => { for (const reject of rejecters) reject(error); };
+  return { engine, run, mine, failWaiters, log, signed, intents, reservations, settled, attempts, receipts, reconciliations, broadcastCount: () => broadcasts, hashOf: (index: number) => keccak256(signed[index]!) };
 }
 
 beforeEach(() => { vi.useFakeTimers({ now: START }); dropOnChain = baseDrop(); registerStrategy(fakeStrategy); });
@@ -280,6 +288,77 @@ describe('T-094 replacement through the real engine flow', () => {
     h.mine(h.hashOf(0));
     await tick(1_500);
     await running;
+  });
+
+  it('after a replacement was sent, a receipt failure is not misread as a foreign replacement of our own nonce', async () => {
+    let nonce = 4;
+    const h = harness(config(), { nonceOnChain: () => nonce });
+    const running = h.run();
+    await tick(9_500);
+    expect(h.signed).toHaveLength(2);
+    nonce = 5; // our own replacement (or original) now holds the nonce
+    await tick(10_000); // the ladder sees the consumed nonce and stops; only then are the receipt watchers started
+    h.failWaiters(new Error('receipt wait failed'));
+    await tick(1_500);
+    const [result] = await running;
+    expect(result).toMatchObject({ status: 'timeout' });
+    expect(result!.lifecycleState).not.toBe('replaced');
+    expect(result!.reconciliationState).not.toBe('replaced');
+    expect(result!.attemptHashes).toBeDefined();
+    expect(h.settled).toHaveLength(0);
+    expect(h.log).not.toContain('release'); // a sent transaction keeps its reservation
+  });
+
+  it('re-runs the store live gate before every replacement and stops when it refuses (a revocation after the first send)', async () => {
+    let revoked = false;
+    const h = harness(config(), { reconfirmRefuses: () => revoked });
+    const running = h.run();
+    await tick(4_000);
+    revoked = true; // the owner revokes enablement in the store after the first send
+    await tick(20_000);
+    expect(h.signed).toHaveLength(1);
+    expect(h.log).toContain('reconfirm');
+    h.mine(h.hashOf(0));
+    await tick(1_500);
+    await running;
+  });
+
+  it('refuses to replace when the store provider has no live gate to re-run (fail closed)', async () => {
+    const h = harness(config(), { noReconfirm: true });
+    const running = h.run();
+    await tick(20_000);
+    expect(h.signed).toHaveLength(1);
+    h.mine(h.hashOf(0));
+    await tick(1_500);
+    await running;
+  });
+
+  it('never starts a second ladder for the same execution in one process', async () => {
+    const h = harness(config());
+    const first = h.run();
+    await tick(3_000);
+    h.mine(h.hashOf(0));
+    await tick(1_500);
+    await first;
+    expect(h.signed).toHaveLength(1);
+    const second = h.run();
+    await tick(40_000);
+    expect(h.signed.length).toBeLessThanOrEqual(3); // the second run signs its own first transaction only; it must not run another ladder
+    expect(h.log.filter((entry) => entry.startsWith('attempt:') && entry.includes('replacement-'))).toHaveLength(0);
+    h.mine(h.hashOf(h.signed.length - 1));
+    await tick(1_500);
+    await second;
+  });
+
+  it('links a winning replacement to its signed attempt if its broadcast attempt could not be stored, never to the original', async () => {
+    const h = harness(config(), { persistAttemptFails: (id) => id.includes('replacement-1:attempt') });
+    const running = h.run();
+    await tick(9_500);
+    expect(h.signed).toHaveLength(2);
+    h.mine(h.hashOf(1));
+    await tick(1_500);
+    const [result] = await running;
+    expect(h.receipts[0]).toMatchObject({ txHash: h.hashOf(1), transactionAttemptId: `${result?.executionId ?? ''}:attempt:replacement-1:signed` });
   });
 
   it('a signer refusal ends replacing and the original is still watched to its result', async () => {

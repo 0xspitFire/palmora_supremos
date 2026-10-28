@@ -6,7 +6,7 @@ const CONTRACT = '0x1111111111111111111111111111111111111111' as const;
 type Planner = { replacementPlan(chainId: number, broadcaster: string): { ceiling: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }; maxBumps: number; stuckAfterMs: number } | undefined };
 
 function config(overrides: { bumps?: number; dryRun?: boolean; replacement?: MintJobConfig['fees']['replacement'] | null } = {}): MintJobConfig {
-  const replacement = overrides.replacement === null ? undefined : (overrides.replacement ?? { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000 });
+  const replacement = overrides.replacement === null ? undefined : (overrides.replacement ?? { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000, policyLimits: { maxFeePerGasGwei: 1.3, maxPriorityFeePerGasGwei: 0.13 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } });
   return {
     target: { chain: 'robinhood', contract: CONTRACT, strategy: 'seadrop-v1-public', quantity: 1, campaignId: 'c' },
     fleet: { walletFile: '/tmp/never-read-wallet-file', maxWallets: 1 },
@@ -40,15 +40,31 @@ describe('T-094 when replacement is enabled', () => {
     const planned = plan(config())!;
     expect(planned).toMatchObject({ maxBumps: 2, stuckAfterMs: 8_000 });
     expect(planned.ceiling).toEqual({ maxFeePerGas: 1_300_000_000n, maxPriorityFeePerGas: 130_000_000n });
-    expect(plan(config({ replacement: { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 500 } }))!.stuckAfterMs).toBe(6_000);
+    expect(plan(config({ replacement: { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 500, policyLimits: { maxFeePerGasGwei: 1.3, maxPriorityFeePerGasGwei: 0.13 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } } }))!.stuckAfterMs).toBe(6_000);
   });
 
   it('refuses the whole run, before anything is signed, when the ceiling cannot hold the configured bumps', () => {
     // two bumps from 1 / 0.1 gwei need 1.21 / 0.121 gwei
-    expect(() => plan(config({ replacement: { ceilingMaxFeePerGasGwei: 1.2, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000 } }))).toThrow('too low');
-    expect(() => plan(config({ replacement: { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.12, stuckAfterMs: 8_000 } }))).toThrow('too low');
-    expect(() => plan(config({ replacement: { ceilingMaxFeePerGasGwei: 0.1, ceilingMaxPriorityFeePerGasGwei: 2, stuckAfterMs: 8_000 } }))).toThrow();
+    expect(() => plan(config({ replacement: { ceilingMaxFeePerGasGwei: 1.2, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000, policyLimits: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } } }))).toThrow('too low');
+    expect(() => plan(config({ replacement: { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.12, stuckAfterMs: 8_000, policyLimits: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } } }))).toThrow('too low');
+    expect(() => plan(config({ replacement: { ceilingMaxFeePerGasGwei: 0.1, ceilingMaxPriorityFeePerGasGwei: 2, stuckAfterMs: 8_000, policyLimits: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } } }))).toThrow();
     expect(() => plan(config({ bumps: 9 }))).toThrow('invalid');
+  });
+
+  it('refuses the run when the ceiling is not inside the signed provider policy limits, or the limits are missing', () => {
+    const ceiling = { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000 };
+    expect(() => plan(config({ replacement: { ...ceiling, policyLimits: { maxFeePerGasGwei: 1.29, maxPriorityFeePerGasGwei: 0.13 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } } }))).toThrow('signed provider policy');
+    expect(() => plan(config({ replacement: { ...ceiling, policyLimits: { maxFeePerGasGwei: 1.3, maxPriorityFeePerGasGwei: 0.12 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } } }))).toThrow('signed provider policy');
+    expect(() => plan(config({ replacement: ceiling as never }))).toThrow('signed provider policy');
+    expect(plan(config({ replacement: { ...ceiling, policyLimits: { maxFeePerGasGwei: 1.3, maxPriorityFeePerGasGwei: 0.13 }, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } } }))).toBeDefined();
+  });
+
+  it('refuses the run when the ceiling is above what the owner approved for this campaign, or the owner cap is missing', () => {
+    const base = { ceilingMaxFeePerGasGwei: 1.3, ceilingMaxPriorityFeePerGasGwei: 0.13, stuckAfterMs: 8_000, policyLimits: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 9 } };
+    expect(() => plan(config({ replacement: { ...base, ownerCap: { maxFeePerGasGwei: 1.29, maxPriorityFeePerGasGwei: 9 } } }))).toThrow('owner fee cap');
+    expect(() => plan(config({ replacement: { ...base, ownerCap: { maxFeePerGasGwei: 9, maxPriorityFeePerGasGwei: 0.12 } } }))).toThrow('owner fee cap');
+    expect(() => plan(config({ replacement: base as never }))).toThrow('owner fee cap');
+    expect(plan(config({ replacement: { ...base, ownerCap: { maxFeePerGasGwei: 1.3, maxPriorityFeePerGasGwei: 0.13 } } }))).toBeDefined();
   });
 });
 

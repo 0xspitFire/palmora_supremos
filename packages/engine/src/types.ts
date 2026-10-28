@@ -275,6 +275,12 @@ export interface SpendReservationProvider {
     readonly freeMint: boolean;
     readonly policySnapshot: unknown;
   }): Promise<SpendReservation>;
+  /**
+   * T-094: re-run the store's full live pre-sign gate for a wallet that already holds a reservation (stored owner enablement still
+   * current, store kill flag clear, reservation still reserved, amounts still inside it). Called with the SAME request before every
+   * replacement. Throws to refuse. A provider without it cannot support replacements.
+   */
+  reconfirm?(input: Parameters<SpendReservationProvider['reserve']>[0]): Promise<void>;
 }
 
 /** Stable identity allocated by Backend/Database before a chain side effect. */
@@ -585,6 +591,13 @@ export interface MintJobConfig {
     readonly replacement?: {
       readonly ceilingMaxFeePerGasGwei: number;
       readonly ceilingMaxPriorityFeePerGasGwei: number;
+      /**
+       * The fee limits PINNED by the signed provider policy for this boundary (from the owner-signed record). Required: the ceiling must
+       * sit inside them or the run is refused before anything is signed.
+       */
+      readonly policyLimits: { readonly maxFeePerGasGwei: number; readonly maxPriorityFeePerGasGwei: number };
+      /** The owner's own fee caps for this campaign (what they approved). The ceiling must sit inside them too. */
+      readonly ownerCap: { readonly maxFeePerGasGwei: number; readonly maxPriorityFeePerGasGwei: number };
       /** Replace only after the newest attempt has been unmined this long (floor 6000 ms). */
       readonly stuckAfterMs: number;
     };
