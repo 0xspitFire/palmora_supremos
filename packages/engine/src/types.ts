@@ -228,6 +228,8 @@ export interface TransactionIntent {
   readonly runId?: string;
   readonly policyRef?: string;
   readonly evidenceRef?: string;
+  /** Local context for the bounded Robinhood policy family. */
+  readonly familyContext?: { readonly nftContract: Address; readonly feeRecipient: Address };
 }
 
 export interface SpendReservation {

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseTransaction, type Address, type Hex } from 'viem';
+import { encodeFunctionData, parseTransaction, parseAbi, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { TurnkeySigner, isSecureTurnkeyFileAccess, validateTurnkeyWalletMap, type TurnkeySignerClient } from './turnkey-signer.js';
 import { createTurnkeyPolicyRecord, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions } from './turnkey-policy-record.js';
 import { canonicalPolicyDigest, turnkeyPolicyRef, validateTurnkeyPolicyAst, type TurnkeyPolicyAst } from './turnkey-policy.js';
+import { SEADROP_V1_ADDRESS } from './chains.js';
 
 const PRIVATE_KEY = `0x${'11'.repeat(32)}` as Hex;
 const ACCOUNT = privateKeyToAccount(PRIVATE_KEY);
@@ -25,9 +26,19 @@ function policy(overrides: Partial<TurnkeyPolicyAst['transaction']> = {}): Turnk
   };
 }
 
+function familyPolicy(): TurnkeyPolicyAst {
+  return {
+    version: 1,
+    effect: 'allow',
+    scope: { provider: 'turnkey', environment: ENVIRONMENT, organizationId: ORG, userId: USER, policyId: 'policy-family', keyIds: [KEY_ID] },
+    transaction: { chainId: 4663, from: [WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: DATA, gasLimitMax: '50000', maxFeePerGasMax: '1000000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
+    family: { kind: 'robinhood-seadrop-public-v1', maxQuantity: 4 },
+  };
+}
+
 function identity() { return { organizationId: ORG, organizationName: 'MintBot', userId: USER, username: 'runtime' }; }
 function organization(rootUserIds = ['root-user']) { return { configs: { quorum: { threshold: 1, userIds: rootUserIds } } }; }
-function providerPolicy(ast = policy()) { const expressions = turnkeyProviderPolicyExpressions(ast); return { policyId: 'policy-test', policyName: 'exact', effect: 'EFFECT_ALLOW' as const, createdAt: timestamp('1'), updatedAt: timestamp('2'), notes: '', consensus: expressions.consensus, condition: expressions.condition }; }
+function providerPolicy(ast = policy()) { const expressions = turnkeyProviderPolicyExpressions(ast); return { policyId: ast.scope.policyId, policyName: 'exact', effect: 'EFFECT_ALLOW' as const, createdAt: timestamp('1'), updatedAt: timestamp('2'), notes: '', consensus: expressions.consensus, condition: expressions.condition }; }
 function providerKey() { return { privateKeyId: KEY_ID, publicKey: `02${'ab'.repeat(32)}`, privateKeyName: 'mintbot-key', curve: 'CURVE_SECP256K1', addresses: [{ format: 'ADDRESS_FORMAT_ETHEREUM', address: WALLET }], privateKeyTags: [], createdAt: timestamp('1'), updatedAt: timestamp('2'), exported: false, imported: true }; }
 
 function record(ast = policy()) {
@@ -37,6 +48,11 @@ function record(ast = policy()) {
 function intent(overrides: Record<string, unknown> = {}) {
   const ast = policy();
   return { chainId: 1 as const, from: WALLET, to: TO, value: 0n, data: DATA, nonce: 4, gasLimit: 50_000n, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 100_000_000n, accessList: [], policyRef: turnkeyPolicyRef(ast.scope.policyId, canonicalPolicyDigest(ast)), ...overrides };
+}
+
+function familyIntent(ast = familyPolicy(), overrides: Record<string, unknown> = {}) {
+  const data = encodeFunctionData({ abi: parseAbi(['function mintPublic(address,address,address,uint256)']), functionName: 'mintPublic', args: ['0x3333333333333333333333333333333333333333', '0x4444444444444444444444444444444444444444', '0x0000000000000000000000000000000000000000', 4n] });
+  return { chainId: 4663 as const, from: WALLET, to: SEADROP_V1_ADDRESS, value: 0n, data, nonce: 4, gasLimit: 50_000n, maxFeePerGas: 1_000_000_000n, maxPriorityFeePerGas: 100_000_000n, accessList: [], familyContext: { nftContract: '0x3333333333333333333333333333333333333333' as Address, feeRecipient: '0x4444444444444444444444444444444444444444' as Address }, policyRef: turnkeyPolicyRef(ast.scope.policyId, canonicalPolicyDigest(ast)), ...overrides };
 }
 
 function clientFor(overrides: Partial<TurnkeySignerClient> = {}): TurnkeySignerClient {
@@ -55,7 +71,7 @@ function clientFor(overrides: Partial<TurnkeySignerClient> = {}): TurnkeySignerC
 }
 
 function signer(ast = policy(), clientOverrides: Partial<TurnkeySignerClient> = {}) {
-  return new TurnkeySigner({ organizationId: ORG, environment: ENVIRONMENT, userId: USER, wallets: [{ index: 0, address: WALLET, signWith: KEY_ID }], policyRecord: record(ast), client: clientFor(clientOverrides) });
+  return new TurnkeySigner({ organizationId: ORG, environment: ENVIRONMENT, userId: USER, wallets: [{ index: 0, address: WALLET, signWith: KEY_ID }], policyRecord: record(ast), client: clientFor({ getPolicies: async () => ({ policies: [providerPolicy(ast)] }), ...clientOverrides }) });
 }
 
 describe('Turnkey policy boundary', () => {
@@ -110,6 +126,17 @@ describe('Turnkey policy boundary', () => {
 });
 
 describe('Turnkey transaction boundary', () => {
+  it('accepts a bounded family calldata shape while retaining local quantity and selector checks', async () => {
+    const ast = familyPolicy();
+    const result = await signer(ast).signTransactionWithEvidence(0, familyIntent(ast));
+    expect(result.signedTransaction).toMatch(/^0x/);
+    await expect(signer(ast).signTransaction(0, familyIntent(ast, { data: '0x161ac21f' as Hex }))).rejects.toThrow('TURNKEY_POLICY_INTENT_BLOCKED');
+    const tooMany = encodeFunctionData({ abi: parseAbi(['function mintPublic(address,address,address,uint256)']), functionName: 'mintPublic', args: ['0x3333333333333333333333333333333333333333', '0x4444444444444444444444444444444444444444', '0x0000000000000000000000000000000000000000', 5n] });
+    await expect(signer(ast).signTransaction(0, familyIntent(ast, { data: tooMany }))).rejects.toThrow('TURNKEY_POLICY_INTENT_BLOCKED');
+    const wrongTarget = encodeFunctionData({ abi: parseAbi(['function mintPublic(address,address,address,uint256)']), functionName: 'mintPublic', args: ['0x5555555555555555555555555555555555555555', '0x4444444444444444444444444444444444444444', '0x0000000000000000000000000000000000000000', 1n] });
+    await expect(signer(ast).signTransaction(0, familyIntent(ast, { data: wrongTarget }))).rejects.toThrow('TURNKEY_POLICY_INTENT_BLOCKED');
+  });
+
   it.each([
     ['wrong chain', { chainId: 4663 }],
     ['wrong from', { from: '0x3333333333333333333333333333333333333333' as Address }],

@@ -97,6 +97,7 @@ export type {
   TurnkeyKeyInventory,
   TurnkeyKeyInventoryEntry,
   TurnkeyPolicyAst,
+  TurnkeyPolicyFamily,
   TurnkeyPolicyScope,
   TurnkeyPolicyTransaction,
   TurnkeyProviderBinding,

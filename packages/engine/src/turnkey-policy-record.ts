@@ -124,6 +124,14 @@ export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consen
   };
   const list = (values: readonly string[]): string => `[${[...values].sort().map(quote).join(', ')}]`;
   const tx = policy.transaction;
+  const dataCondition = policy.family?.kind === 'robinhood-seadrop-public-v1'
+    ? [
+      `eth.tx.data[0..10] == ${quote(tx.data.toLowerCase())}`,
+      "eth.tx.data[138..202] == '0000000000000000000000000000000000000000000000000000000000000000'",
+      `eth.tx.data[202..266].hex_to_uint() >= 1`,
+      `eth.tx.data[202..266].hex_to_uint() <= ${policy.family.maxQuantity}`,
+    ].join(' && ')
+    : `eth.tx.data == ${quote(tx.data.toLowerCase())}`;
   return {
     consensus: `approvers.any(user, user.id == ${quote(policy.scope.userId)})`,
     condition: [
@@ -133,7 +141,7 @@ export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consen
       `eth.tx.from in ${list(tx.from.map((address) => address.toLowerCase()))}`,
       `eth.tx.to == ${quote(tx.to.toLowerCase())}`,
       `eth.tx.value == ${tx.valueWei}`,
-      `eth.tx.data == ${quote(tx.data.toLowerCase())}`,
+      dataCondition,
       `eth.tx.gas <= ${tx.gasLimitMax}`,
       `eth.tx.max_fee_per_gas <= ${tx.maxFeePerGasMax}`,
       `eth.tx.max_priority_fee_per_gas <= ${tx.maxPriorityFeePerGasMax}`,

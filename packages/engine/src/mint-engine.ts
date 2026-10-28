@@ -819,6 +819,7 @@ export class MintEngine {
           campaignId: this.config.target.campaignId,
           runId,
           policyRef: this.config.target.policyRef ?? 'phase-1',
+          ...(chainId === 4663 ? { familyContext: { nftContract: drop.nftContract, feeRecipient: drop.feePayer } } : {}),
         };
         if (!this.config.safety.dryRun) {
           assertSimulationFresh(
