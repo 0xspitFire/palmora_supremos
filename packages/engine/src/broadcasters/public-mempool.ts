@@ -12,6 +12,7 @@
 
 import { keccak256, type Hex, type Hash } from 'viem';
 import type { Broadcaster, BroadcastResult, BroadcastOptions } from '../types.js';
+import { sendSignal } from './send-timeout.js';
 
 export class PublicMempoolBroadcaster implements Broadcaster {
   readonly name = 'public-mempool';
@@ -37,6 +38,7 @@ export class PublicMempoolBroadcaster implements Broadcaster {
             method: 'eth_sendRawTransaction',
             params: [signedTx],
           }),
+          signal: sendSignal(),
         });
 
         const data = await response.json() as { result?: Hash; error?: { message: string; code?: number } };
