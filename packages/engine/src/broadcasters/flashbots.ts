@@ -21,6 +21,7 @@
 
 import { type Hex, type Hash, keccak256, toHex } from 'viem';
 import type { Broadcaster, BroadcastResult, BroadcastOptions, FlashbotsAuthSigner } from '../types.js';
+import { sendSignal } from './send-timeout.js';
 
 export interface FlashbotsConfig {
   /** Flashbots relay URL. Default: https://relay.flashbots.net */
@@ -119,6 +120,7 @@ export class FlashbotsBroadcaster implements Broadcaster {
         'X-Flashbots-Signature': authHeader,
       },
       body,
+      signal: sendSignal(),
     });
 
     const data = await response.json() as {
