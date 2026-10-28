@@ -11,6 +11,7 @@
 
 import { keccak256, type Hex, type Hash } from 'viem';
 import type { Broadcaster, BroadcastResult, BroadcastOptions } from '../types.js';
+import { sendSignal } from './send-timeout.js';
 
 export class SequencerDirectBroadcaster implements Broadcaster {
   readonly name = 'sequencer-direct';
@@ -42,6 +43,7 @@ export class SequencerDirectBroadcaster implements Broadcaster {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body,
+            signal: sendSignal(),
           });
           const data = await response.json() as { result?: Hash; error?: { message: string } };
           const latencyMs = performance.now() - startTime;
@@ -84,7 +86,7 @@ export class SequencerDirectBroadcaster implements Broadcaster {
     const urls = [this.sequencerUrl, ...this.fallbackUrls];
     await Promise.allSettled(
       urls.map((url) =>
-        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: sendSignal() })
       ),
     );
   }
