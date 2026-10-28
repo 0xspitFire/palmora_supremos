@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { chainRpcSecretNames } from '../chains.js';
 import { BlastBroadcaster } from './blast.js';
 import { FlashbotsBroadcaster } from './flashbots.js';
 import { PublicMempoolBroadcaster } from './public-mempool.js';
@@ -25,6 +26,13 @@ function stubFetch(controllers: AbortController[]) {
 }
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+describe('D-079 third Robinhood slot', () => {
+  it('is part of the Robinhood endpoint set and nothing else changed', () => {
+    expect(chainRpcSecretNames(4663)).toEqual(['ROBINHOOD_RPC_URL', 'ROBINHOOD_RPC_FBACK', 'ROBINHOOD_RPC_FBACK_II']);
+    expect(chainRpcSecretNames(8453)).toEqual(['BASE_RPC_URL', 'BASE_RPC_FBACK', 'BASE_RPC_FBACK_II']);
+  });
+});
 
 describe('D-079 send timeouts', () => {
   it('a hung endpoint is recorded as ambiguous after the abort and does not stall the good one (blast)', async () => {
