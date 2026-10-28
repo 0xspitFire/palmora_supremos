@@ -14,6 +14,7 @@ describe('D-078 wallet source rule', () => {
     expect(chooseWalletSource({ hasBundle: true, fleetChange: 'd.json' })).toBe('fleet-change');
     expect(() => chooseWalletSource({ hasBundle: false, fleetChange: 'd.json' })).toThrow('TURNKEY_FLEET_CHANGE_REQUIRES_BUNDLE');
     expect(() => chooseWalletSource({ hasBundle: true, fleetChange: 'd.json', walletArtifact: 'a.json' })).toThrow('TURNKEY_FLEET_CHANGE_CONFLICT');
+    expect(() => chooseWalletSource({ hasBundle: true, fleetChange: '  ' })).toThrow('TURNKEY_FLEET_CHANGE_PATH_REQUIRED');
   });
 });
 

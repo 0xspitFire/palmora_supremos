@@ -535,7 +535,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
             } catch { return undefined; }
           })();
           const walletChange = previousBundle ? diffWallets(previousBundle.activeRecord.record.wallets, proposal.wallets) : undefined;
-          process.stdout.write(`${JSON.stringify({ ok: true, preview: true, recordDigest: digest, keyId, confirmation: expectedConfirmation, ...(walletChange ? { walletChange } : {}), ...(expectedRotation ? { rotationConfirmation: expectedRotation } : {}) })}\n`);
+          process.stdout.write(`${JSON.stringify({ ok: true, preview: true, recordDigest: digest, keyId, confirmation: expectedConfirmation, walletChange: walletChange ?? 'unavailable: no readable previous bundle on this machine, so the added and removed wallets could not be shown', ...(expectedRotation ? { rotationConfirmation: expectedRotation } : {}) })}\n`);
           return;
         }
         if (args.confirm !== expectedConfirmation) throw new Error(`TURNKEY_POLICY_SIGN_CONFIRMATION_REQUIRED: ${expectedConfirmation}`);

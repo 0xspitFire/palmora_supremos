@@ -6,6 +6,7 @@
 export type WalletSource = 'bundle' | 'artifact' | 'fleet-change';
 
 export function chooseWalletSource(input: { hasBundle: boolean; walletArtifact?: string | undefined; fleetChange?: string | undefined }): WalletSource {
+  if (input.fleetChange !== undefined && input.fleetChange.trim() === '') throw new Error('TURNKEY_FLEET_CHANGE_PATH_REQUIRED');
   if (input.fleetChange && input.walletArtifact) throw new Error('TURNKEY_FLEET_CHANGE_CONFLICT');
   if (input.fleetChange && !input.hasBundle) throw new Error('TURNKEY_FLEET_CHANGE_REQUIRES_BUNDLE');
   if (input.hasBundle && input.walletArtifact) throw new Error('TURNKEY_POLICY_BUNDLE_OVERRIDE_BLOCKED');

@@ -51,6 +51,15 @@ describe('D-078 rotation report', () => {
     expect(problems(base({ providerPolicies: [{ policyId: 'p-old', effect: 'EFFECT_ALLOW', text: 'private_key.id in [old]' }] }))).toMatch(/live provider allow policy/);
   });
 
+  it('also catches a live allow policy that pins the retired wallet by address only', () => {
+    expect(problems(base({ providerPolicies: [{ policyId: 'p-old', effect: 'EFFECT_ALLOW', text: `eth.tx.from in ['${addr(1).toUpperCase().replace('0X', '0x')}']` }] }))).toMatch(/live provider allow policy/);
+  });
+
+  it('requires every wallet dropped since the previous record to be named as retired', () => {
+    expect(problems(base({ retired: ['keep'] }))).toMatch(/dropped since the previous record but is not named/);
+    expect(problems(base())).toBe('');
+  });
+
   it('does not count a provider DENY policy as authorization', () => {
     expect(problems(base({ providerPolicies: [{ policyId: 'd', effect: 'EFFECT_DENY', text: 'private_key.id in [old]' }] }))).toBe('');
   });

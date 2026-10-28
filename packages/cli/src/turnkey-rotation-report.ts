@@ -93,6 +93,9 @@ export function buildRotationReport(input: RotationInput): RotationResult {
   // 3. Retired references are really gone: not in the active record, the map, any unexpired catalog record, or any live provider allow policy.
   let exclusionOk = input.retired.length > 0;
   if (!exclusionOk) problems.push('No retired reference was named; the drill must retire at least one wallet.');
+  // Every wallet dropped since the previous record must be named and checked, not only the ones the owner remembered to list.
+  const dropped = input.previous.wallets.filter((wallet) => !input.active.wallets.some((current) => current.signWith === wallet.signWith)).map((wallet) => wallet.signWith);
+  if (dropped.some((id) => !input.retired.includes(id))) { exclusionOk = false; problems.push('A wallet was dropped since the previous record but is not named as retired, so its removal was not checked.'); }
   const stillAuthorizing: string[] = [];
   for (const id of input.retired) {
     if (!previousIds.has(id)) { exclusionOk = false; problems.push('A named retired reference was not in the previous record, so retiring it proves nothing.'); continue; }
@@ -100,7 +103,8 @@ export function buildRotationReport(input: RotationInput): RotationResult {
     if (input.active.wallets.some((wallet) => wallet.signWith === id)) places.push('the installed record');
     if (input.installedMap.some((wallet) => wallet.signWith === id)) places.push('the installed wallet map');
     if (input.catalog.some((record) => record.wallets.some((wallet) => wallet.signWith === id))) places.push('an unexpired catalog record');
-    const policy = input.providerPolicies.find((candidate) => candidate.effect === 'EFFECT_ALLOW' && candidate.text.includes(id));
+    const address = input.previous.wallets.find((wallet) => wallet.signWith === id)?.address.toLowerCase();
+    const policy = input.providerPolicies.find((candidate) => candidate.effect === 'EFFECT_ALLOW' && (candidate.text.includes(id) || (address !== undefined && candidate.text.toLowerCase().includes(address))));
     if (policy) places.push('a live provider allow policy');
     if (places.length > 0) { exclusionOk = false; stillAuthorizing.push(id); problems.push(`A retired reference is still present in ${places.join(', ')}; remove it and rebuild the bundle first.`); }
   }
@@ -120,7 +124,7 @@ export function buildRotationReport(input: RotationInput): RotationResult {
       checks: {
         fresh_wallet_inventory: { pass: true, observed: `${input.active.wallets.length} live wallets match the installed record; ${fresh.length} new since the previous record` },
         funding_profile_bounded: { pass: true, observed: `${Object.keys(input.ceilings).length} chains within ceilings; highest single balance ${eth(highest)}` },
-        old_references_excluded: { pass: true, observed: `${input.retired.length} retired reference(s) absent from the record, map, catalog and live allow policies` },
+        old_references_excluded: { pass: true, observed: `${input.retired.length} retired reference(s) not named in the record, map, any unexpired catalog record or any live allow policy` },
       },
       references: [
         { name: 'canonical-policy-record', sha256: sha256(input.activeRecordText) },
