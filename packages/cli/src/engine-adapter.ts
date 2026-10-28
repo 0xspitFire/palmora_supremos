@@ -58,6 +58,8 @@ export interface MintEngineAdapterOptions {
   readonly maxFeePerGasGweiFor?: (campaignId: string) => number | undefined;
   readonly gasLimitPadding: number;
   readonly maxReplacementBumps: number;
+  /** T-094 / D-080: bounded replacement settings. Unset (the default) means nothing is ever replaced, whatever `maxReplacementBumps` says. Not wired to any host setting yet; enabling it in production needs a fork rehearsal and the owner's go-ahead. */
+  readonly replacement?: { readonly ceilingMaxFeePerGasGwei: number; readonly ceilingMaxPriorityFeePerGasGwei: number; readonly stuckAfterMs: number };
   readonly getState: () => BackendState;
   readonly transact: <T>(mutate: (state: BackendState) => T) => Promise<T>;
   readonly lifecycleStore?: EngineLifecycleStore;
@@ -188,7 +190,7 @@ export function engineConfigFromCampaign(campaign: Campaign, options: MintEngine
     target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id, ...((campaign.custodyPolicy?.policyReference ?? options.policyRef) ? { policyRef: campaign.custodyPolicy?.policyReference ?? options.policyRef } : {}), ...(campaign.custodyPolicy ? { policyRecordDigest: campaign.custodyPolicy.recordDigest } : {}) },
     fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets, ...(selection ? { walletIndexes: selection.indexes, expectedAddresses: selection.addresses } : {}) },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
-    fees: { maxFeePerGasGwei: options.maxFeePerGasGweiFor?.(campaign.id) ?? options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding },
+    fees: { maxFeePerGasGwei: options.maxFeePerGasGweiFor?.(campaign.id) ?? options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding, ...(options.replacement ? { replacement: options.replacement } : {}) },
     safety: {
       maxSpendEth: asFiniteNumber(campaign.spendPolicy.maxRunWei, 'max_run_spend'),
       dailySpendCapEth: asFiniteNumber(campaign.spendPolicy.dailyCapWei, 'daily_spend_cap'),
@@ -248,14 +250,17 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
     const state = result.dryRun ? 'Prepared' : pending ? 'Pending' : failed ? 'Failed' : 'Confirmed';
     if (pending) hasPending = true;
     if (failed && !pending) hasFailed = true;
+    // T-094: a wallet with replacements has one hash per attempt; otherwise every attempt shares the wallet's hash, exactly as before.
+    const replacedIds = new Set(wallet.replacedAttemptIds ?? []);
     for (const attemptId of attemptIds) attempts.push({
       id: attemptId,
       executionId,
       runId,
       wallet: wallet.address,
       ...(wallet.nonce === undefined ? {} : { nonce: wallet.nonce }),
-      ...(wallet.txHash === undefined ? {} : { hash: wallet.txHash }),
-      state: attemptId === submittedAttemptId ? state : attemptId.endsWith(':signed') ? 'Signed' : 'Submitted',
+      ...((wallet.attemptHashes?.[attemptId] ?? wallet.txHash) === undefined ? {} : { hash: (wallet.attemptHashes?.[attemptId] ?? wallet.txHash)! }),
+      ...(wallet.attemptReplacements?.[attemptId] ? { replacementOfId: wallet.attemptReplacements[attemptId]! } : {}),
+      state: replacedIds.has(attemptId) ? 'Replaced' : attemptId === submittedAttemptId ? state : attemptId.endsWith(':signed') ? 'Signed' : 'Submitted',
       ...(campaign.chainId === 4663 && robinhoodFinality(wallet.finalityStage) ? { robinhoodFinality: robinhoodFinality(wallet.finalityStage) } : {}),
       createdAt: now,
       updatedAt: now,

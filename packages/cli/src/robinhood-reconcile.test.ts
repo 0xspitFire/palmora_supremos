@@ -191,3 +191,59 @@ describe('Robinhood reconciliation (T-035 piece 2)', () => {
     });
   });
 });
+
+describe('Robinhood reconciliation with replacements (T-094)', () => {
+  // Two attempts of ONE execution and nonce, with different hashes: the original and its replacement.
+  const original = { ...attempt('1', `0x${'a'.repeat(64)}`), id: 'exe1:attempt:accepted', executionId: 'exe1', nonce: 4 };
+  const replacement = { ...attempt('1', `0x${'b'.repeat(64)}`), id: 'exe1:replacement-1:attempt:accepted', executionId: 'exe1', nonce: 4, replacementOfId: 'exe1:attempt:signed' };
+  const withReceiptsFor = (mined: string[], finality: ObservedFinality = final) => reconcileRobinhood({
+    run,
+    attempts: [original, replacement],
+    mintPriceWei: 0n,
+    quantity: 1,
+    readReceipt: async (hash) => (mined.includes(hash) ? receipt() : null),
+    observe: async () => finality,
+    now: () => new Date('2026-10-17T10:00:00.000Z'),
+  });
+
+  it('settles on the replacement that mined and marks the original Replaced, instead of leaving the run unresolved', async () => {
+    const update = await withReceiptsFor([replacement.hash!]);
+    expect(update.result).toBe('final');
+    expect(update.attempts.find((item) => item.id === original.id)).toMatchObject({ state: 'Replaced' });
+    expect(update.attempts.find((item) => item.id === replacement.id)).toMatchObject({ state: 'Confirmed' });
+    expect(update.receipts).toHaveLength(1);
+    expect(update.receipts[0]).toMatchObject({ transactionAttemptId: replacement.id, actualSpendWei: 200_000n * 20_000_000n });
+  });
+
+  it('settles on the original when it mined first and marks the replacement Replaced', async () => {
+    const update = await withReceiptsFor([original.hash!]);
+    expect(update.result).toBe('final');
+    expect(update.attempts.find((item) => item.id === replacement.id)).toMatchObject({ state: 'Replaced' });
+    expect(update.receipts[0]?.transactionAttemptId).toBe(original.id);
+  });
+
+  it('stays unresolved when NEITHER attempt has a receipt: a missing receipt is never read as a loss', async () => {
+    const update = await withReceiptsFor([]);
+    expect(update.result).toBe('unknown');
+    expect(update.attempts.some((item) => item.state === 'Replaced')).toBe(false);
+  });
+
+  it('a different execution never counts as a sibling: only the same execution and nonce can supersede an attempt', async () => {
+    const other = { ...attempt('2', `0x${'c'.repeat(64)}`), id: 'exe2:attempt:accepted', executionId: 'exe2', nonce: 4 };
+    const update = await reconcileRobinhood({ run, attempts: [original, other], mintPriceWei: 0n, quantity: 1, readReceipt: async (hash) => (hash === other.hash ? receipt() : null), observe: async () => final, now: () => new Date('2026-10-17T10:00:00.000Z') });
+    expect(update.result).toBe('unknown');
+    expect(update.attempts.some((item) => item.state === 'Replaced')).toBe(false);
+  });
+
+  it('keeps a mined replacement that is only soft or posted pending, with the loser still marked Replaced', async () => {
+    const update = await withReceiptsFor([replacement.hash!], { stage: 'posted', canonical: true, ready: false });
+    expect(update.result).toBe('posted');
+    expect(update.attempts.find((item) => item.id === original.id)).toMatchObject({ state: 'Replaced' });
+    expect(update.receipts).toHaveLength(0);
+  });
+
+  it('reports a reorg of the only mined attempt as reorged and does not call the loser unresolved', async () => {
+    const update = await withReceiptsFor([replacement.hash!], { stage: 'posted', canonical: false, ready: false });
+    expect(update.result).toBe('reorged');
+  });
+});

@@ -6,35 +6,41 @@ const fees = (max: number, tip: number): Fees => ({ maxFeePerGas: gwei(max), max
 
 describe('D-080 planReplacement', () => {
   it('is disabled by default (zero bumps) and refuses', () => {
-    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 0, anyAttemptMayHaveMined: false })).toEqual({ ok: false, reason: 'REPLACEMENT_DISABLED' });
+    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 0, mayHaveMined: 'no' })).toEqual({ ok: false, reason: 'REPLACEMENT_DISABLED' });
   });
 
   it('raises both fees by at least 10 percent and stays under the ceiling', () => {
-    const decision = planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 2, anyAttemptMayHaveMined: false });
+    const decision = planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 2, mayHaveMined: 'no' });
     expect(decision).toEqual({ ok: true, next: { maxFeePerGas: gwei(1.1), maxPriorityFeePerGas: gwei(0.11) }, bumpsUsed: 1 });
   });
 
   it('never exceeds the number of allowed replacements', () => {
-    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 2, maxBumps: 2, anyAttemptMayHaveMined: false })).toEqual({ ok: false, reason: 'REPLACEMENT_LIMIT_REACHED' });
+    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 2, maxBumps: 2, mayHaveMined: 'no' })).toEqual({ ok: false, reason: 'REPLACEMENT_LIMIT_REACHED' });
   });
 
   it('refuses when any earlier attempt may have been mined', () => {
-    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 2, anyAttemptMayHaveMined: true })).toEqual({ ok: false, reason: 'REPLACEMENT_MAY_HAVE_MINED' });
+    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 2, mayHaveMined: 'yes' })).toEqual({ ok: false, reason: 'REPLACEMENT_MAY_HAVE_MINED' });
+  });
+
+  it('refuses when it is not PROVEN that nothing mined (unknown, or any unexpected value)', () => {
+    const input = { current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 2 };
+    expect(planReplacement({ ...input, mayHaveMined: 'unknown' })).toEqual({ ok: false, reason: 'REPLACEMENT_MINED_STATUS_UNKNOWN' });
+    expect(planReplacement({ ...input, mayHaveMined: undefined as never })).toEqual({ ok: false, reason: 'REPLACEMENT_MINED_STATUS_UNKNOWN' });
   });
 
   it('refuses rather than clamp when the required rise would pass the ceiling, on either fee', () => {
-    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(1, 0.5), bumpsUsed: 0, maxBumps: 2, anyAttemptMayHaveMined: false })).toEqual({ ok: false, reason: 'REPLACEMENT_CEILING_REACHED' });
-    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.1), bumpsUsed: 0, maxBumps: 2, anyAttemptMayHaveMined: false })).toEqual({ ok: false, reason: 'REPLACEMENT_CEILING_REACHED' });
+    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(1, 0.5), bumpsUsed: 0, maxBumps: 2, mayHaveMined: 'no' })).toEqual({ ok: false, reason: 'REPLACEMENT_CEILING_REACHED' });
+    expect(planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.1), bumpsUsed: 0, maxBumps: 2, mayHaveMined: 'no' })).toEqual({ ok: false, reason: 'REPLACEMENT_CEILING_REACHED' });
   });
 
   it('can raise a zero tip by one unit and never lets the tip exceed the max fee', () => {
-    const decision = planReplacement({ current: { maxFeePerGas: 10n, maxPriorityFeePerGas: 0n }, ceiling: { maxFeePerGas: 100n, maxPriorityFeePerGas: 100n }, bumpsUsed: 0, maxBumps: 1, anyAttemptMayHaveMined: false });
+    const decision = planReplacement({ current: { maxFeePerGas: 10n, maxPriorityFeePerGas: 0n }, ceiling: { maxFeePerGas: 100n, maxPriorityFeePerGas: 100n }, bumpsUsed: 0, maxBumps: 1, mayHaveMined: 'no' });
     expect(decision).toEqual({ ok: true, next: { maxFeePerGas: 11n, maxPriorityFeePerGas: 1n }, bumpsUsed: 1 });
     if (decision.ok) expect(decision.next.maxPriorityFeePerGas <= decision.next.maxFeePerGas).toBe(true);
   });
 
   it('rejects invalid inputs and absurd bump counts', () => {
-    const bad = (overrides: Partial<Parameters<typeof planReplacement>[0]>) => planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 2, anyAttemptMayHaveMined: false, ...overrides });
+    const bad = (overrides: Partial<Parameters<typeof planReplacement>[0]>) => planReplacement({ current: fees(1, 0.1), ceiling: fees(2, 0.5), bumpsUsed: 0, maxBumps: 2, mayHaveMined: 'no', ...overrides });
     expect(bad({ maxBumps: 6 })).toEqual({ ok: false, reason: 'REPLACEMENT_CONFIG_INVALID' });
     expect(bad({ maxBumps: -1 })).toEqual({ ok: false, reason: 'REPLACEMENT_CONFIG_INVALID' });
     expect(bad({ maxBumps: 1.5 })).toEqual({ ok: false, reason: 'REPLACEMENT_CONFIG_INVALID' });
@@ -48,19 +54,19 @@ describe('D-080 planReplacement', () => {
     const ceiling = requiredCeiling(initial, 2);
     let current = initial;
     for (let used = 0; used < 2; used += 1) {
-      const decision = planReplacement({ current, ceiling, bumpsUsed: used, maxBumps: 2, anyAttemptMayHaveMined: false });
+      const decision = planReplacement({ current, ceiling, bumpsUsed: used, maxBumps: 2, mayHaveMined: 'no' });
       expect(decision.ok).toBe(true);
       if (decision.ok) current = decision.next;
     }
     expect(current).toEqual(ceiling);
-    expect(planReplacement({ current, ceiling, bumpsUsed: 2, maxBumps: 3, anyAttemptMayHaveMined: false })).toEqual({ ok: false, reason: 'REPLACEMENT_CEILING_REACHED' });
+    expect(planReplacement({ current, ceiling, bumpsUsed: 2, maxBumps: 3, mayHaveMined: 'no' })).toEqual({ ok: false, reason: 'REPLACEMENT_CEILING_REACHED' });
   });
 });
 
 describe('D-080 rounding and limits', () => {
   it('always rounds the 10 percent rise up, so a value that is not a multiple of 10 still rises by at least 10 percent', () => {
     for (const fee of [1n, 7n, 9n, 11n, 99n, 101n, 12_345_678_901n]) {
-      const decision = planReplacement({ current: { maxFeePerGas: fee + 5n, maxPriorityFeePerGas: fee }, ceiling: { maxFeePerGas: fee * 10n + 100n, maxPriorityFeePerGas: fee * 10n + 100n }, bumpsUsed: 0, maxBumps: 1, anyAttemptMayHaveMined: false });
+      const decision = planReplacement({ current: { maxFeePerGas: fee + 5n, maxPriorityFeePerGas: fee }, ceiling: { maxFeePerGas: fee * 10n + 100n, maxPriorityFeePerGas: fee * 10n + 100n }, bumpsUsed: 0, maxBumps: 1, mayHaveMined: 'no' });
       expect(decision.ok).toBe(true);
       if (!decision.ok) continue;
       expect(decision.next.maxPriorityFeePerGas * 10_000n).toBeGreaterThanOrEqual(fee * 11_000n);
@@ -75,12 +81,12 @@ describe('D-080 rounding and limits', () => {
     const ceiling = requiredCeiling(initial, 5);
     let current = initial;
     for (let used = 0; used < 5; used += 1) {
-      const decision = planReplacement({ current, ceiling, bumpsUsed: used, maxBumps: 5, anyAttemptMayHaveMined: false });
+      const decision = planReplacement({ current, ceiling, bumpsUsed: used, maxBumps: 5, mayHaveMined: 'no' });
       expect(decision.ok).toBe(true);
       if (decision.ok) { current = decision.next; expect(current.maxPriorityFeePerGas <= current.maxFeePerGas).toBe(true); }
     }
     expect(current).toEqual(ceiling);
-    expect(planReplacement({ current, ceiling, bumpsUsed: 5, maxBumps: 5, anyAttemptMayHaveMined: false })).toEqual({ ok: false, reason: 'REPLACEMENT_LIMIT_REACHED' });
+    expect(planReplacement({ current, ceiling, bumpsUsed: 5, maxBumps: 5, mayHaveMined: 'no' })).toEqual({ ok: false, reason: 'REPLACEMENT_LIMIT_REACHED' });
     expect(() => requiredCeiling(initial, 6)).toThrow('REPLACEMENT_CONFIG_INVALID');
     expect(() => requiredCeiling({ maxFeePerGas: 0n, maxPriorityFeePerGas: 0n }, 1)).toThrow('REPLACEMENT_FEES_INVALID');
   });

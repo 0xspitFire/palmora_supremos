@@ -1139,6 +1139,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const intentId = this.intentRowIdFromExecution(attempt.executionId, attempt.wallet, attempt.runId);
     if (!intentId) throw new Error('TRANSACTION_INTENT_REQUIRED');
     this.databaseStore.recordAttempt({ id: attempt.id, transactionIntentId: intentId, endpoint: safeAttemptEndpoint(attempt.endpoint ?? 'engine'), responseClass: attempt.state, ...(attempt.nonce === undefined ? {} : { nonce: attempt.nonce }), ...(attempt.hash === undefined ? {} : { txHash: attempt.hash }), ...(attempt.redactedError === undefined ? {} : { redactedError: attempt.redactedError }), ...(attempt.replacementOfId === undefined ? {} : { replacementOfId: attempt.replacementOfId }), executionId: attempt.executionId, attemptedAt: attempt.createdAt });
+    // T-094: a replacement is a competing attempt for a nonce that was already submitted. It must not move the execution (a new "signed"
+    // attempt would ask for submitted -> signed); the execution moves on the receipt of whichever attempt is mined.
+    if (attempt.replacementOfId !== undefined) return;
     const target = attempt.state.toLowerCase();
     const nextState = target === 'pending' ? 'submitted' : target;
     this.transitionExecutionSafe(attempt.executionId, nextState, `engine attempt ${attempt.state}`);
