@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promi
 import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
+import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei, zeroAddress } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, installTurnkeyPolicyBundleAtomic, pruneTurnkeySignedPolicyCatalog, readTurnkeySecretConfig, resolveSeaDropFeeRecipient, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyPolicyBundle, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyCatalog, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
@@ -361,7 +361,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   })
   .command('turnkey-robinhood-policy-prepare', 'Create an owner-only exact free-mint enforcement policy for chain 4663', (args) => args
     .option('policy-id', { type: 'string', default: 'pending-provider-policy', description: 'Exact provider policy ID returned by Turnkey; omit only to print the provider-policy template before creation' })
-    .option('nft-contract', { type: 'string', demandOption: true })
+    .option('nft-contract', { type: 'string', description: 'Exact NFT contract for legacy exact mode; omit with --policy-family' })
+    .option('policy-family', { type: 'boolean', default: false, description: 'Prepare the bounded Robinhood SeaDrop policy family (one-time setup; no per-drop contract pin)' })
     .option('fee-recipient', { type: 'string', description: 'Override the on-chain SeaDrop recipient resolution' })
     .option('quantity', { type: 'number', default: 1 })
     .option('gas-limit-max', { type: 'string', default: '500000' })
@@ -371,17 +372,17 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('fleet-change', { type: 'string', description: 'D-078: a draft public wallet list (from turnkey-fleet-inventory --write) that replaces the installed bundle\'s wallets in this UNSIGNED proposal; the owner still creates the provider policy and signs offline' })
     .option('output', { type: 'string', description: 'Policy AST output under the secret root' }), async (args) => {
       try {
-        if (!/^0x[0-9a-fA-F]{40}$/.test(args.nftContract) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
+        if ((!args.policyFamily && (typeof args.nftContract !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
         const secretRoot = configuredSecretRoot(runtimeRoot);
         const config = await readTurnkeySecretConfig(secretRoot);
         const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
         const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
         const chain = await resolveChainConfigFromSecrets(4663, 'mainnet', secretRoot);
-        if (!args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
-        const feeRecipient = args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
+        if (!args.policyFamily && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
+        const feeRecipient = args.policyFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
         const { artifact, change: walletChange } = await policyWalletArtifact(config, installedBundle, args);
         const wallets = walletReferencesFromArtifact(artifact);
-        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: args.nftContract as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei });
+        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei, ...(args.policyFamily ? { policyFamily: true } : {}) });
         const providerPolicy = turnkeyProviderPolicyExpressions(policy);
         const output = turnkeySecretPath(args.output, 'turnkey-robinhood-policy-ast.json');
         await writeTurnkeyJson(output, policy);
@@ -735,18 +736,22 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const wallet = (await signer.listWallets())[0];
         if (!wallet) throw new Error('TURNKEY_WALLET_NOT_FOUND');
         const tx = record.enforcementPolicy.transaction;
+        const rehearsalData = record.enforcementPolicy.family
+          ? encodeFunctionData({ abi: parseAbi(['function mintPublic(address,address,address,uint256)']), functionName: 'mintPublic', args: [zeroAddress, zeroAddress, zeroAddress, 1n] })
+          : tx.data;
         const result = await signer.signTransactionWithEvidence(wallet.index, {
           chainId: tx.chainId,
           nonce: Number.MAX_SAFE_INTEGER,
           from: wallet.address,
           to: tx.to,
           value: BigInt(tx.valueWei),
-          data: tx.data,
+          data: rehearsalData,
           gasLimit: 0n,
           maxFeePerGas: 0n,
           maxPriorityFeePerGas: 0n,
           accessList: [],
           policyRef: signer.policyReference(),
+          ...(record.enforcementPolicy.family ? { familyContext: { nftContract: zeroAddress, feeRecipient: zeroAddress } } : {}),
         });
         const evidence = {
           version: 1,

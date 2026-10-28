@@ -15,6 +15,7 @@ import {
   verifyTurnkeySignedPolicyRecord,
 } from './turnkey-policy-record.js';
 import type { TurnkeyPolicyAst } from './turnkey-policy.js';
+import { SEADROP_V1_ADDRESS } from './chains.js';
 import { selectTurnkeyPolicyRecord, turnkeyPolicySelection } from './turnkey-signer.js';
 import { validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
 
@@ -114,6 +115,20 @@ describe('Turnkey signed canonical policy record', () => {
       consensus: "approvers.any(user, user.id == 'user-1')",
       condition: "activity.type == 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2' && private_key.id in ['key-1'] && eth.tx.chain_id == 1 && eth.tx.from in ['0x1111111111111111111111111111111111111111'] && eth.tx.to == '0x2222222222222222222222222222222222222222' && eth.tx.value == 0 && eth.tx.data == '0x161ac21f' && eth.tx.gas <= 200000 && eth.tx.max_fee_per_gas <= 1000000000 && eth.tx.max_priority_fee_per_gas <= 100000000",
     });
+  });
+
+  it('renders only the approved bounded family predicates for Robinhood', () => {
+    const ast: TurnkeyPolicyAst = {
+      ...enforcementPolicy(),
+      scope: { ...enforcementPolicy().scope, policyId: 'policy-family' },
+      transaction: { ...enforcementPolicy().transaction, chainId: 4663, to: SEADROP_V1_ADDRESS, data: '0x161ac21f' as Hex },
+      family: { kind: 'robinhood-seadrop-public-v1', maxQuantity: 4 },
+    };
+    const { condition } = turnkeyProviderPolicyExpressions(ast);
+    expect(condition).toContain("eth.tx.data[0..10] == '0x161ac21f'");
+    expect(condition).toContain("eth.tx.data[138..202] == '0000000000000000000000000000000000000000000000000000000000000000'");
+    expect(condition).toContain('eth.tx.data[202..266].hex_to_uint() <= 4');
+    expect(condition).not.toContain('eth.tx.data ==');
   });
 
   it('normalizes actual SDK response projections and verifies with a separately pinned Ed25519 key', () => {

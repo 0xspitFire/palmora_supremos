@@ -194,6 +194,20 @@ export interface DryRunWallet { wallet: string; simulation: 'passed' | 'failed';
 export interface SupplyView { totalSupply: string; maxSupply: string; soldOut: boolean }
 export interface DryRunReport { contract: string; supply?: SupplyView | null; verdict: 'ok' | 'blocked'; summary: string; drop: { priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null; quantity: number; wallets: DryRunWallet[] }
 
+async function mapLimit<T, R>(items: readonly T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await work(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
+  return results;
+}
+
 
 // ── Why a simulated mint reverted, in plain words ─────────────────────────────────────────────────────
 
@@ -285,22 +299,25 @@ export async function dryRunDrop(client: PublicClient, contract: string, wallets
   const supply = await readSupply(client, contract);
   if (supply?.soldOut) return { contract, verdict: 'blocked', summary: `This collection is sold out (${supply.totalSupply} of ${supply.maxSupply} minted), so a mint would revert.`, drop: dropView, supply, quantity, wallets: [] };
   const gasPrice = await client.getGasPrice().catch(() => null);
-  const results: DryRunWallet[] = [];
-  for (const wallet of wallets) {
+  // `minterIfNotPayer` is zero for this strategy, so calldata is identical for
+  // every wallet. Build it once; the wallet is still supplied as `account` to
+  // each eth_call and estimate, preserving per-wallet authorization checks.
+  const calldata = strategy.buildCalldata(drop, wallets[0] as Address, quantity);
+  const results = await mapLimit(wallets, 8, async (wallet): Promise<DryRunWallet> => {
     const minter = wallet as Address;
-    const calldata = strategy.buildCalldata(drop, minter, quantity);
     try {
       await client.call({ account: minter, to: SEADROP_V1_ADDRESS, data: calldata, value: 0n });
-      let estimatedGas: bigint | null = null;
-      try { estimatedGas = await client.estimateGas({ account: minter, to: SEADROP_V1_ADDRESS, data: calldata, value: 0n }); } catch { estimatedGas = null; }
+      const [estimatedGas, balance] = await Promise.all([
+        client.estimateGas({ account: minter, to: SEADROP_V1_ADDRESS, data: calldata, value: 0n }).catch(() => null),
+        client.getBalance({ address: minter }).catch(() => null),
+      ]);
       const cost = estimatedGas !== null && gasPrice !== null ? estimatedGas * gasPrice : null;
-      const balance = await client.getBalance({ address: minter }).catch(() => null);
-      results.push({ wallet, simulation: 'passed', estimatedGas: estimatedGas?.toString() ?? null, estimatedCostEth: cost === null ? null : ethString(cost), withinPerWalletCap: cost === null ? null : cost <= FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, balanceEth: balance === null ? null : ethString(balance), hasEnoughForGas: balance === null || cost === null ? null : balance >= cost });
+      return { wallet, simulation: 'passed', estimatedGas: estimatedGas?.toString() ?? null, estimatedCostEth: cost === null ? null : ethString(cost), withinPerWalletCap: cost === null ? null : cost <= FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, balanceEth: balance === null ? null : ethString(balance), hasEnoughForGas: balance === null || cost === null ? null : balance >= cost };
     } catch (error) {
       const why = explainRevert(error);
-      results.push({ wallet, simulation: 'failed', reason: why.reason, ...(why.selector ? { revertSelector: why.selector } : {}), estimatedGas: null, estimatedCostEth: null, withinPerWalletCap: null, balanceEth: null, hasEnoughForGas: null });
+      return { wallet, simulation: 'failed', reason: why.reason, ...(why.selector ? { revertSelector: why.selector } : {}), estimatedGas: null, estimatedCostEth: null, withinPerWalletCap: null, balanceEth: null, hasEnoughForGas: null };
     }
-  }
+  });
   const passed = results.filter((item) => item.simulation === 'passed').length;
   return { contract, supply, verdict: passed > 0 ? 'ok' : 'blocked', summary: `${passed} of ${results.length} wallet(s) simulated a ${quantity}-NFT free mint successfully (simulation only; nothing was sent). ${results.filter((item) => item.hasEnoughForGas === false).length} of them hold too little ETH on Robinhood to pay for the gas.`, drop: dropView, quantity, wallets: results };
 }

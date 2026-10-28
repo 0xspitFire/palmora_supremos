@@ -138,38 +138,26 @@ export class SeaDropV1PublicStrategy implements MintStrategy {
       );
     }
 
-    // 2. Resolve fee recipient
-    const feeRecipient = await resolveSeaDropFeeRecipient(
-      client,
-      nftContract,
-      publicDrop.restrictFeeRecipients,
-    );
-
-    // 3. Try to read total supply (some contracts don't implement this)
-    let totalMinted = 0n;
-    let maxTokenSupply = 0n;
-    let totalSupplyKnown = false;
-    let maxSupplyKnown = false;
-    try {
-      totalMinted = await client.readContract({
-        address: nftContract,
-        abi: ERC721_ABI,
-        functionName: 'totalSupply',
-      });
-      totalSupplyKnown = true;
-    } catch {
-      // totalSupply is optional — retain an explicit unknown supply fact.
-    }
-    try {
-      maxTokenSupply = await client.readContract({
-        address: nftContract,
-        abi: ERC721_ABI,
-        functionName: 'maxSupply',
-      });
-      maxSupplyKnown = true;
-    } catch {
-      // maxSupply is not standard — retain an explicit unknown upper bound.
-    }
+    // 2–3. These reads are independent after getPublicDrop. Run them together
+    // to keep preparation bounded by the slowest RPC instead of the sum of four
+    // round trips. Unknown optional supply methods remain an explicit unknown.
+    const optionalRead = async (functionName: 'totalSupply' | 'maxSupply'): Promise<{ value: bigint; known: boolean }> => {
+      try {
+        const value = await client.readContract({ address: nftContract, abi: ERC721_ABI, functionName });
+        return { value: value as bigint, known: true };
+      } catch {
+        return { value: 0n, known: false };
+      }
+    };
+    const [feeRecipient, totalSupply, maxSupply] = await Promise.all([
+      resolveSeaDropFeeRecipient(client, nftContract, publicDrop.restrictFeeRecipients),
+      optionalRead('totalSupply'),
+      optionalRead('maxSupply'),
+    ]);
+    const totalMinted = totalSupply.value;
+    const maxTokenSupply = maxSupply.value;
+    const totalSupplyKnown = totalSupply.known;
+    const maxSupplyKnown = maxSupply.known;
 
     return {
       nftContract,
