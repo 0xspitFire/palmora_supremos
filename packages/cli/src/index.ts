@@ -1315,16 +1315,18 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
         const keys = await client.getPrivateKeys({ organizationId: config.organizationId });
         const hd = await (client as unknown as { getWallets?: (input: { organizationId: string }) => Promise<{ wallets?: unknown[] }> }).getWallets?.({ organizationId: config.organizationId }).catch(() => undefined);
+        const hdNote = hd?.wallets ? '' : 'Note: the HD-wallet check could not run, so a fleet made of HD wallets would show as zero keys without that explanation.\n';
         const inventory = inventoryFleet({ privateKeys: keys.privateKeys, ...(hd?.wallets ? { hdWalletCount: hd.wallets.length } : {}), ...(args.expect !== undefined ? { expect: args.expect } : {}) });
         let written: string | undefined;
         if (args.write) {
-          if (inventory.problems.length > 0) throw new Error('TURNKEY_FLEET_DRAFT_BLOCKED: fix the listed problems first; nothing was written');
+          if (inventory.problems.length > 0 || inventory.usable === 0) throw new Error('TURNKEY_FLEET_DRAFT_BLOCKED: fix the listed problems first (a draft needs at least one usable key); nothing was written');
           written = turnkeySecretPath(args.output, 'turnkey-fleet-draft.json');
+          if (existsSync(written)) throw new Error('TURNKEY_FLEET_DRAFT_EXISTS: a draft is already there; move or delete it first so it is not overwritten');
           await writeTurnkeyJson(written, { wallets: inventory.draftWallets });
         }
-        process.stdout.write(`${renderFleetInventory(inventory)}\n${written ? `Draft saved: ${written}\n` : ''}`);
+        process.stdout.write(`${renderFleetInventory(inventory)}\n${hdNote}${written ? `Draft saved: ${written}\n` : ''}`);
         if (inventory.problems.length > 0) process.exitCode = 2;
-      } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
+      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
     })
   .command('probe-rpc', 'Read-only load probe of a chain RPC: latency, errors and rate limiting at rising concurrency', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'ethereum' })

@@ -58,6 +58,11 @@ describe('rpc-health', () => {
     expect(result.slots[0]?.working).toBe(true);
   });
 
+  it('keeps the wrong-chain reason when a later url in the slot fails differently', async () => {
+    const result = await checkChainRpc({ chainId: 1, slots: [{ name: 'ETHEREUM_RPC_URL', urls: [A, B] }], read: reader({ [A]: { chainId: 5 } }) });
+    expect(result.slots[0]?.failure).toBe('wrong_chain');
+  });
+
   it('derives a coarse provider group only for comparison', () => {
     expect(providerGroup(A)).toBe('alpha.example');
     expect(providerGroup('not a url')).toBeUndefined();

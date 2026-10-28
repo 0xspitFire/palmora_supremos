@@ -60,7 +60,7 @@ export async function checkChainRpc(input: { chainId: number; slots: readonly Rp
         if (reading.chainId !== input.chainId) { failure = 'wrong_chain'; continue; }
         const group = providerGroup(url);
         return { health: { slot: slot.name, configured: true, working: true, latencyMs: Math.round(now() - started), block: reading.block.toString() }, ...(group ? { group } : {}), block: reading.block };
-      } catch (error) { failure = classifyFailure(error); }
+      } catch (error) { if (failure !== 'wrong_chain') failure = classifyFailure(error); }
     }
     return { health: { slot: slot.name, configured: true, working: false, failure } };
   }));
