@@ -59,6 +59,7 @@ import { MintError, MintErrorType } from './types.js';
 import { getChainConfig, resolveChainByNameFromSecrets } from './chains.js';
 import { exceedsRunReserveCap, freeMintReserveCapsForChain, replacementPriorityBudget, validateFeeBudget, validateFreeMintReserve, validateFreeMintSpend, validatePaidGasExposure, validatePaidQuantity } from './fee-guard.js';
 import { readAndValidateDrop, simulateMint, getStrategy } from './drop-reader.js';
+import { CAMPAIGN_CHANGED_MID_RUN, createDropRecheck } from './drop-recheck.js';
 import { reserveThenSign, robinhoodL1DataGasWei } from './pre-sign.js';
 import { quoteBaseFeeBound } from './base-fees.js';
 import { NonceManagerImpl } from './nonce-manager.js';
@@ -675,6 +676,13 @@ export class MintEngine {
     );
     assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
     const admissionGate = new AdmissionGate();
+    // D-081: live runs re-read the drop just before each wallet is prepared and stop sending if it changed since approval.
+    const recheckDrop = this.config.safety.dryRun ? undefined : createDropRecheck({
+      initial: drop,
+      read: () => readAndValidateDrop(publicClient, this.config.target.contract, chainId, this.config.target.strategy, this.now()),
+      now: () => this.now().getTime(),
+      onUnavailable: () => parentLog.warn({ event: 'drop_recheck_unavailable' }, 'Drop could not be re-read in time; continuing under the existing gates'),
+    });
     // Concurrent execution with Promise.allSettled (per-wallet isolation)
     const promises = walletIndices.map(async (walletIndex): Promise<WalletMintResult> => {
       const walletLog = childLogger(parentLog, 'WalletMint', { walletIndex });
@@ -701,6 +709,12 @@ export class MintEngine {
         }
         // Robinhood only: the owner's enablement must still be current at the moment this wallet is about to be prepared and signed (D-050).
         assertDirectChainExecutionPolicy(chainId, drop.mintPrice * BigInt(this.config.target.quantity), this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
+
+        const dropChange = await recheckDrop?.();
+        if (dropChange && dropChange !== 'unknown') {
+          walletLog.warn({ event: 'campaign_changed_mid_run', changed: dropChange }, 'Drop changed after approval; this wallet is not sent');
+          return { walletIndex, address: walletAddress, status: 'skipped', error: `${CAMPAIGN_CHANGED_MID_RUN}: ${dropChange}`, simulation: simulations.get(walletIndex), durationMs: Date.now() - startTime };
+        }
 
         const simulation = simulations.get(walletIndex);
         if (!this.config.safety.dryRun && !simulation?.success) {
