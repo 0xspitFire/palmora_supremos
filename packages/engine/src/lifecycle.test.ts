@@ -108,6 +108,19 @@ describe('Gate 3 lifecycle boundaries', () => {
     expect(reconcileTransaction({ receiptVisible: true, receiptStatus: 'success', sender: wallet, nonce: 1, chainPendingNonce: 2, restart: false, originalHash: hash, observedHash: replacementHash }).action).toBe('record-replacement');
   });
 
+  it('T-094: a hash we sent ourselves for the nonce (a winning replacement) matches; a foreign hash on our nonce is still replaced', () => {
+    const own = [hash, replacementHash];
+    expect(reconcileByHashAndNonce({ originalHash: hash, ownHashes: own, observedHash: replacementHash, receiptVisible: true, receiptStatus: 'success', receiptCanonical: true }).state).toBe('matched');
+    expect(reconcileByHashAndNonce({ originalHash: hash, ownHashes: own, observedHash: replacementHash, nonceConsumedByDifferentHash: true, receiptVisible: true, receiptStatus: 'success', receiptCanonical: true }).state).toBe('matched');
+    const foreign = `0x${'f'.repeat(64)}` as typeof hash;
+    expect(reconcileByHashAndNonce({ originalHash: hash, ownHashes: own, observedHash: foreign, receiptVisible: true, receiptStatus: 'success', receiptCanonical: true }).state).toBe('replaced');
+    expect(reconcileByHashAndNonce({ originalHash: hash, ownHashes: own, nonceConsumedByDifferentHash: true, receiptVisible: false }).state).toBe('replaced');
+    // Without the set the old behaviour is unchanged.
+    expect(reconcileByHashAndNonce({ originalHash: hash, observedHash: replacementHash, receiptVisible: true, receiptStatus: 'success', receiptCanonical: true }).state).toBe('replaced');
+    // A reorg of our own winning hash is still a reorg.
+    expect(reconcileByHashAndNonce({ originalHash: hash, ownHashes: own, observedHash: replacementHash, receiptVisible: true, receiptStatus: 'success', receiptCanonical: false }).state).toBe('reorged');
+  });
+
   it('does not treat Robinhood soft or posted stages as product success or settlement', () => {
     expect(lifecycleStateForFinality(4663, 'soft', 'success')).toBe('included');
     expect(lifecycleStateForFinality(4663, 'posted', 'success')).toBe('posted');
@@ -218,15 +231,19 @@ describe('Robinhood enablement grant (D-040, Key 2): refused unless a current ow
 });
 
 describe('the engine hands its Robinhood grant to the policy at every check', () => {
-  it('passes safety.robinhoodGrant at all five policy call sites (four run-level checks and one per wallet before preparing and signing) and to the broadcast profile (D-075), and reads no environment variable for it', async () => {
+  it('passes safety.robinhoodGrant at all six policy call sites (four run-level checks, one per wallet before preparing and signing, and one before every replacement, T-094) and to the broadcast profile (D-075), and reads no environment variable for it', async () => {
     const { readFile } = await import('node:fs/promises');
     const source = await readFile(new URL('./mint-engine.ts', import.meta.url), 'utf8');
     const calls = source.match(/assertDirectChainExecutionPolicy\(/g)?.length ?? 0;
     const granted = source.match(/this\.config\.safety\.robinhoodGrant/g)?.length ?? 0;
-    expect(calls).toBe(5);
-    // Six direct hand-offs remain. The former seventh occurrence was a mere
+    expect(calls).toBe(6);
+    // Seven direct hand-offs remain: one per call site and one for the broadcast profile. The former extra occurrence was a mere
     // object-presence bypass; admission now proves that the grant is current.
-    expect(granted).toBe(6);
+    expect(granted).toBe(7);
+    // The stronger invariant behind the counts: EVERY policy call hands over the grant, so no check can run without it.
+    const callTexts = [...source.matchAll(/assertDirectChainExecutionPolicy\(([\s\S]*?)\);/g)].map((match) => match[1]!);
+    expect(callTexts.length).toBe(6);
+    for (const text of callTexts) expect(text).toContain('this.config.safety.robinhoodGrant');
     expect(source).not.toMatch(/process\.env[^\n]*(ROBINHOOD|GRANT)/i);
   });
 });

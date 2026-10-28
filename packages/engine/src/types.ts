@@ -275,6 +275,12 @@ export interface SpendReservationProvider {
     readonly freeMint: boolean;
     readonly policySnapshot: unknown;
   }): Promise<SpendReservation>;
+  /**
+   * T-094: re-run the store's full live pre-sign gate for a wallet that already holds a reservation (stored owner enablement still
+   * current, store kill flag clear, reservation still reserved, amounts still inside it). Called with the SAME request before every
+   * replacement. Throws to refuse. A provider without it cannot support replacements.
+   */
+  reconfirm?(input: Parameters<SpendReservationProvider['reserve']>[0]): Promise<void>;
 }
 
 /** Stable identity allocated by Backend/Database before a chain side effect. */
@@ -507,6 +513,12 @@ export interface WalletMintResult {
   readonly reservationId?: string;
   readonly attemptIds?: readonly string[];
   readonly submittedAttemptId?: string;
+  /** T-094: each attempt's own transaction hash, when a wallet has more than one (a replacement). Absent means every attempt shares `txHash`. */
+  readonly attemptHashes?: Readonly<Record<string, Hash>>;
+  /** T-094: attempt id to the attempt it replaced. */
+  readonly attemptReplacements?: Readonly<Record<string, string>>;
+  /** T-094: attempts that lost to another attempt for the same nonce. */
+  readonly replacedAttemptIds?: readonly string[];
   readonly lifecycleState?: 'prepared' | 'submitted' | 'included' | 'posted' | 'ethereum_final' | 'replaced' | 'dropped' | 'reorged' | 'failed' | 'killed';
   readonly reconciliationState?: 'unresolved' | 'matched' | 'ambiguous' | 'replaced' | 'dropped' | 'reorged' | 'final';
 }
@@ -571,6 +583,24 @@ export interface MintJobConfig {
     readonly maxFeePerGasGwei: number;
     readonly maxPriorityFeePerGasGwei: number;
     readonly gasLimitPadding: number;
+    /**
+     * D-080 / T-094: bounded same-nonce replacement. Used only when `safety.maxReplacementBumps` is above 0 on a public or sequencer
+     * path. The ceiling is what is reserved at admission and the most any replacement may carry; it must sit inside the signed provider
+     * policy's pinned fee limits. Omit (the default) and nothing is ever replaced.
+     */
+    readonly replacement?: {
+      readonly ceilingMaxFeePerGasGwei: number;
+      readonly ceilingMaxPriorityFeePerGasGwei: number;
+      /**
+       * The fee limits PINNED by the signed provider policy for this boundary (from the owner-signed record). Required: the ceiling must
+       * sit inside them or the run is refused before anything is signed.
+       */
+      readonly policyLimits: { readonly maxFeePerGasGwei: number; readonly maxPriorityFeePerGasGwei: number };
+      /** The owner's own fee caps for this campaign (what they approved). The ceiling must sit inside them too. */
+      readonly ownerCap: { readonly maxFeePerGasGwei: number; readonly maxPriorityFeePerGasGwei: number };
+      /** Replace only after the newest attempt has been unmined this long (floor 6000 ms). */
+      readonly stuckAfterMs: number;
+    };
   };
   readonly safety: {
     readonly maxSpendEth: number;

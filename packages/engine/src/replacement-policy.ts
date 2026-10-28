@@ -19,9 +19,13 @@ export type ReplacementRefusal =
   | 'REPLACEMENT_DISABLED'
   | 'REPLACEMENT_LIMIT_REACHED'
   | 'REPLACEMENT_MAY_HAVE_MINED'
+  | 'REPLACEMENT_MINED_STATUS_UNKNOWN'
   | 'REPLACEMENT_CEILING_REACHED'
   | 'REPLACEMENT_FEES_INVALID'
   | 'REPLACEMENT_CONFIG_INVALID';
+
+/** Whether any earlier attempt for this nonce may already be mined. Anything but a proven 'no' refuses. */
+export type MinedStatus = 'no' | 'yes' | 'unknown';
 
 export type ReplacementDecision = { ok: true; next: Fees; bumpsUsed: number } | { ok: false; reason: ReplacementRefusal };
 
@@ -36,11 +40,12 @@ function nextStep(current: Fees): Fees {
   return { maxFeePerGas: raisedFee > maxPriorityFeePerGas ? raisedFee : maxPriorityFeePerGas, maxPriorityFeePerGas };
 }
 
-export function planReplacement(input: { current: Fees; ceiling: Fees; bumpsUsed: number; maxBumps: number; anyAttemptMayHaveMined: boolean }): ReplacementDecision {
+export function planReplacement(input: { current: Fees; ceiling: Fees; bumpsUsed: number; maxBumps: number; mayHaveMined: MinedStatus }): ReplacementDecision {
   if (!Number.isSafeInteger(input.maxBumps) || input.maxBumps < 0 || input.maxBumps > MAX_REPLACEMENT_BUMPS_LIMIT || !Number.isSafeInteger(input.bumpsUsed) || input.bumpsUsed < 0) return { ok: false, reason: 'REPLACEMENT_CONFIG_INVALID' };
   if (input.maxBumps === 0) return { ok: false, reason: 'REPLACEMENT_DISABLED' };
   if (input.bumpsUsed >= input.maxBumps) return { ok: false, reason: 'REPLACEMENT_LIMIT_REACHED' };
-  if (input.anyAttemptMayHaveMined) return { ok: false, reason: 'REPLACEMENT_MAY_HAVE_MINED' };
+  if (input.mayHaveMined === 'yes') return { ok: false, reason: 'REPLACEMENT_MAY_HAVE_MINED' };
+  if (input.mayHaveMined !== 'no') return { ok: false, reason: 'REPLACEMENT_MINED_STATUS_UNKNOWN' };
   if (!validFees(input.current) || !validFees(input.ceiling)) return { ok: false, reason: 'REPLACEMENT_FEES_INVALID' };
 
   const { maxFeePerGas: nextFee, maxPriorityFeePerGas: nextTip } = nextStep(input.current);

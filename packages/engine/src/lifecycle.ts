@@ -229,6 +229,8 @@ export type SubmissionDisposition =
  */
 export function reconcileByHashAndNonce(input: {
   originalHash?: Hash;
+  /** T-094: every hash this system itself sent for the nonce (the original and any replacements). A hash outside this set on our nonce is still `replaced`. */
+  ownHashes?: readonly Hash[];
   observedHash?: Hash;
   receiptVisible: boolean;
   receiptStatus?: 'success' | 'reverted';
@@ -239,7 +241,8 @@ export function reconcileByHashAndNonce(input: {
   if (input.receiptVisible && input.receiptCanonical === false) {
     return { state: 'reorged', reason: 'receipt is no longer canonical' };
   }
-  if (input.nonceConsumedByDifferentHash || (input.observedHash && input.originalHash && input.observedHash.toLowerCase() !== input.originalHash.toLowerCase())) {
+  const ownHash = (input.observedHash !== undefined && (input.ownHashes ?? []).some((hash) => hash.toLowerCase() === input.observedHash!.toLowerCase()));
+  if ((input.nonceConsumedByDifferentHash && !ownHash) || (input.observedHash && input.originalHash && !ownHash && input.observedHash.toLowerCase() !== input.originalHash.toLowerCase())) {
     return { state: 'replaced', observedHash: input.observedHash, reason: 'a different hash consumed the same sender nonce' };
   }
   if (input.receiptVisible && input.receiptStatus === 'success') {

@@ -118,17 +118,27 @@ describe('adapter wiring (T-010)', () => {
   it('routes the reserve step through the complete pre-sign gate', async () => {
     const { readFile } = await import('node:fs/promises');
     const source = await readFile(new URL('./engine-adapter.ts', import.meta.url), 'utf8');
+    // The complete gate lives in one shared function, which both the reserve step and the pre-replacement re-check (T-094) run.
+    const gateBody = source.slice(source.indexOf('const gateNow = '), source.indexOf('const provider: SpendReservationProvider'));
+    expect(gateBody).toContain('preSignReservationGate(');
     const reserveBody = source.slice(source.indexOf('reserve: async (input) => {'), source.indexOf('const settleTotal'));
-    expect(reserveBody).toContain('preSignReservationGate(');
+    expect(reserveBody).toContain('gateNow(input)');
   });
 
   it('re-reads the reservations when reserve runs, never the copy taken when execute started (T-021)', async () => {
     const { readFile } = await import('node:fs/promises');
     const source = await readFile(new URL('./engine-adapter.ts', import.meta.url), 'utf8');
+    // The live gate is one shared function (also re-run before every replacement, T-094). It reads the store NOW, and `reserve` runs it
+    // first, before any await, so nothing is signed from the copy taken when execute started.
+    const gateBody = source.slice(source.indexOf('const gateNow = '), source.indexOf('const provider: SpendReservationProvider'));
+    expect(gateBody).toContain('options.getState()');
+    expect(gateBody).toContain('byWallet: freshByWallet');
+    expect(gateBody).not.toMatch(/byWallet,\s*runId/);
     const reserveBody = source.slice(source.indexOf('reserve: async (input) => {'), source.indexOf('const settleTotal'));
-    expect(reserveBody).toContain('options.getState()');
-    expect(reserveBody).toContain('byWallet: freshByWallet');
-    expect(reserveBody).not.toMatch(/byWallet,\s*runId/);
+    expect(reserveBody).toContain('gateNow(input)');
+    expect(reserveBody).not.toContain('await');
+    const reconfirmBody = source.slice(source.indexOf('reconfirm: async (input) =>'), source.indexOf('reserve: async (input) => {'));
+    expect(reconfirmBody).toContain('gateNow(input)');
   });
 
   it('refuses when a reservation was released or settled after execute began, with no signer involved', () => {
