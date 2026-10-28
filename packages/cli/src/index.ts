@@ -17,13 +17,15 @@ import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
 import { importWatchList } from './watch-import.js';
 import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './watch-ranking.js';
-import { failoverTransport, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
+import { chainRpcSecretNames, failoverTransport, readSecretList, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
 import { buildCompensatingEvidence, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, probeOrEngageKillSwitch, walletSetDigest } from './compensating-controls-cli.js';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
 import { probeRpc } from './rpc-probe.js';
+import { checkChainRpc, renderRpcHealth, viemReader, type ChainHealth } from './rpc-health.js';
+import { inventoryFleet, renderFleetInventory } from './turnkey-fleet-inventory.js';
 import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -1288,6 +1290,41 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         // Provider errors can carry the RPC URL (and its key), so only a cleaned short description is printed.
         process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`);
       }
+    })
+  .command('rpc-health', 'Read-only check that every configured RPC slot works and that reads could fail over (prints slot names only, never an endpoint)', (args) => args
+    .option('chain', { type: 'string', choices: ['ethereum', 'base', 'robinhood', 'all'] as const, default: 'all' }), async (args) => {
+      try {
+        const root = configuredSecretRoot(runtimeRoot);
+        const chains = args.chain === 'all' ? ([1, 8453, 4663] as const) : ([args.chain === 'ethereum' ? 1 : args.chain === 'base' ? 8453 : 4663] as const);
+        const read = viemReader();
+        const results: ChainHealth[] = [];
+        for (const chainId of chains) {
+          const slots = await Promise.all(chainRpcSecretNames(chainId).map(async (name) => ({ name, urls: await readSecretList(name as Parameters<typeof readSecretList>[0], 'mainnet', root).catch(() => [] as string[]) })));
+          results.push(await checkChainRpc({ chainId, slots, read }));
+        }
+        process.stdout.write(`${renderRpcHealth(results)}\n`);
+        if (results.some((result) => !result.failoverReady)) process.exitCode = 2;
+      } catch (error) { process.stdout.write(`${blocked(new Error(surveyErrorMessage(error)))}\n`); }
+    })
+  .command('turnkey-fleet-inventory', 'Read-only list of the Turnkey private keys that can form the production fleet; --write saves the draft public wallet list', (args) => args
+    .option('expect', { type: 'number', description: 'How many usable keys the fleet should have' })
+    .option('write', { type: 'boolean', default: false, description: 'Save the draft wallet list (public ids and addresses only) under the secret root' })
+    .option('output', { type: 'string' }), async (args) => {
+      try {
+        const config = await readTurnkeySecretConfig(configuredSecretRoot(runtimeRoot));
+        const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
+        const keys = await client.getPrivateKeys({ organizationId: config.organizationId });
+        const hd = await (client as unknown as { getWallets?: (input: { organizationId: string }) => Promise<{ wallets?: unknown[] }> }).getWallets?.({ organizationId: config.organizationId }).catch(() => undefined);
+        const inventory = inventoryFleet({ privateKeys: keys.privateKeys, ...(hd?.wallets ? { hdWalletCount: hd.wallets.length } : {}), ...(args.expect !== undefined ? { expect: args.expect } : {}) });
+        let written: string | undefined;
+        if (args.write) {
+          if (inventory.problems.length > 0) throw new Error('TURNKEY_FLEET_DRAFT_BLOCKED: fix the listed problems first; nothing was written');
+          written = turnkeySecretPath(args.output, 'turnkey-fleet-draft.json');
+          await writeTurnkeyJson(written, { wallets: inventory.draftWallets });
+        }
+        process.stdout.write(`${renderFleetInventory(inventory)}\n${written ? `Draft saved: ${written}\n` : ''}`);
+        if (inventory.problems.length > 0) process.exitCode = 2;
+      } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
     })
   .command('probe-rpc', 'Read-only load probe of a chain RPC: latency, errors and rate limiting at rising concurrency', (args) => args
     .option('chain', { type: 'string', choices: ['ethereum', 'robinhood'] as const, default: 'ethereum' })
