@@ -78,6 +78,9 @@ describe('Turnkey policy boundary', () => {
   it('accepts local 0600 and production root-owned 0440 files while rejecting writable or public modes', () => {
     expect(isSecureTurnkeyFileAccess({ mode: 0o100600, uid: 1000, gid: 1000 }, 1000, [1000])).toBe(true);
     expect(isSecureTurnkeyFileAccess({ mode: 0o100440, uid: 0, gid: 1000 }, 1000, [1000])).toBe(true);
+    expect(isSecureTurnkeyFileAccess({ mode: 0o100640, uid: 0, gid: 1000 }, 0, [0])).toBe(true);
+    expect(isSecureTurnkeyFileAccess({ mode: 0o100644, uid: 0, gid: 1000 }, 0, [0])).toBe(false);
+    expect(isSecureTurnkeyFileAccess({ mode: 0o100660, uid: 0, gid: 1000 }, 0, [0])).toBe(false);
     expect(isSecureTurnkeyFileAccess({ mode: 0o100460, uid: 0, gid: 1000 }, 1000, [1000])).toBe(false);
     expect(isSecureTurnkeyFileAccess({ mode: 0o100444, uid: 0, gid: 1000 }, 1000, [1000])).toBe(false);
     expect(isSecureTurnkeyFileAccess({ mode: 0o100440, uid: 0, gid: 2000 }, 1000, [1000])).toBe(false);
