@@ -40,7 +40,7 @@ describe('service wiring of the compensated Turnkey profile', () => {
   it('only host mode runs live requests, through its own application with every gate, never the read-only one (T-058)', () => {
     const block = service.slice(service.indexOf('let liveRequests'), service.indexOf('// Scheduled encrypted backups'));
     expect(block).toContain("if (config.mode === 'host') {");
-    expect(block).toContain('new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY })');
+    expect(block).toContain('new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(runtime.custodyPolicyFor ? { custodyPolicyFor: runtime.custodyPolicyFor } : {}) })');
     expect(block).toContain('command: (name, input) => liveApplication.command(name, input)');
     expect(block).not.toContain('runtime.application');
     expect(service).toContain('liveRequests?.stop()');
@@ -59,7 +59,7 @@ describe('service wiring of the compensated Turnkey profile', () => {
     expect(setup).toContain("logger.registerSecret(secrets.get('TELEGRAM_TOTP_SECRET') ?? '')");
     expect(service).toContain('alerts: intelligenceAlerts');
     const wiring = service.slice(service.indexOf('if (telegramCommandSetup) {'), service.indexOf('// Scheduled encrypted backups'));
-    expect(wiring).toContain('const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY })');
+    expect(wiring).toContain('const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(runtime.custodyPolicyFor ? { custodyPolicyFor: runtime.custodyPolicyFor } : {}) })');
     expect(wiring).not.toContain('runtime.application');
     expect(wiring).toContain('killSwitchPath: config.killSwitchPath');
     expect(service).toContain('telegramCommands?.stop()');
