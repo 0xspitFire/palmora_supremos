@@ -38,8 +38,11 @@ export const ZEROIZATION_LIMITS = 'JavaScript strings and V8 heap objects cannot
 export function realIo() {
   return {
     exec: async (command, args) => {
-      try { const { stdout } = await run(command, args, { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }); return { ok: true, stdout: String(stdout) }; }
-      catch (error) { return { ok: false, stdout: String(error?.stdout ?? '') }; }
+      try {
+        const { stdout, stderr } = await run(command, args, { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 });
+        return { ok: true, stdout: String(stdout), stderr: String(stderr ?? '') };
+      }
+      catch (error) { return { ok: false, stdout: String(error?.stdout ?? ''), stderr: String(error?.stderr ?? '') }; }
     },
     readText: (path) => readFile(path, 'utf8'),
     readlink: (path) => readlink(path),
@@ -128,7 +131,12 @@ async function heapCore(io) {
   const pattern = (await io.readText('/proc/sys/kernel/core_pattern').catch(() => '')).trim();
   checks.push(check('core_pattern_recorded', pattern.length > 0, `kernel core_pattern: ${pattern}`, 'the kernel core_pattern could not be read'));
   const dumps = await io.exec('coredumpctl', ['list', '--no-pager']);
-  checks.push(check('no_coredumps', /No coredumps found/i.test(dumps.stdout), 'coredumpctl: no coredumps found', 'coredumpctl found a core dump or could not be run'));
+  // Some systemd versions report an empty store on stderr and exit non-zero.
+  // The evidence rule is about the store contents, so accept the explicit
+  // "No coredumps found" result from either stream while still failing closed
+  // for command-not-found or any actual listing.
+  const dumpOutput = `${dumps.stdout ?? ''}\n${dumps.stderr ?? ''}`;
+  checks.push(check('no_coredumps', /No coredumps found/i.test(dumpOutput), 'coredumpctl: no coredumps found', 'coredumpctl found a core dump or could not be run'));
   const heap = await io.exec('/usr/bin/node', ['-e', "console.log(require('v8').getHeapStatistics().heap_size_limit)"]);
   const heapLimit = Number.parseInt(heap.stdout.trim(), 10);
   const environment = (await show(io, 'mint-bot.service', 'Environment')) ?? '';
