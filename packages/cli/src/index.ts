@@ -658,7 +658,9 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         if (installedBundle && config.policyBundlePath) {
           const bundleRoot = resolve(config.policyBundlePath, '..');
           if (config.policyBundlePath !== join(bundleRoot, 'current.json')) throw new Error('TURNKEY_POLICY_BUNDLE_PATH_INVALID');
-          await installTurnkeyPolicyBundleAtomic({ bundle: { ...installedBundle, walletMap }, pinnedPublicKey: publicKey, bundleRoot, groupReadable: true });
+          const expectedGroupId = Number(execFileSync('/usr/bin/id', ['-g', 'mintbot'], { encoding: 'utf8' }).trim());
+          if (!Number.isSafeInteger(expectedGroupId) || expectedGroupId <= 0) throw new Error('TURNKEY_POLICY_BUNDLE_SERVICE_GROUP_REQUIRED');
+          await installTurnkeyPolicyBundleAtomic({ bundle: { ...installedBundle, walletMap }, pinnedPublicKey: publicKey, bundleRoot, groupReadable: true, expectedGroupId });
         } else await writeTurnkeyWalletMap(config.walletMapPath, walletMap);
         process.stdout.write(`${JSON.stringify({ ok: true, walletCount: record.wallets.length, policyRecordDigest: turnkeyPolicyRecordDigest(record), liveProviderStateMatched: true })}\n`);
       } catch (error) { printError(error); }
