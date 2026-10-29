@@ -24,8 +24,11 @@ export interface ReservationRequestAmounts {
 }
 
 /** The numbers sent to the reservation must be the numbers in the transaction about to be signed. */
-export function assertRequestMatchesIntent(intent: Pick<TransactionIntent, 'value' | 'gasLimit' | 'maxFeePerGas'>, request: ReservationRequestAmounts): void {
-  const worstCaseGas = intent.gasLimit * intent.maxFeePerGas;
+export function assertRequestMatchesIntent(intent: Pick<TransactionIntent, 'value' | 'gasLimit' | 'maxFeePerGas'>, request: ReservationRequestAmounts, reservedMaxFeePerGas?: bigint): void {
+  // With replacements enabled the worst case is the CEILING fee (T-094), never lower than the first fee; otherwise it is the first fee.
+  const feeForWorstCase = reservedMaxFeePerGas === undefined ? intent.maxFeePerGas : reservedMaxFeePerGas;
+  if (reservedMaxFeePerGas !== undefined && reservedMaxFeePerGas < intent.maxFeePerGas) throw new MintError(MintErrorType.DURABLE_RESERVATION_REQUIRED, 'Replacement ceiling is below the first fee');
+  const worstCaseGas = intent.gasLimit * feeForWorstCase;
   if (request.valueWei !== intent.value || request.mintValueWei !== intent.value || request.maxGasCostWei !== worstCaseGas || request.l2ExecutionGasWei !== worstCaseGas) {
     throw new MintError(MintErrorType.DURABLE_RESERVATION_REQUIRED, 'Reservation amounts differ from the transaction about to be signed');
   }
@@ -59,10 +62,12 @@ export async function reserveThenSign<R>(args: {
   reserve: () => Promise<R>;
   sign: () => Promise<Hex>;
   checkKill: () => void;
+  /** T-094: the ceiling max fee the reservation was sized at, when replacements are enabled. */
+  reservedMaxFeePerGas?: bigint;
   /** Called the moment the reservation exists, so the caller can release it if a later step refuses. */
   onReserved?: (reservation: R) => void;
 }): Promise<{ reservation: R; signedTx: Hex }> {
-  assertRequestMatchesIntent(args.intent, args.request);
+  assertRequestMatchesIntent(args.intent, args.request, args.reservedMaxFeePerGas);
   const reservation = await args.reserve();
   args.onReserved?.(reservation);
   args.checkKill();

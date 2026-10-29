@@ -22,4 +22,10 @@ describe('Robinhood Turnkey policy template', () => {
     expect(() => robinhoodTurnkeyPolicy({ ...input, quantity: 16 })).toThrow('TURNKEY_ROBINHOOD_POLICY_LIMIT_INVALID');
     expect(() => robinhoodTurnkeyPolicy({ ...input, maxFeePerGasGwei: '0.05' })).toThrow('TURNKEY_ROBINHOOD_POLICY_FEE_INVALID');
   });
+
+  it('can create the bounded family without binding a future NFT contract', () => {
+    const policy = robinhoodTurnkeyPolicy({ ...input, policyFamily: true });
+    expect(policy.family).toEqual({ kind: 'robinhood-seadrop-public-v1', maxQuantity: 1 });
+    expect(policy.transaction.data).toBe('0x161ac21f');
+  });
 });

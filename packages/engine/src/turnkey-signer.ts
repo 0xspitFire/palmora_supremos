@@ -233,7 +233,14 @@ async function readOwnerOnlyFile(path: string, errorCode: string): Promise<strin
 /** Local owner-only files and production root-owned/group-readable files are accepted; writable group/world modes are rejected. */
 export function isSecureTurnkeyFileAccess(file: { mode: number; uid: number; gid: number }, runtimeUid: number, runtimeGroups: readonly number[]): boolean {
   const permissions = file.mode & 0o777;
-  if (file.uid === runtimeUid) return (permissions & 0o077) === 0 && (permissions & 0o400) !== 0;
+  // Root-owned production files are deliberately group-readable (root:mintbot
+  // 0640/0440) so the service can read them. When the verifier itself runs as
+  // root, the owner branch must preserve that production shape; otherwise root
+  // rejects the same files that the mintbot service is allowed to read.
+  if (file.uid === runtimeUid) {
+    const groupReadableRoot = runtimeUid === 0 && (permissions & 0o037) === 0;
+    return (groupReadableRoot || (permissions & 0o077) === 0) && (permissions & 0o400) !== 0;
+  }
   return file.uid === 0
     && runtimeGroups.includes(file.gid)
     && (permissions & 0o037) === 0

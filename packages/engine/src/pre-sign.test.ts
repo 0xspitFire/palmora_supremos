@@ -132,3 +132,36 @@ describe('reserve then sign (execute-level fail-closed behaviour)', () => {
     await expect(result).rejects.toThrow('differs');
   });
 });
+
+describe('T-094: reservation sized at the replacement ceiling', () => {
+  const ceilingFee = 4_000_000_000n;
+  const atCeiling = (item: TransactionIntent) => ({ ...amounts(item), maxGasCostWei: item.gasLimit * ceilingFee, l2ExecutionGasWei: item.gasLimit * ceilingFee });
+
+  it('accepts a request sized at the ceiling fee and refuses one still sized at the first fee', () => {
+    const item = intent();
+    expect(() => assertRequestMatchesIntent(item, atCeiling(item), ceilingFee)).not.toThrow();
+    expect(() => assertRequestMatchesIntent(item, amounts(item), ceilingFee)).toThrow('Reservation amounts differ');
+  });
+
+  it('without a ceiling the old rule is unchanged: the request must be sized at the first fee', () => {
+    const item = intent();
+    expect(() => assertRequestMatchesIntent(item, amounts(item))).not.toThrow();
+    expect(() => assertRequestMatchesIntent(item, atCeiling(item))).toThrow('Reservation amounts differ');
+  });
+
+  it('refuses a ceiling below the first fee', () => {
+    const item = intent();
+    expect(() => assertRequestMatchesIntent(item, amounts(item), item.maxFeePerGas - 1n)).toThrow('below the first fee');
+  });
+
+  it('reserveThenSign passes the ceiling through: nothing is reserved or signed for a request not sized at it', async () => {
+    const item = intent();
+    let reserved = false;
+    let signed = false;
+    await expect(reserveThenSign({ intent: item, request: amounts(item), reservedMaxFeePerGas: ceilingFee, reserve: async () => { reserved = true; return 'r'; }, sign: async () => { signed = true; return signFor(account, item); }, checkKill: () => undefined })).rejects.toThrow('Reservation amounts differ');
+    expect(reserved).toBe(false);
+    expect(signed).toBe(false);
+    const ok = await reserveThenSign({ intent: item, request: atCeiling(item), reservedMaxFeePerGas: ceilingFee, reserve: async () => 'r', sign: () => signFor(account, item), checkKill: () => undefined });
+    expect(ok.reservation).toBe('r');
+  });
+});

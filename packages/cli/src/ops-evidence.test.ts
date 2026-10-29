@@ -1,6 +1,7 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { buildRotationReport } from './turnkey-rotation-report.js';
 
 /**
  * Production evidence artifacts and the owner's acceptance (infrastructure design, "Evidence contract" and "Go/no-go conditions").
@@ -226,6 +227,31 @@ describe('collectors (fake host)', () => {
     expect(unsafe.failed.map((item) => item.name)).toContain('fresh_wallet_inventory');
     const oneFailed = await collector.collect('rotation_revocation', withDrill(drill({ checks: { fresh_wallet_inventory: { pass: true, observed: 'fresh inventory' }, funding_profile_bounded: { pass: false, observed: 'not bounded' }, old_references_excluded: { pass: true, observed: 'excluded' } } })), {}, { rotationDrill: '/home/o/rotation.json' });
     expect(oneFailed.failed.map((item) => item.name)).toEqual(['funding_profile_bounded']);
+  });
+
+  it('D-078: the report built by turnkey-rotation-report is accepted by the real rotation collector', async () => {
+    const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}`;
+    const keep = { index: 0, signWith: 'keep', address: addr(1) };
+    const fresh = { index: 1, signWith: 'new', address: addr(2) };
+    const active = { wallets: [keep, fresh], expiresAt: '2027-01-01T00:00:00.000Z', policyId: 'p-new' };
+    const E = 10n ** 18n;
+    const ceiling = { walletMaxWei: E / 100n, fleetMaxWei: E / 50n };
+    const built = buildRotationReport({
+      now: new Date(NOW.getTime() - 3_600_000), activeDigest: 'sha256:aaa', active,
+      previous: { wallets: [{ index: 0, signWith: 'old', address: addr(9) }, keep], expiresAt: active.expiresAt, policyId: 'p-old' },
+      catalog: [active], installedMap: active.wallets, activeRecordText: '{"a":1}', walletMapText: '{"m":1}',
+      providerKeys: [keep, fresh].map((w) => ({ privateKeyId: w.signWith, curve: 'CURVE_SECP256K1', exported: false, address: w.address })),
+      providerPolicies: [{ policyId: 'p-new', effect: 'EFFECT_ALLOW', text: 'private_key.id in [keep,new]' }],
+      balances: [1, 8453, 4663].flatMap((chainId) => [keep, fresh].map((w) => ({ chainId, address: w.address, wei: 0n }))),
+      ceilings: { 1: ceiling, 8453: ceiling, 4663: ceiling },
+      rehearsal: { recordedAt: new Date(NOW.getTime() - 7_200_000).toISOString(), policyRecordDigest: 'sha256:aaa', broadcastAttempted: false, rawText: '{"r":1}' },
+      retired: ['old'],
+    });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const accepted = await collector.collect('rotation_revocation', fakeIo({ files: { '/home/o/rotation.json': JSON.stringify(built.report) } }), {}, { rotationDrill: '/home/o/rotation.json' });
+    expect(accepted.problems).toEqual([]);
+    expect(accepted.failed).toEqual([]);
   });
 
   it('history parsing: a rollback is a move back to the release the previous move left', () => {

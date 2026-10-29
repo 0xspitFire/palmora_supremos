@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promi
 import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei } from 'viem';
+import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei, zeroAddress } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, installTurnkeyPolicyBundleAtomic, pruneTurnkeySignedPolicyCatalog, readTurnkeySecretConfig, resolveSeaDropFeeRecipient, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyPolicyBundle, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyCatalog, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
@@ -26,6 +26,8 @@ import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
 import { probeRpc } from './rpc-probe.js';
 import { checkChainRpc, renderRpcHealth, viemReader, type ChainHealth } from './rpc-health.js';
 import { inventoryFleet, renderFleetInventory } from './turnkey-fleet-inventory.js';
+import { assertFleetChanged, chooseWalletSource, diffWallets, type WalletChange } from './turnkey-fleet-change.js';
+import { buildRotationReport } from './turnkey-rotation-report.js';
 import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
 import { PUBLIC_ROBINHOOD_FEED, checkFeed, readFeed } from './feed-check.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -194,6 +196,19 @@ function walletReferencesFromArtifact(value: unknown): TurnkeyWalletReference[] 
   });
 }
 
+/** D-078: where the wallet list for a policy proposal comes from. A fleet change only ever feeds an unsigned proposal. */
+async function policyWalletArtifact(config: TurnkeySecretConfig, installedBundle: TurnkeyPolicyBundle | undefined, args: { walletArtifact?: string | undefined; fleetChange?: string | undefined }): Promise<{ artifact: unknown; change?: WalletChange }> {
+  const source = chooseWalletSource({ hasBundle: Boolean(installedBundle), walletArtifact: args.walletArtifact, fleetChange: args.fleetChange });
+  if (source === 'bundle') return { artifact: installedBundle!.walletMap };
+  if (source === 'fleet-change') {
+    const draft = JSON.parse(await readTurnkeyRuntimeText(turnkeyMapPath(args.fleetChange), 'TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED')) as unknown;
+    const change = diffWallets(walletReferencesFromArtifact(installedBundle!.walletMap), walletReferencesFromArtifact(draft));
+    assertFleetChanged(change);
+    return { artifact: draft, change };
+  }
+  return { artifact: JSON.parse(await readTurnkeyRuntimeText(turnkeyMapPath(args.walletArtifact ?? config.walletMapPath), 'TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED')) as unknown };
+}
+
 function policyFromLegacyWalletArtifact(value: unknown, config: { organizationId: string; userId: string; environment: 'production' | 'testnet' }, wallets: readonly TurnkeyWalletReference[]): ReturnType<typeof validateTurnkeyPolicyAst> {
   if (!value || typeof value !== 'object') throw new Error('TURNKEY_LEGACY_POLICY_INVALID');
   const artifact = value as { policyId?: unknown; policy?: unknown };
@@ -346,31 +361,32 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   })
   .command('turnkey-robinhood-policy-prepare', 'Create an owner-only exact free-mint enforcement policy for chain 4663', (args) => args
     .option('policy-id', { type: 'string', default: 'pending-provider-policy', description: 'Exact provider policy ID returned by Turnkey; omit only to print the provider-policy template before creation' })
-    .option('nft-contract', { type: 'string', demandOption: true })
+    .option('nft-contract', { type: 'string', description: 'Exact NFT contract for legacy exact mode; omit with --policy-family' })
+    .option('policy-family', { type: 'boolean', default: false, description: 'Prepare the bounded Robinhood SeaDrop policy family (one-time setup; no per-drop contract pin)' })
     .option('fee-recipient', { type: 'string', description: 'Override the on-chain SeaDrop recipient resolution' })
     .option('quantity', { type: 'number', default: 1 })
     .option('gas-limit-max', { type: 'string', default: '500000' })
     .option('max-fee-gwei', { type: 'string', default: '0.2' })
     .option('priority-fee-gwei', { type: 'string', default: '0.1' })
     .option('wallet-artifact', { type: 'string', description: 'Existing wallet map containing only public wallet/key references' })
+    .option('fleet-change', { type: 'string', description: 'D-078: a draft public wallet list (from turnkey-fleet-inventory --write) that replaces the installed bundle\'s wallets in this UNSIGNED proposal; the owner still creates the provider policy and signs offline' })
     .option('output', { type: 'string', description: 'Policy AST output under the secret root' }), async (args) => {
       try {
-        if (!/^0x[0-9a-fA-F]{40}$/.test(args.nftContract) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
+        if ((!args.policyFamily && (typeof args.nftContract !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
         const secretRoot = configuredSecretRoot(runtimeRoot);
         const config = await readTurnkeySecretConfig(secretRoot);
         const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
         const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
-        if (installedBundle && args.walletArtifact) throw new Error('TURNKEY_POLICY_BUNDLE_OVERRIDE_BLOCKED');
         const chain = await resolveChainConfigFromSecrets(4663, 'mainnet', secretRoot);
-        if (!args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
-        const feeRecipient = args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
-        const artifact = installedBundle?.walletMap ?? JSON.parse(await readTurnkeyRuntimeText(turnkeyMapPath(args.walletArtifact ?? config.walletMapPath), 'TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED')) as unknown;
+        if (!args.policyFamily && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
+        const feeRecipient = args.policyFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
+        const { artifact, change: walletChange } = await policyWalletArtifact(config, installedBundle, args);
         const wallets = walletReferencesFromArtifact(artifact);
-        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: args.nftContract as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei });
+        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei, ...(args.policyFamily ? { policyFamily: true } : {}) });
         const providerPolicy = turnkeyProviderPolicyExpressions(policy);
         const output = turnkeySecretPath(args.output, 'turnkey-robinhood-policy-ast.json');
         await writeTurnkeyJson(output, policy);
-        process.stdout.write(`${JSON.stringify({ ok: true, output, chainId: 4663, walletCount: wallets.length, policyId: args.policyId, policyDigest: canonicalPolicyDigest(policy), providerPolicy: { effect: 'EFFECT_ALLOW', ...providerPolicy, time: null } })}\n`);
+        process.stdout.write(`${JSON.stringify({ ok: true, output, chainId: 4663, walletCount: wallets.length, ...(walletChange ? { walletChange } : {}), policyId: args.policyId, policyDigest: canonicalPolicyDigest(policy), providerPolicy: { effect: 'EFFECT_ALLOW', ...providerPolicy, time: null } })}\n`);
       } catch (error) { printError(error); }
     })
   .command('turnkey-policy-renew', 'Preview or prepare an exact Robinhood policy renewal without granting policy-admin access to the service', (args) => args
@@ -382,6 +398,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('max-fee-gwei', { type: 'string', default: '0.2' })
     .option('priority-fee-gwei', { type: 'string', default: '0.1' })
     .option('wallet-artifact', { type: 'string' })
+    .option('fleet-change', { type: 'string', description: 'D-078: a draft public wallet list that replaces the installed bundle\'s wallets in this UNSIGNED proposal; the owner still creates the provider policy and signs offline' })
     .option('policy-output', { type: 'string' })
     .option('proposal-output', { type: 'string' })
     .option('state-output', { type: 'string' })
@@ -394,11 +411,10 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const config = await readTurnkeySecretConfig(secretRoot);
         const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
         const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
-        if (installedBundle && args.walletArtifact) throw new Error('TURNKEY_POLICY_BUNDLE_OVERRIDE_BLOCKED');
         const chain = await resolveChainConfigFromSecrets(4663, 'mainnet', secretRoot);
         if (!args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
         const feeRecipient = args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
-        const artifact = installedBundle?.walletMap ?? JSON.parse(await readTurnkeyRuntimeText(turnkeyMapPath(args.walletArtifact ?? config.walletMapPath), 'TURNKEY_WALLET_MAP_PERMISSIONS_REQUIRED')) as unknown;
+        const { artifact, change: walletChange } = await policyWalletArtifact(config, installedBundle, args);
         const wallets = walletReferencesFromArtifact(artifact);
         const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
         const [whoami, organization, policies, keys] = await Promise.all([
@@ -413,7 +429,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         if (plan.stage === 'provider-policy-required') {
           const state = { version: 1, stage: plan.stage, policyDigest: canonicalPolicyDigest(plan.policy), policy: plan.policy, providerPolicy: plan.providerPolicy };
           if (args.apply) await writeTurnkeyJson(stateOutput, state);
-          process.stdout.write(`${JSON.stringify({ ok: true, preview: !args.apply, stateOutput: args.apply ? stateOutput : undefined, ...state, next: 'Create this exact provider policy with an owner/admin Turnkey session, then rerun with --policy-id. The runtime credential is never used to administer policies.' })}\n`);
+          process.stdout.write(`${JSON.stringify({ ok: true, preview: !args.apply, stateOutput: args.apply ? stateOutput : undefined, ...(walletChange ? { walletChange } : {}), ...state, next: 'Create this exact provider policy with an owner/admin Turnkey session, then rerun with --policy-id. The runtime credential is never used to administer policies.' })}\n`);
           return;
         }
         const issuedAt = new Date();
@@ -436,7 +452,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           await writeTurnkeyJson(proposalOutput, record);
           await writeTurnkeyJson(stateOutput, state);
         }
-        process.stdout.write(`${JSON.stringify({ ok: true, preview: !args.apply, policyOutput: args.apply ? policyOutput : undefined, stateOutput: args.apply ? stateOutput : undefined, ...state, next: 'Review and sign the proposal with the offline approval key. Then regenerate the map and run the no-broadcast rehearsal.' })}\n`);
+        process.stdout.write(`${JSON.stringify({ ok: true, preview: !args.apply, policyOutput: args.apply ? policyOutput : undefined, stateOutput: args.apply ? stateOutput : undefined, ...(walletChange ? { walletChange } : {}), ...state, next: 'Review and sign the proposal with the offline approval key. Then regenerate the map and run the no-broadcast rehearsal.' })}\n`);
       } catch (error) { printError(error); }
     })
   .command('turnkey-policy-propose', 'Snapshot actual Turnkey fields into an unsigned canonical policy record', (args) => args
@@ -512,7 +528,15 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const existingKeyId = existingPin ? turnkeyPolicyApproverKeyId(existingPin) : undefined;
         const expectedRotation = existingKeyId && existingKeyId !== keyId ? approverRotationConfirmation(existingKeyId, keyId) : undefined;
         if (args.preview) {
-          process.stdout.write(`${JSON.stringify({ ok: true, preview: true, recordDigest: digest, keyId, confirmation: expectedConfirmation, ...(expectedRotation ? { rotationConfirmation: expectedRotation } : {}) })}\n`);
+          // D-078: show what this signature would add and remove compared with the bundle on this machine, if there is one.
+          const previousBundle = await (async () => {
+            try {
+              if (!await lstat(bundleOutput).then((entry) => entry.isFile() && !entry.isSymbolicLink()).catch(() => false)) return undefined;
+              return validateTurnkeyPolicyBundle(JSON.parse(await readTurnkeyRuntimeText(bundleOutput, 'TURNKEY_POLICY_BUNDLE_PERMISSIONS_REQUIRED')) as unknown, publicKey);
+            } catch { return undefined; }
+          })();
+          const walletChange = previousBundle ? diffWallets(previousBundle.activeRecord.record.wallets, proposal.wallets) : undefined;
+          process.stdout.write(`${JSON.stringify({ ok: true, preview: true, recordDigest: digest, keyId, confirmation: expectedConfirmation, walletChange: walletChange ?? 'unavailable: no readable previous bundle on this machine, so the added and removed wallets could not be shown', ...(expectedRotation ? { rotationConfirmation: expectedRotation } : {}) })}\n`);
           return;
         }
         if (args.confirm !== expectedConfirmation) throw new Error(`TURNKEY_POLICY_SIGN_CONFIRMATION_REQUIRED: ${expectedConfirmation}`);
@@ -634,12 +658,69 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         if (installedBundle && config.policyBundlePath) {
           const bundleRoot = resolve(config.policyBundlePath, '..');
           if (config.policyBundlePath !== join(bundleRoot, 'current.json')) throw new Error('TURNKEY_POLICY_BUNDLE_PATH_INVALID');
-          await installTurnkeyPolicyBundleAtomic({ bundle: { ...installedBundle, walletMap }, pinnedPublicKey: publicKey, bundleRoot, groupReadable: true });
+          const expectedGroupId = Number(execFileSync('/usr/bin/id', ['-g', 'mintbot'], { encoding: 'utf8' }).trim());
+          if (!Number.isSafeInteger(expectedGroupId) || expectedGroupId <= 0) throw new Error('TURNKEY_POLICY_BUNDLE_SERVICE_GROUP_REQUIRED');
+          await installTurnkeyPolicyBundleAtomic({ bundle: { ...installedBundle, walletMap }, pinnedPublicKey: publicKey, bundleRoot, groupReadable: true, expectedGroupId });
         } else await writeTurnkeyWalletMap(config.walletMapPath, walletMap);
         process.stdout.write(`${JSON.stringify({ ok: true, walletCount: record.wallets.length, policyRecordDigest: turnkeyPolicyRecordDigest(record), liveProviderStateMatched: true })}\n`);
       } catch (error) { printError(error); }
     })
-  .command('turnkey-signing-rehearsal', 'Sign an intentionally non-broadcastable transaction and persist redacted activity evidence', (args) => args
+  .command('turnkey-rotation-report', 'D-078: check a finished wallet rotation against live state and write the redacted report the D-017 rotation artifact needs (writes nothing unless every check passes)', (args) => args
+    .option('previous', { type: 'string', demandOption: true, description: 'The previous bundle generation file (or signed record) from before the rotation, under the secret root' })
+    .option('retired', { type: 'string', array: true, demandOption: true, description: 'Key id(s) retired in this rotation' })
+    .option('rehearsal', { type: 'string', description: 'Rehearsal evidence file (default: the one turnkey-signing-rehearsal wrote)' })
+    .option('output', { type: 'string', description: 'Report output under the secret root' }), async (args) => {
+      try {
+        const secretRoot = configuredSecretRoot(runtimeRoot);
+        const config = await readTurnkeySecretConfig(secretRoot);
+        const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+        const installed = await readConfiguredTurnkeyBundle(config, publicKey);
+        if (!installed) throw new Error('TURNKEY_ROTATION_REPORT_REQUIRES_BUNDLE');
+        const now = new Date();
+        const active = verifyTurnkeySignedPolicyRecord(installed.activeRecord, publicKey, now);
+        const catalog = verifyTurnkeySignedPolicyCatalog(installed.catalog, publicKey, now);
+        const previousRaw = JSON.parse(await readTurnkeyRuntimeText(turnkeySecretPath(args.previous, 'turnkey-previous-generation.json'), 'TURNKEY_POLICY_BUNDLE_PERMISSIONS_REQUIRED')) as { activeRecord?: unknown } & Record<string, unknown>;
+        const previousSigned = (previousRaw.activeRecord ?? previousRaw) as { record?: { issuedAt?: string } };
+        const previous = verifyTurnkeySignedPolicyRecord(previousSigned, publicKey, new Date(Date.parse(previousSigned.record?.issuedAt ?? '')));
+        const plain = (record: typeof active) => ({ wallets: record.wallets.map(({ index, address, signWith }) => ({ index, address, signWith })), expiresAt: record.expiresAt, policyId: record.providerPolicy.policyId });
+        const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
+        const [keys, policies] = await Promise.all([client.getPrivateKeys({ organizationId: config.organizationId }), client.getPolicies({ organizationId: config.organizationId })]);
+        const providerKeys = (keys.privateKeys as Array<{ privateKeyId: string; curve: string; exported: boolean; addresses?: Array<{ format?: string; address?: string }> }>).map((key) => ({ privateKeyId: key.privateKeyId, curve: key.curve, exported: key.exported, address: key.addresses?.find((entry) => entry.format === 'ADDRESS_FORMAT_ETHEREUM')?.address }));
+        const providerPolicies = (policies.policies as Array<{ policyId?: string; effect?: string; condition?: string; consensus?: string }>).map((policy) => ({ policyId: String(policy.policyId ?? ''), effect: String(policy.effect ?? ''), text: `${policy.consensus ?? ''} ${policy.condition ?? ''}` }));
+        const balances: Array<{ chainId: number; address: string; wei: bigint }> = [];
+        for (const chainId of [1, 8453, 4663] as const) {
+          const endpoints = [...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints];
+          if (endpoints.length === 0) continue;
+          const reader = createPublicClient({ transport: failoverTransport(endpoints) });
+          for (const wallet of active.wallets) {
+            // A failed read leaves the balance missing, so the report refuses; it is never treated as zero.
+            const wei = await reader.getBalance({ address: wallet.address as Address }).catch(() => undefined);
+            if (wei !== undefined) balances.push({ chainId, address: wallet.address, wei });
+          }
+        }
+        const rehearsalPath = turnkeySecretPath(args.rehearsal, 'turnkey-signing-rehearsal.json');
+        const rehearsalText = await readTurnkeyRuntimeText(rehearsalPath, 'TURNKEY_ROTATION_REHEARSAL_PERMISSIONS_REQUIRED');
+        const rehearsal = parseRehearsalEvidence(JSON.parse(rehearsalText));
+        const result = buildRotationReport({
+          now, activeDigest: turnkeyPolicyRecordDigest(active), active: plain(active), previous: plain(previous), catalog: catalog.map(plain),
+          installedMap: installed.walletMap.wallets.map(({ index, address, signWith }) => ({ index, address, signWith })),
+          activeRecordText: JSON.stringify(installed.activeRecord), walletMapText: JSON.stringify(installed.walletMap),
+          providerKeys, providerPolicies, balances,
+          ceilings: Object.fromEntries(([1, 8453, 4663] as const).map((chainId) => [chainId, { walletMaxWei: DEFAULT_IDLE_BALANCE_CEILINGS[chainId]!.walletMaxWei, fleetMaxWei: DEFAULT_IDLE_BALANCE_CEILINGS[chainId]!.fleetMaxWei }])),
+          rehearsal: { recordedAt: rehearsal.recordedAt, policyRecordDigest: rehearsal.policyRecordDigest, broadcastAttempted: rehearsal.broadcastAttempted, rawText: rehearsalText },
+          retired: args.retired,
+        });
+        if (!result.ok) {
+          process.stdout.write(`Rotation report NOT written. Fix these first:\n${result.problems.map((problem) => `  - ${problem}`).join('\n')}\n`);
+          process.exitCode = 2;
+          return;
+        }
+        const output = turnkeySecretPath(args.output, 'rotation-revocation-drill.json');
+        await writeTurnkeyJson(output, result.report);
+        process.stdout.write(`${JSON.stringify({ ok: true, output, completedAt: result.report.completedAt, references: result.report.references.map((reference) => reference.name) })}\n`);
+      } catch (error) { printError(error); }
+    })
+  .command('turnkey-signing-rehearsal','Sign an intentionally non-broadcastable transaction and persist redacted activity evidence', (args) => args
     .option('evidence-output', { type: 'string' })
     .option('confirm', { type: 'string', demandOption: true }), async (args) => {
       let signer: TurnkeySigner | undefined;
@@ -657,18 +738,22 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const wallet = (await signer.listWallets())[0];
         if (!wallet) throw new Error('TURNKEY_WALLET_NOT_FOUND');
         const tx = record.enforcementPolicy.transaction;
+        const rehearsalData = record.enforcementPolicy.family
+          ? encodeFunctionData({ abi: parseAbi(['function mintPublic(address,address,address,uint256)']), functionName: 'mintPublic', args: [zeroAddress, zeroAddress, zeroAddress, 1n] })
+          : tx.data;
         const result = await signer.signTransactionWithEvidence(wallet.index, {
           chainId: tx.chainId,
           nonce: Number.MAX_SAFE_INTEGER,
           from: wallet.address,
           to: tx.to,
           value: BigInt(tx.valueWei),
-          data: tx.data,
+          data: rehearsalData,
           gasLimit: 0n,
           maxFeePerGas: 0n,
           maxPriorityFeePerGas: 0n,
           accessList: [],
           policyRef: signer.policyReference(),
+          ...(record.enforcementPolicy.family ? { familyContext: { nftContract: zeroAddress, feeRecipient: zeroAddress } } : {}),
         });
         const evidence = {
           version: 1,

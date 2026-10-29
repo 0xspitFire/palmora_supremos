@@ -77,10 +77,25 @@ export async function reconcileRobinhood(input: RobinhoodReconcileInput): Promis
   let lowestPending: 'soft' | 'posted' = 'posted';
   const submitted = uniqueSubmittedAttempts(input.attempts.filter((attempt) => attempt.hash && attempt.nonce !== undefined));
   if (submitted.length === 0) return unknown([], [], 'no persisted transaction attempts');
+  // T-094: attempts for one execution and nonce are replacements of each other, so at most one of them can mine. Read every receipt first.
+  const complete = (receipt: ObservedReceipt | null): receipt is ObservedReceipt => Boolean(receipt) && typeof receipt!.gasUsed === 'bigint' && typeof receipt!.effectiveGasPrice === 'bigint' && typeof receipt!.blockNumber === 'bigint' && Boolean(receipt!.blockHash);
+  const receiptByHash = new Map<string, ObservedReceipt | null>();
   for (const attempt of submitted) {
-    let receipt: ObservedReceipt | null = null;
-    try { receipt = await input.readReceipt(attempt.hash!); } catch { receipt = null; }
-    if (!receipt || typeof receipt.gasUsed !== 'bigint' || typeof receipt.effectiveGasPrice !== 'bigint' || typeof receipt.blockNumber !== 'bigint' || !receipt.blockHash) { missing += 1; continue; }
+    let read: ObservedReceipt | null = null;
+    try { read = await input.readReceipt(attempt.hash!); } catch { read = null; }
+    receiptByHash.set(attempt.hash!.toLowerCase(), read);
+  }
+  const nonceGroup = (attempt: AttemptRecord): string => `${attempt.executionId}:${attempt.nonce}`;
+  let replaced = 0;
+  for (const attempt of submitted) {
+    const receipt = receiptByHash.get(attempt.hash!.toLowerCase()) ?? null;
+    if (!complete(receipt)) {
+      // No receipt for this hash. If a DIFFERENT hash for the same execution and nonce has one, this attempt lost the race: it is replaced, not unresolved.
+      const siblingMined = submitted.some((other) => other !== attempt && nonceGroup(other) === nonceGroup(attempt) && other.hash!.toLowerCase() !== attempt.hash!.toLowerCase() && complete(receiptByHash.get(other.hash!.toLowerCase()) ?? null));
+      if (siblingMined) { replaced += 1; updatedAttempts.push({ ...attempt, state: 'Replaced', updatedAt: now }); continue; }
+      missing += 1;
+      continue;
+    }
     let observation: ObservedFinality;
     try { observation = await input.observe({ txHash: attempt.hash!, txBlockNumber: receipt.blockNumber }); } catch { missing += 1; continue; }
     // Unproven canonicality is never treated as final or as a reorg.
@@ -119,9 +134,9 @@ export async function reconcileRobinhood(input: RobinhoodReconcileInput): Promis
   if (missing > 0) return unknown(updatedAttempts, receipts, 'a receipt, its finality or its L1 data fee could not be proven; outcome unresolved');
   if (reorged > 0) {
     // The coordinator only accepts "reorged" when every attempt has a reorged receipt; anything mixed waits for the owner.
-    return reorged === submitted.length ? { result: 'reorged', attempts: updatedAttempts, receipts } : unknown(updatedAttempts, receipts, 'mixed reorg; the reservation stays held for owner reconciliation');
+    return reorged === submitted.length - replaced ? { result: 'reorged', attempts: updatedAttempts, receipts } : unknown(updatedAttempts, receipts, 'mixed reorg; the reservation stays held for owner reconciliation');
   }
   if (pending > 0) return { result: lowestPending, attempts: updatedAttempts, receipts };
   if (failed > 0) return { result: 'failed', attempts: updatedAttempts, receipts };
-  return { result: final === submitted.length ? 'final' : 'unknown', attempts: updatedAttempts, receipts };
+  return { result: final === submitted.length - replaced ? 'final' : 'unknown', attempts: updatedAttempts, receipts };
 }

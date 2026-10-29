@@ -18,6 +18,20 @@ export interface DropCheckReport {
   wallets: DropCheckWallet[];
 }
 
+async function mapLimit<T, R>(items: readonly T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await work(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
+  return results;
+}
+
 /**
  * Plans the per-wallet quantity for `mint --auto-quantity` (D-037). The quantity never exceeds the drop's
  * per-wallet allowance; a drop that allows none is refused. Throws with the reason when not even 1 NFT fits.
@@ -70,18 +84,17 @@ export async function checkDrop(port: IntelligenceChainPort, contract: string, w
   }
   const selected = free ? [...wallets] : wallets.slice(0, limits.paidMaxWalletsPerMint);
   const required = drop.priceWei * BigInt(quantity) + (free ? limits.freeFeeAllowanceWei : limits.paidFeeAllowanceWei);
-  const rows: DropCheckWallet[] = [];
-  for (const wallet of selected) {
+  const rows = await mapLimit(selected, 8, async (wallet): Promise<DropCheckWallet> => {
     const balance = await port.balance(wallet);
     const base = { wallet, balanceEth: balance === null ? null : formatEth(balance), requiredEth: formatEth(required) };
-    if (balance === null) { rows.push({ ...base, topUpEth: null, simulation: 'not run', verdict: 'unknown', note: 'Balance could not be read.' }); continue; }
-    if (balance < required) { rows.push({ ...base, topUpEth: formatEth(required - balance), simulation: 'not run', verdict: 'needs ETH', note: `Send ${formatEth(required - balance)} ETH to this wallet on Ethereum.` }); continue; }
-    if (!options.simulate || status !== 'open') { rows.push({ ...base, topUpEth: null, simulation: 'not run', verdict: 'funded', note: status === 'open' ? 'Funded. Run `simulate` to test the mint call.' : 'Funded. The test mint call can run once the mint opens.' }); continue; }
+    if (balance === null) return { ...base, topUpEth: null, simulation: 'not run', verdict: 'unknown', note: 'Balance could not be read.' };
+    if (balance < required) return { ...base, topUpEth: formatEth(required - balance), simulation: 'not run', verdict: 'needs ETH', note: `Send ${formatEth(required - balance)} ETH to this wallet on Ethereum.` };
+    if (!options.simulate || status !== 'open') return { ...base, topUpEth: null, simulation: 'not run', verdict: 'funded', note: status === 'open' ? 'Funded. Run `simulate` to test the mint call.' : 'Funded. The test mint call can run once the mint opens.' };
     const result = await port.simulateMint(wallet, contract, quantity, drop.priceWei * BigInt(quantity));
-    if (result.outcome === 'pass') rows.push({ ...base, topUpEth: null, simulation: 'passed', verdict: 'ready', note: 'A test mint call succeeded. Minting still needs your approval.' });
-    else if (result.outcome === 'fail') rows.push({ ...base, topUpEth: null, simulation: 'failed', verdict: 'blocked', note: `The test mint call failed (${result.reason}). This wallet must not mint.` });
-    else rows.push({ ...base, topUpEth: null, simulation: 'unavailable', verdict: 'unknown', note: 'The test mint call could not run.' });
-  }
+    if (result.outcome === 'pass') return { ...base, topUpEth: null, simulation: 'passed', verdict: 'ready', note: 'A test mint call succeeded. Minting still needs your approval.' };
+    if (result.outcome === 'fail') return { ...base, topUpEth: null, simulation: 'failed', verdict: 'blocked', note: `The test mint call failed (${result.reason}). This wallet must not mint.` };
+    return { ...base, topUpEth: null, simulation: 'unavailable', verdict: 'unknown', note: 'The test mint call could not run.' };
+  });
   const ready = rows.filter((row) => row.verdict === 'ready' || row.verdict === 'funded').length;
   const skipped = wallets.length - selected.length;
   const summary = `${ready} of ${selected.length} wallets are funded for ${quantity} NFT(s) each at ${free ? 'no mint cost' : `${formatEth(drop.priceWei)} ETH`} (mint is ${status}).${skipped > 0 ? ` ${skipped} wallet(s) left out: paid mints use at most ${limits.paidMaxWalletsPerMint}.` : ''}${free && selected.length < limits.freeMinWallets ? ` You asked for at least ${limits.freeMinWallets} wallets on free mints.` : ''}`;

@@ -1,5 +1,6 @@
 import { keccak256, toBytes, type Address, type Hex } from 'viem';
 import type { SupportedChainId, TransactionIntent } from './types.js';
+import { SEADROP_V1_ADDRESS } from './chains.js';
 
 export type TurnkeyEnvironment = 'production' | 'testnet';
 
@@ -33,15 +34,24 @@ export interface TurnkeyPolicyTransaction {
   readonly accessList: readonly [];
 }
 
+/** Bounded provider-side policy family for Robinhood public SeaDrop mints. */
+export interface TurnkeyPolicyFamily {
+  readonly kind: 'robinhood-seadrop-public-v1';
+  readonly maxQuantity: number;
+}
+
 /**
  * Canonical allow-only policy AST. It intentionally has no `or`, wildcard,
- * substring, regex, deny/allow union, or unbounded transaction branch.
+ * substring, regex, deny/allow union, or unbounded transaction branch. The
+ * optional family is a closed, enumerated bounded schema, not a free-form CEL
+ * escape hatch.
  */
 export interface TurnkeyPolicyAst {
   readonly version: 1;
   readonly effect: 'allow';
   readonly scope: TurnkeyPolicyScope;
   readonly transaction: TurnkeyPolicyTransaction;
+  readonly family?: TurnkeyPolicyFamily;
 }
 
 export interface TurnkeyKeyInventoryEntry {
@@ -79,12 +89,16 @@ export function normalizeAccessList(value: readonly { address: Address; storageK
 }
 
 export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
-  if (!isRecord(value) || !exactKeys(value, ['version', 'effect', 'scope', 'transaction'])) throw new Error('TURNKEY_POLICY_AST_INVALID');
+  if (!isRecord(value) || !([['version', 'effect', 'scope', 'transaction'], ['version', 'effect', 'scope', 'transaction', 'family']] as const).some((keys) => exactKeys(value, keys))) throw new Error('TURNKEY_POLICY_AST_INVALID');
   if (value.version !== 1 || value.effect !== 'allow' || !isRecord(value.scope) || !isRecord(value.transaction)) throw new Error('TURNKEY_POLICY_AST_INVALID');
   if (!exactKeys(value.scope, ['provider', 'environment', 'organizationId', 'userId', 'policyId', 'keyIds'])) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
   if (!exactKeys(value.transaction, ['chainId', 'from', 'to', 'valueWei', 'data', 'gasLimitMax', 'maxFeePerGasMax', 'maxPriorityFeePerGasMax', 'accessList'])) throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
   const scope = value.scope;
   const tx = value.transaction;
+  const familyValue = value.family;
+  const familyRecord = familyValue as Record<string, unknown> | undefined;
+  if (familyValue !== undefined && (!isRecord(familyValue) || !exactKeys(familyValue, ['kind', 'maxQuantity']) || familyRecord?.kind !== 'robinhood-seadrop-public-v1' || !Number.isSafeInteger(familyRecord?.maxQuantity) || Number(familyRecord?.maxQuantity) < 1 || Number(familyRecord?.maxQuantity) > 15)) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  const family = familyValue === undefined ? undefined : { kind: 'robinhood-seadrop-public-v1' as const, maxQuantity: Number(familyRecord?.maxQuantity) };
   if (scope.provider !== 'turnkey' || !isEnvironment(scope.environment) || !nonEmpty(scope.organizationId) || !nonEmpty(scope.userId) || !nonEmpty(scope.policyId) || !stringArray(scope.keyIds)) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
   const keyIds = uniqueStrings(scope.keyIds);
   if (!keyIds || keyIds.length === 0) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
@@ -96,6 +110,7 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
   if (new Set(from).size !== from.length || tx.valueWei !== '0' || !isNonNegativeInteger(tx.valueWei) || !isNonNegativeInteger(tx.gasLimitMax) || !isNonNegativeInteger(tx.maxFeePerGasMax) || !isNonNegativeInteger(tx.maxPriorityFeePerGasMax) || tx.accessList.length !== 0) throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
   const data = normalizeHexBytes(tx.data as string);
   if (data === '0x') throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
+  if (family !== undefined && (tx.chainId !== 4663 || tx.to.toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || data !== '0x161ac21f' || tx.valueWei !== '0')) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
   return {
     version: 1,
     effect: 'allow',
@@ -118,6 +133,7 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
       maxPriorityFeePerGasMax: tx.maxPriorityFeePerGasMax,
       accessList: [],
     },
+    ...(family === undefined ? {} : { family: { kind: 'robinhood-seadrop-public-v1' as const, maxQuantity: family.maxQuantity } }),
   };
 }
 
@@ -161,11 +177,41 @@ export function validateKeyInventory(inventory: TurnkeyKeyInventory, provider: T
 export function validateTransactionIntent(intent: TransactionIntent, policy: TurnkeyPolicyAst, expectedPolicyRef: string): void {
   try {
     const normalized = validateTurnkeyPolicyAst(policy);
-    if (intent.policyRef !== expectedPolicyRef || intent.chainId !== normalized.transaction.chainId || intent.nonce < 0 || !isAddress(intent.from) || !normalized.transaction.from.includes(intent.from.toLowerCase() as Address) || !isAddress(intent.to) || intent.to.toLowerCase() !== normalized.transaction.to || intent.value !== BigInt(normalized.transaction.valueWei) || intent.gasLimit < 0n || intent.maxFeePerGas < 0n || intent.maxPriorityFeePerGas < 0n || intent.gasLimit > BigInt(normalized.transaction.gasLimitMax) || intent.maxFeePerGas > BigInt(normalized.transaction.maxFeePerGasMax) || intent.maxPriorityFeePerGas > BigInt(normalized.transaction.maxPriorityFeePerGasMax) || normalizeHexBytes(intent.data) !== normalized.transaction.data || normalizeAccessList(intent.accessList) !== '[]') throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
+    const common = intent.policyRef === expectedPolicyRef
+      && intent.chainId === normalized.transaction.chainId
+      && intent.nonce >= 0
+      && isAddress(intent.from)
+      && normalized.transaction.from.includes(intent.from.toLowerCase() as Address)
+      && isAddress(intent.to)
+      && intent.to.toLowerCase() === normalized.transaction.to
+      && intent.value === BigInt(normalized.transaction.valueWei)
+      && intent.gasLimit >= 0n
+      && intent.maxFeePerGas >= 0n
+      && intent.maxPriorityFeePerGas >= 0n
+      && intent.gasLimit <= BigInt(normalized.transaction.gasLimitMax)
+      && intent.maxFeePerGas <= BigInt(normalized.transaction.maxFeePerGasMax)
+      && intent.maxPriorityFeePerGas <= BigInt(normalized.transaction.maxPriorityFeePerGasMax)
+      && normalizeAccessList(intent.accessList) === '[]';
+    const data = normalizeHexBytes(intent.data);
+    const exactData = normalized.family === undefined && data === normalized.transaction.data;
+    const familyData = normalized.family?.kind === 'robinhood-seadrop-public-v1' && robinhoodFamilyCalldata(data, normalized.family.maxQuantity, intent.familyContext);
+    if (!common || (!exactData && !familyData)) throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
   } catch (error) {
     if (error instanceof Error && error.message === 'TURNKEY_POLICY_INTENT_BLOCKED') throw error;
     throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
   }
+}
+
+/** Exact calldata validation retained locally when Turnkey uses the bounded family policy. */
+function robinhoodFamilyCalldata(data: Hex, maxQuantity: number, context: TransactionIntent['familyContext']): boolean {
+  if (data.length !== 266 || data.slice(0, 10).toLowerCase() !== '0x161ac21f') return false;
+  if (!context || !isAddress(context.nftContract) || !isAddress(context.feeRecipient)) return false;
+  if (`0x${data.slice(34, 74)}`.toLowerCase() !== context.nftContract.toLowerCase() || `0x${data.slice(98, 138)}`.toLowerCase() !== context.feeRecipient.toLowerCase()) return false;
+  if (!/^0{64}$/.test(data.slice(138, 202))) return false;
+  try {
+    const quantity = BigInt(`0x${data.slice(202, 266)}`);
+    return quantity >= 1n && quantity <= BigInt(maxQuantity);
+  } catch { return false; }
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

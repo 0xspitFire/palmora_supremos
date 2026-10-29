@@ -158,6 +158,20 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   type PlanFacts =
     | { kind: 'robinhood'; plan: RobinhoodPlan; quantity: number; maxQuantity: number }
     | { kind: 'evm'; planned: LivePlanResult; quantity: number; maxQuantity: number };
+  // Guided preparation asks for the same read-only plan at adjacent steps (contract, quantity,
+  // and wallet count). Keep that snapshot briefly so an owner does not pay the RPC round-trip
+  // three times while moving through the menu. `guidedPrepare` still calls `planFor` directly,
+  // so the final campaign admission always uses fresh chain state.
+  const guidedPlanCache = new Map<string, { at: number; facts: PlanFacts }>();
+  const cachedPlanFor = async (chainText: string, contract: string, quantityLimit: number | undefined, only?: readonly string[]): Promise<PlanFacts> => {
+    const key = [chainText.toLowerCase(), contract.toLowerCase(), quantityLimit === undefined ? '' : String(quantityLimit), only ? only.map((wallet) => wallet.toLowerCase()).join(',') : 'all'].join('|');
+    const hit = guidedPlanCache.get(key);
+    if (hit && now().getTime() - hit.at <= 10_000) return hit.facts;
+    const facts = await planFor(chainText, contract, quantityLimit, only);
+    guidedPlanCache.set(key, { at: now().getTime(), facts });
+    if (guidedPlanCache.size > 32) guidedPlanCache.delete(guidedPlanCache.keys().next().value as string);
+    return facts;
+  };
   const planFor = async (chainText: string, contract: string, quantityLimit: number | undefined, only?: readonly string[]): Promise<PlanFacts> => {
     if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
     if (chainFrom(chainText) === 4663) {
@@ -596,9 +610,9 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       return [{ key: 'ethereum' as const, name: 'Ethereum' }, ...(base ? [{ key: 'base' as const, name: 'Base' }] : []), ...(robinhood ? [{ key: 'robinhood' as const, name: 'Robinhood' }] : [])];
     },
     async guidedPlan(chainText, contract, quantity, walletCount) {
-      let facts = await planFor(chainText, contract, quantity);
+      let facts = await cachedPlanFor(chainText, contract, quantity);
       const all = readyOf(facts);
-      if (walletCount !== undefined && isReady(facts) && walletCount < all.length) facts = await planFor(chainText, contract, quantity, all.slice(0, walletCount));
+      if (walletCount !== undefined && isReady(facts) && walletCount < all.length) facts = await cachedPlanFor(chainText, contract, quantity, all.slice(0, walletCount));
       return { text: renderPlan(facts), ok: isReady(facts), ready: readyOf(facts), quantity: facts.quantity, maxQuantity: facts.maxQuantity, ...(isReady(facts) && phraseOf(facts, contract) ? { phrase: phraseOf(facts, contract)! } : {}) };
     },
     async guidedPrepare(chainText, contract, quantity, wallets, expectedPhrase) {
