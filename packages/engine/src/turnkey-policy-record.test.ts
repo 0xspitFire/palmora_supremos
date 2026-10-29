@@ -127,7 +127,8 @@ describe('Turnkey signed canonical policy record', () => {
     const { condition } = turnkeyProviderPolicyExpressions(ast);
     expect(condition).toContain("eth.tx.data[0..10] == '0x161ac21f'");
     expect(condition).toContain("eth.tx.data[138..202] == '0000000000000000000000000000000000000000000000000000000000000000'");
-    expect(condition).toContain('eth.tx.data[202..266].hex_to_uint() <= 4');
+    expect(condition).toContain("eth.tx.data[202..266] in ['0000000000000000000000000000000000000000000000000000000000000001', '0000000000000000000000000000000000000000000000000000000000000002', '0000000000000000000000000000000000000000000000000000000000000003', '0000000000000000000000000000000000000000000000000000000000000004']");
+    expect(condition).not.toContain('hex_to_uint');
     expect(condition).not.toContain('eth.tx.data ==');
   });
 
