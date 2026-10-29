@@ -244,7 +244,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       log: (event, fields) => logger.info({ event, ...fields }, 'deployment readiness flags changed'),
     }, { onError: (error) => logger.warn({ event: 'dependency_flags_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'DEPENDENCY_FLAGS_FAILED' }, 'dependency flag pass failed') });
     const bridge = runtime.store as CanonicalStoreBridge;
-    const liveApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+    const liveApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(runtime.custodyPolicyFor ? { custodyPolicyFor: runtime.custodyPolicyFor } : {}) });
     liveRequests = startLiveRequestPoller({
       unclaimed: () => bridge.unclaimedLiveRunRequests(),
       claim: (requestId, outcome) => bridge.claimLiveRunRequest(requestId, outcome),
@@ -307,7 +307,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         latestRoundData: async () => { const round = await (await ethereum()).readContract({ address: CHAINLINK_ETH_USD_FEED, abi: CHAINLINK_ABI, functionName: 'latestRoundData' }); return { answer: round[1], updatedAt: new Date(Number(round[3]) * 1000), roundId: round[0], answeredInRound: round[4] }; },
       },
     });
-    const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
+    const ownerApplication = new BackendApplication(runtime.store, runtime.coordinator, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(runtime.custodyPolicyFor ? { custodyPolicyFor: runtime.custodyPolicyFor } : {}) });
     // T-067 (D-067): `/fire` and `/schedule`, in host mode only. Both end in the same pipeline and the same request processor.
     const reader = async (chainId: 1 | 8453 | 4663) => createPublicClient({ transport: failoverTransport([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]) });
     const latestBlock = async (chainId: 1 | 8453 | 4663) => { const block = await (await reader(chainId)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; };

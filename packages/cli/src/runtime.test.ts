@@ -1,10 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, type SpendAlertSink } from './runtime.js';
+import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, type SpendAlertSink } from './runtime.js';
 import { PERSONAL_LIVE_FLEET_POLICY, type EngineAdapter } from '@mint-bot/backend';
+import { createTurnkeyPolicyRecord, turnkeyProviderPolicyExpressions, SEADROP_V1_ADDRESS, type TurnkeyPolicyAst } from '@mint-bot/engine';
+import type { Address, Hex } from 'viem';
+
+const FAMILY_WALLET = '0x1111111111111111111111111111111111111111' as Address;
+const FAMILY_KEY = 'key-family';
+
+function familyRecord(maxQuantity = 4, policyId = 'policy-family') {
+  const policy: TurnkeyPolicyAst = {
+    version: 1,
+    effect: 'allow',
+    scope: { provider: 'turnkey', environment: 'production', organizationId: 'org', userId: 'runtime', policyId, keyIds: [FAMILY_KEY] },
+    transaction: { chainId: 4663, from: [FAMILY_WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: '0x161ac21f' as Hex, gasLimitMax: '500000', maxFeePerGasMax: '200000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
+    family: { kind: 'robinhood-seadrop-public-v1', maxQuantity },
+  };
+  const expressions = turnkeyProviderPolicyExpressions(policy);
+  return createTurnkeyPolicyRecord({
+    environment: 'production',
+    providerIdentity: { organizationId: 'org', organizationName: 'MintBot', userId: 'runtime', username: 'mintbot-runtime' },
+    providerPolicy: { policyId, policyName: 'Robinhood family', effect: 'EFFECT_ALLOW', createdAt: { seconds: '1', nanos: '0' }, updatedAt: { seconds: '2', nanos: '0' }, notes: '', ...expressions, time: null },
+    enforcementPolicy: policy,
+    walletReferences: [{ index: 0, address: FAMILY_WALLET, signWith: FAMILY_KEY }],
+    providerKeys: [{ privateKeyId: FAMILY_KEY, publicKey: `02${'ab'.repeat(32)}`, privateKeyName: 'family', curve: 'CURVE_SECP256K1', addresses: [{ format: 'ADDRESS_FORMAT_ETHEREUM', address: FAMILY_WALLET }], privateKeyTags: [], createdAt: { seconds: '1', nanos: '0' }, updatedAt: null, exported: false, imported: false }],
+    issuedAt: '2030-01-01T00:00:00.000Z',
+    expiresAt: '2031-01-01T00:00:00.000Z',
+  });
+}
 
 describe('CLI runtime custody boundaries', () => {
+  it('automatically binds any free Robinhood SeaDrop campaign to the one approved family record', () => {
+    const selection = selectTurnkeyRobinhoodFamilyPolicy([familyRecord()], { chainId: 4663, strategy: 'seadrop-v1-public', quantity: 2, mintPriceWei: 0n });
+    expect(selection?.policyReference).toMatch(/^turnkey:policy-family:0x[0-9a-f]{64}$/);
+  });
+
+  it('does not use the family for paid, over-quantity or non-Robinhood campaigns', () => {
+    const records = [familyRecord()];
+    expect(selectTurnkeyRobinhoodFamilyPolicy(records, { chainId: 4663, strategy: 'seadrop-v1-public', quantity: 1, mintPriceWei: 1n })).toBeUndefined();
+    expect(selectTurnkeyRobinhoodFamilyPolicy(records, { chainId: 4663, strategy: 'seadrop-v1-public', quantity: 5, mintPriceWei: 0n })).toBeUndefined();
+    expect(selectTurnkeyRobinhoodFamilyPolicy(records, { chainId: 1, strategy: 'seadrop-v1-public', quantity: 1, mintPriceWei: 0n })).toBeUndefined();
+  });
+
+  it('fails closed when more than one eligible family record is installed', () => {
+    expect(() => selectTurnkeyRobinhoodFamilyPolicy([familyRecord(4, 'family-a'), familyRecord(8, 'family-b')], { chainId: 4663, strategy: 'seadrop-v1-public', quantity: 1, mintPriceWei: 0n })).toThrow('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
+  });
+
   it('accepts only wallet files under the workspace or configured external secret wallet roots', () => {
     const root = '/workspace/mintbot';
     const priorSecretRoot = process.env.MINT_BOT_SECRET_ROOT;

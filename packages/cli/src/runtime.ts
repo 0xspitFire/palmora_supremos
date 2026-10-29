@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
 import { openDatabase } from '@mint-bot/database';
-import { buildSeaDropPublicMintCalldata, readTurnkeyApprovedPolicyRecords, readTurnkeySecretConfig, resolveChainConfigFromSecrets, resolveSeaDropFeeRecipient, SEADROP_V1_ADDRESS, turnkeyPolicySelection, TurnkeySigner, type WalletInfo } from '@mint-bot/engine';
+import { buildSeaDropPublicMintCalldata, readTurnkeyApprovedPolicyRecords, readTurnkeySecretConfig, resolveChainConfigFromSecrets, resolveSeaDropFeeRecipient, SEADROP_V1_ADDRESS, turnkeyPolicySelection, TurnkeySigner, type TurnkeyCanonicalPolicyRecord, type TurnkeyPolicySelection, type WalletInfo } from '@mint-bot/engine';
 import { createPublicClient, http, type Address } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 import type { CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
@@ -14,7 +14,17 @@ export interface SpendAlertSink {
   mintFailed?(runId: string, facts: { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string; feePaid?: string }, reason?: string): Promise<void>;
 }
 
-export interface CliRuntime { store: BackendStore; coordinator: ExecutionCoordinator; application: BackendApplication; walletRoot: string; setAlertSink(sink: SpendAlertSink): void; /** T-058: the fee ceiling for one campaign's run, set by the service from a live request; undefined clears it. */ setFeeCeiling(campaignId: string, gwei: number | undefined): void; }
+export interface CliRuntime {
+  store: BackendStore;
+  coordinator: ExecutionCoordinator;
+  application: BackendApplication;
+  /** Shared campaign custody resolver used by host-side Telegram and scheduler applications. */
+  custodyPolicyFor?: (input: import('@mint-bot/backend').CampaignInput) => Promise<import('@mint-bot/engine').TurnkeyPolicySelection & { provider: 'turnkey' } | undefined>;
+  walletRoot: string;
+  setAlertSink(sink: SpendAlertSink): void;
+  /** T-058: the fee ceiling for one campaign's run, set by the service from a live request; undefined clears it. */
+  setFeeCeiling(campaignId: string, gwei: number | undefined): void;
+}
 
 export type CustodyMode = 'local' | 'turnkey';
 
@@ -61,6 +71,29 @@ export function personalLiveLocalCustodyAllowed(requested: boolean | undefined, 
   return requested === true && !useTurnkey;
 }
 
+/**
+ * Select the owner-approved bounded Robinhood family record without creating a
+ * provider policy or resolving a contract-specific fee recipient. The family
+ * deliberately leaves those calldata fields to the local transaction checks.
+ */
+export function selectTurnkeyRobinhoodFamilyPolicy(
+  records: readonly TurnkeyCanonicalPolicyRecord[],
+  input: Pick<import('@mint-bot/backend').CampaignInput, 'chainId' | 'quantity' | 'mintPriceWei' | 'strategy'>,
+): TurnkeyPolicySelection | undefined {
+  if (input.chainId !== 4663 || input.strategy !== 'seadrop-v1-public' || (input.mintPriceWei ?? 0n) !== 0n || !Number.isSafeInteger(input.quantity) || input.quantity < 1) return undefined;
+  const matches = records.filter((record) => {
+    const policy = record.enforcementPolicy;
+    return policy.family?.kind === 'robinhood-seadrop-public-v1'
+      && policy.family.maxQuantity >= input.quantity
+      && policy.transaction.chainId === 4663
+      && policy.transaction.to.toLowerCase() === SEADROP_V1_ADDRESS.toLowerCase()
+      && policy.transaction.valueWei === '0'
+      && policy.transaction.data === '0x161ac21f';
+  });
+  if (matches.length > 1) throw new Error('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
+  return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
+}
+
 export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean; acceptPersonalLiveLocalCustody?: boolean; /** Host service only (D-058/D-059): builds the compensated-profile wiring once the store is open. The owner's CLI never passes it. */ coordinatorAssurance?: (store: CanonicalStoreBridge) => Promise<CoordinatorAssuranceWiring> } = {}): Promise<CliRuntime> {
   const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
   const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
@@ -83,12 +116,17 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   } : {};
   const custodyPolicyFor = turnkeyConfig ? async (input: import('@mint-bot/backend').CampaignInput) => {
     if (!/^0x[0-9a-fA-F]{40}$/.test(input.contract)) throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
+    const records = await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot);
+    // The bounded family is the fast path: `/prepare` binds the campaign to
+    // one already-approved record and the signer performs the exact contract
+    // and fee-recipient checks from the live drop at signing time.
+    const family = selectTurnkeyRobinhoodFamilyPolicy(records, input);
+    if (family) return { provider: 'turnkey' as const, ...family };
     const chain = await resolveChainConfigFromSecrets(input.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
     if (!chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
     const client = createPublicClient({ transport: http(chain.rpcEndpoints[0]) });
     const feeRecipient = await resolveSeaDropFeeRecipient(client, input.contract as Address);
     const data = buildSeaDropPublicMintCalldata(input.contract as Address, feeRecipient, input.quantity);
-    const records = await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot);
     const matches = records.filter((record) => {
       const tx = record.enforcementPolicy.transaction;
       return tx.chainId === input.chainId
@@ -130,5 +168,5 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     mintFailed: (runId, facts, reason) => alertSink.mintFailed?.(runId, facts, reason) ?? Promise.resolve(),
   }, ...(assuranceWiring ? { expectedCustodyPolicy: assuranceWiring.expectedCustodyPolicy, compensatingAssurance: assuranceWiring.compensatingAssurance, refreshReadiness: assuranceWiring.refreshReadiness, walletWatch: assuranceWiring.walletWatch } : {}), ...(personalLiveLocalCustodyAllowed(runtimeOptions.acceptPersonalLiveLocalCustody, useTurnkey) ? { acceptPersonalLiveLocalCustody: true } : {}) });
   if (runtimeOptions.startCoordinator !== false) await coordinator.start();
-  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(custodyPolicyFor ? { custodyPolicyFor } : {}) }), walletRoot: join(configuredSecretRoot(projectRoot), 'wallets'), setAlertSink: (sink) => { alertSink = sink; }, setFeeCeiling: (campaignId, gwei) => { if (gwei === undefined) feeCeilings.delete(campaignId); else feeCeilings.set(campaignId, gwei); } };
+  return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(custodyPolicyFor ? { custodyPolicyFor } : {}) }), ...(custodyPolicyFor ? { custodyPolicyFor } : {}), walletRoot: join(configuredSecretRoot(projectRoot), 'wallets'), setAlertSink: (sink) => { alertSink = sink; }, setFeeCeiling: (campaignId, gwei) => { if (gwei === undefined) feeCeilings.delete(campaignId); else feeCeilings.set(campaignId, gwei); } };
 }
