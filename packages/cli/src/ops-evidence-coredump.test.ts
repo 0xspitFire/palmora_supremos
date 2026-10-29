@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-// The collector is a checked-in ESM operations script without a generated declaration file.
-// Keep the integration test typed while importing that deliberate JavaScript boundary.
-// @ts-expect-error ops-evidence-collect.mjs has no declaration file by design.
 const collector = await import('../../../scripts/ops-evidence-collect.mjs');
 
 describe('heap/core evidence', () => {
