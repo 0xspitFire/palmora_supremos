@@ -128,8 +128,9 @@ export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consen
     ? [
       `eth.tx.data[0..10] == ${quote(tx.data.toLowerCase())}`,
       "eth.tx.data[138..202] == '0000000000000000000000000000000000000000000000000000000000000000'",
-      `eth.tx.data[202..266].hex_to_uint() >= 1`,
-      `eth.tx.data[202..266].hex_to_uint() <= ${policy.family.maxQuantity}`,
+      // Keep the quantity bound exact without relying on hex_to_uint(), which
+      // is not accepted by all Turnkey policy parsers.
+      `eth.tx.data[202..266] in ${list(Array.from({ length: policy.family.maxQuantity }, (_, index) => (index + 1).toString(16).padStart(64, '0')))}`,
     ].join(' && ')
     : `eth.tx.data == ${quote(tx.data.toLowerCase())}`;
   return {
