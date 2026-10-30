@@ -3,7 +3,7 @@ import { readFile, writeFile, rename, unlink, lstat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DEFAULT_PATHS, realIo } from './ops-evidence-collect.mjs';
-import { KINDS, acceptancePhrase, buildAcceptance, sha256Hex, verifyAcceptance } from './ops-evidence-lib.mjs';
+import { KINDS, acceptancePhrase, buildAcceptance, evidenceBindingDigest, sha256Hex, verifyAcceptance } from './ops-evidence-lib.mjs';
 
 /**
  * The owner's acceptance of the five production evidence artifacts (infrastructure design, "Go/no-go conditions"). It only ever
@@ -61,8 +61,10 @@ async function main() {
   const digests = Object.fromEntries(KINDS.filter((kind) => artifacts[kind]).map((kind) => [kind, sha256Hex(artifacts[kind].bytes)]));
   for (const kind of KINDS) console.log(`${artifacts[kind] ? 'found  ' : 'MISSING'} ${kind}${artifacts[kind] ? `  ${digests[kind]}` : ''}`);
   const phrase = acceptancePhrase(digests, designSha256);
-  const acceptance = buildAcceptance({ digests, designSha256, witness: witness.trim(), acceptedAt: io.now().toISOString() });
-  const problems = verifyAcceptance(acceptance, artifacts, { currentCommit: commit, hostId });
+  const eventDigest = /^[0-9a-f]{64}$/i.test(process.env.MINT_BOT_OPS_EVIDENCE_EVENT_DIGEST ?? '') ? process.env.MINT_BOT_OPS_EVIDENCE_EVENT_DIGEST.toLowerCase() : '';
+  const bindingDigest = evidenceBindingDigest({ currentCommit: commit, hostId, digests, eventDigest });
+  const acceptance = buildAcceptance({ digests, designSha256, witness: witness.trim(), acceptedAt: io.now().toISOString(), bindingDigest });
+  const problems = verifyAcceptance(acceptance, artifacts, { currentCommit: commit, hostId, bindingDigest });
   if (problems.length > 0) { console.log(`\nCannot accept yet:\n${problems.map((problem) => `  - ${problem}`).join('\n')}`); process.exitCode = 1; return; }
   if (option('--confirm') !== phrase) { console.log(`\nAll five artifacts are present, pass, and describe the installed release ${commit.slice(0, 7)} on ${hostId}.\nTo accept exactly these, run the same command again adding:\n  --confirm "${phrase}"`); return; }
   const text = `${JSON.stringify(acceptance, null, 2)}\n`;

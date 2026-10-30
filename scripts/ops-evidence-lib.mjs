@@ -7,19 +7,22 @@ import { createHash } from 'node:crypto';
  */
 export const KINDS = ['recovery', 'rotation_revocation', 'heap_core_dump', 'backup_restore', 'service_supervision'];
 export const OPS_EVIDENCE_ACCEPTANCE_VERSION = 2;
-/** Acceptance is re-witnessed weekly even when the installed release and artifact bytes have not changed. */
-export const OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000;
+export const OPS_EVIDENCE_LEGACY_ACCEPTANCE_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000;
+/** The owner acceptance is bounded at 30 days; shorter-lived artifacts still force an earlier refresh. */
+export const OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000;
+export const OPS_EVIDENCE_EXPIRY_PROFILE = 'tiered-v1';
+export const OPS_EVIDENCE_REMINDER_BEFORE_MS = 3 * 24 * 60 * 60 * 1000;
 /**
- * Maximum age of each source artifact at every acceptance/runtime check. D-017 evidence is recollected in the weekly
- * maintenance window; re-signing an unchanged acceptance must never make an older drill current again. These are separate
- * per-kind limits so a future policy can shorten one kind without silently changing the others.
+ * Maximum age of each source artifact at every acceptance/runtime check. Dynamic recovery and backup drills stay weekly;
+ * host hardening, custody/rotation, and service supervision are valid for 30 days unless a release or configuration event
+ * changes their bound. These are separate per-kind limits so one policy can be shortened without silently changing the others.
  */
 export const OPS_EVIDENCE_MAX_AGE_MS = Object.freeze({
   recovery: 7 * 24 * 60 * 60 * 1000,
-  rotation_revocation: 7 * 24 * 60 * 60 * 1000,
-  heap_core_dump: 7 * 24 * 60 * 60 * 1000,
+  rotation_revocation: 30 * 24 * 60 * 60 * 1000,
+  heap_core_dump: 30 * 24 * 60 * 60 * 1000,
   backup_restore: 7 * 24 * 60 * 60 * 1000,
-  service_supervision: 7 * 24 * 60 * 60 * 1000,
+  service_supervision: 30 * 24 * 60 * 60 * 1000,
 });
 
 /** Names every artifact of that kind must contain, each passing. A check that could not be made is a failure, never a skip. */
@@ -32,6 +35,12 @@ export const REQUIRED_CHECKS = {
 };
 
 export const sha256Hex = (data) => createHash('sha256').update(data).digest('hex');
+
+/** Binding for release/host/artifact state plus an optional deployment or custody generation event. */
+export function evidenceBindingDigest({ currentCommit, hostId, digests, eventDigest = '' }) {
+  const joined = [`commit:${currentCommit}`, `host:${hostId}`, ...KINDS.map((kind) => `${kind}:${digests[kind] ?? ''}`), `event:${eventDigest}`].join('\n');
+  return sha256Hex(joined);
+}
 
 /** One short line, no web addresses, no long hex: an artifact never carries a secret-shaped string. */
 export function sanitize(text, max = 300) {
@@ -81,26 +90,38 @@ export function acceptancePhrase(digests, designSha256) {
   return `ACCEPT-OPS-EVIDENCE ${sha256Hex(joined).slice(0, 12)}`;
 }
 
-export function buildAcceptance({ digests, designSha256, witness, acceptedAt }) {
+export function buildAcceptance({ digests, designSha256, witness, acceptedAt, bindingDigest = '' }) {
   const acceptedTime = Date.parse(acceptedAt);
   const expiresAt = Number.isFinite(acceptedTime) ? new Date(acceptedTime + OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS).toISOString() : '';
-  return { version: OPS_EVIDENCE_ACCEPTANCE_VERSION, type: 'ops-evidence-acceptance', acceptedAt, expiresAt, witness: { reference: witness }, design: { sha256: designSha256 }, artifacts: Object.fromEntries(KINDS.map((kind) => [kind, digests[kind]])) };
+  const acceptance = { version: OPS_EVIDENCE_ACCEPTANCE_VERSION, type: 'ops-evidence-acceptance', profile: OPS_EVIDENCE_EXPIRY_PROFILE, acceptedAt, expiresAt, witness: { reference: witness }, design: { sha256: designSha256, expiresAt: Number.isFinite(acceptedTime) ? new Date(acceptedTime + 90 * 24 * 60 * 60 * 1000).toISOString() : '' }, artifacts: Object.fromEntries(KINDS.map((kind) => [kind, digests[kind]])) };
+  // A deployment or custody change may publish a generation digest. Keeping this optional preserves compatibility with
+  // older hosts while allowing an installation to invalidate an acceptance immediately without waiting for a timer.
+  if (SHA256.test(String(bindingDigest))) acceptance.binding = { sha256: bindingDigest };
+  return acceptance;
 }
 
 /**
  * Judges the acceptance against what is on disk now. `artifacts` maps each kind to { bytes, json }. The artifacts must still be
  * the very bytes that were accepted, each must still validate, and all must describe the release installed now on the same host.
  */
-export function verifyAcceptance(acceptance, artifacts, { currentCommit, hostId, now = new Date() }) {
+export function verifyAcceptance(acceptance, artifacts, { currentCommit, hostId, now = new Date(), bindingDigest = '' }) {
   const problems = [];
   if (!acceptance || acceptance.version !== OPS_EVIDENCE_ACCEPTANCE_VERSION || acceptance.type !== 'ops-evidence-acceptance') return ['ACCEPTANCE_INVALID'];
+  const profile = acceptance.profile === undefined ? 'legacy-weekly' : acceptance.profile;
+  if (profile !== OPS_EVIDENCE_EXPIRY_PROFILE && profile !== 'legacy-weekly') problems.push('ACCEPTANCE_PROFILE');
   const acceptedTime = Date.parse(acceptance.acceptedAt);
   const expiresTime = Date.parse(acceptance.expiresAt);
   if (!Number.isFinite(acceptedTime) || acceptedTime > now.getTime() + 60_000) problems.push('ACCEPTANCE_TIME');
-  if (!Number.isFinite(expiresTime) || !Number.isFinite(acceptedTime) || expiresTime !== acceptedTime + OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS) problems.push('ACCEPTANCE_EXPIRY');
+  const validity = profile === 'legacy-weekly' ? OPS_EVIDENCE_LEGACY_ACCEPTANCE_VALIDITY_MS : OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS;
+  if (!Number.isFinite(expiresTime) || !Number.isFinite(acceptedTime) || expiresTime !== acceptedTime + validity) problems.push('ACCEPTANCE_EXPIRY');
   else if (now.getTime() >= expiresTime) problems.push('ACCEPTANCE_EXPIRED');
   if (typeof acceptance.witness?.reference !== 'string' || acceptance.witness.reference.trim().length < 3) problems.push('ACCEPTANCE_WITNESS_MISSING');
   if (!SHA256.test(String(acceptance.design?.sha256))) problems.push('ACCEPTANCE_DESIGN_DIGEST');
+  if (profile === OPS_EVIDENCE_EXPIRY_PROFILE && (!SHA256.test(String(acceptance.design?.sha256)) || !Number.isFinite(Date.parse(acceptance.design?.expiresAt)) || now.getTime() >= Date.parse(acceptance.design.expiresAt))) problems.push('ACCEPTANCE_DESIGN_EXPIRED');
+  if (acceptance.binding?.sha256 !== undefined) {
+    if (!SHA256.test(String(acceptance.binding.sha256))) problems.push('ACCEPTANCE_BINDING_DIGEST');
+    else if (!SHA256.test(String(bindingDigest)) || acceptance.binding.sha256 !== bindingDigest) problems.push('ACCEPTANCE_BINDING_CHANGED');
+  }
   for (const kind of KINDS) {
     const artifact = artifacts[kind];
     if (!artifact) { problems.push(`ARTIFACT_MISSING:${kind}`); continue; }
