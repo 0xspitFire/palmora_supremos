@@ -5,6 +5,9 @@ export interface OpsEvidenceReport {
   missing: string[];
   acceptance: 'accepted' | 'not_accepted';
   acceptanceProblems: string[];
+  expiryProfile: string;
+  acceptanceExpiresAt: string | null;
+  artifactExpiry: Record<string, { completedAt: string | null; expiresAt: string | null }>;
   note: string;
 }
 export function evaluateOpsEvidence(options?: Record<string, unknown>): Promise<OpsEvidenceReport>;

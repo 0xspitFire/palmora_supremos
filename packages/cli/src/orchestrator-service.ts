@@ -36,7 +36,7 @@ import { parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './f
 import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
-import { assertOpsEvidenceAccepted } from '../../../scripts/ops-evidence-runtime.mjs';
+import { assertOpsEvidenceAccepted, evaluateOpsEvidence } from '../../../scripts/ops-evidence-runtime.mjs';
 import { chainRpcSecretNames, failoverTransport, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import { startDependencyFlags } from './dependency-flags.js';
 import { createPublicClient, formatGwei } from 'viem';
@@ -48,6 +48,7 @@ import { createBlockscoutPortfolio, type PortfolioProvider } from './portfolio-p
 import { CHAINLINK_ABI, CHAINLINK_ETH_USD_FEED, createEthPriceProvider } from './price-provider.js';
 import { createOpenSeaFloors, type OpenSeaFloors } from './opensea-client.js';
 import { startFireScheduler } from './fire.js';
+import { startOpsEvidenceReminders } from './ops-evidence-reminders.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -140,6 +141,18 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   }
   const alerts = new AlertManager(runtime.store, dispatcher, metrics, { policy: { retentionDays: config.alertRetentionDays }, ...(config.canonicalUrlBase ? { canonicalUrlBase: config.canonicalUrlBase } : {}) });
   runtime.setAlertSink(alerts);
+  // D-017: send the administrator a durable, actionable reminder when an artifact is due, three days from expiry,
+  // or expired. This is host-only and uses the owner Telegram channel; it never fans out to viewers.
+  let opsEvidenceReminders: { stop(): void } | undefined;
+  if (config.mode === 'host' && config.telegramEnabled) {
+    const interval = Number(environment.MINT_BOT_OPS_EVIDENCE_REMINDER_INTERVAL_MS);
+    opsEvidenceReminders = startOpsEvidenceReminders({
+      evaluate: () => evaluateOpsEvidence({ environment }),
+      alert: (input) => alerts.intelligence(input),
+      ...(Number.isSafeInteger(interval) && interval >= 60_000 ? { intervalMs: interval } : {}),
+      logger,
+    });
+  }
   // T-061 (D-063): owner commands over Telegram, only when the owner turns them on. Without every secret they need the start fails,
   // so the commands never run without the owner check or the authenticator.
   const commandsFlag = environment.MINT_BOT_TELEGRAM_COMMANDS ?? '';
@@ -473,6 +486,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     fireScheduler?.stop();
     telegramCommands?.stop();
     gasAlertChecker?.stop();
+    opsEvidenceReminders?.stop();
     backups?.stop();
     await orchestrator.stop();
     await http.stop();

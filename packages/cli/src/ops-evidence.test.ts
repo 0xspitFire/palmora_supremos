@@ -368,7 +368,7 @@ describe('owner acceptance', () => {
     expect(lib.verifyAcceptance(null, artifacts, identity)).toEqual(['ACCEPTANCE_INVALID']);
   });
 
-  it('acceptance is valid before its fixed weekly expiry and refused exactly at and after it', () => {
+  it('keeps the 30-day acceptance ceiling while shorter-lived artifacts still expire first', () => {
     const artifacts = all();
     for (const entry of Object.values(artifacts)) {
       entry.json.startedAt = NOW.toISOString();
@@ -378,8 +378,8 @@ describe('owner acceptance', () => {
     const acceptance = accept(artifacts);
     const expires = Date.parse(String(acceptance.expiresAt));
     expect(expires).toBe(NOW.getTime() + lib.OPS_EVIDENCE_ACCEPTANCE_VALIDITY_MS);
-    expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires - 1) })).toEqual([]);
-    expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires) })).toContain('ACCEPTANCE_EXPIRED');
+    expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires - 1) })).toEqual(expect.arrayContaining(['recovery:EVIDENCE_STALE', 'backup_restore:EVIDENCE_STALE']));
+    expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires) })).toEqual(expect.arrayContaining(['ACCEPTANCE_EXPIRED', 'recovery:EVIDENCE_STALE', 'backup_restore:EVIDENCE_STALE']));
     expect(lib.verifyAcceptance(acceptance, artifacts, { ...identity, now: new Date(expires + 1) })).toContain('ACCEPTANCE_EXPIRED');
     expect(lib.verifyAcceptance({ ...acceptance, expiresAt: new Date(expires + 1).toISOString() }, artifacts, identity)).toContain('ACCEPTANCE_EXPIRY');
     const withoutExpiry = { ...acceptance }; delete withoutExpiry.expiresAt;
@@ -392,5 +392,12 @@ describe('owner acceptance', () => {
     expect(phrase).toMatch(/^ACCEPT-OPS-EVIDENCE [0-9a-f]{12}$/);
     expect(lib.acceptancePhrase({ ...digests(artifacts), recovery: 'e'.repeat(64) }, DESIGN)).not.toBe(phrase);
     expect(lib.acceptancePhrase(digests(artifacts), 'f'.repeat(64))).not.toBe(phrase);
+  });
+
+  it('invalidates a bound acceptance when the deployment or custody event digest changes', () => {
+    const artifacts = all();
+    const bound = lib.buildAcceptance({ digests: digests(artifacts), designSha256: DESIGN, witness: 'Owner, event-bound', acceptedAt: NOW.toISOString(), bindingDigest: 'a'.repeat(64) });
+    expect(lib.verifyAcceptance(bound, artifacts, { ...identity, bindingDigest: 'a'.repeat(64) })).toEqual([]);
+    expect(lib.verifyAcceptance(bound, artifacts, { ...identity, bindingDigest: 'b'.repeat(64) })).toContain('ACCEPTANCE_BINDING_CHANGED');
   });
 });
