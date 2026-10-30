@@ -63,6 +63,8 @@ export { SeaDropV1PublicStrategy, buildSeaDropPublicMintCalldata, resolveSeaDrop
 
 // Drop reader
 export { readAndValidateDrop, simulateMint, getStrategy, registerStrategy } from './drop-reader.js';
+export { buildReplicationPlan } from './replication.js';
+export type { ObservedMintTransaction, ReplicationChecklist, ReplicationPlan, ReplicationReasonCode, ReplicationSource, ReplicationTarget } from './replication.js';
 
 // Broadcasters
 export {

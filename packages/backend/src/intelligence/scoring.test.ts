@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatEth, paidQuantityForScore, scoreOpportunity, SCORING_MODEL_VERSION, type ScoringInput } from './scoring.js';
+import { formatEth, paidQuantityForScore, scoreOpportunity, SCORING_MODEL_VERSION, SCORING_MODEL_VERSION_PHASE4, type ScoringInput } from './scoring.js';
 
 const NOW = new Date('2026-09-29T12:00:00.000Z');
 const LIMIT = 3_700_000_000_000_000n;
@@ -34,6 +34,15 @@ describe('v1-rules-p2 scoring', () => {
     expect(tooExpensive).toMatchObject({ blocked: true, band: 'log' });
     expect(tooExpensive.risks).toEqual([expect.objectContaining({ code: 'PRICE_ABOVE_LIMIT', severity: 'blocking' })]);
     expect(scoreOpportunity(input({ hasCode: false })).risks.map((risk) => risk.code)).toEqual(['NO_CONTRACT_CODE']);
+  });
+
+  it('uses an optional bounded historical track record without making it execution permission', () => {
+    const result = scoreOpportunity(input({ trackRecord: { successRate: 0.8, sampleSize: 10, recencyHours: 2 } }));
+    const factor = result.factors.find((item) => item.code === 'track_record');
+    expect(factor).toMatchObject({ status: 'available', max: 25 });
+    expect(factor?.points).toBeGreaterThan(0);
+    expect(result.modelVersion).toBe(SCORING_MODEL_VERSION_PHASE4);
+    expect(result.blocked).toBe(false);
   });
 
   it('rates price against the owner limit and decays freshness to zero at six hours', () => {

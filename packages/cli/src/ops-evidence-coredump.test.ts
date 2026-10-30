@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+// @ts-expect-error The collector is an executable .mjs boundary and is intentionally tested through its runtime API.
 const collector = await import('../../../scripts/ops-evidence-collect.mjs');
 
 describe('heap/core evidence', () => {
