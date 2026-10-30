@@ -21,8 +21,8 @@ interface Lib {
   sanitize(text: string, max?: number): string;
   validateEvidence(value: unknown, kind: string, now?: Date): string[];
   acceptancePhrase(digests: Record<string, string>, design: string): string;
-  buildAcceptance(input: { digests: Record<string, string>; designSha256: string; witness: string; acceptedAt: string }): Record<string, unknown>;
-  verifyAcceptance(acceptance: unknown, artifacts: Record<string, unknown>, identity: { currentCommit: string; hostId: string; now?: Date }): string[];
+  buildAcceptance(input: { digests: Record<string, string>; designSha256: string; witness: string; acceptedAt: string; bindingDigest?: string }): Record<string, unknown>;
+  verifyAcceptance(acceptance: unknown, artifacts: Record<string, unknown>, identity: { currentCommit: string; hostId: string; now?: Date; bindingDigest?: string }): string[];
 }
 interface Collector {
   collect(kind: string, io: unknown, env?: Record<string, string>, options?: { restoreDrill?: string; recoveryDrill?: string; rotationDrill?: string }): Promise<{ artifact: { kind: string; environment: string; hostId: string; release: { commit: string }; checks: Check[]; references: Array<{ name: string }> }; failed: Check[]; problems: string[] }>;
