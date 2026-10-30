@@ -39,7 +39,7 @@ const runtime = await import(join(scripts, 'ops-evidence-runtime.mjs')) as {
 const COMMIT = 'a'.repeat(40);
 const NOW = new Date('2026-10-23T12:00:00.000Z');
 
-type Responses = Record<string, string | { ok: false; stdout?: string }>;
+type Responses = Record<string, string | { ok: false; stdout?: string; stderr?: string }>;
 function fakeIo(overrides: { exec?: Responses; files?: Record<string, string>; health?: { status: number; body: string } } = {}) {
   const exec: Responses = {
     'systemctl show mint-bot.service -p User --value': 'mintbot',
@@ -83,7 +83,9 @@ function fakeIo(overrides: { exec?: Responses; files?: Record<string, string>; h
     exec: async (command: string, args: string[]) => {
       const answer = exec[[command, ...args].join(' ')];
       if (answer === undefined) return { ok: false, stdout: '' };
-      return typeof answer === 'string' ? { ok: true, stdout: `${answer}\n` } : { ok: false, stdout: answer.stdout ?? '' };
+      return typeof answer === 'string'
+        ? { ok: true, stdout: `${answer}\n` }
+        : { ok: false, stdout: answer.stdout ?? '', stderr: answer.stderr ?? '' };
     },
     readText: async (path: string) => { if (files[path] === undefined) throw new Error('ENOENT'); return files[path]; },
     readlink: async () => `/opt/mint-bot/releases/${COMMIT}`,
@@ -152,6 +154,8 @@ describe('collectors (fake host)', () => {
     expect(stopped.failed.map((item) => item.name)).toContain('core_limit_process');
     const dumped = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager': 'TIME PID ... 1 coredump' } }), {});
     expect(dumped.failed.map((item) => item.name)).toContain('no_coredumps');
+    const emptyOnStderr = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager': { ok: false, stderr: 'No coredumps found.' } } }), {});
+    expect(emptyOnStderr.failed.map((item) => item.name)).not.toContain('no_coredumps');
     const processAllows = await collector.collect('heap_core_dump', fakeIo({ files: { '/proc/4242/limits': 'Max core file size        unlimited            unlimited            bytes\n' } }), {});
     expect(processAllows.failed.map((item) => item.name)).toContain('core_limit_process');
   });

@@ -658,6 +658,9 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         if (installedBundle && config.policyBundlePath) {
           const bundleRoot = resolve(config.policyBundlePath, '..');
           if (config.policyBundlePath !== join(bundleRoot, 'current.json')) throw new Error('TURNKEY_POLICY_BUNDLE_PATH_INVALID');
+           // Keep the regenerated bundle readable by the supervised service. The
+           // atomic installer requires the service group explicitly; omitting it
+           // fails closed with TURNKEY_POLICY_BUNDLE_SERVICE_GROUP_REQUIRED.
           const expectedGroupId = Number(execFileSync('/usr/bin/id', ['-g', 'mintbot'], { encoding: 'utf8' }).trim());
           if (!Number.isSafeInteger(expectedGroupId) || expectedGroupId <= 0) throw new Error('TURNKEY_POLICY_BUNDLE_SERVICE_GROUP_REQUIRED');
           await installTurnkeyPolicyBundleAtomic({ bundle: { ...installedBundle, walletMap }, pinnedPublicKey: publicKey, bundleRoot, groupReadable: true, expectedGroupId });

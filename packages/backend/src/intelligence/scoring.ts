@@ -7,10 +7,13 @@
  * permission: blocking risks and safety gates stay separate (§12 blocking rule).
  */
 export const SCORING_MODEL_VERSION = 'v1-rules-p2';
+export const SCORING_MODEL_VERSION_PHASE4 = 'v1-rules-p4';
 
 export interface ScoringInput {
   /** Distinct watched addresses that minted this contract in the convergence window. */
   watchedMinters: number;
+  /** Optional historical result supplied by a Phase 4 history consumer. */
+  trackRecord?: { successRate: number; sampleSize: number; recencyHours?: number };
   /** Whether any watched addresses are configured; without them convergence is unavailable. */
   watchingConfigured: boolean;
   /** Mint price per NFT in wei, or null when not known yet. */
@@ -64,7 +67,14 @@ export function scoreOpportunity(input: ScoringInput): ScoreResult {
   const factors: ScoredFactor[] = [];
   const risks: RiskOut[] = [];
 
-  factors.push(unavailable('track_record', 25, 'Past results of the wallets involved are not measured yet (arrives with analytics).'));
+  if (input.trackRecord && Number.isFinite(input.trackRecord.successRate) && Number.isFinite(input.trackRecord.sampleSize) && input.trackRecord.sampleSize > 0) {
+    const successRate = Math.max(0, Math.min(1, input.trackRecord.successRate));
+    const recencyHours = input.trackRecord.recencyHours === undefined ? 0 : Math.max(0, input.trackRecord.recencyHours);
+    const recency = Math.max(0, Math.min(1, 1 - recencyHours / (30 * 24)));
+    const confidence = Math.min(1, input.trackRecord.sampleSize / 10);
+    const points = Math.round(25 * successRate * (0.5 + 0.5 * recency) * confidence);
+    factors.push(available('track_record', points, 25, `${input.trackRecord.sampleSize} historical result(s), ${(successRate * 100).toFixed(0)}% success, recency factor ${(recency * 100).toFixed(0)}%.`));
+  } else factors.push(unavailable('track_record', 25, 'Past results of the wallets involved are not measured yet (arrives with analytics).'));
 
   if (!input.watchingConfigured) factors.push(unavailable('convergence', 20, 'No watched wallets are set up, so wallet agreement cannot be measured.'));
   else {
@@ -107,7 +117,7 @@ export function scoreOpportunity(input: ScoringInput): ScoreResult {
   let band: ScoreBand = score >= 70 ? 'proposal' : score >= 40 ? 'notify' : 'log';
   if (confidence < LOW_CONFIDENCE) band = band === 'proposal' ? 'notify' : 'log';
   if (blocked) band = 'log';
-  return { modelVersion: SCORING_MODEL_VERSION, score, confidence, confidenceLabel, band, factors, risks, blocked };
+  return { modelVersion: input.trackRecord ? SCORING_MODEL_VERSION_PHASE4 : SCORING_MODEL_VERSION, score, confidence, confidenceLabel, band, factors, risks, blocked };
 }
 
 /** Paid mints: NFTs per wallet by score (D-033): 70+ → 2, 40–69 → 1, below 40 → 0. */

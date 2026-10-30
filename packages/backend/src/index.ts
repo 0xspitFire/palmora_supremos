@@ -106,6 +106,8 @@ export type { HostSecretStore, TelegramCredentials, TelegramFetcher, TelegramFet
 export { ServiceHttpServer } from './service-http.js';
 export type { ServiceHttpOptions } from './service-http.js';
 export * from './intelligence/index.js';
+export { evaluateQualifiedAutomationGate } from './intelligence/automation-gate.js';
+export type { QualifiedAutomationBlocker, QualifiedAutomationGateInput, QualifiedAutomationGateResult } from './intelligence/automation-gate.js';
 export type { IntelligenceAlertInput, IntelligenceAlertKind } from './alerts.js';
 export { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, ownerTypedAuthority, ownerTypedProof, recordWalletSimulations, PERSONAL_LIVE_PROBE_MS, PERSONAL_LIVE_SIMULATION_MS, PERSONAL_LIVE_CHAIN_EVIDENCE_MS } from './personal-live-readiness.js';
 export type { PersonalLiveProbes, ReadinessFailure, ReadinessOutcome } from './personal-live-readiness.js';

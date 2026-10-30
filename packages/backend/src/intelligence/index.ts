@@ -2,7 +2,7 @@ export { DiscoveryService } from './discovery.js';
 export type { DiscoveryOptions, DiscoveryTickResult } from './discovery.js';
 export { D033_READINESS_LIMITS, ReadinessSweep } from './readiness.js';
 export type { ReadinessLimits, ReadinessOptions, WalletReadiness as DropWalletReadiness, WalletReadinessState as DropWalletReadinessState } from './readiness.js';
-export { formatEth, paidQuantityForScore, scoreOpportunity, SCORING_MODEL_VERSION } from './scoring.js';
+export { formatEth, paidQuantityForScore, scoreOpportunity, SCORING_MODEL_VERSION, SCORING_MODEL_VERSION_PHASE4 } from './scoring.js';
 export type { ScoreResult, ScoredFactor, ScoringInput } from './scoring.js';
 export { calendarId, DISCOVERY_FRESHNESS_MS, opportunityId, READINESS_FRESHNESS_MS } from './port.js';
 export { CollectionNames } from './names.js';
