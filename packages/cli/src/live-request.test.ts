@@ -141,6 +141,37 @@ describe('live-request processing in the host service (T-058)', () => {
     return { value, calls, events, ceilings };
   };
 
+  it('rechecks automated replication authority and unattended evidence before both arm and execute', async () => {
+    const checks: string[] = [];
+    const { value, calls } = deps({
+      unclaimed: () => [{ ...pending, provenance: { kind: 'automation', eventId: 'prepared' } }],
+      assertUnattendedReady: async () => { checks.push('production'); },
+      assertAutomationReady: async () => { checks.push('signal'); },
+    });
+    await processLiveRunRequests(value);
+    expect(checks).toEqual(['production', 'signal', 'production', 'signal']);
+    expect(calls.some((call) => call.startsWith('run:'))).toBe(true);
+  });
+
+  it('stops an automated request before arm when authority is missing, and before execute when it changes', async () => {
+    const request = { ...pending, provenance: { kind: 'automation' as const, eventId: 'prepared' } };
+    const missing = deps({ unclaimed: () => [request], assertUnattendedReady: async () => undefined });
+    await processLiveRunRequests(missing.value);
+    expect(missing.calls).toEqual(['claim:request-1']);
+    let calls = 0;
+    const drift = deps({ unclaimed: () => [request], assertUnattendedReady: async () => undefined, assertAutomationReady: async () => { if (++calls === 2) throw new Error('AUTOMATION_SIGNAL_STALE'); } });
+    await processLiveRunRequests(drift.value);
+    expect(drift.calls.some((call) => call.startsWith('arm:'))).toBe(true);
+    expect(drift.calls.some((call) => call.startsWith('run:'))).toBe(false);
+  });
+
+  it('rejects a paid scheduled request even when its unattended evidence is current', async () => {
+    const { value, calls, events } = deps({ campaign: () => campaign({ mintPriceWei: 1n }), unclaimed: () => [{ ...pending, provenance: { kind: 'schedule', scheduleId: 'schedule' } }], assertUnattendedReady: async () => undefined });
+    await processLiveRunRequests(value);
+    expect(calls).toEqual(['claim:request-1']);
+    expect(events).toContainEqual(expect.objectContaining({ code: 'PAID_FINAL_FIRE_REQUIRED' }));
+  });
+
   it('claims first, arms live with the recorded approval, runs under the request fee ceiling, then clears it', async () => {
     const { value, calls, events, ceilings } = deps();
     expect(await processLiveRunRequests(value)).toBe(1);

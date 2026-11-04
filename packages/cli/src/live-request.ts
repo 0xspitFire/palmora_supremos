@@ -88,7 +88,7 @@ export function liveRequestConfirmationDigest(phrase: string, preview: Pick<Live
 
 export interface LiveRequestStore {
   snapshot(): RequestState & Pick<BackendState, 'events'>;
-  recordLiveRunRequest(input: { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string; provenance?: { kind: 'attended' } | { kind: 'schedule'; scheduleId: string } }): void;
+  recordLiveRunRequest(input: { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string; provenance?: { kind: 'attended' } | { kind: 'schedule'; scheduleId: string } | { kind: 'automation'; eventId: string } }): void;
 }
 
 /** The owner command. `status` only reads; `create` records the approval and the request after the exact phrase. */
@@ -102,7 +102,7 @@ export async function runLiveRequest(input: {
   store: LiveRequestStore;
   approve: (validated: ValidatedCampaign) => Promise<{ id: string }>;
   newId?: () => string;
-  provenance?: { kind: 'schedule'; scheduleId: string };
+  provenance?: { kind: 'schedule'; scheduleId: string } | { kind: 'automation'; eventId: string };
 }): Promise<Record<string, unknown>> {
   const preview = previewLiveRequest(input.store.snapshot(), input.campaignId, input.wallets, input.maxFeeGwei, input.now);
   if (input.action === 'status' || input.confirm === undefined) {
@@ -127,7 +127,7 @@ export async function runLiveRequest(input: {
 
 /** What the host service needs to process requests. */
 export interface LiveRequestProcessorDeps {
-  unclaimed(): Array<{ id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; requestedAt: string; expiresAt: string; provenance?: { kind: 'legacy' } | { kind: 'attended' } | { kind: 'schedule'; scheduleId: string } }>;
+  unclaimed(): Array<{ id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; requestedAt: string; expiresAt: string; provenance?: { kind: 'legacy' } | { kind: 'attended' } | { kind: 'schedule'; scheduleId: string } | { kind: 'automation'; eventId: string } }>;
   claim(requestId: string, outcome: 'started' | 'expired'): boolean;
   campaign(campaignId: string): Campaign | undefined;
   /** The service's own application (not read-only), so `arm` and `run` apply every gate exactly as the guided live run does. */
@@ -142,6 +142,8 @@ export interface LiveRequestProcessorDeps {
   /** D-017: required only for scheduled provenance; checked directly before arm and again directly before execute. */
   assertUnattendedReady?(): Promise<void>;
   /** Host journal only (never Telegram or the stored result): what an uncoded failure looked like, cleaned by `describeFailure`. */
+  assertAutomationReady?(eventId: string, campaign: Campaign, wallets: readonly string[], maxFeeGwei: number): Promise<void>;
+  assertScheduledCampaignReady?(campaign: Campaign): Promise<void>;
   failed?(requestId: string, detail: FailureDetail): void | Promise<void>;
   now(): Date;
 }
@@ -235,17 +237,25 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
       const maxFeeGwei = Number(request.maxFeeGwei);
       if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500) throw new Error('MAX_FEE_GWEI_INVALID');
       if (request.provenance?.kind === 'legacy') throw new Error('LEGACY_REQUEST_PROVENANCE_UNVERIFIED');
-      if (request.provenance?.kind === 'schedule') {
+      if (request.provenance?.kind === 'schedule' && campaign.mintPriceWei > 0n) throw new Error('PAID_FINAL_FIRE_REQUIRED');
+      if ((request.provenance?.kind === 'schedule' || request.provenance?.kind === 'automation')) {
         if (!deps.assertUnattendedReady) throw new Error('OPS_EVIDENCE_CHECK_REQUIRED');
         await deps.assertUnattendedReady();
       }
+      if (request.provenance?.kind === 'automation') {
+        if (!deps.assertAutomationReady) throw new Error('AUTOMATION_AUTHORITY_REQUIRED');
+        await deps.assertAutomationReady(request.provenance.eventId, campaign, request.wallets, maxFeeGwei);
+      }
+      if (request.provenance?.kind === 'schedule') await deps.assertScheduledCampaignReady?.(campaign);
       const validated: ValidatedCampaign = { campaign, wallets: request.wallets, simulationIds: request.simulationIds, evidenceAt: request.evidenceAt };
       const armed = await deps.command('arm', { validated, mode: 'live', approvalId: request.approvalId, idempotencyKey: `live-request:${request.id}` });
       runId = armed.id;
       deps.setFeeCeiling(request.campaignId, maxFeeGwei);
       let ran: { state?: string };
       try {
-        if (request.provenance?.kind === 'schedule') await deps.assertUnattendedReady!();
+        if ((request.provenance?.kind === 'schedule' || request.provenance?.kind === 'automation')) await deps.assertUnattendedReady!();
+        if (request.provenance?.kind === 'automation') await deps.assertAutomationReady!(request.provenance.eventId, campaign, request.wallets, maxFeeGwei);
+        if (request.provenance?.kind === 'schedule') await deps.assertScheduledCampaignReady?.(campaign);
         ran = await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` });
       } finally { deps.setFeeCeiling(request.campaignId, undefined); }
       // A completed run is finished. A run still Active was sent and is waiting for the chain to settle it (Robinhood: until Ethereum finality):

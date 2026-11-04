@@ -12,6 +12,7 @@ import type { DryRunReport, DryRunWallet } from './robinhood-readonly.js';
 export const ROBINHOOD_DEFAULT_TIP_GWEI = 0.1;
 
 export interface RobinhoodPlan {
+  strategyName?: string;
   contract: string;
   verdict: 'ready' | 'not_ready';
   summary: string;
@@ -65,7 +66,8 @@ export function buildRobinhoodPlan(report: DryRunReport, context: { candidates: 
     for (const wallet of report.wallets) { const check = walletReady(wallet); if (!check.ok) notReady.push({ wallet: wallet.wallet.toLowerCase(), why: check.why }); }
     if (drop && blockers.length === 0 && ready.length === 0) blockers.push(report.verdict === 'blocked' && report.wallets.length === 0 ? report.summary : 'No wallet is ready: each failed the test mint or lacks ETH on Robinhood.');
   } else {
-    ready = drop && blockers.length === 0 ? context.candidates.map((wallet) => wallet.toLowerCase()) : [];
+    ready = drop && blockers.length === 0 ? context.candidates.map((wallet) => wallet.toLowerCase()).filter((wallet) => !drop.eligibleWallets || drop.eligibleWallets.some((entry) => entry.toLowerCase() === wallet)) : [];
+    if (drop?.strategyName === 'seadrop-v1-allowlist' && ready.length === 0) blockers.push('ALLOWLIST_OWN_WALLET_PROOF_REQUIRED');
     if (drop?.status === 'upcoming' && blockers.length === 0) warnings.push(`The mint opens at ${drop.opensAt ?? 'an unknown time'}. The campaign can be recorded now; the test mints can only be recorded once it is open (they are good for 30 minutes).`);
   }
   if (report.supply?.soldOut) blockers.push(`This collection is sold out (${report.supply.totalSupply} of ${report.supply.maxSupply}).`);
@@ -81,6 +83,7 @@ export function buildRobinhoodPlan(report: DryRunReport, context: { candidates: 
     ? `${open ? 'Drop and wallets are ready' : 'The drop is readable and free'}: up to ${ready.length} wallet(s) would each mint ${context.quantity} NFT(s) and could spend at most ${formatEth(totalWex(ready))} ETH in total. Nothing has been sent.`
     : `Not ready: ${blockers.length} thing(s) to fix before a live Robinhood mint. Nothing has been sent.`;
   return {
+    ...(drop?.strategyName ? { strategyName: drop.strategyName } : {}),
     contract: report.contract,
     verdict,
     summary,
@@ -156,9 +159,10 @@ export async function robinhoodPrepareAction(input: {
   if (!evidence) throw new Error('ROBINHOOD_NOT_ENABLED: record the Robinhood enablement first (robinhood-enable status, then record)');
   const fields = robinhoodFreeCampaignFields({ quantity: plan.quantity, wallets: plan.walletsReady.length, tipWei: parseGwei(input.priorityFeeGwei.toString()) });
   const campaign = await input.createCampaign({
+    walletScope: plan.walletsReady,
     chainId: 4663,
     contract: input.contract,
-    strategy: 'seadrop-v1-public',
+    strategy: plan.strategyName ?? 'seadrop-v1-public',
     quantity: fields.quantity,
     dryRun: false,
     maxRunWei: fields.maxRunWei,

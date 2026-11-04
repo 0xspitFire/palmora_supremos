@@ -16,7 +16,7 @@ const SHORT = 151_000_000_000_000n; // 0.000151 ETH, like the real wallet
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000);
 const minuteText = (offsetMs: number): string => new Date(NOW.getTime() + offsetMs).toISOString().slice(0, 16);
 
-async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; walletsUsed?: string[]; reconciliations?: Array<{ runId: string; result: string; reason?: string; observedAt: string }>; reconcileNow?: () => Promise<void>; reconcileTimeoutMs?: number; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string; opsReady?: boolean } = {}) {
+async function setup(options: { paid?: boolean; status?: 'open' | 'upcoming' | 'ended'; failing?: string[]; kill?: boolean; maxRunWei?: bigint; balances?: Record<string, bigint>; walletsInList?: string[]; walletsUsed?: string[]; reconciliations?: Array<{ runId: string; result: string; reason?: string; observedAt: string }>; reconcileNow?: () => Promise<void>; reconcileTimeoutMs?: number; runs?: Array<{ id: string; campaignId: string; state: string; updatedAt?: string }>; readTimeoutMs?: number; slowRead?: boolean; events?: Array<{ type: string; data: Record<string, unknown> }>; started?: Array<{ id: string; campaignId: string }>; claimedAt?: string; opsReady?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'mintbot-fire-'));
   const killSwitchPath = join(directory, 'killswitch');
   if (options.kill) await writeFile(killSwitchPath, 'on\n');
@@ -31,7 +31,7 @@ async function setup(options: { status?: 'open' | 'upcoming' | 'ended'; failing?
   const requests: Array<Record<string, unknown>> = [];
   const approvals: unknown[] = [];
   const evidence = { id: 'verification_abc', chainId: 4663, status: 'accepted', executionEnabled: true, checkedAt: '2026-10-25T11:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', sourceBlock: 1n, endpointIdentity: 'robinhood-sequencer' };
-  const campaigns = [{ id: 'campaign_abcdef12', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: 0n, spendPolicy: { maxRunWei: options.maxRunWei ?? 10n ** 18n, dailyCapWei: 10n ** 18n, gasCeilingWei: 10n ** 18n }, chainVerification: { chainId: 4663, status: 'verified', seaDropCompatible: true }, state: 'draft', createdAt: 'x', updatedAt: 'x', broadcastMode: 'sequencer' }];
+  const campaigns = [{ id: 'campaign_abcdef12', chainId: 4663, contract: CONTRACT, quantity: 1, dryRun: false, feePolicy: { kind: 'free', configuredPriorityFeeWei: 100_000_000n, totalFeeBudgetWei: 200_000_000_000_000n }, strategy: 'seadrop-v1-public', mintPriceWei: options.paid ? 1n : 0n, spendPolicy: { maxRunWei: options.maxRunWei ?? 10n ** 18n, dailyCapWei: 10n ** 18n, gasCeilingWei: 10n ** 18n }, chainVerification: { chainId: 4663, status: 'verified', seaDropCompatible: true }, state: 'draft', createdAt: 'x', updatedAt: 'x', broadcastMode: 'sequencer' }];
   const store = {
     snapshot: () => ({ attempts: [], receipts: [], reservations: [], reconciliations: options.reconciliations ?? [], events: options.events ?? [], campaigns, simulations, chainEvidence: [evidence], runs: options.runs ?? [], killed: false, runtime: { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } } }),
     transaction: async (mutate: (state: { simulations: unknown[] }) => void) => { mutate({ simulations }); },
@@ -401,6 +401,12 @@ describe('a run needs each wallet to hold its full worst case (the second live a
 });
 
 describe('/schedule', () => {
+  it('refuses paid schedules at preview instead of silently replacing final fire approval', async () => {
+    const t = await setup({ paid: true });
+    try { await expect(t.actions.schedulePreview('campaign_abcdef12', A, 0.2, 'now', '+30m')).rejects.toThrow('PAID_FINAL_FIRE_REQUIRED'); }
+    finally { await cleanup(t.directory); }
+  });
+
   it('fails closed at preview and execution until D-017 evidence is accepted', async () => {
     const blocked = await setup({ status: 'upcoming', opsReady: false });
     const ready = await setup({ status: 'upcoming' });

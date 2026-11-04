@@ -10,7 +10,7 @@ import { liveRequestDigest } from './evidence.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, type FleetSpendPolicy } from './fleet-policy.js';
 
 export interface CommandResponse<T> { id: string; state: string; nextAction: string; createdAt: string; retryable: boolean; blockingReason?: string; data?: T; }
-export interface CampaignInput { chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; custodyPolicy?: Campaign['custodyPolicy']; }
+export interface CampaignInput { walletScope?: readonly string[]; chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; custodyPolicy?: Campaign['custodyPolicy']; }
 export interface ApprovalCommandInput { validated: ValidatedCampaign; idempotencyKey?: string; }
 export interface ArmCommandInput { validated: ValidatedCampaign; mode: 'dry-run' | 'live'; idempotencyKey?: string; approvalId?: string; }
 export interface RunCommandInput { runId: string; wallets: string[]; idempotencyKey?: string; }

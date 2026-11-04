@@ -80,6 +80,13 @@ function setup(store: BackendStore = new DurableStore()) {
 }
 
 describe('DiscoveryService', () => {
+  it('never restores another chain\'s opportunity or watched-wallet consolidation', async () => {
+    const t = setup();
+    await t.store.transaction((state) => { state.events.push({ id: 'other-chain', type: 'opportunity_scored', at: t.clock.now().toISOString(), data: { chainId: 8453, contract: NFT, lastActivityAt: t.clock.now().toISOString(), firstSeenAt: t.clock.now().toISOString(), watchedMinters: [WHALE], priceWei: '0', score: 90, band: 'proposal' } }); });
+    await t.discovery.tick();
+    expect(events(t.store, 'opportunity_notified')).toEqual([]);
+    expect(events(t.store, 'opportunity_scored')).toHaveLength(1);
+  });
   it('turns watched-wallet convergence on a busy free SeaDrop mint into one scored, alerted opportunity', async () => {
     const t = setup();
     t.repo.watched = [WHALE];

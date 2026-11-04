@@ -1,5 +1,5 @@
 import { decodeErrorResult, parseAbi, toFunctionSelector, type Address, type Hash, type Hex, type PublicClient } from 'viem';
-import { FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, RobinhoodFinalityObserver, SEADROP_MINT_TOPIC, SEADROP_V1_ADDRESS, SeaDropV1PublicStrategy, providerErrorDetail, type FinalityObservation, type RobinhoodFinalitySources } from '@mint-bot/engine';
+import { FREE_MINT_PER_WALLET_RESERVE_CAP_WEI, FREE_MINT_ACTIVE_PERIOD_RESERVE_CAP_WEI, RobinhoodFinalityObserver, SEADROP_MINT_TOPIC, SEADROP_V1_ADDRESS, SeaDropV1PublicStrategy, getStrategy, providerErrorDetail, type FinalityObservation, type MintStrategy, type RobinhoodFinalitySources } from '@mint-bot/engine';
 import { classifyMint } from './seadrop-survey.js';
 
 /**
@@ -192,7 +192,7 @@ export async function checkFees(client: PublicClient, options: { blocks?: number
 
 export interface DryRunWallet { wallet: string; simulation: 'passed' | 'failed'; reason?: string; revertSelector?: string; estimatedGas: string | null; estimatedCostEth: string | null; withinPerWalletCap: boolean | null; balanceEth: string | null; hasEnoughForGas: boolean | null }
 export interface SupplyView { totalSupply: string; maxSupply: string; soldOut: boolean }
-export interface DryRunReport { contract: string; supply?: SupplyView | null; verdict: 'ok' | 'blocked'; summary: string; drop: { priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null; quantity: number; wallets: DryRunWallet[] }
+export interface DryRunReport { contract: string; supply?: SupplyView | null; verdict: 'ok' | 'blocked'; summary: string; drop: { strategyName?: string; eligibleWallets?: readonly string[]; priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null; quantity: number; wallets: DryRunWallet[] }
 
 async function mapLimit<T, R>(items: readonly T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
@@ -281,19 +281,27 @@ export async function readSupply(client: PublicClient, contract: string): Promis
 }
 
 /** Reads a Robinhood SeaDrop public drop and simulates the mint for each wallet with eth_call. Never signs or sends. */
-export async function dryRunDrop(client: PublicClient, contract: string, wallets: readonly string[], options: { quantity?: number; now?: Date } = {}): Promise<DryRunReport> {
+export async function dryRunDrop(client: PublicClient, contract: string, wallets: readonly string[], options: { quantity?: number; now?: Date; publicOnly?: boolean } = {}): Promise<DryRunReport> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) return { contract, verdict: 'blocked', summary: 'That is not a valid contract address.', drop: null, quantity: 0, wallets: [] };
   if (wallets.length === 0 || wallets.length > 50 || wallets.some((wallet) => !/^0x[0-9a-fA-F]{40}$/.test(wallet))) return { contract, verdict: 'blocked', summary: 'Give 1 to 50 valid wallet addresses.', drop: null, quantity: 0, wallets: [] };
   if (options.quantity !== undefined && (!Number.isSafeInteger(options.quantity) || options.quantity < 1)) return { contract, verdict: 'blocked', summary: 'The quantity must be a whole number of 1 or more.', drop: null, quantity: 0, wallets: [] };
-  const strategy = new SeaDropV1PublicStrategy();
+  let strategy: MintStrategy = new SeaDropV1PublicStrategy();
   let drop;
-  try { drop = await strategy.readDrop(client, contract as Address, 4663); } catch (error) { return { contract, verdict: 'blocked', summary: `No readable SeaDrop public drop here: ${providerErrorDetail(error)}`, drop: null, quantity: 0, wallets: [] }; }
+  try {
+    let allowlist;
+    try { if (!options.publicOnly) allowlist = getStrategy('seadrop-v1-allowlist'); } catch { /* no proof provider installed */ }
+    if (allowlist) {
+      try { drop = await allowlist.readDrop(client, contract as Address, 4663); strategy = allowlist; }
+      catch (error) { if (!(error instanceof Error) || error.message !== 'ALLOWLIST_FIRST_PARTY_SOURCE_REQUIRED') throw error; }
+    }
+    drop ??= await strategy.readDrop(client, contract as Address, 4663);
+  } catch (error) { return { contract, verdict: 'blocked', summary: `No readable SeaDrop public drop here: ${providerErrorDetail(error)}`, drop: null, quantity: 0, wallets: [] }; }
   const nowMs = (options.now ?? new Date()).getTime();
   const startMs = drop.startTime * 1_000;
   const endMs = drop.endTime === 0 ? Number.POSITIVE_INFINITY : drop.endTime * 1_000;
   const status = nowMs < startMs ? 'upcoming' : nowMs >= endMs ? 'ended' : 'open';
   const quantity = Math.max(1, Math.min(options.quantity ?? 1, drop.maxTotalMintableByWallet || 1));
-  const dropView = { priceEth: ethString(drop.mintPrice), opensAt: startMs > 0 ? new Date(startMs).toISOString() : null, closesAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null, maxPerWallet: drop.maxTotalMintableByWallet, status } as const;
+  const dropView = { ...(drop.strategyName === 'seadrop-v1-allowlist' ? { strategyName: drop.strategyName, eligibleWallets: (drop.extra?.walletProofs as Array<{ wallet: string }>).map((proof) => proof.wallet) } : {}), priceEth: ethString(drop.mintPrice), opensAt: startMs > 0 ? new Date(startMs).toISOString() : null, closesAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null, maxPerWallet: drop.maxTotalMintableByWallet, status } as const;
   if (drop.mintPrice > 0n) return { contract, verdict: 'blocked', summary: 'This drop is paid. Paid Robinhood mints are blocked (D-038), so it is not simulated.', drop: dropView, quantity, wallets: [] };
   if (status !== 'open') return { contract, verdict: 'blocked', summary: `This mint is ${status}, so a simulation would not be meaningful.`, drop: dropView, quantity, wallets: [] };
   const supply = await readSupply(client, contract);
@@ -302,10 +310,11 @@ export async function dryRunDrop(client: PublicClient, contract: string, wallets
   // `minterIfNotPayer` is zero for this strategy, so calldata is identical for
   // every wallet. Build it once; the wallet is still supplied as `account` to
   // each eth_call and estimate, preserving per-wallet authorization checks.
-  const calldata = strategy.buildCalldata(drop, wallets[0] as Address, quantity);
+  const sharedCalldata = drop.strategyName === 'seadrop-v1-public' ? strategy.buildCalldata(drop, wallets[0] as Address, quantity) : undefined;
   const results = await mapLimit(wallets, 8, async (wallet): Promise<DryRunWallet> => {
     const minter = wallet as Address;
     try {
+      const calldata = sharedCalldata ?? strategy.buildCalldata(drop, minter, quantity);
       await client.call({ account: minter, to: SEADROP_V1_ADDRESS, data: calldata, value: 0n });
       const [estimatedGas, balance] = await Promise.all([
         client.estimateGas({ account: minter, to: SEADROP_V1_ADDRESS, data: calldata, value: 0n }).catch(() => null),

@@ -132,7 +132,13 @@ export class DiscoveryService {
         item.priceWei = mint.unitPriceWei;
         item.lastActivityAt = at;
         // Convergence counts only a watched wallet that paid for its own mint; a drop owner cannot forge the payer.
-        if (watchedSet.has(mint.minter.toLowerCase()) && mint.minter.toLowerCase() === mint.payer.toLowerCase()) item.watched.set(mint.minter.toLowerCase(), at);
+        if (watchedSet.has(mint.minter.toLowerCase()) && mint.minter.toLowerCase() === mint.payer.toLowerCase()) {
+          item.watched.set(mint.minter.toLowerCase(), at);
+          if (mint.txHash && /^0x[0-9a-fA-F]{64}$/.test(mint.txHash)) {
+            const id = `watched_mint:${chainId}:${mint.txHash.toLowerCase()}:${mint.logIndex}`;
+            await this.store.transaction((state) => { if (!state.events.some((event) => event.id === id)) state.events.push({ id, type: 'watched_wallet_mint', at: new Date(at).toISOString(), data: { chainId, contract: item.contract, wallet: mint.minter.toLowerCase(), txHash: mint.txHash, sourceBlock: mint.blockNumber.toString() } }); });
+          }
+        }
         touched.add(item.contract);
         result.mintsObserved += quantity;
       }
@@ -176,6 +182,7 @@ export class DiscoveryService {
     const latest = new Map<string, EventRecord>();
     for (const event of this.store.snapshot().events) {
       if (event.type !== 'opportunity_scored' && event.type !== 'calendar_entry') continue;
+      if (event.data.chainId !== this.port.chainId) continue;
       const key = `${event.type}:${String(event.data.contract ?? '')}`;
       const prior = latest.get(key);
       if (!prior || event.at >= prior.at) latest.set(key, event);

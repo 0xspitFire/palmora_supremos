@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
+import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, loadHostSecretStore, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
 import { openDatabase } from '@mint-bot/database';
-import { buildSeaDropPublicMintCalldata, readTurnkeyApprovedPolicyRecords, readTurnkeySecretConfig, resolveChainConfigFromSecrets, resolveSeaDropFeeRecipient, SEADROP_V1_ADDRESS, turnkeyPolicySelection, TurnkeySigner, type TurnkeyCanonicalPolicyRecord, type TurnkeyPolicySelection, type WalletInfo } from '@mint-bot/engine';
-import { createPublicClient, http, type Address } from 'viem';
+import { buildSeaDropPublicMintCalldata, getStrategy, readTurnkeyApprovedPolicyRecords, readTurnkeySecretConfig, resolveChainConfigFromSecrets, resolveSeaDropFeeRecipient, SEADROP_V1_ADDRESS, turnkeyPolicySelection, TurnkeySigner, type TurnkeyCanonicalPolicyRecord, type TurnkeyPolicySelection, type WalletInfo } from '@mint-bot/engine';
+import { createPublicClient, http, type Address, type Hex } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 import type { CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
+import { installAllowlistSources } from './allowlist-source-config.js';
 
 /** Where spend-limit alerts go. The default records a durable alert event; the service swaps in its Telegram-backed manager. */
 export interface SpendAlertSink {
@@ -100,6 +101,12 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
+  if (process.env.MINT_BOT_ALLOWLIST_SOURCES_PATH) {
+    await installAllowlistSources({ path: process.env.MINT_BOT_ALLOWLIST_SOURCES_PATH, secretRoot,
+      wallets: async () => (await configuredWallets(projectRoot, configuredWalletPath(projectRoot))).map((wallet) => wallet.address),
+      credential: async (name) => process.env.SECRET_STORE_PATH ? (await loadHostSecretStore(process.env.SECRET_STORE_PATH)).get(name) : undefined,
+    });
+  }
   const turnkeyConfig = useTurnkey ? await readTurnkeySecretConfig(secretRoot) : undefined;
   let turnkeyPolicyReference: string | undefined;
   if (turnkeyConfig) {
@@ -125,14 +132,22 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     const chain = await resolveChainConfigFromSecrets(input.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
     if (!chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
     const client = createPublicClient({ transport: http(chain.rpcEndpoints[0]) });
-    const feeRecipient = await resolveSeaDropFeeRecipient(client, input.contract as Address);
-    const data = buildSeaDropPublicMintCalldata(input.contract as Address, feeRecipient, input.quantity);
+    let candidates: Hex[];
+    if (input.strategy === 'seadrop-v1-allowlist') {
+      const strategy = getStrategy(input.strategy);
+      const drop = await strategy.readDrop(client, input.contract as Address, input.chainId as 1 | 8453 | 4663);
+      const own = (await configuredWallets(projectRoot, configuredWalletPath(projectRoot))).filter((wallet) => !input.walletScope || input.walletScope.some((address) => address.toLowerCase() === wallet.address.toLowerCase()));
+      candidates = own.flatMap((wallet) => { try { return [strategy.buildCalldata(drop, wallet.address, input.quantity)]; } catch { return []; } });
+    } else {
+      const feeRecipient = await resolveSeaDropFeeRecipient(client, input.contract as Address);
+      candidates = [buildSeaDropPublicMintCalldata(input.contract as Address, feeRecipient, input.quantity)];
+    }
     const matches = records.filter((record) => {
       const tx = record.enforcementPolicy.transaction;
       return tx.chainId === input.chainId
         && tx.to.toLowerCase() === SEADROP_V1_ADDRESS.toLowerCase()
         && tx.valueWei === String((input.mintPriceWei ?? 0n) * BigInt(input.quantity))
-        && tx.data === data;
+        && candidates.includes(tx.data);
     });
     if (matches.length !== 1) throw new Error(matches.length === 0 ? 'TURNKEY_POLICY_SELECTION_NOT_FOUND' : 'TURNKEY_POLICY_SELECTION_AMBIGUOUS');
     return { provider: 'turnkey' as const, ...turnkeyPolicySelection(matches[0]!) };

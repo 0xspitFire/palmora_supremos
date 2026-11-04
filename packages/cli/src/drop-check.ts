@@ -11,7 +11,7 @@ export interface DropCheckReport {
   contract: string;
   verdict: 'ok' | 'blocked' | 'unknown';
   summary: string;
-  drop: { priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null;
+  drop: { strategyName?: string; priceEth: string; opensAt: string | null; closesAt: string | null; maxPerWallet: number; status: 'upcoming' | 'open' | 'ended' } | null;
   quantity: number;
   /** Set for free mints when the planner ran (D-037): says whether and why the quantity was reduced for fees. */
   quantityPlan?: { desired: number; planned: number; reduced: boolean; reason: string; maxFeeGwei: string; message: string };
@@ -61,7 +61,7 @@ export async function checkDrop(port: IntelligenceChainPort, contract: string, w
   const startMs = drop.startTime * 1000;
   const endMs = drop.endTime === 0 || drop.endTime > MAX_TIME_SECONDS ? Number.POSITIVE_INFINITY : drop.endTime * 1000;
   const status = now < startMs ? 'upcoming' : now >= endMs ? 'ended' : 'open';
-  const dropView = { priceEth: formatEth(drop.priceWei), opensAt: startMs > 0 ? new Date(startMs).toISOString() : null, closesAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null, maxPerWallet: drop.maxPerWallet, status } as const;
+  const dropView = { ...(drop.strategyName ? { strategyName: drop.strategyName } : {}), priceEth: formatEth(drop.priceWei), opensAt: startMs > 0 ? new Date(startMs).toISOString() : null, closesAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null, maxPerWallet: drop.maxPerWallet, status } as const;
   if (status === 'ended') return { contract, verdict: 'blocked', summary: 'This mint has ended.', drop: dropView, quantity: 0, wallets: [] };
   if (drop.priceWei > limits.paidMaxPricePerNftWei) return { contract, verdict: 'blocked', summary: `Price ${formatEth(drop.priceWei)} ETH is above your ${formatEth(limits.paidMaxPricePerNftWei)} ETH per-NFT limit.`, drop: dropView, quantity: 0, wallets: [] };
   const free = drop.priceWei === 0n;
@@ -85,6 +85,7 @@ export async function checkDrop(port: IntelligenceChainPort, contract: string, w
   const selected = free ? [...wallets] : wallets.slice(0, limits.paidMaxWalletsPerMint);
   const required = drop.priceWei * BigInt(quantity) + (free ? limits.freeFeeAllowanceWei : limits.paidFeeAllowanceWei);
   const rows = await mapLimit(selected, 8, async (wallet): Promise<DropCheckWallet> => {
+    if (drop.eligibleWallets && !drop.eligibleWallets.some((entry) => entry.toLowerCase() === wallet.toLowerCase())) return { wallet, balanceEth: null, requiredEth: formatEth(required), topUpEth: null, simulation: 'not run', verdict: 'blocked', note: 'A current own-wallet allowlist proof is required.' };
     const balance = await port.balance(wallet);
     const base = { wallet, balanceEth: balance === null ? null : formatEth(balance), requiredEth: formatEth(required) };
     if (balance === null) return { ...base, topUpEth: null, simulation: 'not run', verdict: 'unknown', note: 'Balance could not be read.' };

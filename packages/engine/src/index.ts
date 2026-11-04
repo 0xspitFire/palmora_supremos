@@ -64,6 +64,12 @@ export { SeaDropV1PublicStrategy, buildSeaDropPublicMintCalldata, resolveSeaDrop
 // Drop reader
 export { readAndValidateDrop, simulateMint, getStrategy, registerStrategy } from './drop-reader.js';
 export { buildReplicationPlan } from './replication.js';
+export { SeaDropV1AllowlistStrategy } from './strategies/seadrop-v1-allowlist.js';
+export type { WalletProofProvider } from './strategies/seadrop-v1-allowlist.js';
+export { ALLOWLIST_MINT_ABI, buildAllowlistMint, qualifyWalletProofs } from './allowlist-authority.js';
+export type { AllowlistAuthoritySnapshot, AllowlistSourceBinding, VerifiedWalletProof } from './allowlist-authority.js';
+export { allowlistLeaf, buildTree, checkAllowlist, parsePublishedList, verifyProof } from './allowlist.js';
+export type { AllowlistReport, AllowlistVerdict, MintParams, PublishedEntry, WalletAllowlistResult } from './allowlist.js';
 export type { ObservedMintTransaction, ReplicationChecklist, ReplicationPlan, ReplicationReasonCode, ReplicationSource, ReplicationTarget } from './replication.js';
 
 // Broadcasters

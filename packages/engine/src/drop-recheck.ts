@@ -23,7 +23,7 @@ const plain = (value: unknown): string => JSON.stringify(value, (_key, item: unk
  * and the fee recipient falls back to a default when the allowed-recipient read fails, so none of those can prove a change: a
  * flaky node must never stop a good mint. The fee recipient is covered through `restrictFeeRecipients` and `feeBps`.
  */
-const STABLE_SETTINGS = ['feeBps', 'restrictFeeRecipients', 'seaDropAddress'] as const;
+const STABLE_SETTINGS = ['feeBps', 'restrictFeeRecipients', 'seaDropAddress', 'allowlistRoot', 'stageIndex', 'proofSourceDigest'] as const;
 const OPTIONAL_READ_FLAGS = ['totalSupplyKnown', 'maxSupplyKnown'] as const;
 
 /** True when an optional read worked for one reading but not the other, so supply-based comparisons would be meaningless. */
@@ -70,12 +70,22 @@ export function createDropRecheck(options: DropRecheckOptions): () => Promise<st
         new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('DROP_RECHECK_TIMEOUT')), options.timeoutMs ?? DROP_RECHECK_TIMEOUT_MS); }),
       ]);
       // A partly failed reading (an optional supply read worked before but not now, or the reverse) is "unknown", never a change.
-      if (isPartialReading(options.initial, read.drop)) { options.onUnavailable?.(); return 'unknown'; }
+      if (isPartialReading(options.initial, read.drop)) {
+        options.onUnavailable?.();
+        if (options.initial.strategyName === 'seadrop-v1-allowlist') { latched = 'ALLOWLIST_AUTHORITY_UNAVAILABLE'; return latched; }
+        return 'unknown';
+      }
       const change = describeDropChange(options.initial, read.drop, read.validation);
       if (change) latched = change;
       return change;
     } catch {
       options.onUnavailable?.();
+      // A wallet-specific proof cannot use the public strategy's best-effort
+      // reread rule: unknown current authority must stop this run before signing.
+      if (options.initial.strategyName === 'seadrop-v1-allowlist') {
+        latched = 'ALLOWLIST_AUTHORITY_UNAVAILABLE';
+        return latched;
+      }
       return 'unknown';
     } finally {
       if (timer) clearTimeout(timer);

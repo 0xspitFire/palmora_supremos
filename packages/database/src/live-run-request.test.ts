@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openDatabase } from './database.js';
 import { DurableRepository, type LiveRunRequestRecord } from './repositories.js';
+import { Phase2Repository } from './phase2.js';
 
 /** T-058: the owner's live request is complete, short-lived, immutable, and claimed at most once. */
 function fixture() {
@@ -28,6 +29,19 @@ const request = (overrides: Partial<LiveRunRequestRecord> = {}): LiveRunRequestR
 });
 
 describe('live run requests (T-058)', () => {
+  it('keeps automated free requests unattended and binds them to a persisted free-preparation authority', () => {
+    const { db, repository } = fixture();
+    const provenance = { kind: 'automation' as const, eventId: 'prepared-1' };
+    expect(() => repository.recordLiveRunRequest(request({ provenance }))).toThrow();
+    new Phase2Repository(db).appendEvent({ id: 'prepared-1', type: 'replication_prepared', occurredAt: '2026-10-24T10:00:00.000Z', payload: { campaignId: 'campaign', mintPriceWei: '0', policyVersion: 'free-watched-v1', score: 70, wallets: request().wallets, maxFeeGwei: 5 } });
+    repository.recordLiveRunRequest(request({ provenance }));
+    expect(repository.unclaimedLiveRunRequests()[0]!.provenance).toEqual(provenance);
+    expect(db.prepare('SELECT execution_provenance FROM live_run_request').get()).toEqual({ execution_provenance: 'scheduled' });
+    expect(() => db.prepare("UPDATE live_run_request SET automation_event_id = NULL").run()).toThrow(/immutable/);
+    new Phase2Repository(db).appendEvent({ id: 'paid-prepared', type: 'replication_prepared', occurredAt: '2026-10-24T10:00:00.000Z', payload: { campaignId: 'campaign', mintPriceWei: '1', policyVersion: 'free-watched-v1' } });
+    expect(() => repository.recordLiveRunRequest(request({ id: 'paid', provenance: { kind: 'automation', eventId: 'paid-prepared' } }))).toThrow();
+    db.close();
+  });
   it('records a complete request and lists it until it is claimed, which happens once', () => {
     const { repository } = fixture();
     repository.recordLiveRunRequest(request());
