@@ -31,9 +31,9 @@ export interface FireWiringDeps {
   /** How long a chain read may take before the step fails by name (default 20 seconds; tests shorten it). */
   readTimeoutMs?: number;
   walletList(): Promise<string[]>;
-  evmPort(chainId: 1 | 8453): Promise<IntelligenceChainPort>;
+  evmPort(chainId: 1 | 8453, strategy?: string): Promise<IntelligenceChainPort>;
   evmLatestBlock(chainId: 1 | 8453): Promise<{ number: bigint; hash: string }>;
-  robinhoodDryRun(contract: string, wallets: readonly string[], quantity: number | undefined, at: Date): Promise<DryRunReport>;
+  robinhoodDryRun(contract: string, wallets: readonly string[], quantity: number | undefined, at: Date, publicOnly?: boolean): Promise<DryRunReport>;
   /** A wallet's balance on a chain (used to check the funding a run needs before anything is tapped). */
   balanceOf(chainId: number, address: string): Promise<bigint>;
   robinhoodLatestBlock(): Promise<{ number: bigint; hash: string }>;
@@ -42,6 +42,8 @@ export interface FireWiringDeps {
   now?: () => Date;
   /** D-017: accepted host evidence, checked when a schedule is created and again before it fires. */
   assertUnattendedReady?: () => Promise<void>;
+  allowlistSimulation?(campaign: Campaign, wallets: readonly string[]): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }>;
+  allowlistMintState?(campaign: Campaign): Promise<MintState>;
 }
 
 export interface FireWiring {
@@ -57,6 +59,7 @@ export interface FireWiring {
   describe(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number): string;
   fireNow(campaignId: string, wallets: readonly string[], maxFeeGwei: number): Promise<FireResult>;
   fireSchedule(schedule: FireScheduleRecord): Promise<FireResult>;
+  fireAutonomous(campaignId: string, wallets: readonly string[], maxFeeGwei: number, eventId: string): Promise<FireResult>;
   schedulePhrase(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number, from: Date, until: Date): string;
   parseWindow(from: string, until: string): { from: Date; until: Date };
   campaignDigest(campaign: Campaign): string;
@@ -100,14 +103,15 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
 
   const mintState = async (campaign: Campaign): Promise<MintState> => {
     try {
+      if (campaign.strategy === 'seadrop-v1-allowlist') return deps.allowlistMintState ? await deps.allowlistMintState(campaign) : 'unknown';
       if (campaign.chainId === 4663) {
         const wallet = (await deps.walletList())[0];
         if (!wallet) return 'unknown';
-        const report = await read(() => deps.robinhoodDryRun(campaign.contract, [wallet], campaign.quantity, now()));
+        const report = await read(() => deps.robinhoodDryRun(campaign.contract, [wallet], campaign.quantity, now(), campaign.strategy === 'seadrop-v1-public'));
         return report.drop?.status ?? 'unknown';
       }
       if (campaign.chainId !== 1 && campaign.chainId !== 8453) return 'unknown';
-      const report = await read(async () => checkDrop(await deps.evmPort(campaign.chainId as 1 | 8453), campaign.contract, [], { simulate: false, now: now() }));
+      const report = await read(async () => checkDrop(await deps.evmPort(campaign.chainId as 1 | 8453, campaign.strategy), campaign.contract, [], { simulate: false, now: now() }));
       return report.drop?.status ?? 'unknown';
     } catch { return 'unknown'; }
   };
@@ -140,14 +144,18 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   };
 
   const recordSimulations: FireDeps['recordSimulations'] = async (campaign, wallets) => {
+    if (campaign.strategy === 'seadrop-v1-allowlist') {
+      if (!deps.allowlistSimulation) throw new Error('ALLOWLIST_PROOF_SOURCE_REQUIRED');
+      return withFunding(campaign, await deps.allowlistSimulation(campaign, wallets));
+    }
     if (campaign.chainId === 4663) {
-      const report = await read(() => deps.robinhoodDryRun(campaign.contract, wallets, campaign.quantity, now()));
+      const report = await read(() => deps.robinhoodDryRun(campaign.contract, wallets, campaign.quantity, now(), campaign.strategy === 'seadrop-v1-public'));
       const result = await recordRobinhoodSimulationsAction({ store: deps.store, campaign, report, latestBlock: () => read(() => deps.robinhoodLatestBlock()) });
       return withFunding(campaign, result);
     }
     if (campaign.chainId !== 1 && campaign.chainId !== 8453) throw new Error('LIVE_SUPPORTED_CAMPAIGN_REQUIRED');
     const chainId = campaign.chainId;
-    const result = await recordPassingSimulationsAction({ store: deps.store, campaign, wallets, port: await read(() => deps.evmPort(chainId)), latestBlock: () => read(() => deps.evmLatestBlock(chainId)) });
+    const result = await recordPassingSimulationsAction({ store: deps.store, campaign, wallets, port: await read(() => deps.evmPort(chainId, campaign.strategy)), latestBlock: () => read(() => deps.evmLatestBlock(chainId)) });
     return withFunding(campaign, result);
   };
 
@@ -179,7 +187,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     kick: deps.kick,
   };
 
-  const run = async (input: { campaignId: string; wallets: readonly string[]; maxFeeGwei: number; scheduleId?: string }): Promise<FireResult> => {
+  const run = async (input: { campaignId: string; wallets: readonly string[]; maxFeeGwei: number; scheduleId?: string; automationEventId?: string }): Promise<FireResult> => {
     // Held for the whole pipeline, so a second tap or a scheduler pass cannot start the same campaign twice.
     if (inFlight.has(input.campaignId)) throw new Error('FIRE_CONFLICT: this campaign is being fired right now');
     inFlight.add(input.campaignId);
@@ -205,7 +213,13 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
       return `${campaign.quantity} NFT(s) per wallet at ${formatEth(campaign.mintPriceWei)} ETH from ${used} wallet(s) on chain ${campaign.chainId}, contract ${campaign.contract.slice(0, 6)}…${campaign.contract.slice(-4)}. The most that can be spent is ${formatEth(total)} ETH, signing at no more than ${maxFeeGwei} gwei. Every guard still applies.`;
     },
     fireNow: (campaignId, wallets, maxFeeGwei) => run({ campaignId, wallets, maxFeeGwei }),
+    fireAutonomous: async (campaignId, wallets, maxFeeGwei, eventId) => {
+      if (!deps.assertUnattendedReady) throw new Error('OPS_EVIDENCE_CHECK_REQUIRED');
+      await deps.assertUnattendedReady();
+      return run({ campaignId, wallets, maxFeeGwei, automationEventId: eventId });
+    },
     fireSchedule: async (schedule) => {
+      if ((findCampaign(schedule.campaignId)?.mintPriceWei ?? 0n) > 0n) throw new Error('PAID_FINAL_FIRE_REQUIRED');
       if (!deps.assertUnattendedReady) throw new Error('OPS_EVIDENCE_CHECK_REQUIRED');
       await deps.assertUnattendedReady();
       return run({ campaignId: schedule.campaignId, wallets: schedule.wallets, maxFeeGwei: Number(schedule.maxFeeGwei), scheduleId: schedule.id });

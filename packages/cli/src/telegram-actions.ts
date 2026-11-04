@@ -500,6 +500,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const wiring = fireWiring();
       await wiring.assertUnattendedReady();
       const target = fireCampaign(campaignId, maxFeeGwei);
+      if (target.mintPriceWei > 0n) throw new Error('PAID_FINAL_FIRE_REQUIRED: paid mints need final approval through /fire');
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);
       await assertListOrder(wallets);
@@ -513,6 +514,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const wiring = fireWiring();
       await wiring.assertUnattendedReady();
       const target = fireCampaign(campaignId, maxFeeGwei);
+      if (target.mintPriceWei > 0n) throw new Error('PAID_FINAL_FIRE_REQUIRED: paid mints need final approval through /fire');
       if (digest !== undefined && wiring.campaignDigest(target) !== digest) throw new Error('CAMPAIGN_CHANGED: the campaign changed since the preview; start the schedule again');
       const { from, until } = wiring.parseWindow(fromText, untilText);
       const wallets = await wiring.wallets(walletsText);

@@ -38,11 +38,12 @@ const toWei = (eth: string): bigint => parseEther(eth);
 export function buildLivePlan(report: DropCheckReport, context: LivePlanContext): LivePlan {
   const blockers: string[] = [];
   const warnings: string[] = [];
+  const allowlistUpcoming = report.drop?.strategyName === 'seadrop-v1-allowlist' && report.drop.status === 'upcoming';
   const free = report.drop !== null && toWei(report.drop.priceEth) === 0n;
   if (report.drop === null || report.wallets.length === 0) blockers.push(report.summary);
   else {
     if (!free) blockers.push('This drop is paid. The first live mint is limited to free drops, so preparing a paid one is not built yet.');
-    if (report.drop.status !== 'open') blockers.push(`The mint is ${report.drop.status}; a live run only makes sense while it is open.`);
+    if (report.drop.status !== 'open' && !allowlistUpcoming) blockers.push(`The mint is ${report.drop.status}; a live run only makes sense while it is open.`);
   }
   if (report.verdict === 'blocked' && blockers.length === 0) blockers.push(report.summary);
   if (context.killSwitchPresent === true) warnings.push('The kill switch is engaged, as required during preparation. Release it only after the campaign and simulations are recorded.');
@@ -50,12 +51,12 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
   if (context.killSwitchPresent === null) warnings.push('The kill-switch file could not be checked.');
   if (context.custody === 'local') warnings.push('Wallets are signed from the local encrypted keystore (accepted for Personal Live, D-028).');
 
-  const walletsReady = report.wallets.filter((row) => row.verdict === 'ready').map((row) => row.wallet);
+  const walletsReady = report.wallets.filter((row) => row.verdict === 'ready' || allowlistUpcoming && row.verdict === 'funded').map((row) => row.wallet);
   const needing = report.wallets.flatMap((row) => row.verdict === 'needs ETH' && row.topUpEth ? [{ wallet: row.wallet, topUpEth: row.topUpEth }] : []);
   const failed = report.wallets.filter((row) => row.verdict === 'blocked').map((row) => row.wallet);
   if (failed.length > 0) blockers.push(`${failed.length} wallet(s) failed the test mint call and must not mint: ${failed.join(', ')}.`);
   if (needing.length > 0) blockers.push(`${needing.length} wallet(s) need ETH first: ${needing.map((item) => `${item.wallet} needs ${item.topUpEth} ETH`).join('; ')}.`);
-  const unknown = report.wallets.filter((row) => row.verdict === 'unknown' || row.verdict === 'funded').length;
+  const unknown = report.wallets.filter((row) => row.verdict === 'unknown' || !allowlistUpcoming && row.verdict === 'funded').length;
   if (unknown > 0) blockers.push(`${unknown} wallet(s) have not passed a test mint call yet. Run the simulate command while the mint is open.`);
   if (walletsReady.length === 0 && blockers.length === 0) blockers.push('No wallet is ready.');
 
@@ -66,6 +67,7 @@ export function buildLivePlan(report: DropCheckReport, context: LivePlanContext)
   const within = perWalletWei === null ? null : totalWei <= dailyBudgetWei;
   if (within === false) blockers.push(`The most these wallets could spend (${formatEth(totalWei)} ETH) is above today's ${free ? 'free' : 'paid'} budget of ${formatEth(dailyBudgetWei)} ETH. Use fewer wallets.`);
 
+  if (allowlistUpcoming) warnings.push('Allowlist stage is upcoming. Schedule this campaign; fresh per-wallet simulation is required when it opens.');
   const ready = blockers.length === 0;
   const total = formatEth(totalWei);
   const summary = ready

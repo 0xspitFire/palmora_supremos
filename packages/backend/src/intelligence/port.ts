@@ -13,12 +13,12 @@ export interface ChainScan { fromBlock: bigint; toBlock: bigint; mints: Observed
 export type ChainScanOutcome = { ok: true; scan: ChainScan } | { ok: false; reason: string };
 
 /** A public SeaDrop drop as read from chain; null fields are unknown, never zero. */
-export interface DropSnapshot { nftContract: string; priceWei: bigint; startTime: number; endTime: number; maxPerWallet: number; maxSupply: bigint | null; totalMinted: bigint | null; }
+export interface DropSnapshot { strategyName?: string; eligibleWallets?: readonly string[]; nftContract: string; priceWei: bigint; startTime: number; endTime: number; maxPerWallet: number; maxSupply: bigint | null; totalMinted: bigint | null; }
 export type CollectionNameRead = { status: 'name'; name: string } | { status: 'none' } | { status: 'error' };
 export type SimulationOutcome = { outcome: 'pass' } | { outcome: 'fail'; reason: string } | { outcome: 'unknown'; reason: string };
 
 export interface IntelligenceChainPort {
-  readonly chainId: 1;
+  readonly chainId: 1 | 8453 | 4663;
   /** Highest block considered settled, or null when the chain head is unavailable. */
   safeHead(): Promise<bigint | null>;
   scan(fromBlock: bigint, toBlock: bigint, watched: readonly string[]): Promise<ChainScanOutcome>;

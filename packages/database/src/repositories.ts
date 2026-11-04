@@ -190,7 +190,7 @@ export interface BaseEnablementInput {
   paidAllowed?: boolean;
 }
 export interface EthereumLiveMintProofInput { id: string; txHash: string; blockNumber: string; blockHash: string; seadropAddress: string; sender: string; nftContract: string; callSelector: string; evidenceReference: string; approvedAt: string; confirmationDigest: string }
-export type LiveRunRequestProvenance = { kind: 'legacy' } | { kind: 'attended' } | { kind: 'schedule'; scheduleId: string };
+export type LiveRunRequestProvenance = { kind: 'legacy' } | { kind: 'attended' } | { kind: 'schedule'; scheduleId: string } | { kind: 'automation'; eventId: string };
 export interface LiveRunRequestRecord { id: string; campaignId: string; wallets: string[]; simulationIds: string[]; approvalId: string; evidenceAt: string; maxFeeGwei: string; confirmationDigest: string; requestedAt: string; expiresAt: string; provenance?: LiveRunRequestProvenance }
 export interface BaseEnablementRow extends BaseEnablementInput { approvedBy: string; freeAllowed: true; paidAllowed: boolean; createdAt: string; }
 
@@ -585,11 +585,11 @@ export class DurableRepository {
   public recordLiveRunRequest(input: LiveRunRequestRecord): void {
     const provenance = input.provenance ?? { kind: 'attended' as const };
     if (provenance.kind === 'legacy') throw new Error('legacy live request provenance cannot be created');
-    this.db.prepare("INSERT INTO live_run_request (id, campaign_id, wallets_json, simulation_ids_json, approval_id, evidence_at, max_fee_gwei, requested_by, confirmation_digest, requested_at, expires_at, execution_provenance, schedule_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'owner-cli', ?, ?, ?, ?, ?)").run(input.id, input.campaignId, JSON.stringify(input.wallets), JSON.stringify(input.simulationIds), input.approvalId, input.evidenceAt, input.maxFeeGwei, input.confirmationDigest, input.requestedAt, input.expiresAt, provenance.kind === 'schedule' ? 'scheduled' : 'attended', provenance.kind === 'schedule' ? provenance.scheduleId : null);
+    this.db.prepare("INSERT INTO live_run_request (id, campaign_id, wallets_json, simulation_ids_json, approval_id, evidence_at, max_fee_gwei, requested_by, confirmation_digest, requested_at, expires_at, execution_provenance, schedule_id, automation_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'owner-cli', ?, ?, ?, ?, ?, ?)").run(input.id, input.campaignId, JSON.stringify(input.wallets), JSON.stringify(input.simulationIds), input.approvalId, input.evidenceAt, input.maxFeeGwei, input.confirmationDigest, input.requestedAt, input.expiresAt, provenance.kind === 'schedule' || provenance.kind === 'automation' ? 'scheduled' : 'attended', provenance.kind === 'schedule' ? provenance.scheduleId : null, provenance.kind === 'automation' ? provenance.eventId : null);
   }
 
   private liveRequest(row: Record<string, string | null>): LiveRunRequestRecord {
-    const provenance: LiveRunRequestProvenance = row['execution_provenance'] === 'scheduled' ? { kind: 'schedule', scheduleId: row['schedule_id']! } : row['execution_provenance'] === 'attended' ? { kind: 'attended' } : { kind: 'legacy' };
+    const provenance: LiveRunRequestProvenance = row['execution_provenance'] === 'scheduled' ? (row['automation_event_id'] ? { kind: 'automation', eventId: row['automation_event_id'] } : { kind: 'schedule', scheduleId: row['schedule_id']! }) : row['execution_provenance'] === 'attended' ? { kind: 'attended' } : { kind: 'legacy' };
     return { id: row['id']!, campaignId: row['campaign_id']!, wallets: JSON.parse(row['wallets_json']!) as string[], simulationIds: JSON.parse(row['simulation_ids_json']!) as string[], approvalId: row['approval_id']!, evidenceAt: row['evidence_at']!, maxFeeGwei: row['max_fee_gwei']!, confirmationDigest: row['confirmation_digest']!, requestedAt: row['requested_at']!, expiresAt: row['expires_at']!, provenance };
   }
 

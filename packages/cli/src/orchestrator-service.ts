@@ -5,6 +5,7 @@ import { access, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promi
 import { dirname, join, resolve } from 'node:path';
 import {
   AlertManager,
+  DiscoveryService,
   BackendApplication,
   CanonicalStoreBridge,
   CanonicalJobStore,
@@ -48,6 +49,11 @@ import { createBlockscoutPortfolio, type PortfolioProvider } from './portfolio-p
 import { CHAINLINK_ABI, CHAINLINK_ETH_USD_FEED, createEthPriceProvider } from './price-provider.js';
 import { createOpenSeaFloors, type OpenSeaFloors } from './opensea-client.js';
 import { startFireScheduler } from './fire.js';
+import { createReplicationAutomation } from './replication-automation.js';
+import { readReplicationSource } from './replication-source.js';
+import { prepareReplication } from './replication-prepare.js';
+import { simulateAllowlistCampaign } from './allowlist-execution.js';
+import { getStrategy } from '@mint-bot/engine';
 import { startOpsEvidenceReminders } from './ops-evidence-reminders.js';
 
 export interface RunningOrchestratorService {
@@ -78,6 +84,9 @@ async function incrementRestartCounter(path: string): Promise<number> {
 /** Start the supervised local/host service without accepting control commands. */
 export async function startOrchestratorService(environment: NodeJS.ProcessEnv = process.env): Promise<RunningOrchestratorService> {
   const config = loadServiceConfig(environment, process.cwd());
+  const replicationFlag = environment.MINT_BOT_REPLICATION_AUTOMATION;
+  if (replicationFlag !== undefined && replicationFlag !== 'true' && replicationFlag !== 'false') throw new Error('REPLICATION_AUTOMATION_FLAG_INVALID');
+  if (replicationFlag === 'true' && (config.mode !== 'host' || !config.intelligenceEnabled || environment.MINT_BOT_TELEGRAM_COMMANDS !== 'true')) throw new Error('REPLICATION_HOST_DISCOVERY_AND_TELEGRAM_REQUIRED');
   process.env.MINT_BOT_PHASE2_READ_ONLY = 'true';
   const logger = new RedactedLogger({ destination: config.logPath, maxBytes: config.logMaxBytes, maxFiles: config.logMaxFiles });
   logger.info({ event: 'service_configured', config: summarizeServiceConfig(config) }, 'orchestrator service configured');
@@ -190,6 +199,9 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     requireOffHostBackup: environment.MINT_BOT_OFFHOST_BACKUP_REQUIRED === 'true',
   });
   await orchestrator.start();
+  let replicationAutomation: ReturnType<typeof createReplicationAutomation> | undefined;
+  let replicationTimer: ReturnType<typeof setInterval> | undefined;
+  const replicationDiscoveryTimers: Array<ReturnType<typeof setInterval>> = [];
   let intelligence: { stop(): void } | undefined;
   if (config.intelligenceEnabled && config.secretStorePath) {
     const secrets = await loadHostSecretStore(config.secretStorePath);
@@ -266,6 +278,17 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       setFeeCeiling: (campaignId, gwei) => runtime.setFeeCeiling(campaignId, gwei),
       closeRun: (runId) => runtime.coordinator.closeUnsentRun(runId, 'REQUEST_FAILED'),
       assertUnattendedReady: async () => { await assertOpsEvidenceAccepted({ environment }); },
+      assertAutomationReady: async (eventId, campaign, wallets, maxFeeGwei) => {
+        if (!replicationAutomation) throw new Error('AUTOMATION_NOT_CONFIGURED');
+        await replicationAutomation.assertReady(eventId, campaign, wallets, maxFeeGwei);
+      },
+      assertScheduledCampaignReady: async (campaign) => {
+        const prepared = runtime.store.snapshot().events.find((e) => e.type === 'replication_prepared' && e.data.campaignId === campaign.id);
+        if (!prepared) return;
+        if (campaign.mintPriceWei !== 0n) throw new Error('PAID_REPLICATION_FINAL_FIRE_REQUIRED');
+        if (!replicationAutomation) throw new Error('AUTOMATION_NOT_CONFIGURED');
+        await replicationAutomation.assertReady(prepared.id, campaign);
+      },
       sentTransactions: (runId) => { const state = runtime.store.snapshot(); return sentTransactionsForRun(state.attempts, state.receipts, runId); },
       record: async ({ requestId, runId, campaignId, state, code, runClosed, sent }) => {
         await runtime.store.transaction((current) => { current.events.push({ id: `live_request_result_${randomUUID()}`, type: 'live_request_result', ...(runId ? { runId } : {}), at: new Date().toISOString(), data: { requestId, state, ...(code ? { code } : {}) } }); });
@@ -335,9 +358,15 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       campaignWalletsUsed: (campaignId) => bridge.campaignWalletsUsed(campaignId),
       startedRequests: () => bridge.recentLiveRunRequests(20).filter((row) => row.outcome === 'started').map((row) => ({ id: row.id, campaignId: row.campaignId, ...(row.claimedAt ? { claimedAt: row.claimedAt } : {}) })),
       walletList: walletAddresses,
-      evmPort: async (chainId) => EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]),
+      evmPort: async (chainId, strategy) => EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints], chainId, strategy === 'seadrop-v1-public'),
       evmLatestBlock: latestBlock,
-      robinhoodDryRun: async (contract, wallets, quantity, at) => dryRunDrop(await reader(4663), contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at }),
+      allowlistSimulation: async (campaign, wallets) => simulateAllowlistCampaign({ campaign, wallets, client: await reader(campaign.chainId as 1 | 8453 | 4663), store: runtime.store, secretRoot }),
+      allowlistMintState: async (campaign) => {
+        const drop = await getStrategy('seadrop-v1-allowlist').readDrop(await reader(campaign.chainId as 1 | 8453 | 4663), campaign.contract as `0x${string}`, campaign.chainId as 1 | 8453 | 4663);
+        const now = Date.now() / 1000;
+        return now < drop.startTime ? 'upcoming' : now > drop.endTime ? 'ended' : 'open';
+      },
+      robinhoodDryRun: async (contract, wallets, quantity, at, publicOnly) => dryRunDrop(await reader(4663), contract, wallets, { ...(quantity === undefined ? {} : { quantity }), now: at, publicOnly }),
       robinhoodLatestBlock: () => latestBlock(4663),
       balanceOf: async (chainId, address) => (await reader(chainId as 1 | 8453 | 4663)).getBalance({ address: address as `0x${string}` }),
       kick: () => { void liveRequests?.tick(); },
@@ -367,6 +396,49 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         alert: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },
         now: () => new Date(),
       }, { onError: (error) => logger.warn({ event: 'fire_schedule_tick_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'FIRE_SCHEDULE_TICK_FAILED' }, 'fire schedule pass failed') });
+    }
+    if (environment.MINT_BOT_REPLICATION_AUTOMATION === 'true') {
+      if (!fire || !config.intelligenceEnabled) throw new Error('REPLICATION_HOST_DISCOVERY_REQUIRED');
+      const maxFeeGwei = Number(environment.MINT_BOT_REPLICATION_MAX_FEE_GWEI);
+      const maxQuantity = Number(environment.MINT_BOT_REPLICATION_MAX_QUANTITY ?? '1');
+      if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500 || !Number.isSafeInteger(maxQuantity) || maxQuantity < 1 || maxQuantity > 15) throw new Error('REPLICATION_LIMIT_CONFIG_REQUIRED');
+      const watchedWallets = (chainId: number) => bridge.intelligenceRepository().observedAddresses(chainId).map((wallet) => wallet.address);
+      replicationAutomation = createReplicationAutomation({
+        store: runtime.store, watchedWallets,
+        wallets: async () => (await walletAddresses()) as `0x${string}`[],
+        qualify: async (event, wallets) => {
+          const chainId = Number(event.data.chainId);
+          if (![1, 8453, 4663].includes(chainId) || !/^0x[0-9a-fA-F]{40}$/.test(String(event.data.contract)) || !/^0x[0-9a-fA-F]{64}$/.test(String(event.data.txHash))) throw new Error('REPLICATION_SOURCE_INVALID');
+          return readReplicationSource({ client: await reader(chainId as 1 | 8453 | 4663), chainId: chainId as 1 | 8453 | 4663, contract: event.data.contract as `0x${string}`, hash: event.data.txHash as `0x${string}`, watchedWallets: watchedWallets(chainId), targetWallets: wallets });
+        },
+        prepare: async (source, wallets) => {
+          const status = bridge.ethereumFeePolicyStatus();
+          const tipWei = source.drop.chainId === 1 ? BigInt(status.stored?.tipWei ?? status.approved?.tipWei ?? '100000000') : 100_000_000n;
+          const prepare = (selected: readonly `0x${string}`[]) => prepareReplication({ source, wallets: selected, maxQuantity, maxFeeGwei, tipWei, store: runtime.store, createCampaign: (input) => ownerApplication.createCampaign(input), now: new Date() });
+          if (source.drop.strategyName !== 'seadrop-v1-allowlist') return prepare(wallets);
+          const targets = new Set(source.plan.targets.map((target) => target.wallet.toLowerCase()));
+          const prepared = [];
+          for (const wallet of wallets.filter((wallet) => targets.has(wallet.toLowerCase())).slice(0, source.drop.mintPrice > 0n ? PERSONAL_LIVE_FLEET_POLICY.paidMaxWalletsPerMint : 10)) prepared.push(await prepare([wallet]));
+          return prepared;
+        },
+        fire: fire.fireDeps, fireAutonomous: fire.fireAutonomous,
+        assertUnattendedReady: () => fire.assertUnattendedReady(),
+        notify: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },
+      });
+      for (const chainId of [8453, 4663] as const) {
+        if (!runtime.store.snapshot().chainEvidence.some((e) => e.chainId === chainId && e.status === 'accepted' && e.executionEnabled)) continue;
+        const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints], chainId), { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts });
+        let scanning = false;
+        const timer = setInterval(() => {
+          if (scanning) return;
+          scanning = true;
+          void discovery.tick().catch(() => logger.warn({ event: 'replication_discovery_unavailable', chainId }, 'replication discovery unavailable')).finally(() => { scanning = false; });
+        }, config.discoveryIntervalMs);
+        timer.unref();
+        replicationDiscoveryTimers.push(timer);
+      }
+      replicationTimer = setInterval(() => { void replicationAutomation?.tick().catch(() => logger.warn({ event: 'replication_tick_failed' }, 'replication pass failed')); }, 2_000);
+      replicationTimer.unref();
     }
     const actions = createTelegramActions({
       mode: config.mode,
@@ -484,6 +556,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     liveRequests?.stop();
     dependencyFlags?.stop();
     fireScheduler?.stop();
+    if (replicationTimer) clearInterval(replicationTimer);
+    for (const timer of replicationDiscoveryTimers) clearInterval(timer);
     telegramCommands?.stop();
     gasAlertChecker?.stop();
     opsEvidenceReminders?.stop();

@@ -50,6 +50,18 @@ describe('D-081 describeDropChange', () => {
 });
 
 describe('D-081 createDropRecheck', () => {
+  it('stops an allowlist run on unavailable or timed-out proof authority and never un-stops it', async () => {
+    let clock = 0;
+    const read = vi.fn(async () => { throw new Error('ALLOWLIST_RPC_DISAGREEMENT'); });
+    const initial = drop({ strategyName: 'seadrop-v1-allowlist' });
+    const check = createDropRecheck({ initial, read, now: () => clock });
+    expect(await check()).toBe('ALLOWLIST_AUTHORITY_UNAVAILABLE');
+    clock = 5_000;
+    expect(await check()).toBe('ALLOWLIST_AUTHORITY_UNAVAILABLE');
+    expect(read).toHaveBeenCalledTimes(1);
+    const timeout = createDropRecheck({ initial, read: () => new Promise(() => undefined), timeoutMs: 10 });
+    expect(await timeout()).toBe('ALLOWLIST_AUTHORITY_UNAVAILABLE');
+  });
   it('shares one read between wallets that ask at the same time, then reads again after the reuse window', async () => {
     let clock = 0;
     const read = vi.fn(async () => ({ drop: drop(), validation: valid }));

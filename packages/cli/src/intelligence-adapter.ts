@@ -1,6 +1,5 @@
 import { createPublicClient, type Address, type PublicClient } from 'viem';
-import { mainnet } from 'viem/chains';
-import { ChainFactsReader, SeaDropObserver, SeaDropV1PublicStrategy, failoverTransport, simulateMint, type DropConfig } from '@mint-bot/engine';
+import { ChainFactsReader, SeaDropObserver, SeaDropV1PublicStrategy, failoverTransport, getStrategy, simulateMint, type DropConfig } from '@mint-bot/engine';
 import type { ChainScanOutcome, CollectionNameRead, DropSnapshot, IntelligenceChainPort, SimulationOutcome } from '@mint-bot/backend';
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -29,16 +28,19 @@ function isRateLimit(detail: string | undefined): boolean {
  * It has no signer and cannot send a transaction.
  */
 export class EngineIntelligencePort implements IntelligenceChainPort {
-  public readonly chainId = 1 as const;
+  public readonly chainId: 1 | 8453 | 4663;
   private readonly observer: SeaDropObserver;
   private readonly strategy = new SeaDropV1PublicStrategy();
   /** Blocks per request; adapts to the provider's getLogs limits (halves on rejection, grows after steady success). */
   private range: bigint;
   private readonly maxRange: bigint;
   private successes = 0;
+  private readonly publicOnly: boolean;
 
-  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint; initialRange?: bigint } = {}) {
-    const reader = new ChainFactsReader(client, { chainId: 1, sourceRef: 'intelligence-rpc' });
+  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint; initialRange?: bigint; chainId?: 1 | 8453 | 4663; publicOnly?: boolean } = {}) {
+    this.chainId = options.chainId ?? 1;
+    this.publicOnly = options.publicOnly ?? false;
+    const reader = new ChainFactsReader(client, { chainId: this.chainId, sourceRef: 'intelligence-rpc' });
     this.maxRange = options.maxRange ?? 500n;
     this.range = options.initialRange ?? 100n;
     if (this.maxRange < 1n || this.range < 1n || this.range > this.maxRange) throw new Error('INTELLIGENCE_RANGE_INVALID');
@@ -54,13 +56,13 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   }
 
   /** The first address is used while it answers; a timeout or failure moves the read to the next one (failoverTransport). */
-  public static fromRpcUrls(rpcUrls: readonly string[]): EngineIntelligencePort {
+  public static fromRpcUrls(rpcUrls: readonly string[], chainId: 1 | 8453 | 4663 = 1, publicOnly = false): EngineIntelligencePort {
     for (const rpcUrl of rpcUrls) {
       let parsed: URL;
       try { parsed = new URL(rpcUrl); } catch { throw new Error('INTELLIGENCE_RPC_URL_INVALID'); }
       if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('INTELLIGENCE_RPC_MUST_BE_HTTPS');
     }
-    return new EngineIntelligencePort(createPublicClient({ chain: mainnet, transport: failoverTransport(rpcUrls) }) as PublicClient);
+    return new EngineIntelligencePort(createPublicClient({ transport: failoverTransport(rpcUrls) }) as PublicClient, { chainId, publicOnly });
   }
 
   public async safeHead(): Promise<bigint | null> { return this.observer.safeHead(); }
@@ -93,7 +95,7 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
     const drop = await this.drop(nftContract);
     if (!drop) return null;
     const extra = drop.extra ?? {};
-    return { nftContract: nftContract.toLowerCase(), priceWei: drop.mintPrice, startTime: drop.startTime, endTime: drop.endTime, maxPerWallet: drop.maxTotalMintableByWallet, maxSupply: extra.maxSupplyKnown === false ? null : drop.maxTokenSupply, totalMinted: extra.totalSupplyKnown === false ? null : drop.totalMinted };
+    return { nftContract: nftContract.toLowerCase(), priceWei: drop.mintPrice, startTime: drop.startTime, endTime: drop.endTime, maxPerWallet: drop.maxTotalMintableByWallet, maxSupply: extra.maxSupplyKnown === false ? null : drop.maxTokenSupply, totalMinted: extra.totalSupplyKnown === false ? null : drop.totalMinted, strategyName: drop.strategyName, ...(Array.isArray(extra.walletProofs) ? { eligibleWallets: (extra.walletProofs as Array<{ wallet: string }>).map((proof) => proof.wallet) } : {}) };
   }
 
   public async hasCode(address: string): Promise<boolean | null> {
@@ -124,7 +126,7 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
     if (!drop) return null;
     try {
       const to = (drop.extra?.['seaDropAddress'] as Address | undefined) ?? drop.nftContract;
-      return await this.client.estimateGas({ account: wallet as Address, to, data: this.strategy.buildCalldata(drop, wallet as Address, quantity), value: valueWei });
+      return await this.client.estimateGas({ account: wallet as Address, to, data: getStrategy(drop.strategyName).buildCalldata(drop, wallet as Address, quantity), value: valueWei });
     } catch { return null; }
   }
 
@@ -138,7 +140,7 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
     const drop = await this.drop(nftContract);
     if (!drop) return { outcome: 'unknown', reason: 'DROP_UNAVAILABLE' };
     try {
-      const evidence = await simulateMint(this.client, this.strategy, drop, wallet as Address, quantity, valueWei);
+      const evidence = await simulateMint(this.client, getStrategy(drop.strategyName), drop, wallet as Address, quantity, valueWei);
       return evidence.success ? { outcome: 'pass' } : { outcome: 'fail', reason: evidence.revertType ?? 'REVERTED' };
     } catch { return { outcome: 'unknown', reason: 'SIMULATION_UNAVAILABLE' }; }
   }
@@ -160,6 +162,14 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
 
   private async drop(nftContract: string): Promise<DropConfig | null> {
     if (!ADDRESS.test(nftContract)) return null;
-    try { return await this.strategy.readDrop(this.client, nftContract as Address, 1); } catch { return null; }
+    try {
+      let allowlist;
+      try { if (!this.publicOnly) allowlist = getStrategy('seadrop-v1-allowlist'); } catch { /* no configured proof provider */ }
+      if (allowlist) {
+        try { return await allowlist.readDrop(this.client, nftContract as Address, this.chainId); }
+        catch (error) { if (!(error instanceof Error) || error.message !== 'ALLOWLIST_FIRST_PARTY_SOURCE_REQUIRED') return null; }
+      }
+      return await this.strategy.readDrop(this.client, nftContract as Address, this.chainId);
+    } catch { return null; }
   }
 }

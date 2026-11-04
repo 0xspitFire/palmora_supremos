@@ -96,9 +96,10 @@ export async function livePrepareAction(input: {
   const evidence = input.store.snapshot().chainEvidence.find((item) => item.chainId === input.chainId && item.status === 'accepted' && item.executionEnabled && item.expiresAt > input.now.toISOString());
   if (!evidence) throw new Error('CHAIN_EVIDENCE_NOT_ACCEPTED: run chain-evidence status, then chain-evidence accept with its phrase, before live-prepare');
   const campaign = await input.createCampaign({
+    walletScope: readyWallets,
     chainId: input.chainId,
     contract: input.contract,
-    strategy: 'seadrop-v1-public',
+    strategy: report.drop?.strategyName ?? 'seadrop-v1-public',
     quantity: fields.quantity,
     dryRun: false,
     maxRunWei: fields.maxRunWei,

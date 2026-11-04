@@ -19,15 +19,16 @@ export interface FireDeps {
   /** Dry-runs the wallets and records a passing test mint for each wallet that passed; throws when the mint is not open or none passed. */
   recordSimulations(campaign: Campaign, wallets: readonly string[]): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }>;
   /** Approves exactly the recorded test mints and stores the live request for the request processor. */
-  createRequest(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number, provenance?: { kind: 'schedule'; scheduleId: string }): Promise<{ requestId: string; /** The wallets the request really covers (never more than the campaign was sized for). */ wallets?: string[]; /** Wallets that passed but were left out because the campaign is sized for fewer. */ leftOut?: string[] }>;
+  createRequest(campaign: Campaign, wallets: readonly string[], maxFeeGwei: number, provenance?: { kind: 'schedule'; scheduleId: string } | { kind: 'automation'; eventId: string }): Promise<{ requestId: string; /** The wallets the request really covers (never more than the campaign was sized for). */ wallets?: string[]; /** Wallets that passed but were left out because the campaign is sized for fewer. */ leftOut?: string[] }>;
   /** Asks the request processor to look now instead of at its next pass. */
   kick(): void;
 }
 
-export interface FireInput { campaignId: string; wallets: readonly string[]; maxFeeGwei: number; scheduleId?: string }
+export interface FireInput { campaignId: string; wallets: readonly string[]; maxFeeGwei: number; scheduleId?: string; automationEventId?: string }
 export interface FireResult { requestId: string; wallets: string[]; skipped: Array<{ wallet: string; why: string }> }
 
 export async function runFire(deps: FireDeps, input: FireInput): Promise<FireResult> {
+  if (input.scheduleId && input.automationEventId) throw new Error('FIRE_AUTHORITY_AMBIGUOUS');
   if (!Number.isFinite(input.maxFeeGwei) || input.maxFeeGwei <= 0 || input.maxFeeGwei > 500) throw new Error('MAX_FEE_GWEI_INVALID: use more than 0 and at most 500');
   const campaign = deps.campaign(input.campaignId);
   if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND: check the id (shown by /prepare)');
@@ -37,7 +38,7 @@ export async function runFire(deps: FireDeps, input: FireInput): Promise<FireRes
   if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
   const recorded = await deps.recordSimulations(campaign, input.wallets);
   if (recorded.recorded.length === 0) throw new Error('SIMULATION_NOT_PASSED: no wallet passed the test mint');
-  const request = await deps.createRequest(campaign, recorded.recorded, input.maxFeeGwei, input.scheduleId ? { kind: 'schedule', scheduleId: input.scheduleId } : undefined);
+  const request = await deps.createRequest(campaign, recorded.recorded, input.maxFeeGwei, input.automationEventId ? { kind: 'automation', eventId: input.automationEventId } : input.scheduleId ? { kind: 'schedule', scheduleId: input.scheduleId } : undefined);
   deps.kick();
   return { requestId: request.requestId, wallets: request.wallets ?? recorded.recorded, skipped: [...recorded.skipped, ...(request.leftOut ?? []).map((wallet) => ({ wallet, why: 'it passed, but the campaign was sized for fewer wallets' }))] };
 }

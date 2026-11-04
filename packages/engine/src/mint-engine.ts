@@ -691,7 +691,7 @@ export class MintEngine {
       initial: drop,
       read: () => readAndValidateDrop(publicClient, this.config.target.contract, chainId, this.config.target.strategy, this.now()),
       now: () => this.now().getTime(),
-      onUnavailable: () => parentLog.warn({ event: 'drop_recheck_unavailable' }, 'Drop could not be re-read in time; continuing under the existing gates'),
+      onUnavailable: () => parentLog.warn({ event: 'drop_recheck_unavailable' }, 'Drop could not be re-read in time'),
     });
     // T-094 / D-080: bounded same-nonce replacement. Undefined (the default) means nothing is ever replaced.
     const replacement = this.replacementPlan(chainId, broadcaster.name);
