@@ -106,3 +106,19 @@ The runtime never creates or administers Turnkey policies. Existing owner-signed
 families are automatically selected for later eligible free drops until their
 record expires or their scope changes. Paid mints are outside this family.
 See `replication-automation.md` for discovery and final-release gates.
+
+## Dashboard renames and installation ownership
+
+A dashboard rename changes `policyName` and `updatedAt`. Live provider checks
+allow those two metadata fields to differ from the historical signed snapshot;
+the signed snapshot and its digest are not rewritten. Policy IDs, creation
+timestamps, notes, effects, consensus, conditions and time restrictions remain
+pinned. Every live ALLOW policy still needs an approved catalog entry (or must
+be the exact new policy currently being proposed). Unknown policies and changes
+to authority continue to block. This rename handling requires a release that
+includes T-099; c9aab25 still rejects cosmetic drift.
+
+When transferring a newly signed bundle to the host for `turnkey-bundle-install`,
+stage it as `root:mintbot` with mode `0640` and run installation as root. A
+service-owned `mintbot:mintbot` mode `0600` staging file is intentionally rejected
+by the root verifier. Do not change ownership of an entire secret directory.
