@@ -367,6 +367,15 @@ export function pruneTurnkeySignedPolicyCatalog(value: unknown, pinnedPublicKey:
   return { version: 1, context: CATALOG_CONTEXT, records };
 }
 
+/** Dashboard renames update their timestamp without changing signing authority.
+ * Full metadata remains signed; only these two fields are omitted from the
+ * live binding comparison. Every other provider-policy field stays pinned.
+ */
+function sameProviderPolicyBinding(actual: TurnkeyProviderPolicyProjection, expected: TurnkeyProviderPolicyProjection): boolean {
+  const binding = ({ policyName: _name, updatedAt: _updatedAt, ...pinned }: TurnkeyProviderPolicyProjection) => pinned;
+  return stableStringify(binding(actual)) === stableStringify(binding(expected));
+}
+
 export function validateTurnkeyActualProviderState(recordValue: unknown, state: TurnkeyActualProviderState, approvedRecords?: readonly unknown[]): void {
   const record = validateTurnkeyCanonicalPolicyRecord(recordValue);
   if (stableStringify(projectTurnkeyProviderIdentity(state.whoami)) !== stableStringify(record.providerIdentity)) throw new Error('TURNKEY_PROVIDER_IDENTITY_DRIFT');
@@ -383,15 +392,15 @@ export function validateTurnkeyActualProviderState(recordValue: unknown, state: 
     for (const policy of policies) {
       if (policy.effect !== 'EFFECT_ALLOW') continue;
       const expected = approvedPolicies.get(policy.policyId);
-      if (!expected || stableStringify(policy) !== stableStringify(expected)) throw new Error('TURNKEY_PROVIDER_POLICY_NOT_APPROVED');
+      if (!expected || !sameProviderPolicyBinding(policy, expected)) throw new Error('TURNKEY_PROVIDER_POLICY_NOT_APPROVED');
     }
     for (const expected of approvedPolicies.values()) {
       const matches = policies.filter((candidate) => candidate.policyId === expected.policyId);
-      if (matches.length !== 1 || stableStringify(matches[0]) !== stableStringify(expected)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
+      if (matches.length !== 1 || !sameProviderPolicyBinding(matches[0]!, expected)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
     }
   } else if (policies.length !== 1) throw new Error('TURNKEY_PROVIDER_POLICY_INVENTORY_NOT_ISOLATED');
   const matches = policies.filter((policy) => policy.policyId === record.providerPolicy.policyId);
-  if (matches.length !== 1 || stableStringify(matches[0]) !== stableStringify(record.providerPolicy)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
+  if (matches.length !== 1 || !sameProviderPolicyBinding(matches[0]!, record.providerPolicy)) throw new Error('TURNKEY_PROVIDER_POLICY_DRIFT');
   const keys = state.privateKeys.map(projectTurnkeyProviderKey);
   const byId = new Map(keys.map((key) => [key.privateKeyId, key]));
   if (byId.size !== keys.length) throw new Error('TURNKEY_PROVIDER_KEY_DUPLICATE');

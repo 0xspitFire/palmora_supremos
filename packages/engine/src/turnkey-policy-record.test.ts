@@ -205,7 +205,8 @@ describe('Turnkey signed canonical policy record', () => {
     ['condition', (policy: ReturnType<typeof providerPolicy>) => ({ ...policy, condition: 'true' })],
     ['consensus', (policy: ReturnType<typeof providerPolicy>) => ({ ...policy, consensus: 'true' })],
     ['time', (policy: ReturnType<typeof providerPolicy>) => ({ ...policy, time: 'now() < 1' })],
-    ['updated timestamp', (policy: ReturnType<typeof providerPolicy>) => ({ ...policy, updatedAt: timestamp('1800000002') })],
+    ['creation timestamp', (policy: ReturnType<typeof providerPolicy>) => ({ ...policy, createdAt: timestamp('1800000002') })],
+    ['notes', (policy: ReturnType<typeof providerPolicy>) => ({ ...policy, notes: 'changed' })],
   ])('detects provider %s drift', (_label, mutate) => {
     const canonical = record();
     expect(() => validateTurnkeyActualProviderState(canonical, {
@@ -215,6 +216,40 @@ describe('Turnkey signed canonical policy record', () => {
       privateKeys: [providerKey()],
     })).toThrow('TURNKEY_PROVIDER_POLICY_DRIFT');
   });
+
+  it('accepts live policy renames while preserving the signed historical metadata', () => {
+    const owner = generateKeyPairSync('ed25519');
+    const canonical = record();
+    const signed = signTurnkeyPolicyRecord(canonical, owner.privateKey);
+    const renamed = { ...providerPolicy(), policyName: 'Renamed in dashboard', updatedAt: timestamp('1800000002') };
+    const state = { whoami: identity(), organization: organization(), policies: [renamed], privateKeys: [providerKey()] };
+    expect(() => validateTurnkeyActualProviderState(canonical, state)).not.toThrow();
+    expect(() => validateTurnkeyActualProviderState(canonical, state, [canonical])).not.toThrow();
+    expect(verifyTurnkeySignedPolicyRecord(signed, owner.publicKey, NOW)).toEqual(canonical);
+    const edited = clone(signed);
+    (edited.record.providerPolicy as { policyName: string }).policyName = renamed.policyName;
+    expect(() => verifyTurnkeySignedPolicyRecord(edited, owner.publicKey, NOW)).toThrow();
+  });
+
+  it.each(['effect', 'consensus', 'condition', 'time', 'createdAt', 'notes', 'unchanged'] as const)(
+    'checks retained-policy %s binding even when its display name and timestamp change', (field) => {
+      const active = record();
+      const retainedAst = { ...enforcementPolicy(), scope: { ...enforcementPolicy().scope, policyId: 'retained-policy' } };
+      const retained = record(retainedAst);
+      const renamed = { ...providerPolicy(retainedAst), policyName: 'New display name', updatedAt: timestamp('1800000002'), time: null as string | null };
+      if (field === 'effect') renamed.effect = 'EFFECT_DENY' as typeof renamed.effect;
+      if (field === 'consensus') renamed.consensus = 'true';
+      if (field === 'condition') renamed.condition = 'true';
+      if (field === 'time') renamed.time = 'now() < 1';
+      if (field === 'createdAt') renamed.createdAt = timestamp('1800000002');
+      if (field === 'notes') renamed.notes = 'changed';
+      const check = () => validateTurnkeyActualProviderState(active, {
+        whoami: identity(), organization: organization(), policies: [providerPolicy(), renamed], privateKeys: [providerKey()],
+      }, [active, retained]);
+      if (field === 'unchanged') expect(check).not.toThrow();
+      else expect(check).toThrow(field === 'effect' ? 'TURNKEY_PROVIDER_POLICY_DRIFT' : 'TURNKEY_PROVIDER_POLICY_NOT_APPROVED');
+    },
+  );
 
   it('detects authenticated identity and provider key drift while allowing unrelated organization keys', () => {
     const canonical = record();
