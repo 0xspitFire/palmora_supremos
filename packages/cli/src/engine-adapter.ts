@@ -7,6 +7,8 @@ import {
   baseReceiptFees,
   readBaseOperatorFee,
   canonicalExecutionIdentity,
+  planFireLanes,
+  type FireLane,
   resolveChainByNameFromSecrets,
   failoverTransport,
   splitBaseEndpoints,
@@ -45,6 +47,8 @@ interface WalletFile {
 export interface MintEngineAdapterOptions {
   readonly walletFile?: string;
   readonly walletList?: () => Promise<WalletInfo[]>;
+  /** D-081: trusted campaign-scoped lane configuration; no environment or Telegram default. */
+  readonly fireLanesFor?: (campaignId: string, selection: KeyListSelection, mode: MintJobConfig['broadcast']['mode']) => readonly FireLane[] | undefined;
   readonly signerFactory?: SignerFactory;
   /** Creates a signer for the immutable policy reference recorded on this campaign. */
   readonly signerFactoryFor?: (policyReference: string, recordDigest: string) => SignerFactory;
@@ -186,9 +190,14 @@ export function engineConfigFromCampaign(campaign: Campaign, options: MintEngine
   const reserveCaps = freeMintReserveCapsFor(campaign.chainId);
   const priorityFeeGwei = Number(formatGwei(campaign.feePolicy.configuredPriorityFeeWei));
   if (!Number.isFinite(priorityFeeGwei) || priorityFeeGwei < 0) throw new Error('INVALID_PRIORITY_FEE_POLICY');
+  const broadcastMode = campaign.chainId === 8453 ? 'public' : dryRun && campaign.chainId === 1 ? 'public' : campaign.broadcastMode ?? (campaign.chainId === 1 ? 'auto' : 'sequencer');
+  if (options.fireLanesFor && !selection) throw new Error('FIRE_LANE_SELECTION_REQUIRED');
+  const requestedLanes = selection ? options.fireLanesFor?.(campaign.id, { indexes: [...selection.indexes], addresses: [...selection.addresses] }, broadcastMode) : undefined;
+  if (requestedLanes) planFireLanes(selection!.indexes, requestedLanes, broadcastMode);
+  const fireLanes = requestedLanes?.map((lane) => ({ walletIndexes: [...lane.walletIndexes], mode: lane.mode, startOffsetMs: lane.startOffsetMs }));
   return {
     target: { chain, contract: campaign.contract as Address, strategy: campaign.strategy, quantity: campaign.quantity, campaignId: campaign.id, ...((campaign.custodyPolicy?.policyReference ?? options.policyRef) ? { policyRef: campaign.custodyPolicy?.policyReference ?? options.policyRef } : {}), ...(campaign.custodyPolicy ? { policyRecordDigest: campaign.custodyPolicy.recordDigest } : {}) },
-    fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets, ...(selection ? { walletIndexes: selection.indexes, expectedAddresses: selection.addresses } : {}) },
+    fleet: { walletFile: options.walletFile ?? 'turnkey://wallet-map', maxWallets, ...(selection ? { walletIndexes: selection.indexes, expectedAddresses: selection.addresses } : {}), ...(fireLanes ? { fireLanes } : {}) },
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
     fees: { maxFeePerGasGwei: options.maxFeePerGasGweiFor?.(campaign.id) ?? options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding, ...(options.replacement ? { replacement: options.replacement } : {}) },
     safety: {
@@ -208,7 +217,7 @@ export function engineConfigFromCampaign(campaign: Campaign, options: MintEngine
       // defaults to the Flashbots-backed auto route through the campaign.
       // D-057 binds Base to one owner-approved primary RPC. The other Base
       // endpoint is observation-only and must never receive the signed tx.
-      mode: campaign.chainId === 8453 ? 'public' : dryRun && campaign.chainId === 1 ? 'public' : campaign.broadcastMode ?? (campaign.chainId === 1 ? 'auto' : 'sequencer'),
+      mode: broadcastMode,
       rpcEndpoints: [],
       blastParallel: false,
       secretScope: 'mainnet',

@@ -6,6 +6,7 @@ import { buildSeaDropPublicMintCalldata, getStrategy, readTurnkeyApprovedPolicyR
 import { createPublicClient, http, type Address, type Hex } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 import type { CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
+import { configuredFireLanes } from './fire-lane-config.js';
 import { installAllowlistSources } from './allowlist-source-config.js';
 
 /** Where spend-limit alerts go. The default records a durable alert event; the service swaps in its Telegram-backed manager. */
@@ -101,7 +102,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
-  if (process.env.MINT_BOT_ALLOWLIST_SOURCES_PATH) {
+  if (process.env.MINT_BOT_ALLOWLIST_SOURCES_PATH || process.env.SECRET_STORE_PATH) {
     await installAllowlistSources({ path: process.env.MINT_BOT_ALLOWLIST_SOURCES_PATH, secretRoot,
       wallets: async () => (await configuredWallets(projectRoot, configuredWalletPath(projectRoot))).map((wallet) => wallet.address),
       credential: async (name) => process.env.SECRET_STORE_PATH ? (await loadHostSecretStore(process.env.SECRET_STORE_PATH)).get(name) : undefined,
@@ -165,6 +166,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     gasLimitPadding: 1.2,
     maxReplacementBumps: 0,
     ...configuredAdapterOptions,
+    fireLanesFor: configuredAdapterOptions.fireLanesFor ?? configuredFireLanes(process.env.MINT_BOT_FIRE_LANES),
     maxFeePerGasGweiFor: (campaignId) => feeCeilings.get(campaignId),
     getState: () => store.snapshot(),
     transact: (mutate) => store.transaction(mutate),
