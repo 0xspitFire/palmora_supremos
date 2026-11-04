@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { assertLiveOperationalReadiness, computeWalletSetDigest, type AssuranceRun, type Campaign, type CompensatingAssuranceContext, type OperationalReadiness } from '@mint-bot/backend';
 import { createHash } from 'node:crypto';
-import { assertApproverKeyPin } from './turnkey-readiness-service.js';
+import { assertApproverKeyPin, readRehearsalForPolicy } from './turnkey-readiness-service.js';
+import { rehearsalFileName } from './compensating-controls-cli.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createTurnkeyReadiness, type ReadinessSigner, type TurnkeyReadinessOptions, type VerifiedTurnkeyRecord } from './turnkey-readiness.js';
 
 /**
@@ -80,6 +84,14 @@ function harness(overrides: Partial<TurnkeyReadinessOptions> = {}): Harness {
 }
 
 describe('Turnkey readiness at the service (T-042 requirements 1 to 4)', () => {
+  it('loads rehearsal evidence using the currently selected verified record digest', async () => {
+    const seen: string[] = [];
+    const h = harness({ readOptional: async (_name, digest) => { seen.push(digest); return rehearsalFile(digest); } });
+    const readiness = await createTurnkeyReadiness(h.options);
+    await readiness.refresh(run());
+    expect(seen).toEqual([DIGEST]);
+  });
+
   it('derives the expected custody policy from the verified record only', async () => {
     const h = harness();
     const readiness = await createTurnkeyReadiness(h.options);
@@ -255,4 +267,20 @@ describe('pinned approver key (digest in settings the service cannot change)', (
     expect(() => assertApproverKeyPin(key, '')).toThrow('TURNKEY_APPROVER_KEY_PIN_MISMATCH');
     expect(() => assertApproverKeyPin(key, 'z'.repeat(64))).toThrow('TURNKEY_APPROVER_KEY_PIN_MISMATCH');
   });
+});
+
+
+it('keeps rehearsal evidence separate for each signed policy and supports the legacy fallback', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mint-rehearsals-'));
+  const a = `sha256:${'a'.repeat(64)}`; const b = `sha256:${'b'.repeat(64)}`;
+  try {
+    await writeFile(join(root, 'turnkey-signing-rehearsal.json'), JSON.stringify({ policyRecordDigest: a }), { mode: 0o600 });
+    expect(await readRehearsalForPolicy(root, a)).toEqual({ policyRecordDigest: a });
+    await writeFile(join(root, rehearsalFileName(b)), JSON.stringify({ policyRecordDigest: b }), { mode: 0o600 });
+    expect(await readRehearsalForPolicy(root, b)).toEqual({ policyRecordDigest: b });
+    expect(await readRehearsalForPolicy(root, a)).toEqual({ policyRecordDigest: a });
+    await writeFile(join(root, rehearsalFileName(a)), 'not-json', { mode: 0o600 });
+    expect(await readRehearsalForPolicy(root, a)).toBeUndefined();
+    await expect(readRehearsalForPolicy(root, '../../escape')).rejects.toThrow('TURNKEY_REHEARSAL_DIGEST_INVALID');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

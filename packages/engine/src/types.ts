@@ -233,7 +233,7 @@ export interface TransactionIntent {
    * checked against the encoded calldata before a provider signing request;
    * they are deliberately not part of the provider policy family itself.
    */
-  readonly familyContext?: { readonly nftContract: Address; readonly feeRecipient: Address };
+  readonly familyContext?: { readonly nftContract: Address; readonly feeRecipient: Address; readonly allowlistProof?: import('./allowlist-authority.js').VerifiedWalletProof; readonly assertReady?: () => void | Promise<void> };
 }
 
 export interface SpendReservation {

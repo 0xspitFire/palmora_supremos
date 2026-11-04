@@ -61,3 +61,13 @@ export async function prepareReplication(input: {
   const campaign = await input.createCampaign({ ...fields, walletScope: wallets, chainId, contract: drop.nftContract.toLowerCase(), strategy: drop.strategyName, dryRun: false, broadcastMode: chainId === 4663 ? 'sequencer' : 'public', chainVerification: { chainId, status: 'verified', seaDropCompatible: true, evidenceId: evidence.id, checkedAt: evidence.checkedAt, sourceBlock: evidence.sourceBlock, endpointReference: evidence.endpointIdentity } });
   return { campaign, wallets, maxFeeGwei: input.maxFeeGwei };
 }
+
+
+/** A shared signed free family permits one fleet campaign; exact policies and paid mints remain wallet-specific. */
+export function allowlistPreparationGroups(input: { wallets: readonly Address[]; targets: readonly string[]; paid: boolean; sharedFamily: boolean; paidMaxWallets: number }): Address[][] {
+  const targets = new Set(input.targets.map((wallet) => wallet.toLowerCase()));
+  const seen = new Set<string>();
+  const selected = input.wallets.filter((wallet) => { const key = wallet.toLowerCase(); if (seen.has(key) || !targets.has(key)) return false; seen.add(key); return true; }).slice(0, input.paid ? input.paidMaxWallets : 10);
+  if (!selected.length) return [];
+  return !input.paid && input.sharedFamily ? [selected] : selected.map((wallet) => [wallet]);
+}

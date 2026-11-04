@@ -46,7 +46,7 @@ export interface ReadinessSigner {
 
 export interface TurnkeyReadinessOptions {
   readSigned: () => Promise<{ signed: unknown; publicKey: string }>;
-  readOptional: (name: 'rehearsal') => Promise<unknown | undefined>;
+  readOptional: (name: 'rehearsal', recordDigest: string) => Promise<unknown | undefined>;
   lockfileDigest: () => Promise<string>;
   createSigner: () => Promise<ReadinessSigner>;
   readBalances: (chainId: number, addresses: readonly string[]) => Promise<ReadonlyArray<{ address: string; balanceWei: bigint }>>;
@@ -181,7 +181,7 @@ export async function createTurnkeyReadiness(options: TurnkeyReadinessOptions): 
       const providerProbe = await probe(record);
       const balances = await step('READINESS_BALANCES_UNREADABLE', () => options.readBalances(run.chainId, record.addresses));
       const lockfileDigest = await step('READINESS_LOCKFILE_UNREADABLE', () => options.lockfileDigest());
-      const rehearsalRaw = await options.readOptional('rehearsal').catch(() => undefined);
+      const rehearsalRaw = await options.readOptional('rehearsal', record.digest).catch(() => undefined);
       const rehearsal = (() => { try { return rehearsalRaw === undefined ? undefined : parseRehearsalEvidence(rehearsalRaw); } catch { return undefined; } })();
       const evidence = await step('READINESS_EVIDENCE_FAILED', () => buildCompensatingEvidence({
         chainId: run.chainId,

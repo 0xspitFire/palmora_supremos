@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  assertRehearsalOutputSafe,
   buildCompensatingEvidence,
   engageKillSwitchFile,
   evaluateStatus,
   lockfileDigest,
   parseRehearsalEvidence,
   probeOrEngageKillSwitch,
+  rehearsalFileName,
   walletSetDigest,
 } from './compensating-controls-cli.js';
 
@@ -101,4 +103,33 @@ describe('compensating controls evidence assembly (D-058, D-059)', () => {
       expect(evaluateStatus(build({ lockfileDigest: `sha256:${'9'.repeat(64)}` }), { ...config, expected: { ...config.expected, lockfileDigest: `sha256:${'9'.repeat(64)}` } }, NOW).text).toContain('DEPENDENCIES_CHANGED');
     });
   });
+});
+
+
+it('uses a bounded, unique filename for each signed policy digest', () => {
+  const a = `sha256:${'a'.repeat(64)}`; const b = `sha256:${'b'.repeat(64)}`;
+  expect(rehearsalFileName(a)).not.toBe(rehearsalFileName(b));
+  expect(() => rehearsalFileName('sha256:../../escape')).toThrow('TURNKEY_REHEARSAL_DIGEST_INVALID');
+});
+
+
+it('does not overwrite another policy rehearsal or a non-evidence artifact', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mint-rehearsal-output-'));
+  const a = `sha256:${'a'.repeat(64)}`; const b = `sha256:${'b'.repeat(64)}`;
+  const row = (digest: string) => ({ type: 'turnkey-signing-rehearsal', recordedAt: NOW.toISOString(), policyRecordDigest: digest, walletSetDigest: a, lockfileDigest: a, safety: { broadcastAttempted: false } });
+  try {
+    const pathA = join(root, rehearsalFileName(a));
+    await writeFile(pathA, JSON.stringify(row(a)), { mode: 0o600 });
+    await expect(assertRehearsalOutputSafe(pathA, a)).resolves.toBeUndefined();
+    await expect(assertRehearsalOutputSafe(pathA, b)).rejects.toThrow('TURNKEY_REHEARSAL_OUTPUT_CONFLICT');
+    const custom = join(root, 'custom.json');
+    await writeFile(custom, JSON.stringify(row(a)), { mode: 0o600 });
+    await expect(assertRehearsalOutputSafe(custom, b)).rejects.toThrow('TURNKEY_REHEARSAL_OUTPUT_CONFLICT');
+    await writeFile(custom, JSON.stringify({ type: 'different-artifact' }), { mode: 0o600 });
+    await expect(assertRehearsalOutputSafe(custom, a)).rejects.toThrow('TURNKEY_REHEARSAL_OUTPUT_CONFLICT');
+    await expect(assertRehearsalOutputSafe(join(root, rehearsalFileName(b)), a)).rejects.toThrow('TURNKEY_REHEARSAL_OUTPUT_CONFLICT');
+    const shared = join(root, 'not-yet-created.json');
+    const concurrent = await Promise.allSettled([assertRehearsalOutputSafe(shared, a), assertRehearsalOutputSafe(shared, b)]);
+    expect(concurrent.every((result) => result.status === 'rejected')).toBe(true);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -4,7 +4,9 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { TurnkeySigner, isSecureTurnkeyFileAccess, validateTurnkeyWalletMap, type TurnkeySignerClient } from './turnkey-signer.js';
 import { createTurnkeyPolicyRecord, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions } from './turnkey-policy-record.js';
 import { canonicalPolicyDigest, turnkeyPolicyRef, validateTurnkeyPolicyAst, type TurnkeyPolicyAst } from './turnkey-policy.js';
-import { SEADROP_V1_ADDRESS } from './chains.js';
+import { OPENSEA_FEE_COLLECTOR, SEADROP_V1_ADDRESS } from './chains.js';
+import { allowlistLeaf } from './allowlist.js';
+import { buildAllowlistMint, type VerifiedWalletProof } from './allowlist-authority.js';
 
 const PRIVATE_KEY = `0x${'11'.repeat(32)}` as Hex;
 const ACCOUNT = privateKeyToAccount(PRIVATE_KEY);
@@ -188,5 +190,32 @@ describe('Turnkey transaction boundary', () => {
     const normal = clientFor();
     const testSigner = signer(policy(), { signTransaction: async (input) => { const response = await normal.signTransaction(input); return { ...response, activity: { ...response.activity, appProofs: { length: 1 } } } as unknown as Awaited<ReturnType<TurnkeySignerClient['signTransaction']>>; } });
     await expect(testSigner.signTransaction(0, intent())).rejects.toThrow('TURNKEY_SIGNING_ACTIVITY_INVALID');
+  });
+});
+
+
+describe('free allowlist family signing boundary', () => {
+  it('requires independent live authority and rechecks readiness before calling Turnkey', async () => {
+    const ast: TurnkeyPolicyAst = { ...familyPolicy(), transaction: { ...familyPolicy().transaction, data: '0x4300a4e6', maxFeePerGasMax: '200000000' }, family: { kind: 'seadrop-free-allowlist-v1', maxQuantity: 4 } };
+    const nft = '0x3333333333333333333333333333333333333333' as Address;
+    const params = { mintPrice: 0n, maxTotalMintableByWallet: 4n, startTime: 1n, endTime: 2_000_000_000n, dropStageIndex: 1n, maxTokenSupplyForStage: 100n, feeBps: 0n, restrictFeeRecipients: false };
+    const p: VerifiedWalletProof = { wallet: WALLET, mintParams: params, proof: [], source: { chainId: 4663, nftContract: nft, stageIndex: '1', sourceId: 'test', contentDigest: `sha256:${'a'.repeat(64)}` }, authority: { chainId: 4663, nftContract: nft, seaDrop: SEADROP_V1_ADDRESS, root: allowlistLeaf(WALLET, params), blockNumber: 100n, blockHash: `0x${'a'.repeat(64)}`, observedAt: new Date().toISOString(), feeRecipient: OPENSEA_FEE_COLLECTOR } };
+    const base = { ...familyIntent(ast, { maxFeePerGas: 200000000n }), campaignId: 'campaign', runId: 'run', data: buildAllowlistMint(p, WALLET, 1).data, familyContext: { nftContract: nft, feeRecipient: OPENSEA_FEE_COLLECTOR, allowlistProof: p, assertReady: () => undefined } };
+    let sent = 0;
+    const client = clientFor({ getPolicies: async () => ({ policies: [providerPolicy(ast)] }), signTransaction: async (input) => { sent += 1; return clientFor().signTransaction(input); } });
+    const make = (verifyAllowlistAuthority?: (value: import('./types.js').TransactionIntent) => Promise<void>) => new TurnkeySigner({ organizationId: ORG, environment: ENVIRONMENT, userId: USER, wallets: [{ index: 0, address: WALLET, signWith: KEY_ID }], policyRecord: record(ast), client, verifyAllowlistAuthority });
+    await expect(make().signTransaction(0, base)).rejects.toThrow('TURNKEY_ALLOWLIST_AUTHORITY_REQUIRED');
+    await expect(make(async () => { throw new Error('TURNKEY_ALLOWLIST_ROOT_CHANGED'); }).signTransaction(0, base)).rejects.toThrow('TURNKEY_ALLOWLIST_ROOT_CHANGED');
+    await expect(make(async () => undefined).signTransaction(0, { ...base, familyContext: { ...base.familyContext, assertReady: () => { throw new Error('KILLED'); } } })).rejects.toThrow('KILLED');
+    expect(sent).toBe(0);
+    await expect(make(async () => undefined).signTransaction(0, base)).resolves.toMatch(/^0x/);
+    expect(sent).toBe(1);
+    const noNetwork = make();
+    const rehearsal = await noNetwork.rehearseFreeAllowlist(0, async () => undefined);
+    expect(rehearsal.signedTransactionHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(rehearsal).not.toHaveProperty('signedTransaction');
+    expect(sent).toBe(2);
+    await expect(noNetwork.rehearseFreeAllowlist(0, async () => { throw new Error('KILL_SWITCH_NOT_ENGAGED'); })).rejects.toThrow('KILL_SWITCH_NOT_ENGAGED');
+    expect(sent).toBe(2);
   });
 });

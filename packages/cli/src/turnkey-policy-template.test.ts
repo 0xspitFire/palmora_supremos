@@ -29,3 +29,16 @@ describe('Robinhood Turnkey policy template', () => {
     expect(policy.transaction.data).toBe('0x161ac21f');
   });
 });
+
+
+describe('reusable free allowlist templates', () => {
+  it('builds a distinct allowlist family for each approved chain without a collection', () => {
+    for (const chainId of [1, 8453, 4663] as const) {
+      const policy = robinhoodTurnkeyPolicy({ ...input, chainId, allowlistFamily: true, quantity: 4 });
+      expect(policy.family).toEqual({ kind: 'seadrop-free-allowlist-v1', maxQuantity: 4 });
+      expect(policy.transaction).toMatchObject({ chainId, data: '0x4300a4e6', valueWei: '0' });
+    }
+    expect(() => robinhoodTurnkeyPolicy({ ...input, allowlistFamily: true, policyFamily: true })).toThrow('TURNKEY_POLICY_FAMILY_INVALID');
+    expect(() => robinhoodTurnkeyPolicy({ ...input, chainId: 8453, allowlistFamily: true, quantity: 5 })).toThrow('TURNKEY_POLICY_FAMILY_INVALID');
+  });
+});

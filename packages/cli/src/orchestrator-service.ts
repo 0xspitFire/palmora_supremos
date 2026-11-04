@@ -21,7 +21,7 @@ import {
   summarizeServiceConfig,
   TelegramNotifier,
 } from '@mint-bot/backend';
-import { createCliRuntime, configuredSecretRoot, configuredWalletPath, configuredWallets, turnkeyCustodyEnabled } from './runtime.js';
+import { createCliRuntime, configuredSecretRoot, configuredWalletPath, configuredWallets, turnkeyCustodyEnabled, selectTurnkeyAllowlistFamilyPolicy } from './runtime.js';
 import type { TelegramAccessRepository } from '@mint-bot/database';
 import { createTelegramBotApi, type TelegramBotApi } from './telegram-api.js';
 import { TelegramCommandRouter } from './telegram-commands.js';
@@ -51,9 +51,9 @@ import { createOpenSeaFloors, type OpenSeaFloors } from './opensea-client.js';
 import { startFireScheduler } from './fire.js';
 import { createReplicationAutomation } from './replication-automation.js';
 import { readReplicationSource } from './replication-source.js';
-import { prepareReplication } from './replication-prepare.js';
+import { allowlistPreparationGroups, prepareReplication } from './replication-prepare.js';
 import { simulateAllowlistCampaign } from './allowlist-execution.js';
-import { getStrategy } from '@mint-bot/engine';
+import { getStrategy, readTurnkeyApprovedPolicyRecords } from '@mint-bot/engine';
 import { startOpsEvidenceReminders } from './ops-evidence-reminders.js';
 
 export interface RunningOrchestratorService {
@@ -416,9 +416,14 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
           const tipWei = source.drop.chainId === 1 ? BigInt(status.stored?.tipWei ?? status.approved?.tipWei ?? '100000000') : 100_000_000n;
           const prepare = (selected: readonly `0x${string}`[]) => prepareReplication({ source, wallets: selected, maxQuantity, maxFeeGwei, tipWei, store: runtime.store, createCampaign: (input) => ownerApplication.createCampaign(input), now: new Date() });
           if (source.drop.strategyName !== 'seadrop-v1-allowlist') return prepare(wallets);
-          const targets = new Set(source.plan.targets.map((target) => target.wallet.toLowerCase()));
+          const targets = source.plan.targets.map((target) => target.wallet);
+          const paid = source.drop.mintPrice > 0n;
+          const eligible = allowlistPreparationGroups({ wallets, targets, paid, sharedFamily: true, paidMaxWallets: PERSONAL_LIVE_FLEET_POLICY.paidMaxWalletsPerMint }).flat();
+          const quantity = Math.min(maxQuantity, source.plan.observed.quantity ?? 0, source.drop.maxTotalMintableByWallet, source.drop.chainId === 8453 ? 4 : 15);
+          const sharedFamily = !paid && eligible.length > 0 && Boolean(selectTurnkeyAllowlistFamilyPolicy(await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot), { chainId: source.drop.chainId, strategy: source.drop.strategyName, quantity, mintPriceWei: source.drop.mintPrice, walletScope: eligible }));
+          const groups = allowlistPreparationGroups({ wallets, targets, paid, sharedFamily, paidMaxWallets: PERSONAL_LIVE_FLEET_POLICY.paidMaxWalletsPerMint });
           const prepared = [];
-          for (const wallet of wallets.filter((wallet) => targets.has(wallet.toLowerCase())).slice(0, source.drop.mintPrice > 0n ? PERSONAL_LIVE_FLEET_POLICY.paidMaxWalletsPerMint : 10)) prepared.push(await prepare([wallet]));
+          for (const group of groups) prepared.push(await prepare(group));
           return prepared;
         },
         fire: fire.fireDeps, fireAutonomous: fire.fireAutonomous,

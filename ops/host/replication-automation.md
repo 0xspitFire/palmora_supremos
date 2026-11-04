@@ -107,14 +107,15 @@ requesting execution. Free discovered replications use the same score/watched
 rule as public FCFS. Owner-scheduled exact campaigns retain their explicit
 advance authorization. Paid replication still requires final `/fire`.
 
-Existing public-mint Turnkey families authorize only `mintPublic`; they do not
-authorize `mintAllowList`. The owner must install a signed canonical policy
-catalog record that authorizes the actual wallet-specific allowlist calldata
-and existing fee envelope. The resolver only selects already signed matching
-records and stops on no match or ambiguity. Because different wallets normally
-have different proof bytes, a single exact public policy cannot authorize an
-entire allowlist fleet. This integration step requires the chosen collection
-and owned-wallet proofs; the runtime never administers Turnkey policies.
+Existing public-mint Turnkey families authorize only `mintPublic`. A separate
+owner-approved `seadrop-free-allowlist-v1` family can authorize future free
+`mintAllowList` calls for its signed chain, fleet, quantity and fee envelope.
+The runtime selects only a matching installed signed record; it never creates
+or administers provider policies. Exact allowlist records remain supported. A
+signed family can group eligible free wallets into one fleet campaign. Exact
+policy preparations remain wallet-specific. Paid mints require separate custody
+authorization and the final operator approval; this family does not grant it. See
+`free-allowlist-family.md` for the one-time setup and expiry/renewal boundary.
 
 Server-signed and token-gated SeaDrop methods remain unsupported, with no blind
 replay fallback. Contract-standard Merkle allowlists and public FCFS are the
@@ -172,10 +173,10 @@ responses, not inferred from the configured chain slug. The builder requires an
 active stage and may refuse unfunded wallets; unavailable future-stage proofs
 remain unavailable, not invented. Other platforms require documented adapters.
 
-Public-only Turnkey policy families still cannot authorize allowlist calls. The
-proposal in local `Docs/decision-drafts/dynamic-allowlist-custody.md` needs owner
-approval before any broader reusable signing authorization is built. Until then,
-already signed exact allowlist records remain mandatory.
+Public-only families cannot authorize allowlist calls. The owner approved the
+separate bounded free-allowlist family (D-085). It takes effect only after its
+reviewed release, provider policy, owner-signed record and bundle are installed.
+Until then, already signed exact allowlist records remain mandatory.
 
 Official contracts:
 - https://docs.opensea.io/reference/build_drop_mint_transaction
@@ -189,9 +190,10 @@ Official contracts:
    fixed collection list is required. For platforms without a supported adapter,
    engineering needs their official API documentation; private credentials remain
    in named host-secret entries. Individual manual manifests are optional.
-2. Review the generated exact allowlist custody policy with the verified own
-   proofs; approve its provider policy and sign/install the canonical record.
-   No public-only policy is widened automatically.
+2. Review/create the bounded free-allowlist provider policy and owner-sign/install
+   its canonical record once per enabled chain/fleet, following
+   `free-allowlist-family.md`. Exact allowlist policies remain an option. No
+   public-only policy is widened automatically.
 3. At final production, install the reviewed release, collect/accept the new
    D-017 artifacts and complete release activation. Recollection stays deferred
    until that point.
