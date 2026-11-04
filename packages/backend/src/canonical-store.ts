@@ -1180,6 +1180,15 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   private persistEvent(event: EventRecord, prior: EventRecord | undefined): void {
     if (prior) return;
     this.recordAudit({ id: event.id, entityType: event.runId ? 'execution_run' : 'state_transition', entityId: event.runId ?? 'global', actor: this.actor, reason: 'backend event', newState: event.type, policySnapshot: { kind: 'event', eventType: event.type, eventData: event.data, ...(event.runId ? { runId: event.runId } : {}) }, occurredAt: event.at });
+    // Migration 038 binds autonomous requests to an immutable domain-event FK.
+    // Persist its authority in the same transaction as the append-only audit row.
+    if (event.type === 'replication_prepared') {
+      // Domain read models intentionally reject raw 32-byte provider values.
+      // Project only the fields migration 038 needs; source hashes/digests stay
+      // in the canonical audit record, never copied into the read model.
+      const { campaignId, mintPriceWei, policyVersion, score, maxFeeGwei, wallets } = event.data;
+      this.databaseStore.appendEvent({ id: event.id, type: event.type, entityType: 'campaign', entityId: String(campaignId), campaignId: String(campaignId), payload: { campaignId, mintPriceWei, policyVersion, score, maxFeeGwei, wallets }, source: 'backend-qualified-replication', occurredAt: event.at });
+    }
   }
 
   private persistNotification(notification: BackendState['notificationOutbox'][number], prior: BackendState['notificationOutbox'][number] | undefined): void {

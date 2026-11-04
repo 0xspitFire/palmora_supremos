@@ -247,3 +247,6 @@ export {
 } from './gas-strategy.js';
 export { READ_TIMEOUT_MS, failoverTransport, splitBaseEndpoints } from './rpc-transport.js';
 export { chainRpcSecretNames } from './chains.js';
+
+export { planFireLanes } from './fire-lanes.js';
+export type { FireLane, FireLaneAssignment } from './fire-lanes.js';

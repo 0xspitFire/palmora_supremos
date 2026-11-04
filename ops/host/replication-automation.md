@@ -136,15 +136,91 @@ and simulates three reconstructed wallet calls with `eth_call`. On 2026-11-04 it
 passed with zero skips and zero broadcasts. These are regression/fork evidence,
 not a live allowlist mint, profitability evidence or final D-017 certification.
 
+## Dynamic OpenSea resolution (T-097)
+
+The host reuses its existing named `OPENSEA_API` secret to resolve discovered
+contracts through the official contract-metadata endpoint and request mint data
+for each fleet wallet through `/api/v2/drops/{slug}/mint`. No per-project manifest
+or public full allowlist is required for this path, and no wallet login/JWT or
+message-signing authority is added. Existing on-chain discovery/scoring supplies
+the changing chain and collection; the adapter does not auto-enable a chain.
+
+The response must identify the requested chain, SeaDrop target, NFT collection,
+zero sponsored minter, quantity one and exact mint value. Only canonical
+`mintAllowList` calldata is decoded; own-wallet proofs are independently verified
+against two agreeing RPCs at a common recent block. Locally reconstructed calls
+then pass the existing simulation, signed custody, admission and execution gates.
+The builder requests one NFT to retrieve eligibility; final quantity remains
+bounded by the verified allocation and existing mint limits.
+
+Fixed API origin, no redirects, bounded streamed bodies, ten-second timeout,
+serialized two-request-per-second pacing, in-flight deduplication and fifteen-
+second bounded successful-response caching protect the read path. Chain authority
+is always fresh. Rate limits/transient unavailability respect bounded Retry-After
+without automatic request retries. API credentials and raw provider errors are
+never persisted or printed.
+
+An explicitly absent/unsupported OpenSea drop or public-stage response permits
+the existing independent public-chain read. Authentication failures, unknown API
+failures, invalid proofs and contradictory chain evidence never silently downgrade
+an allowlist campaign. Explicit pinned project sources take precedence; they
+remain a fallback for supported project-published proof formats.
+
+Coverage: the documented mint-builder API supports ERC-721 SeaDrop V1, not every
+NFT platform or contract. Robinhood API coverage is determined by actual API
+responses, not inferred from the configured chain slug. The builder requires an
+active stage and may refuse unfunded wallets; unavailable future-stage proofs
+remain unavailable, not invented. Other platforms require documented adapters.
+
+Public-only Turnkey policy families still cannot authorize allowlist calls. The
+proposal in local `Docs/decision-drafts/dynamic-allowlist-custody.md` needs owner
+approval before any broader reusable signing authorization is built. Until then,
+already signed exact allowlist records remain mandatory.
+
+Official contracts:
+- https://docs.opensea.io/reference/build_drop_mint_transaction
+- https://docs.opensea.io/reference/get_contract
+- https://docs.opensea.io/docs/mint-from-a-drop
+
 ## Owner inputs still required
 
-1. Supply the chosen chain, NFT contract, stage and official project proof/list
-   URL or published API documentation. Engineering then creates the exact
-   manifest and obtains/pins its digest. A private API credential, if needed,
-   is stored by the owner under its named host-secret entry.
+1. At final deployment verify that the existing OPENSEA_API entry permits Drops
+   requests on the intended platform/chain. Do not send its value in chat. No
+   fixed collection list is required. For platforms without a supported adapter,
+   engineering needs their official API documentation; private credentials remain
+   in named host-secret entries. Individual manual manifests are optional.
 2. Review the generated exact allowlist custody policy with the verified own
    proofs; approve its provider policy and sign/install the canonical record.
    No public-only policy is widened automatically.
 3. At final production, install the reviewed release, collect/accept the new
    D-017 artifacts and complete release activation. Recollection stays deferred
    until that point.
+
+## Optional D-081 fire lanes
+
+The default remains simultaneous execution of the selected fleet. A trusted host
+operator may optionally set `MINT_BOT_FIRE_LANES` to a JSON plan in the existing
+service environment, then deploy/restart through the normal reviewed-release
+procedure. Do not configure it from collection metadata or opportunity input.
+For a ten-position fleet, an example is:
+
+```json
+{"version":1,"lanes":[{"positions":[0,2,4,6,8],"startOffsetMs":0},{"positions":[1,3,5,7,9],"startOffsetMs":100}]}
+```
+
+Positions are zero-based within each run's canonical selected wallet list, not
+persistent wallet identities or absolute signer indexes. A smaller selected fleet
+(for example, two paid wallets) uses only its covered positions; empty lanes are
+omitted. The plan must cover a dense unique position range beginning at zero, up
+to 100 positions. A run selecting more wallets than the plan covers is blocked.
+Offsets must be whole milliseconds, nondecreasing between lanes, from zero to
+30,000. Unknown fields, duplicate/sparse positions and transport overrides fail
+closed. Every lane inherits the job's existing broadcast mode and fee limits.
+
+The trusted adapter callback `fireLanesFor(campaignId, selection, mode)` may supply
+a campaign-specific plan instead; the same exact fleet coverage validation applies.
+Plans are copied per job. Preflight-skipped wallets are never added back. Delays
+start before the existing per-wallet kill/chain/drop/simulation/reservation and
+signing checks. Offsets schedule preparation starts, not guaranteed inclusion
+blocks or exact broadcast timestamps. No setting was changed on production and
+no new Telegram configuration screen is included.

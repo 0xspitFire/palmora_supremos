@@ -70,6 +70,7 @@ import { BaseFinalityObserver, EthereumFinalityObserver, IndependentBaseFinality
 import type { FinalityObserver } from './finality-observer.js';
 import { LocalEncryptedSigner } from './signer.js';
 import { createBroadcaster } from './broadcasters/index.js';
+import { planFireLanes, type FireLaneAssignment } from './fire-lanes.js';
 import { selectFleetWallets } from './fleet-selection.js';
 import { buildFlashbotsAuthSigner } from './flashbots-auth.js';
 import { assertBaseProviderAgreement, type BaseAgreementClient } from './base-provider-agreement.js';
@@ -369,6 +370,7 @@ export class MintEngine {
       signer = await this.signerFactory(passphrase);
       const allWallets = await signer.listWallets();
       const wallets = selectFleetWallets(allWallets, this.config.fleet);
+      const fireLanePlan = planFireLanes(wallets.map((wallet) => wallet.index), this.config.fleet.fireLanes, this.config.broadcast.mode);
       engineLog.info({ walletCount: wallets.length }, 'Wallets loaded');
 
       if (chainId === 8453 && !this.config.safety.dryRun) {
@@ -607,6 +609,7 @@ export class MintEngine {
         gasLimits,
         simulations,
         engineLog,
+        fireLanePlan,
       );
       const walletResults = [...preflightResults, ...executedWalletResults];
 
@@ -675,6 +678,7 @@ export class MintEngine {
     gasLimits: Map<number, bigint>,
     simulations: Map<number, SimulationEvidence>,
     parentLog: pino.Logger,
+    plannedLanes?: readonly FireLaneAssignment[],
   ): Promise<WalletMintResult[]> {
     assertDirectChainExecutionPolicy(
       chainId,
@@ -695,8 +699,12 @@ export class MintEngine {
     });
     // T-094 / D-080: bounded same-nonce replacement. Undefined (the default) means nothing is ever replaced.
     const replacement = this.replacementPlan(chainId, broadcaster.name);
-    // Concurrent execution with Promise.allSettled (per-wallet isolation)
-    const promises = walletIndices.map(async (walletIndex): Promise<WalletMintResult> => {
+    // Lane scheduling only changes when an already admitted wallet starts preparation.
+    // A preflight-skipped wallet is never added back; all normal guards run after its offset.
+    const lanePlan = plannedLanes ?? planFireLanes(walletIndices, this.config.fleet.fireLanes, this.config.broadcast.mode);
+    const admitted = new Set(walletIndices);
+    const fleetStartedAt = Date.now();
+    const promises = lanePlan.filter((assignment) => admitted.has(assignment.walletIndex)).map(async ({ walletIndex, laneIndex, startOffsetMs }): Promise<WalletMintResult> => {
       const walletLog = childLogger(parentLog, 'WalletMint', { walletIndex });
       const startTime = this.now().getTime();
       let builtNonce: number | undefined;
@@ -721,6 +729,9 @@ export class MintEngine {
       });
 
       try {
+        const delayMs = Math.min(startOffsetMs, Math.max(0, fleetStartedAt + startOffsetMs - Date.now()));
+        if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        walletLog.debug({ event: 'fire_lane_start', laneIndex, startOffsetMs }, 'Fire lane wallet ready for normal pre-send gates');
         // Check kill switch
         if (this.killSwitch.isKilled()) {
           return {

@@ -576,6 +576,8 @@ export interface MintJobConfig {
     /** D-073: key-list positions to sign with (instead of the first `maxWallets`), with the approved address for each. */
     readonly walletIndexes?: readonly number[];
     readonly expectedAddresses?: readonly string[];
+    /** D-081: optional groups of the selected fleet. Omit for the existing simultaneous fleet. */
+    readonly fireLanes?: readonly import('./fire-lanes.js').FireLane[];
   };
   readonly timing: {
     readonly mintStartUnix: number | 'auto';

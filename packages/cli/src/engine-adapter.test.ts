@@ -186,3 +186,28 @@ describe('wallet selection takes exactly the approved wallets, wherever they sit
     expect(config.fleet).toMatchObject({ maxWallets: 1, walletIndexes: [2], expectedAddresses: [list[2]!.address] });
   });
 });
+
+
+describe('D-081 campaign-scoped lanes stay inside the canonical selection', () => {
+  const c = { id: 'lane-campaign', chainId: 1, contract: '0x3333333333333333333333333333333333333333', strategy: 'seadrop-v1-public', quantity: 1, spendPolicy: { maxRunWei: 10n ** 16n, dailyCapWei: 10n ** 16n, gasCeilingWei: 10n ** 15n }, feePolicy: { kind: 'free', configuredPriorityFeeWei: 0n, totalFeeBudgetWei: 1n } } as never;
+  const base = { maxFeePerGasGwei: 1, gasLimitPadding: 1, maxReplacementBumps: 0, killSwitchFile: '/x' };
+  const selection = { indexes: [2, 7], addresses: ['0x2222222222222222222222222222222222222222', '0x7777777777777777777777777777777777777777'] };
+  it('passes selected signer indexes and copies the lane configuration into the engine job', () => {
+    const indexes = [7];
+    const config = engineConfigFromCampaign(c, { ...base, fireLanesFor: (id: string, selected: typeof selection, mode: 'public') => {
+      expect(id).toBe('lane-campaign'); expect(selected).toEqual(selection); expect(mode).toBe('public');
+      return [{ walletIndexes: indexes, startOffsetMs: 0, mode }, { walletIndexes: [2], startOffsetMs: 100, mode }];
+    } } as never, true, 2, selection);
+    indexes.push(999);
+    expect(config.fleet.walletIndexes).toEqual([2, 7]);
+    expect(config.fleet.expectedAddresses).toEqual(selection.addresses);
+    expect(config.fleet.fireLanes).toEqual([{ walletIndexes: [7], startOffsetMs: 0, mode: 'public' }, { walletIndexes: [2], startOffsetMs: 100, mode: 'public' }]);
+    expect(config.broadcast.mode).toBe('public');
+  });
+  it('rejects fleet expansion, transport changes and missing canonical selection', () => {
+    for (const lane of [{ walletIndexes: [2, 999], startOffsetMs: 0, mode: 'public' }, { walletIndexes: [2, 7], startOffsetMs: 0, mode: 'flashbots' }]) {
+      expect(() => engineConfigFromCampaign(c, { ...base, fireLanesFor: () => [lane] } as never, true, 2, selection)).toThrow();
+    }
+    expect(() => engineConfigFromCampaign(c, { ...base, fireLanesFor: () => undefined } as never, true, 2)).toThrow('FIRE_LANE_SELECTION_REQUIRED');
+  });
+});

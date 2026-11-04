@@ -396,3 +396,39 @@ describe('T-094 replacement through the real engine flow', () => {
     expect(result).toMatchObject({ txHash: h.hashOf(0) });
   });
 });
+
+
+describe('D-081 delayed lane guards through the real engine flow', () => {
+  it('does not sign before the lane offset, then executes through normal admission', async () => {
+    const cfg = config({ replacement: false });
+    const h = harness({ ...cfg, fleet: { ...cfg.fleet, fireLanes: [{ walletIndexes: [0], startOffsetMs: 1000, mode: 'sequencer' }] } });
+    const running = h.run();
+    await tick(999);
+    expect(h.signed).toHaveLength(0); expect(h.reservations).toHaveLength(0);
+    await tick(1);
+    expect(h.signed).toHaveLength(1); expect(h.reservations).toHaveLength(1);
+    h.mine(h.hashOf(0));
+    await tick(1);
+    expect((await running)[0]!.status).toBe('success');
+  });
+  it('honours a kill engaged while a lane is waiting, without signing or reserving', async () => {
+    const cfg = config({ replacement: false });
+    const h = harness({ ...cfg, fleet: { ...cfg.fleet, fireLanes: [{ walletIndexes: [0], startOffsetMs: 1000, mode: 'sequencer' }] } });
+    const running = h.run();
+    await tick(500);
+    vi.spyOn((h.engine as unknown as { killSwitch: { isKilled(): boolean } }).killSwitch, 'isKilled').mockReturnValue(true);
+    await tick(500);
+    expect((await running)[0]!.status).toBe('killed');
+    expect(h.signed).toHaveLength(0); expect(h.reservations).toHaveLength(0); expect(h.broadcastCount()).toBe(0);
+  });
+  it('refreshes the drop after waiting; a changed price stops the delayed lane before signing', async () => {
+    const cfg = config({ replacement: false });
+    const h = harness({ ...cfg, fleet: { ...cfg.fleet, fireLanes: [{ walletIndexes: [0], startOffsetMs: 1000, mode: 'sequencer' }] } });
+    const running = h.run();
+    await tick(500);
+    dropOnChain = { ...baseDrop(), mintPrice: 1n };
+    await tick(500);
+    expect((await running)[0]).toMatchObject({ status: 'skipped', error: expect.stringContaining('CAMPAIGN_CHANGED_MID_RUN') });
+    expect(h.signed).toHaveLength(0); expect(h.reservations).toHaveLength(0); expect(h.broadcastCount()).toBe(0);
+  });
+});
