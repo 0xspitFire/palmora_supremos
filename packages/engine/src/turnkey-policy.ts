@@ -1,6 +1,7 @@
 import { keccak256, toBytes, type Address, type Hex } from 'viem';
 import type { SupportedChainId, TransactionIntent } from './types.js';
 import { SEADROP_V1_ADDRESS } from './chains.js';
+import { buildAllowlistMint } from './allowlist-authority.js';
 
 export type TurnkeyEnvironment = 'production' | 'testnet';
 
@@ -36,7 +37,7 @@ export interface TurnkeyPolicyTransaction {
 
 /** Bounded provider-side policy family for Robinhood public SeaDrop mints. */
 export interface TurnkeyPolicyFamily {
-  readonly kind: 'robinhood-seadrop-public-v1';
+  readonly kind: 'robinhood-seadrop-public-v1' | 'seadrop-free-allowlist-v1';
   readonly maxQuantity: number;
 }
 
@@ -97,8 +98,8 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
   const tx = value.transaction;
   const familyValue = value.family;
   const familyRecord = familyValue as Record<string, unknown> | undefined;
-  if (familyValue !== undefined && (!isRecord(familyValue) || !exactKeys(familyValue, ['kind', 'maxQuantity']) || familyRecord?.kind !== 'robinhood-seadrop-public-v1' || !Number.isSafeInteger(familyRecord?.maxQuantity) || Number(familyRecord?.maxQuantity) < 1 || Number(familyRecord?.maxQuantity) > 15)) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-  const family = familyValue === undefined ? undefined : { kind: 'robinhood-seadrop-public-v1' as const, maxQuantity: Number(familyRecord?.maxQuantity) };
+  if (familyValue !== undefined && (!isRecord(familyValue) || !exactKeys(familyValue, ['kind', 'maxQuantity']) || !['robinhood-seadrop-public-v1', 'seadrop-free-allowlist-v1'].includes(String(familyRecord?.kind)) || !Number.isSafeInteger(familyRecord?.maxQuantity) || Number(familyRecord?.maxQuantity) < 1 || Number(familyRecord?.maxQuantity) > 15)) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  const family = familyValue === undefined ? undefined : { kind: familyRecord!.kind as TurnkeyPolicyFamily['kind'], maxQuantity: Number(familyRecord?.maxQuantity) };
   if (scope.provider !== 'turnkey' || !isEnvironment(scope.environment) || !nonEmpty(scope.organizationId) || !nonEmpty(scope.userId) || !nonEmpty(scope.policyId) || !stringArray(scope.keyIds)) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
   const keyIds = uniqueStrings(scope.keyIds);
   if (!keyIds || keyIds.length === 0) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
@@ -110,7 +111,16 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
   if (new Set(from).size !== from.length || tx.valueWei !== '0' || !isNonNegativeInteger(tx.valueWei) || !isNonNegativeInteger(tx.gasLimitMax) || !isNonNegativeInteger(tx.maxFeePerGasMax) || !isNonNegativeInteger(tx.maxPriorityFeePerGasMax) || tx.accessList.length !== 0) throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
   const data = normalizeHexBytes(tx.data as string);
   if (data === '0x') throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
-  if (family !== undefined && (tx.chainId !== 4663 || tx.to.toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || data !== '0x161ac21f' || tx.valueWei !== '0')) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  if (family?.kind === 'seadrop-free-allowlist-v1' && tx.chainId === 8453 && family.maxQuantity > 4) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  if (family?.kind === 'seadrop-free-allowlist-v1') {
+    const gas = BigInt(tx.gasLimitMax);
+    const maxFee = BigInt(tx.maxFeePerGasMax);
+    const tip = BigInt(tx.maxPriorityFeePerGasMax);
+    const walletCap = tx.chainId === 1 ? 400_000_000_000_000n : 200_000_000_000_000n;
+    const feeCap = tx.chainId === 1 ? 800_000_000n : 200_000_000n;
+    if (gas < 1n || gas > 500_000n || maxFee < 1n || maxFee > feeCap || tip > 100_000_000n || tip > maxFee || gas * maxFee > walletCap) throw new Error('TURNKEY_POLICY_FAMILY_FEE_LIMIT_INVALID');
+  }
+  if (family !== undefined && (tx.to.toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || tx.valueWei !== '0' || (family.kind === 'robinhood-seadrop-public-v1' ? tx.chainId !== 4663 || data !== '0x161ac21f' : data !== '0x4300a4e6'))) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
   return {
     version: 1,
     effect: 'allow',
@@ -133,7 +143,7 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
       maxPriorityFeePerGasMax: tx.maxPriorityFeePerGasMax,
       accessList: [],
     },
-    ...(family === undefined ? {} : { family: { kind: 'robinhood-seadrop-public-v1' as const, maxQuantity: family.maxQuantity } }),
+    ...(family === undefined ? {} : { family: { kind: family.kind, maxQuantity: family.maxQuantity } }),
   };
 }
 
@@ -194,7 +204,7 @@ export function validateTransactionIntent(intent: TransactionIntent, policy: Tur
       && normalizeAccessList(intent.accessList) === '[]';
     const data = normalizeHexBytes(intent.data);
     const exactData = normalized.family === undefined && data === normalized.transaction.data;
-    const familyData = normalized.family?.kind === 'robinhood-seadrop-public-v1' && robinhoodFamilyCalldata(data, normalized.family.maxQuantity, intent.familyContext);
+    const familyData = normalized.family?.kind === 'robinhood-seadrop-public-v1' ? robinhoodFamilyCalldata(data, normalized.family.maxQuantity, intent.familyContext) : normalized.family?.kind === 'seadrop-free-allowlist-v1' ? allowlistFamilyCalldata(intent, data, normalized.family.maxQuantity) : false;
     if (!common || (!exactData && !familyData)) throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
   } catch (error) {
     if (error instanceof Error && error.message === 'TURNKEY_POLICY_INTENT_BLOCKED') throw error;
@@ -212,6 +222,20 @@ function robinhoodFamilyCalldata(data: Hex, maxQuantity: number, context: Transa
     const quantity = BigInt(`0x${data.slice(202, 266)}`);
     return quantity >= 1n && quantity <= BigInt(maxQuantity);
   } catch { return false; }
+}
+
+/** Verify the canonical wallet-bound proof against the fresh authority supplied by the guarded engine. */
+function allowlistFamilyCalldata(intent: TransactionIntent, data: Hex, maxQuantity: number): boolean {
+  const context = intent.familyContext;
+  const proof = context?.allowlistProof;
+  if (!intent.campaignId || !intent.runId || !context || !proof || proof.source.chainId !== intent.chainId || proof.source.nftContract.toLowerCase() !== context.nftContract.toLowerCase() || proof.source.stageIndex !== proof.mintParams.dropStageIndex.toString() || proof.authority.chainId !== intent.chainId || proof.authority.nftContract.toLowerCase() !== context.nftContract.toLowerCase() || proof.authority.feeRecipient.toLowerCase() !== context.feeRecipient.toLowerCase() || proof.authority.seaDrop.toLowerCase() !== intent.to.toLowerCase() || proof.mintParams.mintPrice !== 0n || proof.proof.length > 64) return false;
+  for (let quantity = 1; quantity <= maxQuantity; quantity += 1) {
+    try {
+      const reconstructed = buildAllowlistMint(proof, intent.from, quantity);
+      if (reconstructed.value === 0n && reconstructed.data.toLowerCase() === data.toLowerCase()) return true;
+    } catch { return false; }
+  }
+  return false;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

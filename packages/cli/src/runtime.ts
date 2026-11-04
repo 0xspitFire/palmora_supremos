@@ -96,6 +96,14 @@ export function selectTurnkeyRobinhoodFamilyPolicy(
   return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
 }
 
+/** Select only an owner-signed free allowlist family on the exact chain and wallet scope. */
+export function selectTurnkeyAllowlistFamilyPolicy(records: readonly TurnkeyCanonicalPolicyRecord[], input: Pick<import('@mint-bot/backend').CampaignInput, 'chainId' | 'quantity' | 'mintPriceWei' | 'strategy' | 'walletScope'>): TurnkeyPolicySelection | undefined {
+  if (input.strategy !== 'seadrop-v1-allowlist' || input.mintPriceWei !== 0n || !Number.isSafeInteger(input.quantity) || input.quantity < 1) return undefined;
+  const matches = records.filter(({ enforcementPolicy: policy }) => policy.family?.kind === 'seadrop-free-allowlist-v1' && policy.family.maxQuantity >= input.quantity && policy.transaction.chainId === input.chainId && policy.transaction.to.toLowerCase() === SEADROP_V1_ADDRESS.toLowerCase() && policy.transaction.valueWei === '0' && policy.transaction.data === '0x4300a4e6' && (!input.walletScope || input.walletScope.every((wallet) => policy.transaction.from.some((address) => address.toLowerCase() === wallet.toLowerCase()))));
+  if (matches.length > 1) throw new Error('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
+  return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
+}
+
 export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean; acceptPersonalLiveLocalCustody?: boolean; /** Host service only (D-058/D-059): builds the compensated-profile wiring once the store is open. The owner's CLI never passes it. */ coordinatorAssurance?: (store: CanonicalStoreBridge) => Promise<CoordinatorAssuranceWiring> } = {}): Promise<CliRuntime> {
   const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
   const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
@@ -128,7 +136,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     // The bounded family is the fast path: `/prepare` binds the campaign to
     // one already-approved record and the signer performs the exact contract
     // and fee-recipient checks from the live drop at signing time.
-    const family = selectTurnkeyRobinhoodFamilyPolicy(records, input);
+    const family = selectTurnkeyAllowlistFamilyPolicy(records, input) ?? selectTurnkeyRobinhoodFamilyPolicy(records, input);
     if (family) return { provider: 'turnkey' as const, ...family };
     const chain = await resolveChainConfigFromSecrets(input.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
     if (!chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, readFile, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { readProtectedText } from './turnkey-files.js';
 import {
   COMPENSATING_CONTROL_IDS,
   computeWalletSetDigest,
@@ -127,4 +128,25 @@ export function renderCompensatingStatus(results: readonly ControlResult[]): str
 export function evaluateStatus(evidence: CompensatingControlsEvidence | undefined, config: CompensatingAssuranceConfig, now = new Date()): { results: ControlResult[]; text: string; valid: boolean } {
   const results = evaluateCompensatingControls(evidence, config, now);
   return { results, text: renderCompensatingStatus(results), valid: results.every((result) => result.ok) };
+}
+
+
+/** Per-policy rehearsal files prevent a new family from overwriting another policy's assurance. */
+export function rehearsalFileName(recordDigest: string): string {
+  if (!/^sha256:[a-f0-9]{64}$/.test(recordDigest)) throw new Error('TURNKEY_REHEARSAL_DIGEST_INVALID');
+  return `turnkey-signing-rehearsal-${recordDigest.slice(7)}.json`;
+}
+
+
+/** Refuse to overwrite another policy's evidence, a malformed file, or a protected non-evidence artifact. */
+export async function assertRehearsalOutputSafe(path: string, digest: string): Promise<void> {
+  const expected = rehearsalFileName(digest);
+  const name = basename(path);
+  if (name !== expected) throw new Error('TURNKEY_REHEARSAL_OUTPUT_CONFLICT');
+  const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw new Error('TURNKEY_REHEARSAL_OUTPUT_CONFLICT'); });
+  if (!entry) return;
+  try {
+    const evidence = parseRehearsalEvidence(JSON.parse(await readProtectedText(path, 'TURNKEY_REHEARSAL_OUTPUT_CONFLICT', true)));
+    if (evidence.policyRecordDigest !== digest) throw new Error('TURNKEY_REHEARSAL_OUTPUT_CONFLICT');
+  } catch { throw new Error('TURNKEY_REHEARSAL_OUTPUT_CONFLICT'); }
 }

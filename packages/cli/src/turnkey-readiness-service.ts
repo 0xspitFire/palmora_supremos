@@ -1,5 +1,7 @@
+import { rehearsalFileName } from './compensating-controls-cli.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createPublicClient, type Address } from 'viem';
 import { RuntimeReadinessService, type AssuranceRun, type CompensatingAssuranceConfig, type CanonicalStoreBridge, type CustodyPolicyBinding } from '@mint-bot/backend';
@@ -42,6 +44,13 @@ async function readJsonIfPresent(path: string): Promise<unknown | undefined> {
   try { return JSON.parse(await readProtectedText(path, 'TURNKEY_ARTIFACT_PERMISSIONS_REQUIRED', true)) as unknown; } catch { return undefined; }
 }
 
+/** Prefer evidence bound to the selected policy; the legacy single-file path remains compatible. */
+export async function readRehearsalForPolicy(root: string, digest: string): Promise<unknown | undefined> {
+  const named = join(root, rehearsalFileName(digest));
+  const exists = await lstat(named).then(() => true).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error; });
+  return readJsonIfPresent(exists ? named : join(root, 'turnkey-signing-rehearsal.json'));
+}
+
 export async function createServiceAssurance(store: CanonicalStoreBridge, inputs: ServiceReadinessInputs): Promise<CoordinatorAssuranceWiring> {
   const now = inputs.now ?? (() => new Date());
   const killSwitchEngaged = async (): Promise<boolean> => existsSync(inputs.killSwitchPath) || store.snapshot().killed;
@@ -72,7 +81,7 @@ export async function createServiceAssurance(store: CanonicalStoreBridge, inputs
       if (!signed) throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
       return { signed, publicKey };
     },
-    readOptional: () => readJsonIfPresent(join(inputs.secretRoot, 'turnkey-signing-rehearsal.json')),
+    readOptional: (_name, digest) => readRehearsalForPolicy(inputs.secretRoot, digest),
     lockfileDigest: () => lockfileDigest(inputs.projectRoot),
     createSigner: async () => {
       const signer = await TurnkeySigner.fromSecrets('mainnet', inputs.secretRoot, policyReference, recordDigest);

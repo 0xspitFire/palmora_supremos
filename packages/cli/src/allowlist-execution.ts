@@ -20,7 +20,9 @@ export async function simulateAllowlistCampaign(input: { campaign: Campaign; wal
   for (const wallet of input.wallets) {
     try {
       const data = strategy.buildCalldata(drop, wallet as Address, c.quantity);
-      if (data !== policies[0]!.enforcementPolicy.transaction.data) throw new Error('ALLOWLIST_SIGNED_WALLET_CALL_REQUIRED');
+      const policy = policies[0]!.enforcementPolicy;
+      const family = policy.family?.kind === 'seadrop-free-allowlist-v1' && policy.transaction.chainId === c.chainId && policy.transaction.valueWei === '0' && c.mintPriceWei === 0n && c.quantity <= policy.family.maxQuantity && policy.transaction.from.some((address) => address.toLowerCase() === wallet.toLowerCase());
+      if (!family && data !== policy.transaction.data) throw new Error('ALLOWLIST_SIGNED_WALLET_CALL_REQUIRED');
       await input.client.call({ account: wallet as Address, to: drop.extra?.['seaDropAddress'] as Address, data, value: c.mintPriceWei * BigInt(c.quantity), blockNumber: block.number });
       recorded.push(wallet.toLowerCase());
     } catch { skipped.push({ wallet, why: 'Own-wallet proof or simulation did not pass.' }); }

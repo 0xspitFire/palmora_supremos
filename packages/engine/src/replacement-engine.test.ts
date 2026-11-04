@@ -37,7 +37,7 @@ function config(opts: { replacement?: boolean; bumps?: number } = {}): MintJobCo
   } as unknown as MintJobConfig;
 }
 
-function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => boolean; nonceOnChain?: () => number; broadcastOutcome?: (call: number) => 'accepted' | 'rejected'; receiptReadError?: boolean; persistAttemptFails?: (id: string) => boolean; reconfirmRefuses?: () => boolean; noReconfirm?: boolean } = {}) {
+function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => boolean; nonceOnChain?: () => number; broadcastOutcome?: (call: number) => 'accepted' | 'rejected'; receiptReadError?: boolean; persistAttemptFails?: (id: string) => boolean; reconfirmRefuses?: () => boolean; reconfirmError?: () => string | undefined; noReconfirm?: boolean; beforeAllowlistGuard?: () => Promise<void> } = {}) {
   const log: string[] = [];
   const signed: Hex[] = [];
   const intents: TransactionIntent[] = [];
@@ -57,6 +57,7 @@ function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => 
       const call = signed.length;
       log.push(`sign:${call}`);
       if (behaviour.signError?.(call)) throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
+      if (behaviour.beforeAllowlistGuard) { await behaviour.beforeAllowlistGuard(); await intent.familyContext?.assertReady?.(); }
       intents.push(intent);
       const tx = await account.signTransaction({ type: 'eip1559', chainId: intent.chainId, to: intent.to, value: intent.value, data: intent.data, nonce: intent.nonce, gas: intent.gasLimit, maxFeePerGas: intent.maxFeePerGas, maxPriorityFeePerGas: intent.maxPriorityFeePerGas });
       signed.push(tx);
@@ -107,7 +108,7 @@ function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => 
   const reservationProvider = {
     durable: true as const,
     storeKind: 'normalized-sqlite' as const,
-    ...(behaviour.noReconfirm ? {} : { reconfirm: async () => { log.push('reconfirm'); if (behaviour.reconfirmRefuses?.()) throw new Error('CHAIN_ENABLEMENT_NOT_CURRENT'); } }),
+    ...(behaviour.noReconfirm ? {} : { reconfirm: async () => { log.push('reconfirm'); const reason = behaviour.reconfirmError?.(); if (reason) throw new Error(reason); if (behaviour.reconfirmRefuses?.()) throw new Error('CHAIN_ENABLEMENT_NOT_CURRENT'); } }),
     reserve: async (request: { maxGasCostWei: bigint; l2ExecutionGasWei: bigint; priorityFeeComponentWei: bigint }) => {
       log.push('reserve');
       reservations.push(request);
@@ -122,7 +123,7 @@ function harness(cfg: MintJobConfig, behaviour: { signError?: (call: number) => 
     for (const resolve of waiters.get(hash.toLowerCase()) ?? []) resolve(receipt);
   };
   const run = (): Promise<WalletMintResult[]> => (engine as unknown as { executeFleet: (...args: unknown[]) => Promise<WalletMintResult[]> }).executeFleet(
-    'run-t094', [0], signer, publicClient, fakeStrategy, baseDrop(), broadcaster, nonceManager, receiptWatcher, 4663,
+    'run-t094', [0], signer, publicClient, fakeStrategy, behaviour.beforeAllowlistGuard ? dropOnChain : baseDrop(), broadcaster, nonceManager, receiptWatcher, 4663,
     new Map([[0, GAS_LIMIT]]), new Map([[0, { walletIndex: 0, address: account.address, sourceBlock: 1n, checkedAt: new Date(Date.now()), success: true }]]),
     (engine as unknown as { logger: unknown }).logger,
   );
@@ -430,5 +431,42 @@ describe('D-081 delayed lane guards through the real engine flow', () => {
     await tick(500);
     expect((await running)[0]).toMatchObject({ status: 'skipped', error: expect.stringContaining('CAMPAIGN_CHANGED_MID_RUN') });
     expect(h.signed).toHaveLength(0); expect(h.reservations).toHaveLength(0); expect(h.broadcastCount()).toBe(0);
+  });
+});
+
+
+describe('allowlist post-authority canonical recheck', () => {
+  it.each(['RESERVATION_RELEASED', 'KILL_SWITCH_ENGAGED', 'CHAIN_ENABLEMENT_NOT_CURRENT'])('does not sign when %s occurs while authority is read', async (reason) => {
+    let revoked = false;
+    dropOnChain = { ...baseDrop(), strategyName: 'seadrop-v1-allowlist', extra: { ...baseDrop().extra, walletProofs: [{ wallet: account.address }] } };
+    const h = harness(config({ replacement: false, bumps: 0 }), { beforeAllowlistGuard: async () => { revoked = true; }, reconfirmError: () => revoked ? reason : undefined });
+    const running = h.run();
+    await tick(100);
+    const [result] = await running;
+    expect(h.log).toContain('reconfirm');
+    expect(h.signed).toHaveLength(0);
+    expect(h.broadcastCount()).toBe(0);
+    expect(result?.status).not.toBe('submitted');
+  });
+  it('preserves the proof readiness gate for a later replacement when replacement is explicitly enabled', async () => {
+    dropOnChain = { ...baseDrop(), strategyName: 'seadrop-v1-allowlist', extra: { ...baseDrop().extra, walletProofs: [{ wallet: account.address }] } };
+    const h = harness(config(), { beforeAllowlistGuard: async () => undefined });
+    const running = h.run();
+    await tick(9_500);
+    expect(h.signed).toHaveLength(2);
+    expect(h.intents[1]?.familyContext?.allowlistProof).toBeDefined();
+    expect(h.log.filter((item) => item === 'reconfirm').length).toBeGreaterThanOrEqual(3);
+    h.mine(h.hashOf(1));
+    await tick(1_500);
+    await running;
+  });
+  it('fails closed when the canonical provider cannot reconfirm after the authority wait', async () => {
+    dropOnChain = { ...baseDrop(), strategyName: 'seadrop-v1-allowlist', extra: { ...baseDrop().extra, walletProofs: [{ wallet: account.address }] } };
+    const h = harness(config({ replacement: false, bumps: 0 }), { beforeAllowlistGuard: async () => undefined, noReconfirm: true });
+    const running = h.run();
+    await tick(100);
+    await running;
+    expect(h.signed).toHaveLength(0);
+    expect(h.broadcastCount()).toBe(0);
   });
 });

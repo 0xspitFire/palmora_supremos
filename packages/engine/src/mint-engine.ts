@@ -718,6 +718,7 @@ export class MintEngine {
       let submissionAttemptId: string | undefined;
       let executionId: string | undefined;
       let transactionIntentId: string | undefined;
+      let allowlistSigningContext: TransactionIntent['familyContext'];
       // T-094: filled only when a wallet has more than one attempt for its nonce.
       const attemptHashes: Record<string, import('viem').Hash> = {};
       const attemptReplacements: Record<string, string> = {};
@@ -830,7 +831,7 @@ export class MintEngine {
           campaignId: this.config.target.campaignId,
           runId,
           policyRef: this.config.target.policyRef ?? 'phase-1',
-          ...(chainId === 4663 ? { familyContext: { nftContract: drop.nftContract, feeRecipient: drop.feePayer } } : {}),
+          ...(chainId === 4663 || drop.strategyName === 'seadrop-v1-allowlist' ? { familyContext: { nftContract: drop.nftContract, feeRecipient: drop.feePayer } } : {}),
         };
         if (!this.config.safety.dryRun) {
           assertSimulationFresh(
@@ -890,7 +891,23 @@ export class MintEngine {
           intent,
           request: reserveRequest,
           reserve: () => reservationProvider.reserve(reserveRequest),
-          sign: () => signer.signTransaction(walletIndex, intent),
+          sign: () => {
+            if (drop.strategyName !== 'seadrop-v1-allowlist') return signer.signTransaction(walletIndex, intent);
+            const proofs = drop.extra?.['walletProofs'] as readonly import('./allowlist-authority.js').VerifiedWalletProof[] | undefined;
+            const proof = proofs?.find((entry) => entry.wallet.toLowerCase() === walletAddress.toLowerCase());
+            if (!proof) throw new Error('ALLOWLIST_OWN_WALLET_PROOF_REQUIRED');
+            allowlistSigningContext = {
+              nftContract: drop.nftContract, feeRecipient: drop.feePayer, allowlistProof: proof,
+              assertReady: async () => {
+                if (!reservationProvider.reconfirm) throw new Error('TURNKEY_ALLOWLIST_RESERVATION_RECHECK_REQUIRED');
+                await reservationProvider.reconfirm(reserveRequest);
+                this.checkKill();
+                assertSimulationFresh(simulation, this.now(), this.config.timing.simulationFreshnessMs ?? 120_000);
+                assertDirectChainExecutionPolicy(chainId, value, this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
+              },
+            };
+            return signer.signTransaction(walletIndex, { ...intent, familyContext: allowlistSigningContext });
+          },
           checkKill: () => this.checkKill(),
           ...(replacement ? { reservedMaxFeePerGas: replacement.ceiling.maxFeePerGas } : {}),
           // Set at once so the catch block below releases the reservation if the kill switch, the signer or the
@@ -1054,7 +1071,7 @@ export class MintEngine {
                 await this.reservationProvider?.reconfirm?.(reserveRequest);
                 if (next.maxFeePerGas > replacement.ceiling.maxFeePerGas || next.maxPriorityFeePerGas > replacement.ceiling.maxPriorityFeePerGas) throw new Error('REPLACEMENT_ABOVE_CEILING');
                 // Only the fees differ from the checked, reserved transaction: calldata, value, gas limit, nonce and sender are the same.
-                const replacementIntent: TransactionIntent = { ...intent, maxFeePerGas: next.maxFeePerGas, maxPriorityFeePerGas: next.maxPriorityFeePerGas };
+                const replacementIntent: TransactionIntent = { ...intent, maxFeePerGas: next.maxFeePerGas, maxPriorityFeePerGas: next.maxPriorityFeePerGas, ...(allowlistSigningContext ? { familyContext: allowlistSigningContext } : {}) };
                 const replacementSigned = await signer.signTransaction(walletIndex, replacementIntent);
                 this.checkKill();
                 await assertSignedMatchesIntent(replacementSigned, replacementIntent);

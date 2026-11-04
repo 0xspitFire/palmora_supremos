@@ -124,13 +124,14 @@ export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consen
   };
   const list = (values: readonly string[]): string => `[${[...values].sort().map(quote).join(', ')}]`;
   const tx = policy.transaction;
-  const dataCondition = policy.family?.kind === 'robinhood-seadrop-public-v1'
+  const dataCondition = policy.family !== undefined
     ? [
       `eth.tx.data[0..10] == ${quote(tx.data.toLowerCase())}`,
       "eth.tx.data[138..202] == '0000000000000000000000000000000000000000000000000000000000000000'",
       // Keep the quantity bound exact without relying on hex_to_uint(), which
       // is not accepted by all Turnkey policy parsers.
       `eth.tx.data[202..266] in ${list(Array.from({ length: policy.family.maxQuantity }, (_, index) => (index + 1).toString(16).padStart(64, '0')))}`,
+      ...(policy.family.kind === 'seadrop-free-allowlist-v1' ? ["eth.tx.data[266..330] == '0000000000000000000000000000000000000000000000000000000000000000'"] : []),
     ].join(' && ')
     : `eth.tx.data == ${quote(tx.data.toLowerCase())}`;
   return {

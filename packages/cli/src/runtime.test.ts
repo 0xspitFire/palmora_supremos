@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, type SpendAlertSink } from './runtime.js';
+import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, selectTurnkeyAllowlistFamilyPolicy, type SpendAlertSink } from './runtime.js';
 import { PERSONAL_LIVE_FLEET_POLICY, type EngineAdapter } from '@mint-bot/backend';
 import { createTurnkeyPolicyRecord, turnkeyProviderPolicyExpressions, SEADROP_V1_ADDRESS, type TurnkeyPolicyAst } from '@mint-bot/engine';
 import type { Address, Hex } from 'viem';
@@ -9,13 +9,13 @@ import type { Address, Hex } from 'viem';
 const FAMILY_WALLET = '0x1111111111111111111111111111111111111111' as Address;
 const FAMILY_KEY = 'key-family';
 
-function familyRecord(maxQuantity = 4, policyId = 'policy-family') {
+function familyRecord(maxQuantity = 4, policyId = 'policy-family', allowlist = false) {
   const policy: TurnkeyPolicyAst = {
     version: 1,
     effect: 'allow',
     scope: { provider: 'turnkey', environment: 'production', organizationId: 'org', userId: 'runtime', policyId, keyIds: [FAMILY_KEY] },
-    transaction: { chainId: 4663, from: [FAMILY_WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: '0x161ac21f' as Hex, gasLimitMax: '500000', maxFeePerGasMax: '200000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
-    family: { kind: 'robinhood-seadrop-public-v1', maxQuantity },
+    transaction: { chainId: 4663, from: [FAMILY_WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: (allowlist ? '0x4300a4e6' : '0x161ac21f') as Hex, gasLimitMax: '500000', maxFeePerGasMax: '200000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
+    family: { kind: allowlist ? 'seadrop-free-allowlist-v1' : 'robinhood-seadrop-public-v1', maxQuantity },
   };
   const expressions = turnkeyProviderPolicyExpressions(policy);
   return createTurnkeyPolicyRecord({
@@ -109,5 +109,20 @@ describe('local key file custody option (D-043)', () => {
     expect(personalLiveLocalCustodyAllowed(false, false)).toBe(false);
     expect(personalLiveLocalCustodyAllowed(undefined, false)).toBe(false);
     expect(personalLiveLocalCustodyAllowed(undefined, true)).toBe(false);
+  });
+});
+
+
+describe('free allowlist family selection', () => {
+  const record = () => familyRecord(4, 'policy-family', true);
+  const input = { chainId: 4663 as const, strategy: 'seadrop-v1-allowlist', quantity: 1, mintPriceWei: 0n, walletScope: [FAMILY_WALLET] };
+  it('selects the signed family only for the matching free chain, quantity and wallet scope', () => {
+    expect(selectTurnkeyAllowlistFamilyPolicy([record()], input)).toBeDefined();
+    expect(selectTurnkeyAllowlistFamilyPolicy([record()], { ...input, mintPriceWei: 1n })).toBeUndefined();
+    expect(selectTurnkeyAllowlistFamilyPolicy([record()], { ...input, mintPriceWei: undefined })).toBeUndefined();
+    expect(selectTurnkeyAllowlistFamilyPolicy([record()], { ...input, chainId: 1 })).toBeUndefined();
+    expect(selectTurnkeyAllowlistFamilyPolicy([record()], { ...input, quantity: 5 })).toBeUndefined();
+    expect(selectTurnkeyAllowlistFamilyPolicy([record()], { ...input, walletScope: ['0x2222222222222222222222222222222222222222'] })).toBeUndefined();
+    expect(selectTurnkeyAllowlistFamilyPolicy([familyRecord()], input)).toBeUndefined();
   });
 });

@@ -3,6 +3,8 @@ import { lstat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import {
+  keccak256,
+  zeroAddress,
   parseTransaction,
   recoverTransactionAddress,
   serializeTransaction,
@@ -32,6 +34,9 @@ import {
   type TurnkeyPolicyAst,
   type TurnkeyProviderBinding,
 } from './turnkey-policy.js';
+import { allowlistLeaf } from './allowlist.js';
+import { buildAllowlistMint, type VerifiedWalletProof } from './allowlist-authority.js';
+import { verifyTurnkeyAllowlistAuthority } from './turnkey-allowlist-authority.js';
 import { validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
 
 export interface TurnkeyWalletReference {
@@ -134,6 +139,7 @@ export interface TurnkeySignerOptions {
   approvedPolicyRecords?: readonly TurnkeyCanonicalPolicyRecord[];
   client: TurnkeySignerClient;
   generateAppProofs?: boolean;
+  verifyAllowlistAuthority?: (intent: TransactionIntent) => Promise<void>;
 }
 
 export interface TurnkeyHealthReport {
@@ -388,6 +394,7 @@ export class TurnkeySigner implements Signer {
   private readonly policyExpiresAt: number;
   private readonly wallets: TurnkeyWalletReference[];
   private readonly generateAppProofs: boolean;
+  private readonly verifyAllowlistAuthority?: (intent: TransactionIntent) => Promise<void>;
 
   public constructor(options: TurnkeySignerOptions) {
     if (!options.organizationId) throw new Error('TURNKEY_ORGANIZATION_REQUIRED');
@@ -418,6 +425,7 @@ export class TurnkeySigner implements Signer {
     this.wallets = options.wallets.map((wallet) => ({ ...wallet }));
     this.client = options.client;
     this.generateAppProofs = options.generateAppProofs ?? true;
+    this.verifyAllowlistAuthority = options.verifyAllowlistAuthority;
   }
 
   public static async fromSecrets(scope: SecretScope = 'mainnet', root = 'Rets', policyReference?: string, recordDigest?: string): Promise<TurnkeySigner> {
@@ -465,6 +473,7 @@ export class TurnkeySigner implements Signer {
       policyRecord: record,
       ...(approvedPolicyRecords ? { approvedPolicyRecords } : {}),
       client: createTurnkeyClient(organizationId, apiPublicKey, apiPrivateKey),
+      verifyAllowlistAuthority: (intent) => verifyTurnkeyAllowlistAuthority(intent, scope, root),
     });
   }
 
@@ -484,6 +493,23 @@ export class TurnkeySigner implements Signer {
   }
 
   public async signTransactionWithEvidence(walletIndex: number, intent: TransactionIntent): Promise<{ signedTransaction: Hex; evidence: TurnkeySigningEvidence }> {
+    return this.signWithEvidence(walletIndex, intent, false);
+  }
+
+  /** Zero-gas, impossible-to-broadcast policy-only rehearsal; it never returns signed bytes. */
+  public async rehearseFreeAllowlist(walletIndex: number, assertStopped: () => Promise<void>): Promise<{ signedTransactionHash: Hex; evidence: TurnkeySigningEvidence }> {
+    if (this.policy.family?.kind !== 'seadrop-free-allowlist-v1') throw new Error('TURNKEY_ALLOWLIST_REHEARSAL_POLICY_REQUIRED');
+    const wallet = this.wallets.find((item) => item.index === walletIndex);
+    if (!wallet) throw new Error('TURNKEY_WALLET_NOT_FOUND');
+    await assertStopped();
+    const params = { mintPrice: 0n, maxTotalMintableByWallet: 1n, startTime: 1n, endTime: 7_258_118_400n, dropStageIndex: 1n, maxTokenSupplyForStage: 1n, feeBps: 0n, restrictFeeRecipients: false };
+    const proof: VerifiedWalletProof = { wallet: wallet.address, mintParams: params, proof: [], source: { chainId: this.policy.transaction.chainId, nftContract: zeroAddress, stageIndex: '1', sourceId: 'rehearsal', contentDigest: `sha256:${'0'.repeat(64)}` }, authority: { chainId: this.policy.transaction.chainId, nftContract: zeroAddress, seaDrop: this.policy.transaction.to, root: allowlistLeaf(wallet.address, params), blockNumber: 0n, blockHash: `0x${'0'.repeat(64)}` as Hex, observedAt: new Date().toISOString(), feeRecipient: zeroAddress } };
+    const data = buildAllowlistMint(proof, wallet.address, 1).data;
+    const result = await this.signWithEvidence(walletIndex, { chainId: this.policy.transaction.chainId, nonce: Number.MAX_SAFE_INTEGER, from: wallet.address, to: this.policy.transaction.to, value: 0n, data, gasLimit: 0n, maxFeePerGas: 0n, maxPriorityFeePerGas: 0n, accessList: [], campaignId: 'rehearsal', runId: 'rehearsal', policyRef: this.policyReference(), familyContext: { nftContract: zeroAddress, feeRecipient: zeroAddress, allowlistProof: proof, assertReady: assertStopped } }, true);
+    return { signedTransactionHash: keccak256(result.signedTransaction), evidence: result.evidence };
+  }
+
+  private async signWithEvidence(walletIndex: number, intent: TransactionIntent, rehearsal: boolean): Promise<{ signedTransaction: Hex; evidence: TurnkeySigningEvidence }> {
     this.assertPolicyCurrent();
     const client = this.client;
     const wallet = this.wallets.find((candidate) => candidate.index === walletIndex);
@@ -493,6 +519,18 @@ export class TurnkeySigner implements Signer {
     const expectedPolicyRef = turnkeyPolicyRef(this.policyId, this.policyDigest);
     if (intent.policyRef !== expectedPolicyRef) throw new Error('TURNKEY_POLICY_REFERENCE_MISMATCH');
     validateTransactionIntent(intent, this.policy, expectedPolicyRef);
+    if (this.policy.family?.kind === 'seadrop-free-allowlist-v1') {
+      if (!intent.familyContext?.assertReady) throw new Error('TURNKEY_ALLOWLIST_AUTHORITY_REQUIRED');
+      if (rehearsal) {
+        if (intent.gasLimit !== 0n || intent.value !== 0n || intent.maxFeePerGas !== 0n || intent.maxPriorityFeePerGas !== 0n || intent.nonce !== Number.MAX_SAFE_INTEGER || intent.familyContext.nftContract !== zeroAddress || intent.familyContext.feeRecipient !== zeroAddress) throw new Error('TURNKEY_ALLOWLIST_REHEARSAL_UNSAFE');
+      } else {
+        if (!this.verifyAllowlistAuthority) throw new Error('TURNKEY_ALLOWLIST_AUTHORITY_REQUIRED');
+        await this.verifyAllowlistAuthority(intent);
+      }
+      await intent.familyContext.assertReady();
+      this.assertPolicyCurrent();
+      validateTransactionIntent(intent, this.policy, expectedPolicyRef);
+    }
 
     const unsignedTransaction = serializeTransaction({
       type: 'eip1559',
