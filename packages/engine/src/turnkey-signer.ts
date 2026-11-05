@@ -8,6 +8,8 @@ import {
   parseTransaction,
   recoverTransactionAddress,
   serializeTransaction,
+  encodeFunctionData,
+  parseAbi,
   type Address,
   type Hex,
   type TransactionSerialized,
@@ -37,6 +39,7 @@ import {
 import { allowlistLeaf } from './allowlist.js';
 import { buildAllowlistMint, type VerifiedWalletProof } from './allowlist-authority.js';
 import { verifyTurnkeyAllowlistAuthority } from './turnkey-allowlist-authority.js';
+import { verifyTurnkeyPublicAuthority } from './turnkey-public-authority.js';
 import { validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
 
 export interface TurnkeyWalletReference {
@@ -140,6 +143,7 @@ export interface TurnkeySignerOptions {
   client: TurnkeySignerClient;
   generateAppProofs?: boolean;
   verifyAllowlistAuthority?: (intent: TransactionIntent) => Promise<void>;
+  verifyPublicAuthority?: (intent: TransactionIntent) => Promise<void>;
 }
 
 export interface TurnkeyHealthReport {
@@ -395,6 +399,7 @@ export class TurnkeySigner implements Signer {
   private readonly wallets: TurnkeyWalletReference[];
   private readonly generateAppProofs: boolean;
   private readonly verifyAllowlistAuthority?: (intent: TransactionIntent) => Promise<void>;
+  private readonly verifyPublicAuthority?: (intent: TransactionIntent) => Promise<void>;
 
   public constructor(options: TurnkeySignerOptions) {
     if (!options.organizationId) throw new Error('TURNKEY_ORGANIZATION_REQUIRED');
@@ -426,6 +431,7 @@ export class TurnkeySigner implements Signer {
     this.client = options.client;
     this.generateAppProofs = options.generateAppProofs ?? true;
     this.verifyAllowlistAuthority = options.verifyAllowlistAuthority;
+    this.verifyPublicAuthority = options.verifyPublicAuthority;
   }
 
   public static async fromSecrets(scope: SecretScope = 'mainnet', root = 'Rets', policyReference?: string, recordDigest?: string): Promise<TurnkeySigner> {
@@ -474,6 +480,7 @@ export class TurnkeySigner implements Signer {
       ...(approvedPolicyRecords ? { approvedPolicyRecords } : {}),
       client: createTurnkeyClient(organizationId, apiPublicKey, apiPrivateKey),
       verifyAllowlistAuthority: (intent) => verifyTurnkeyAllowlistAuthority(intent, scope, root),
+      verifyPublicAuthority: (intent) => verifyTurnkeyPublicAuthority(intent, scope, root),
     });
   }
 
@@ -509,6 +516,17 @@ export class TurnkeySigner implements Signer {
     return { signedTransactionHash: keccak256(result.signedTransaction), evidence: result.evidence };
   }
 
+  /** Policy-only public rehearsal: zero gas, maximum nonce, no real collection or returned signed bytes. */
+  public async rehearseFreePublic(walletIndex: number, assertStopped: () => Promise<void>): Promise<{ signedTransactionHash: Hex; evidence: TurnkeySigningEvidence }> {
+    if (this.policy.family?.kind !== 'seadrop-free-public-v1') throw new Error('TURNKEY_PUBLIC_REHEARSAL_POLICY_REQUIRED');
+    const wallet = this.wallets.find((item) => item.index === walletIndex);
+    if (!wallet) throw new Error('TURNKEY_WALLET_NOT_FOUND');
+    await assertStopped();
+    const data = encodeFunctionData({ abi: parseAbi(['function mintPublic(address,address,address,uint256)']), functionName: 'mintPublic', args: [zeroAddress, zeroAddress, zeroAddress, 1n] });
+    const result = await this.signWithEvidence(walletIndex, { chainId: this.policy.transaction.chainId, nonce: Number.MAX_SAFE_INTEGER, from: wallet.address, to: this.policy.transaction.to, value: 0n, data, gasLimit: 0n, maxFeePerGas: 0n, maxPriorityFeePerGas: 0n, accessList: [], campaignId: 'rehearsal', runId: 'rehearsal', policyRef: this.policyReference(), familyContext: { nftContract: zeroAddress, feeRecipient: zeroAddress, assertReady: assertStopped } }, true);
+    return { signedTransactionHash: keccak256(result.signedTransaction), evidence: result.evidence };
+  }
+
   private async signWithEvidence(walletIndex: number, intent: TransactionIntent, rehearsal: boolean): Promise<{ signedTransaction: Hex; evidence: TurnkeySigningEvidence }> {
     this.assertPolicyCurrent();
     const client = this.client;
@@ -519,6 +537,18 @@ export class TurnkeySigner implements Signer {
     const expectedPolicyRef = turnkeyPolicyRef(this.policyId, this.policyDigest);
     if (intent.policyRef !== expectedPolicyRef) throw new Error('TURNKEY_POLICY_REFERENCE_MISMATCH');
     validateTransactionIntent(intent, this.policy, expectedPolicyRef);
+    if (this.policy.family?.kind === 'seadrop-free-public-v1') {
+      if (!intent.campaignId || !intent.runId || !intent.familyContext?.assertReady) throw new Error('TURNKEY_PUBLIC_AUTHORITY_REQUIRED');
+      if (rehearsal) {
+        if (intent.gasLimit !== 0n || intent.value !== 0n || intent.maxFeePerGas !== 0n || intent.maxPriorityFeePerGas !== 0n || intent.nonce !== Number.MAX_SAFE_INTEGER || intent.familyContext.nftContract !== zeroAddress || intent.familyContext.feeRecipient !== zeroAddress) throw new Error('TURNKEY_PUBLIC_REHEARSAL_UNSAFE');
+      } else {
+        if (intent.gasLimit <= 0n || intent.maxFeePerGas <= 0n || intent.familyContext.nftContract === zeroAddress || !this.verifyPublicAuthority) throw new Error('TURNKEY_PUBLIC_AUTHORITY_REQUIRED');
+        await this.verifyPublicAuthority(intent);
+      }
+      await intent.familyContext.assertReady();
+      this.assertPolicyCurrent();
+      validateTransactionIntent(intent, this.policy, expectedPolicyRef);
+    }
     if (this.policy.family?.kind === 'seadrop-free-allowlist-v1') {
       if (!intent.familyContext?.assertReady) throw new Error('TURNKEY_ALLOWLIST_AUTHORITY_REQUIRED');
       if (rehearsal) {

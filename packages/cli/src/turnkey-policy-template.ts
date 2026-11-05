@@ -13,6 +13,7 @@ export interface RobinhoodTurnkeyPolicyInput {
   feeRecipient: Address;
   policyFamily?: boolean;
   allowlistFamily?: boolean;
+  publicFamily?: boolean;
   chainId?: 1 | 8453 | 4663;
   quantity: number;
   gasLimitMax: string;
@@ -23,11 +24,11 @@ export interface RobinhoodTurnkeyPolicyInput {
 /** Creates the exact policy or the approved bounded Robinhood policy family. */
 export function robinhoodTurnkeyPolicy(input: RobinhoodTurnkeyPolicyInput) {
   if (!Number.isSafeInteger(input.quantity) || input.quantity < 1 || input.quantity > 15 || !/^(?:0|[1-9]\d*)$/.test(input.gasLimitMax)) throw new Error('TURNKEY_ROBINHOOD_POLICY_LIMIT_INVALID');
-  if (input.allowlistFamily && input.policyFamily || input.chainId !== undefined && ![1, 8453, 4663].includes(input.chainId) || !input.allowlistFamily && input.chainId !== undefined && input.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  if ([input.allowlistFamily, input.policyFamily, input.publicFamily].filter(Boolean).length > 1 || input.chainId !== undefined && ![1, 8453, 4663].includes(input.chainId) || !(input.allowlistFamily || input.publicFamily) && input.chainId !== undefined && input.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
   const maxFee = parseGwei(input.maxFeePerGasGwei);
   const priorityFee = parseGwei(input.maxPriorityFeePerGasGwei);
   if (maxFee <= 0n || priorityFee < 0n || priorityFee > maxFee) throw new Error('TURNKEY_ROBINHOOD_POLICY_FEE_INVALID');
-  const data = input.allowlistFamily ? '0x4300a4e6' as Hex : input.policyFamily
+  const data = input.allowlistFamily ? '0x4300a4e6' as Hex : input.policyFamily || input.publicFamily
     ? '0x161ac21f' as Hex
     : encodeFunctionData({ abi: ABI, functionName: 'mintPublic', args: [input.nftContract, input.feeRecipient, zeroAddress, BigInt(input.quantity)] });
   return validateTurnkeyPolicyAst({
@@ -42,7 +43,7 @@ export function robinhoodTurnkeyPolicy(input: RobinhoodTurnkeyPolicyInput) {
       keyIds: input.wallets.map((wallet) => wallet.signWith),
     },
     transaction: {
-      chainId: input.allowlistFamily ? input.chainId ?? 4663 : 4663,
+      chainId: input.allowlistFamily || input.publicFamily ? input.chainId ?? 4663 : 4663,
       from: input.wallets.map((wallet) => wallet.address),
       to: SEADROP_V1_ADDRESS,
       valueWei: '0',
@@ -52,6 +53,6 @@ export function robinhoodTurnkeyPolicy(input: RobinhoodTurnkeyPolicyInput) {
       maxPriorityFeePerGasMax: priorityFee.toString(),
       accessList: [],
     },
-    ...(input.allowlistFamily ? { family: { kind: 'seadrop-free-allowlist-v1' as const, maxQuantity: input.quantity } } : input.policyFamily ? { family: { kind: 'robinhood-seadrop-public-v1' as const, maxQuantity: input.quantity } } : {}),
+    ...(input.allowlistFamily ? { family: { kind: 'seadrop-free-allowlist-v1' as const, maxQuantity: input.quantity } } : input.publicFamily ? { family: { kind: 'seadrop-free-public-v1' as const, maxQuantity: input.quantity } } : input.policyFamily ? { family: { kind: 'robinhood-seadrop-public-v1' as const, maxQuantity: input.quantity } } : {}),
   });
 }

@@ -229,7 +229,7 @@ export interface TransactionIntent {
   readonly policyRef?: string;
   readonly evidenceRef?: string;
   /**
-   * Local context for the bounded Robinhood policy family. These addresses are
+   * Local context for bounded SeaDrop policy families. These addresses are
    * checked against the encoded calldata before a provider signing request;
    * they are deliberately not part of the provider policy family itself.
    */

@@ -470,3 +470,26 @@ describe('allowlist post-authority canonical recheck', () => {
     expect(h.broadcastCount()).toBe(0);
   });
 });
+
+describe('public-family post-authority canonical recheck', () => {
+  it.each(['RESERVATION_RELEASED', 'KILL_SWITCH_ENGAGED', 'CHAIN_ENABLEMENT_NOT_CURRENT'])('does not sign when %s occurs during public authority reads', async (reason) => {
+    let revoked = false;
+    dropOnChain = { ...baseDrop(), strategyName: 'seadrop-v1-public' };
+    const h = harness(config({ replacement: false, bumps: 0 }), { beforeAllowlistGuard: async () => { revoked = true; }, reconfirmError: () => revoked ? reason : undefined });
+    const running = h.run();
+    await tick(100);
+    await running;
+    expect(h.log).toContain('reconfirm');
+    expect(h.signed).toHaveLength(0);
+    expect(h.broadcastCount()).toBe(0);
+  });
+  it('refuses when the canonical provider lacks the post-authority reconfirmation hook', async () => {
+    dropOnChain = { ...baseDrop(), strategyName: 'seadrop-v1-public' };
+    const h = harness(config({ replacement: false, bumps: 0 }), { beforeAllowlistGuard: async () => undefined, noReconfirm: true });
+    const running = h.run();
+    await tick(100);
+    await running;
+    expect(h.signed).toHaveLength(0);
+    expect(h.broadcastCount()).toBe(0);
+  });
+});

@@ -67,3 +67,16 @@ it('renews a free allowlist family without a collection and reuses only its exac
   expect(plan.policy.transaction.data).toBe('0x4300a4e6');
   expect(() => planTurnkeyPolicyRenewal({ ...family, quantity: 5, policyId: 'family-policy' }, [existing])).toThrow('TURNKEY_RENEWAL_POLICY_MISMATCH');
 });
+
+it('renews each approved public family without creating or widening provider policies', () => {
+  for (const chainId of [1, 8453, 4663] as const) {
+    const family = { ...input, publicFamily: true, chainId, quantity: chainId === 8453 ? 4 : 10 };
+    const built = robinhoodTurnkeyPolicy({ ...family, policyId: `public-${chainId}` });
+    const existing = { ...providerPolicy(`public-${chainId}`), ...turnkeyProviderPolicyExpressions(built) };
+    const plan = planTurnkeyPolicyRenewal(family, [existing]);
+    expect(plan.stage).toBe('proposal-ready');
+    expect(plan.policy.transaction.chainId).toBe(chainId);
+    expect(plan.policy.family?.kind).toBe('seadrop-free-public-v1');
+    expect(() => planTurnkeyPolicyRenewal({ ...family, policyId: existing.policyId }, [{ ...existing, condition: 'true' }])).toThrow('TURNKEY_RENEWAL_POLICY_MISMATCH');
+  }
+});
