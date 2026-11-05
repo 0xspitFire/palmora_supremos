@@ -554,9 +554,17 @@ export class TelegramCommandRouter {
     }
     // A session whose kill state cannot be checked counts as ended (fail closed).
     let killed: boolean;
-    try { killed = this.options.actions.killEngagedSince(session.openedAt); } catch { killed = true; }
+    let checkFailed = false;
+    try { killed = this.options.actions.killEngagedSince(session.openedAt); } catch { killed = true; checkFailed = true; }
     if (killed) {
-      if (this.options.access.closeSession('kill')) await this.announce('The kill switch was engaged (or could not be checked), so your unlocked session has ended.');
+      if (this.options.access.closeSession('kill')) {
+        const code = checkFailed ? 'KILL_STATE_CHECK_UNAVAILABLE' : 'KILL_SWITCH_ENGAGED';
+        try { this.options.log?.('telegram_session_closed', { code }); } catch { /* diagnostics cannot restore a closed session */ }
+        try { await this.options.record({ role: 'owner', userId: this.options.ownerUserId, command: 'session', outcome: `closed:${code}` }); } catch { /* state closure remains authoritative */ }
+        await this.announce(checkFailed
+          ? 'Your unlocked session ended because the kill-switch state could not be checked. Check /status and the service before unlocking again.'
+          : 'The kill switch was engaged, so your unlocked session has ended. Check /status for the safety stop before releasing it.');
+      }
       return undefined;
     }
     return session;

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -164,6 +164,66 @@ describe('Telegram actions', () => {
     const text = await createTelegramActions(deps()).status('viewer');
     expect(text).toMatch(/^MintBot is running/);
     expect(text).not.toContain('Kill switch');
+  });
+
+  it('reports deployment separately from full readiness and displays actual health blockingReasons', async () => {
+    const application = { command: async () => ({ state: 'NotReady', data: { state: 'NotReady', ready: false, blockingReasons: ['RUNTIME_PROBE_REQUIRED'] } }) } as never;
+    const actions = createTelegramActions(deps({ application }));
+    const status = await actions.status('owner');
+    expect(status).toContain('Deployment: Ready');
+    expect(status).toContain('Service: Blocked — RUNTIME_PROBE_REQUIRED');
+    expect(status).not.toContain('Service: Ready');
+    expect(await actions.health()).toContain('Blocking: RUNTIME_PROBE_REQUIRED');
+  });
+
+  it('shows ready only when both deployment and aggregate health are ready', async () => {
+    const application = { command: async () => ({ state: 'Ready', data: { state: 'Ready', ready: true, blockingReasons: [] } }) } as never;
+    const actions = createTelegramActions(deps({ application }));
+    expect(await actions.status('owner')).toContain('Service: Ready');
+    expect(await actions.health()).toContain('Health: ready (Ready)');
+  });
+
+  it('fails closed on an unreadable kill path and rejects invalid session times', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mintbot-kill-check-'));
+    try {
+      const file = join(dir, 'killswitch');
+      await symlink('killswitch', file);
+      const application = { command: async () => ({ state: 'Ready', data: { state: 'Ready', ready: true, blockingReasons: [] } }) } as never;
+      const actions = createTelegramActions(deps({ killSwitchPath: file, application }));
+      expect(() => actions.killEngagedSince('2026-10-24T10:00:00.000Z')).toThrow('KILL_STATE_CHECK_UNAVAILABLE');
+      expect(() => actions.killEngagedSince('not-a-date')).toThrow('KILL_SESSION_TIME_INVALID');
+      expect(await actions.status('owner')).toContain('Kill switch: unknown (live work blocked)');
+      expect(await actions.status('owner')).not.toContain('Service: Ready');
+      const previous = deps().store.snapshot();
+      const oldStop = createTelegramActions(deps({ application, killSwitchPath: file, store: { snapshot: () => ({ ...previous, killed: false, events: [{ type: 'kill', data: { reason: 'fleet-watch-unknown_activity' } }] }) } as never }));
+      expect(await oldStop.status('owner')).not.toContain('Watched wallet activity is not explained');
+      expect(await actions.health()).toContain('KILL_STATE_CHECK_UNAVAILABLE');
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it('health honours a present kill file and sanitizes unavailable-provider diagnostics', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mintbot-health-kill-'));
+    try {
+      const file = join(dir, 'killswitch');
+      await writeFile(file, 'provider-probe-failed\n');
+      const application = { command: async () => ({ state: 'Ready', data: { state: 'Ready', ready: true, blockingReasons: [] } }) } as never;
+      const actions = createTelegramActions(deps({ application, killSwitchPath: file }));
+      expect(await actions.health()).toContain('Health: not ready (Killed)');
+      expect(await actions.status('owner')).not.toContain('Service: Ready');
+      const failed = createTelegramActions(deps({ application: { command: async () => { throw new Error('https://rpc.invalid/never-print'); } } as never }));
+      expect(await failed.health()).toContain('HEALTH_CHECK_UNAVAILABLE');
+      expect(await failed.health()).not.toContain('never-print');
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it('only maps known safety-stop reasons, never raw stored error text', async () => {
+    const state = { events: [], campaigns: [], runs: [], simulations: [], killed: true, killReason: 'fleet-watch-unknown_activity', runtime: { startupState: 'Blocked', blockingReasons: ['KILLED'] } };
+    const store = { snapshot: () => state } as never;
+    const application = { command: async () => ({ state: 'Killed', data: { state: 'Killed', ready: false, blockingReasons: ['KILLED'] } }) } as never;
+    const actions = createTelegramActions(deps({ store, application }));
+    expect(await actions.status('owner')).toContain('Watched wallet activity is not explained by MintBot');
+    state.killReason = 'https://rpc.invalid/never-print';
+    expect(await actions.status('owner')).not.toContain('never-print');
   });
 
   describe('Robinhood plan, prepare and simulate (T-063)', () => {
