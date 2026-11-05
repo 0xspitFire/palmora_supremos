@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import type { BackendApplication } from './application.js';
 import type { ExecutionCoordinator } from './coordinator.js';
-import type { BackendStore } from './store.js';
+import { readControlSnapshot, type BackendStore } from './store.js';
 import type { ScheduledJobStore, ScheduledJob } from './job-store.js';
 import { MetricsRegistry, type RedactedLogger } from './observability.js';
 import { AlertManager } from './alerts.js';
@@ -42,7 +43,7 @@ export interface OrchestratorStatus {
 }
 
 export async function pathKillSwitchProbe(path: string): Promise<boolean> {
-  try { await access(path); return true; } catch { return false; }
+  try { await access(path); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
 
 /**
@@ -61,6 +62,8 @@ export class OrchestratorService {
   private running = false;
   private ticking = false;
   private jobsSnapshot: ScheduledJob[] = [];
+  private killAlertRecorded = false;
+  private killAlertOccurrence?: string;
   private lastBackupObservation?: string;
   private lastBackupStatus?: 'ok' | 'failed';
   private lastBackupRecordedAt?: number;
@@ -95,7 +98,7 @@ export class OrchestratorService {
     try {
       await this.coordinator.start();
       // D-072: how long the start-up check took (a number only), so a slow start shows in the journal.
-      this.options.logger?.info({ event: 'startup_reconciliation_done', durationMs: Date.now() - startedAt, startupState: this.store.snapshot().runtime.startupState }, 'start-up reconciliation finished');
+      this.options.logger?.info({ event: 'startup_reconciliation_done', durationMs: Date.now() - startedAt, startupState: readControlSnapshot(this.store).runtime.startupState }, 'start-up reconciliation finished');
     } catch (error) {
       this.options.logger?.error({ error }, 'orchestrator_reconciliation_failed');
       await this.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'RECONCILIATION_FAILED'])] }; });
@@ -116,7 +119,7 @@ export class OrchestratorService {
   }
 
   public status(): OrchestratorStatus {
-    const state = this.store.snapshot();
+    const state = readControlSnapshot(this.store);
     const jobs = this.cachedJobs();
     return { running: this.running, state: this.running ? state.runtime.startupState : 'stopped', startupState: state.runtime.startupState, active: jobs.filter((job) => job.state === 'running').length, queued: jobs.filter((job) => job.state === 'scheduled').length, blocked: jobs.filter((job) => job.state === 'blocked' || job.state === 'cancelled').length, failed: jobs.filter((job) => job.state === 'failed').length, completed: jobs.filter((job) => job.state === 'succeeded').length, blockingReasons: [...state.runtime.blockingReasons] };
   }
@@ -138,37 +141,40 @@ export class OrchestratorService {
       this.recordReconciliationMetrics();
       const backupReady = !this.options.backupStatusPath || (this.lastBackupStatus === 'ok' && this.lastBackupRecordedAt !== undefined && this.now().getTime() - this.lastBackupRecordedAt <= (this.options.backupMaxAgeMs ?? (this.options.requireOffHostBackup ? 8 * 60 * 60_000 : 30 * 86_400_000)));
       // T-070 (D-068): the readiness flag follows the same check, so it is on only while a fresh verified backup exists.
-      if (this.options.backupStatusPath && this.store.snapshot().runtime.dependencies.backup !== backupReady) {
+      if (this.options.backupStatusPath && readControlSnapshot(this.store).runtime.dependencies.backup !== backupReady) {
         await this.store.transaction((state) => { state.runtime = { ...state.runtime, dependencies: { ...state.runtime.dependencies, backup: backupReady } }; });
       }
       if (!backupReady) {
-        await this.store.transaction((state) => {
+        if (readControlSnapshot(this.store).runtime.startupState !== 'Blocked' || !readControlSnapshot(this.store).runtime.blockingReasons.includes('BACKUP_NOT_READY')) await this.store.transaction((state) => {
           state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'BACKUP_NOT_READY'])] };
         });
         return;
       }
-      if (this.options.backupStatusPath && this.store.snapshot().runtime.blockingReasons.includes('BACKUP_NOT_READY')) {
+      if (this.options.backupStatusPath && readControlSnapshot(this.store).runtime.blockingReasons.includes('BACKUP_NOT_READY')) {
         await this.store.transaction((state) => {
           const blockingReasons = state.runtime.blockingReasons.filter((reason) => reason !== 'BACKUP_NOT_READY');
           state.runtime = { ...state.runtime, startupState: blockingReasons.length === 0 ? 'Ready' : state.runtime.startupState, blockingReasons };
         });
       }
-      const killed = this.store.snapshot().killed || (this.options.killSwitchProbe ? await this.options.killSwitchProbe() : false);
+      const killed = readControlSnapshot(this.store).killed || (this.options.killSwitchProbe ? await this.options.killSwitchProbe() : false);
       const capacity = Math.max(0, this.maxConcurrentJobs - this.cachedJobs().filter((job) => job.state === 'running').length);
       if (killed) {
-        await this.store.transaction((state) => {
+        if (readControlSnapshot(this.store).runtime.startupState !== 'Blocked' || !readControlSnapshot(this.store).runtime.blockingReasons.includes('KILL_SWITCH_ENGAGED')) await this.store.transaction((state) => {
           state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILL_SWITCH_ENGAGED'])] };
         });
-        try { await this.options.alerts?.kill('KILL_SWITCH_ENGAGED'); }
+        this.killAlertOccurrence ??= `scheduler-kill:${randomUUID()}`;
+        try { if (!this.killAlertRecorded) { await this.options.alerts?.kill('KILL_SWITCH_ENGAGED', undefined, this.killAlertOccurrence); this.killAlertRecorded = true; } }
         catch (error) { this.options.logger?.warn({ error }, 'kill_switch_alert_delivery_failed'); }
         for (const job of await this.options.jobs.list()) if (job.state === 'scheduled' && job.mode === 'live') await this.options.jobs.update(job.id, { state: 'blocked', lastError: 'KILL_SWITCH_ENGAGED' });
         this.jobsSnapshot = await this.options.jobs.list();
         return;
       }
+      this.killAlertRecorded = false;
+      this.killAlertOccurrence = undefined;
       // T-060 (owner-approved 2026-10-24): once the owner has removed the kill file (and no `kill` command is in force), the
       // kill-file block it caused is lifted, as BACKUP_NOT_READY is above. A run the kill interrupted and that is still unresolved
       // replaces it with UNRESOLVED_EXECUTIONS (as `kill-release` and a restart would refuse); any other reason keeps it Blocked.
-      if (this.store.snapshot().runtime.blockingReasons.includes('KILL_SWITCH_ENGAGED')) {
+      if (readControlSnapshot(this.store).runtime.blockingReasons.includes('KILL_SWITCH_ENGAGED')) {
         await this.store.transaction((state) => {
           if (state.killed) return;
           const others = state.runtime.blockingReasons.filter((reason) => reason !== 'KILL_SWITCH_ENGAGED');
@@ -183,15 +189,17 @@ export class OrchestratorService {
       }
       // D-072: a stored UNRESOLVED_EXECUTIONS block is lifted as soon as the very rule that set it (the start-up check and
       // `kill-release` use the same one) finds no unresolved run. Any other reason, and the kill switch, keep the service Blocked.
-      if (this.store.snapshot().runtime.blockingReasons.includes('UNRESOLVED_EXECUTIONS')) {
+      if (readControlSnapshot(this.store).runtime.blockingReasons.includes('UNRESOLVED_EXECUTIONS')) {
         await this.store.transaction((state) => {
           if (!state.runtime.blockingReasons.includes('UNRESOLVED_EXECUTIONS') || state.killed || unresolvedRunIds(state).length > 0) return;
           const blockingReasons = state.runtime.blockingReasons.filter((reason) => reason !== 'UNRESOLVED_EXECUTIONS');
           state.runtime = { ...state.runtime, startupState: blockingReasons.length === 0 ? 'Ready' : state.runtime.startupState, blockingReasons };
         });
       }
-      if (this.store.snapshot().runtime.startupState !== 'Ready') return;
+      if (readControlSnapshot(this.store).runtime.startupState !== 'Ready') return;
       if (capacity === 0) return;
+      this.jobsSnapshot = await this.options.jobs.list();
+      if (!this.jobsSnapshot.some((job) => job.state === 'scheduled' && Date.parse(job.executeAt) <= this.now().getTime())) return;
       const claimed = await this.options.jobs.claimDue(this.now(), capacity);
       this.jobsSnapshot = await this.options.jobs.list();
       this.metrics.recordQueue(this.cachedJobs().filter((job) => job.state === 'scheduled').length, this.cachedJobs().filter((job) => job.state === 'running').length);
@@ -201,7 +209,7 @@ export class OrchestratorService {
   }
 
   private async reconcile(): Promise<void> {
-    if (!this.running || this.store.snapshot().killed) return;
+    if (!this.running || readControlSnapshot(this.store).killed) return;
     try { await this.coordinator.reconcile(); }
     catch (error) { this.options.logger?.error({ error }, 'orchestrator_periodic_reconciliation_failed'); }
   }
@@ -229,7 +237,7 @@ export class OrchestratorService {
   }
 
   private recordReconciliationMetrics(): void {
-    const reconciliations = this.store.snapshot().reconciliations;
+    const reconciliations = readControlSnapshot(this.store).reconciliations;
     const latest = reconciliations.map((item) => Date.parse(item.observedAt)).filter(Number.isFinite).reduce((maximum, value) => Math.max(maximum, value), 0);
     this.metrics.recordReconciliation(latest === 0 ? Number.MAX_SAFE_INTEGER : Math.max(0, this.now().getTime() - latest), reconciliations.filter((item) => item.result === 'unknown').length);
   }

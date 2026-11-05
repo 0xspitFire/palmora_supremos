@@ -3,7 +3,11 @@ import { dirname } from 'node:path';
 import type { BackendState, EventRecord, StoreCapabilities } from './types.js';
 
 const emptyState = (): BackendState => ({ schemaVersion: 1, campaigns: [], runs: [], intents: [], attempts: [], receipts: [], reconciliations: [], reservations: [], events: [], notificationOutbox: [], chainEvidence: [], simulations: [], readiness: [], jobs: [], runtime: { startupState: 'Cold', blockingReasons: ['RECONCILIATION_REQUIRED'], dependencies: { engine: false, chain: false, backup: false, notifications: false } }, killed: false });
-export interface BackendStore { open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
+/** Fresh control-plane reads omit historical projections; mutations still use full atomic state. */
+export type BackendControlSnapshot = Pick<BackendState, 'runtime' | 'killed' | 'reconciliations' | 'jobs'>;
+export function readEventSnapshot(store: BackendStore): EventRecord[] { return store.eventSnapshot ? store.eventSnapshot() : store.snapshot().events; }
+export function readControlSnapshot(store: BackendStore): BackendControlSnapshot { return store.controlSnapshot ? store.controlSnapshot() : store.snapshot(); }
+export interface BackendStore { open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; controlSnapshot?(): BackendControlSnapshot; eventSnapshot?(): EventRecord[]; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
 export class DurableStore implements BackendStore {
   private state: BackendState = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();
@@ -16,6 +20,8 @@ export class DurableStore implements BackendStore {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   snapshot(): BackendState { return structuredClone(this.state); }
+  eventSnapshot(): EventRecord[] { return structuredClone(this.state.events); }
+  controlSnapshot(): BackendControlSnapshot { const { runtime, killed, reconciliations, jobs } = this.state; return structuredClone({ runtime, killed, reconciliations, jobs }); }
   replace(state: BackendState): void { this.state = state; }
   async transaction<T>(mutate: (state: BackendState) => T): Promise<T> {
     let result!: T;

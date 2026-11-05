@@ -66,3 +66,27 @@ describe('discovery to bounded autonomous request', () => {
     await expect(s.automation.assertReady(event.id, s.campaign)).rejects.toThrow('WATCHED_MINT_STALE_OR_REORGED');
   });
 });
+
+it('does one fresh event projection and no full state reads on an already claimed opportunity', async () => {
+  const s = await setup();
+  await s.automation.tick();
+  const snapshot = vi.spyOn(s.store, 'snapshot');
+  const events = vi.spyOn(s.store, 'eventSnapshot');
+  await s.automation.tick();
+  expect(events).toHaveBeenCalledTimes(1);
+  expect(snapshot).not.toHaveBeenCalled();
+  expect(s.prepare).toHaveBeenCalledTimes(1);
+});
+
+it('retains the atomic claim check when another worker claims during qualification', async () => {
+  const s = await setup();
+  const original = s.qualify.getMockImplementation()!;
+  s.qualify.mockImplementation(async () => {
+    const qualified = await original();
+    await s.store.transaction((state) => state.events.push({ id: `replication_claim:1:${nft}`, type: 'replication_claim', at: now.toISOString(), data: {} }));
+    return qualified;
+  });
+  await s.automation.tick();
+  expect(s.prepare).not.toHaveBeenCalled();
+  expect(s.fireAutonomous).not.toHaveBeenCalled();
+});

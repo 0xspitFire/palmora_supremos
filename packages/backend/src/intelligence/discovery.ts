@@ -103,7 +103,10 @@ export class DiscoveryService {
     const head = await this.port.safeHead();
     if (head === null) return { ...result, status: 'unavailable', reason: 'HEAD_UNAVAILABLE' };
     const chainId = this.port.chainId;
-    const watched = this.repo.observedAddresses(chainId).map((row) => row.address.toLowerCase());
+    // One consistent, read-only watch-list view for all scoring and labels in this tick.
+    const watchedRows = this.repo.observedAddresses(chainId);
+    const labels = new Map(watchedRows.map(row => [row.address.toLowerCase(), row.label] as const));
+    const watched = [...labels.keys()];
     const watchedSet = new Set(watched);
     const cursor = this.repo.cursor(chainId, SOURCE);
     const lookback = this.options.initialLookbackBlocks ?? 300n;
@@ -165,13 +168,13 @@ export class DiscoveryService {
       await this.enrich(touched);
       // Refresh-only rewrites happen only when this scan reached the settled head, so a lagging scan never re-stamps freshness.
       const current = outcome.scan.toBlock >= head;
-      result.opportunitiesWritten += await this.emitOpportunities(result, current, outcome.scan.toBlock);
+      result.opportunitiesWritten += await this.emitOpportunities(result, current, outcome.scan.toBlock, labels);
       result.calendarWritten += await this.emitCalendar(result, current, outcome.scan.toBlock);
       // The cursor moves only after this range's events are durable, so a crash replays rather than skips; replayed logs are not recounted.
       this.repo.advanceCursor(chainId, SOURCE, outcome.scan.toBlock);
     }
     if (result.toBlock === undefined) {
-      result.opportunitiesWritten += await this.emitOpportunities(result, true, head);
+      result.opportunitiesWritten += await this.emitOpportunities(result, true, head, labels);
       result.calendarWritten += await this.emitCalendar(result, true, head);
     }
     this.prune();
@@ -239,13 +242,13 @@ export class DiscoveryService {
     }
   }
 
-  private score(item: Tracked, now: number): ScoreResult {
+  private score(item: Tracked, now: number, watchingConfigured: boolean): ScoreResult {
     const watchedMinters = [...item.watched.values()].filter((at) => now - at <= CONVERGENCE_WINDOW_MS).length;
     const mintsLastHour = item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0);
-    return scoreOpportunity({ watchedMinters, watchingConfigured: this.repo.observedAddresses(this.port.chainId).length > 0, priceWei: item.priceWei, budgetPerNftWei: this.options.budgetPerNftWei, knownSeaDropPattern: item.drop !== null, hasCode: item.hasCode, mintsLastHour, discoveredAt: new Date(item.firstSeenAt), now: new Date(now) });
+    return scoreOpportunity({ watchedMinters, watchingConfigured, priceWei: item.priceWei, budgetPerNftWei: this.options.budgetPerNftWei, knownSeaDropPattern: item.drop !== null, hasCode: item.hasCode, mintsLastHour, discoveredAt: new Date(item.firstSeenAt), now: new Date(now) });
   }
 
-  private async emitOpportunities(result: DiscoveryTickResult, refreshAllowed: boolean, sourceBlock: bigint): Promise<number> {
+  private async emitOpportunities(result: DiscoveryTickResult, refreshAllowed: boolean, sourceBlock: bigint, labels: ReadonlyMap<string, string | null | undefined>): Promise<number> {
     const nowDate = this.now();
     const now = nowDate.getTime();
     const events: EventRecord[] = [];
@@ -253,7 +256,7 @@ export class DiscoveryService {
     for (const item of this.tracked.values()) {
       if (now - item.lastActivityAt > CONVERGENCE_WINDOW_MS) continue;
       try {
-      const scored = this.score(item, now);
+      const scored = this.score(item, now, labels.size > 0);
       const last = item.lastEmit;
       const changed = !last || last.band !== scored.band || Math.abs(last.score - scored.score) >= SCORE_CHANGE;
       const due = changed || (refreshAllowed && now - last.at >= DISCOVERY_FRESHNESS_MS - REFRESH_BEFORE_STALE_MS);
@@ -275,7 +278,6 @@ export class DiscoveryService {
       } });
       item.lastEmit = { at: now, score: scored.score, band: scored.band };
       if (alertable) {
-        const labels = new Map(this.repo.observedAddresses(this.port.chainId).map((row) => [row.address.toLowerCase(), row.label] as const));
         const card = opportunityCard({ chainId: this.port.chainId, contract: item.contract, collectionName, score: scored.score, priceWei: item.priceWei, watchingConfigured: labels.size > 0, minters: watchedMinters, receivers: item.received.size, labels, drop: item.drop, seenMinted: item.totalMinted, mintsLastHour, scored, spottedAt: item.lastActivityAt, now });
         alerts.push({ kind: 'opportunity', dedupe: `opportunity:${item.contract}:${scored.band}`, priority: scored.band === 'proposal' ? 'immediate' : 'grouped', text: plainAlertText(card), card });
       }

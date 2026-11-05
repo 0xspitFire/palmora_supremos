@@ -3,7 +3,7 @@ export { BASE_EVIDENCE_STEPS, BASE_PAID_EVIDENCE_STEPS, assertBaseFirstRehearsal
 export { PERMANENT_ENABLEMENT_EXPIRY, ROBINHOOD_EVIDENCE_STEPS, assertRobinhoodLiveAllowed, validRobinhoodEnablement, type RobinhoodEnablement, type RobinhoodEvidenceStep } from './robinhood-enablement.js';
 export { PauseWatch, type PauseSpan } from './pause-watch.js';
 export { DurableStore } from './store.js';
-export type { BackendStore } from './store.js';
+export { readControlSnapshot, readEventSnapshot, type BackendStore, type BackendControlSnapshot } from './store.js';
 export { SqliteStateStore } from './sqlite-store.js';
 export { CanonicalStoreBridge, PHASE1_ZERO_ADMISSION_BUFFERS, canonicalReceiptFinalityStage, rebindExecutionResult } from './canonical-store.js';
 export type { CanonicalAdmissionInput, CanonicalAdmissionResult, CanonicalExecutionStore, PreparedExecution } from './canonical-store.js';

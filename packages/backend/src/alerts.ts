@@ -100,7 +100,7 @@ export class AlertManager {
   }
 
   public async started(runId: string, walletCount: number): Promise<void> { await this.emit({ kind: 'started', runId, walletCount }); }
-  public async kill(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'kill', runId, reason }); }
+  public async kill(reason: string, runId?: string, occurrence?: string): Promise<void> { await this.emit({ kind: 'kill', runId, reason, ...(occurrence ? { occurrence } : {}) }); }
   public async cap(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'cap', runId, reason }); }
   public async blocked(reason: string, runId?: string, occurrence?: string): Promise<void> { await this.emit({ kind: 'blocked', runId, reason, ...(occurrence ? { occurrence } : {}) }); }
   public async failed(reason: string, runId?: string): Promise<void> { await this.emit({ kind: 'failed', runId, reason }); }

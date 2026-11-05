@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { BackendStore } from './store.js';
+import { readControlSnapshot, type BackendStore } from './store.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import { normalizeError } from './errors.js';
 import { NotificationDispatcher } from './notifications.js';
@@ -223,22 +223,21 @@ export class Orchestrator {
     this.ticking = true;
     try {
       await this.recoverJobs(false);
-      const snapshot = this.store.snapshot();
+      const snapshot = readControlSnapshot(this.store);
       if (snapshot.killed) {
         await this.cancelQueued('KILLED');
         return { claimed: [], completed: [], failed: [], blocked: [] };
       }
-      const ready = snapshot.runtime.startupState === 'Ready';
       const active = snapshot.jobs.filter((job) => job.state === 'running').length;
       const capacity = Math.max(0, this.options.maxConcurrency - active);
       if (capacity === 0) return { claimed: [], completed: [], failed: [], blocked: [] };
       const now = this.now().getTime();
-      const claimed = await this.claim(capacity, now, ready);
+      const claimed = await this.claim(capacity, now);
       const results = await Promise.allSettled(claimed.map((job) => this.runJob(job)));
       const result: TickResult = { claimed: claimed.map((job) => job.id), completed: [], failed: [], blocked: [] };
       for (const [index, settled] of results.entries()) {
         const job = claimed[index]!;
-        const latest = this.store.snapshot().jobs.find((candidate) => candidate.id === job.id);
+        const latest = readControlSnapshot(this.store).jobs.find((candidate) => candidate.id === job.id);
         if (latest?.state === 'succeeded') result.completed.push(job.id);
         else if (latest?.state === 'blocked') result.blocked.push(job.id);
         else if (latest?.state === 'failed' || settled.status === 'rejected') result.failed.push(job.id);
@@ -250,13 +249,18 @@ export class Orchestrator {
   }
 
   public status(): OrchestratorStatus {
-    const state = this.store.snapshot();
+    const state = readControlSnapshot(this.store);
     return { running: this.started, startupState: state.runtime.startupState, active: state.jobs.filter((job) => job.state === 'running').length, queued: state.jobs.filter((job) => job.state === 'scheduled').length, blocked: state.jobs.filter((job) => job.state === 'blocked').length, failed: state.jobs.filter((job) => job.state === 'failed').length, completed: state.jobs.filter((job) => job.state === 'succeeded').length, blockingReasons: [...state.runtime.blockingReasons] };
   }
 
-  private async claim(capacity: number, now: number, startupReady: boolean): Promise<ScheduledJobRecord[]> {
+  private async claim(capacity: number, now: number): Promise<ScheduledJobRecord[]> {
+    if (!readControlSnapshot(this.store).jobs.some((job) => job.state === 'scheduled' && Date.parse(job.scheduledAt) <= now && (!job.nextAttemptAt || Date.parse(job.nextAttemptAt) <= now))) return [];
     return this.store.transaction((state) => {
       const selected: ScheduledJobRecord[] = [];
+      // The lightweight read only skips idle work. Admission still uses fresh atomic state, including a newly engaged kill.
+      if (state.killed) return selected;
+      capacity = Math.min(capacity, Math.max(0, this.options.maxConcurrency - state.jobs.filter((job) => job.state === 'running').length));
+      const startupReady = state.runtime.startupState === 'Ready';
       const leaseExpiresAt = new Date(now + this.options.jobLeaseMs).toISOString();
       const candidates = state.jobs.filter((job) => job.state === 'scheduled' && Date.parse(job.scheduledAt) <= now && (!job.nextAttemptAt || Date.parse(job.nextAttemptAt) <= now)).sort((left, right) => Date.parse(left.scheduledAt) - Date.parse(right.scheduledAt) || left.id.localeCompare(right.id));
       for (const job of candidates) {
@@ -278,7 +282,7 @@ export class Orchestrator {
 
   private async runJob(job: ScheduledJobRecord): Promise<void> {
     try {
-      if (this.store.snapshot().killed) throw new Error('KILLED');
+      if (readControlSnapshot(this.store).killed) throw new Error('KILLED');
       if (job.kind === 'execute') await this.runExecutionJob(job);
       else if (job.kind === 'reconcile') await this.coordinator.reconcile();
       else if (job.kind === 'notification') {
@@ -379,6 +383,7 @@ export class Orchestrator {
 
   private async recoverJobs(force: boolean): Promise<void> {
     const now = this.now().getTime();
+    if (!readControlSnapshot(this.store).jobs.some((job) => job.state === 'running' && (force || !job.leaseExpiresAt || Date.parse(job.leaseExpiresAt) <= now))) return;
     await this.store.transaction((state) => {
       for (const job of state.jobs) {
         if (job.state !== 'running') continue;
@@ -436,7 +441,9 @@ export class Orchestrator {
   }
 
   private async cancelQueued(reason: string): Promise<void> {
+    if (!readControlSnapshot(this.store).jobs.some((job) => job.state === 'scheduled' && job.kind === 'execute')) return;
     await this.store.transaction((state) => {
+      if (reason === 'KILLED' && !state.killed) return;
       for (const job of state.jobs.filter((candidate) => candidate.state === 'scheduled' && candidate.kind === 'execute')) {
         job.state = 'cancelled';
         job.lastError = reason;
