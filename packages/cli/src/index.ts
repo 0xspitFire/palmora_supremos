@@ -20,6 +20,7 @@ import { rankWatchedWallets, readRankingInputs, renderWatchRanking } from './wat
 import { chainRpcSecretNames, failoverTransport, readSecretList, resolveChainByNameFromSecrets, resolveChainConfigFromSecrets, SEADROP_V1_ADDRESS } from '@mint-bot/engine';
 import { fundingRequestEvent, planCampaignFunding, redactAddresses, renderFundingPlan } from './fleet-funding-cli.js';
 import { assertRehearsalOutputSafe, buildCompensatingEvidence, engageKillSwitchFile, evaluateStatus, lockfileDigest, parseRehearsalEvidence, probeOrEngageKillSwitch, rehearsalFileName, walletSetDigest } from './compensating-controls-cli.js';
+import { inspectCompensatingPolicy } from './compensating-policy-selection.js';
 import { checkDrop, planAutoQuantity } from './drop-check.js';
 import { commandErrorMessage, surveyErrorMessage, surveySeaDropMints } from './seadrop-survey.js';
 import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
@@ -819,6 +820,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     })
   .command('compensating-controls-status', 'Check all six D-058 controls now (read-only; a failed provider check engages the kill switch)', (args) => args
     .option('chain-id', { type: 'number', demandOption: true, choices: [1, 8453, 4663] })
+    .option('policy-id', { type: 'string', describe: 'An exact policy in the verified signed catalog; its chain must match --chain-id. Default: the active policy, only on its own chain' })
     .option('wallet-ceiling-wei', { type: 'string', default: '400000000000000' })
     .option('fleet-ceiling-wei', { type: 'string', default: '2000000000000000' })
     .option('rehearsal', { type: 'string' }), async (args) => {
@@ -826,37 +828,46 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
       try {
         if (!/^\d{1,30}$/.test(args.walletCeilingWei) || !/^\d{1,30}$/.test(args.fleetCeilingWei)) throw new Error('BALANCE_CEILING_INVALID');
         const secretRoot = configuredSecretRoot(runtimeRoot);
-        const config = await readTurnkeySecretConfig(secretRoot);
-        const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
-        const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
-        const signed = installedBundle?.activeRecord ?? JSON.parse(await readTurnkeyRuntimeText(config.policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown;
-        const record = verifyTurnkeySignedPolicyRecord(signed, publicKey);
-        const digest = turnkeyPolicyRecordDigest(record);
-        signer = await TurnkeySigner.fromSecrets('mainnet', secretRoot, undefined, digest);
-        const killPath = resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE);
-        const probe = await probeOrEngageKillSwitch(async () => { const health = await signer!.probe(); return { status: health.status, policyRecordDigest: health.policyRecordDigest }; }, (reason) => engageKillSwitchFile(killPath, reason));
-        const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
-        const endpoint = chain.rpcEndpoints[0];
-        if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
-        const client = createPublicClient({ transport: failoverTransport(chain.rpcEndpoints) });
-        const addresses = record.wallets.map((entry) => entry.address);
-        const balances = [];
-        for (const address of addresses) balances.push({ address, balanceWei: await client.getBalance({ address: address as Address }) });
-        const rehearsal = await readTurnkeyRuntimeText(await policyRehearsalPath(digest, args.rehearsal), 'TURNKEY_REHEARSAL_PERMISSIONS_REQUIRED').then((text) => parseRehearsalEvidence(JSON.parse(text))).catch(() => undefined);
-        const now = new Date();
-        const evidence = buildCompensatingEvidence({
-          chainId: args.chainId,
-          record: { digest, issuedAt: record.issuedAt, expiresAt: record.expiresAt, wallets: addresses },
-          lockfileDigest: await lockfileDigest(runtimeRoot),
-          probe,
-          balances,
-          ...(rehearsal ? { rehearsal } : {}),
-          now,
+        await inspectCompensatingPolicy({ chainId: args.chainId, ...(args.policyId === undefined ? {} : { policyId: args.policyId }) }, async () => {
+          const config = await readTurnkeySecretConfig(secretRoot);
+          const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+          const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
+          const signed = installedBundle?.activeRecord ?? JSON.parse(await readTurnkeyRuntimeText(config.policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown;
+          const activeRecord = verifyTurnkeySignedPolicyRecord(signed, publicKey);
+          const records = installedBundle
+            ? verifyTurnkeySignedPolicyCatalog(installedBundle.catalog, publicKey)
+            : config.policyCatalogPath
+              ? verifyTurnkeySignedPolicyCatalog(JSON.parse(await readTurnkeyRuntimeText(config.policyCatalogPath, 'TURNKEY_POLICY_CATALOG_PERMISSIONS_REQUIRED')) as unknown, publicKey)
+              : [activeRecord];
+          return { activeRecord, records };
+        }, async ({ record, selection }) => {
+          const digest = selection.recordDigest;
+          signer = await TurnkeySigner.fromSecrets('mainnet', secretRoot, selection.policyReference, digest);
+          const killPath = resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE);
+          const probe = await probeOrEngageKillSwitch(async () => { const health = await signer!.probe(); return { status: health.status, policyRecordDigest: health.policyRecordDigest }; }, (reason) => engageKillSwitchFile(killPath, reason));
+          const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
+          const endpoint = chain.rpcEndpoints[0];
+          if (!endpoint) throw new Error('CHAIN_ENDPOINT_UNAVAILABLE');
+          const client = createPublicClient({ transport: failoverTransport(chain.rpcEndpoints) });
+          const addresses = record.wallets.map((entry) => entry.address);
+          const balances = [];
+          for (const address of addresses) balances.push({ address, balanceWei: await client.getBalance({ address: address as Address }) });
+          const rehearsal = await readTurnkeyRuntimeText(await policyRehearsalPath(digest, args.rehearsal), 'TURNKEY_REHEARSAL_PERMISSIONS_REQUIRED').then((text) => parseRehearsalEvidence(JSON.parse(text))).catch(() => undefined);
+          const now = new Date();
+          const evidence = buildCompensatingEvidence({
+            chainId: args.chainId,
+            record: { digest, issuedAt: record.issuedAt, expiresAt: record.expiresAt, wallets: addresses },
+            lockfileDigest: await lockfileDigest(runtimeRoot),
+            probe,
+            balances,
+            ...(rehearsal ? { rehearsal } : {}),
+            now,
+          });
+          const status = evaluateStatus(evidence, { ceilings: { [args.chainId]: { walletMaxWei: BigInt(args.walletCeilingWei), fleetMaxWei: BigInt(args.fleetCeilingWei) } }, expected: { recordDigest: digest, walletSetDigest: walletSetDigest(addresses), lockfileDigest: evidence.lockfileDigest } }, now);
+          process.stdout.write(`Policy: ${record.providerPolicy.policyId}; chain ${record.enforcementPolicy.transaction.chainId}; ${record.enforcementPolicy.family?.kind ?? 'exact-policy'}\nRecord: ${digest}\n${status.text}\n`);
+          if (!status.valid) process.exitCode = 1;
         });
-        const status = evaluateStatus(evidence, { ceilings: { [args.chainId]: { walletMaxWei: BigInt(args.walletCeilingWei), fleetMaxWei: BigInt(args.fleetCeilingWei) } }, expected: { recordDigest: digest, walletSetDigest: walletSetDigest(addresses), lockfileDigest: evidence.lockfileDigest } }, now);
-        process.stdout.write(`${status.text}\n`);
-        if (!status.valid) process.exitCode = 1;
-      } catch (error) { printError(error); } finally { signer?.zeroize(); }
+      } catch (error) { process.stdout.write(`${blocked(new Error(commandErrorMessage(error, 'COMPENSATING_STATUS_FAILED')))}\n`); process.exitCode = 1; } finally { signer?.zeroize(); }
     })
   .command('fleet-funding-plan', 'Work out what each wallet needs for one run and, with --request, ask the service to message you (MintBot never sends funds)', (args) => args
     .option('campaign-id', { type: 'string', demandOption: true })

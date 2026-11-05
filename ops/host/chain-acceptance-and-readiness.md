@@ -2,8 +2,10 @@
 
 This guide applies to the T-104 release containing `chain-evidence --validity`
 and `--include-free-allowlist`. Installed 0.0.12 does not contain these changes.
-Install the reviewed release before using its new commands. Installing or
-building source does not accept evidence or release the kill switch.
+The chain-acceptance flow is installed in 0.0.13. The policy-selection diagnostic
+option below belongs to the T-105 follow-up and requires its later reviewed
+release. Installing or building source does not accept evidence or release the
+kill switch.
 
 ## What is permanent
 
@@ -155,3 +157,33 @@ nonempty clean replication/execution audits, finality and ledger agreement, plus
 the observed same-chain collection convergence example. Empty findings with
 `no_samples` are not certification. Manual `/fire` does not substitute for an
 autonomous sample.
+
+## Inspect one exact custody policy (T-105 release)
+
+The read-only diagnostic can assess an explicit policy from the locally verified
+owner-signed catalog:
+
+```bash
+mbcli compensating-controls-status --chain-id 4663 --policy-id <signed-policy-id>
+```
+
+Use the actual provider policy ID already installed in the signed catalog. The
+output identifies the actual chain, policy ID, family (or exact-policy scope) and
+record digest before showing all six controls. Rehearsal and funding checks use
+that same selected record and chain. A provider's observed policy list does not
+authorize a new selection.
+
+Omitting `--policy-id` retains the active-policy default only on its own chain.
+For example, an active Base record with `--chain-id 4663` is refused before any
+provider/RPC inspection; name the intended signed Robinhood policy instead.
+Unknown, ambiguous and cross-chain selections are refused rather than falling
+back to a different policy. This command does not create a policy, sign a
+transaction, record chain authority, approve a mint or release the switch.
+
+Installed 0.0.13 predates this selector: its diagnostic uses the global active
+record even when a different chain is requested. That display limitation was
+worked around during closeout using exact signed-record-scoped checks. The
+production coordinator already selects and validates custody per campaign; its
+authorization guards are unchanged. The diagnostic fix can accompany a later
+planned release; it does not require another deployment or invalidate the
+current release's five D-017 artifacts merely because it is prepared in source.
