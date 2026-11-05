@@ -119,12 +119,14 @@ const WATCH_WORDS: Readonly<Record<FleetWatchFinding, { title: string; severity:
   },
 };
 
-export function fleetWatchCard(input: { finding: FleetWatchFinding; chainId: number; wallet?: string; detail?: string; killFailed?: boolean; at: Date | string }): SystemCard {
+export function fleetWatchCard(input: { finding: FleetWatchFinding; chainId: number; wallet?: string; detail?: string; killFailed?: boolean; repeat?: boolean; at: Date | string }): SystemCard {
   const base = WATCH_WORDS[input.finding];
   // When the automatic kill could not be engaged, never say that signing has stopped: say the opposite and put the manual step first.
   const words = input.killFailed && (input.finding === 'unknown_activity' || input.finding === 'unexplained_fall')
     ? { ...base, means: 'the bot could NOT engage the kill switch by itself, so signing may still be possible. The wallet keys may be compromised.', steps: ['Engage the kill switch yourself now from the terminal, before anything else.', ...base.steps.filter((step) => step !== 'Do not release the kill switch.')] }
     : base;
+  const reviewable = input.repeat === true && (input.finding === 'unknown_activity' || input.finding === 'unexplained_fall')
+    && (input.chainId === 1 || input.chainId === 8453 || input.chainId === 4663) && input.wallet;
   return buildSystemCard({
     title: words.title,
     severity: words.severity,
@@ -135,7 +137,8 @@ export function fleetWatchCard(input: { finding: FleetWatchFinding; chainId: num
       ...(input.detail ? [{ label: 'Detail', value: input.detail }] : []),
       { label: 'What it means', value: words.means },
     ],
-    steps: words.steps,
+    steps: [...words.steps, ...(reviewable ? ['If you recognize this activity or have taken action, tap Review / I took action to review the fresh wallet state. This does not mute the alert or release the kill switch.'] : [])],
+    ...(reviewable ? { watchReview: { chainId: input.chainId as 1 | 8453 | 4663, address: checked(input.wallet!) } } : {}),
     eventAt: input.at,
     eventLabel: 'the check',
     summary: input.killFailed ? `${words.title.toLowerCase()}; the kill switch could not be engaged.` : `${words.title.toLowerCase()}.`,

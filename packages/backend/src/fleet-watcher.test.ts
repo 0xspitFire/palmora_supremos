@@ -86,11 +86,11 @@ describe('FleetWatcher (D-059 item 6)', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ kind: 'fleet_watch', priority: 'immediate' });
     expect(store.snapshot().events.some((event) => event.type === 'fleet_watch_finding')).toBe(true);
-    // the baseline did not move: the next check reports (and kills) again, but the alert is not repeated
+    // The baseline does not move; the second check adds the owner-review reminder once.
     advance(WATCH_IDLE_INTERVAL_MS);
     const again = await watcher.tick();
     expect(again.killed).toBe(true);
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     // the owner accepts the wallet's current state after investigating; then it is quiet again
     await watcher.acceptCurrent({ chainId: 1, address: W1 }, { nonce: 6, balanceWei: 250_000_000_000_000n });
     advance(WATCH_IDLE_INTERVAL_MS);
@@ -106,16 +106,16 @@ describe('FleetWatcher (D-059 item 6)', () => {
     expect(sent).toHaveLength(1);
     advance(WATCH_IDLE_INTERVAL_MS);
     await watcher.tick();
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     await store.transaction(state => { state.killed = false; });
     advance(WATCH_IDLE_INTERVAL_MS);
     await watcher.tick();
     expect(kills).toHaveLength(2);
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
     expect(sent[1]!.dedupe).not.toBe(sent[0]!.dedupe);
     advance(WATCH_IDLE_INTERVAL_MS);
     await make().tick();
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
     expect(store.snapshot().events.filter(event => event.type === 'fleet_watch_baseline' && event.data.address === W1).at(-1)?.data.nonce).toBe(5);
   });
 
@@ -373,14 +373,14 @@ describe('FleetWatcher review fixes (T-044)', () => {
     expect(kills).toEqual([]);
   });
 
-  it('counts an attempt whose run has no recorded intent for every chain, so it never causes a false kill', async () => {
+  it('does not let an attempt with no chain binding explain activity on any chain', async () => {
     const { watcher, reads, kills, advance, store } = build();
     await watcher.tick();
     advance(WATCH_IDLE_INTERVAL_MS);
     await store.transaction((state: BackendState) => { state.attempts.push({ id: 'a', executionId: 'e', runId: 'ghost', wallet: W1, nonce: 5, state: 'Submitted', createdAt: T0.toISOString(), updatedAt: T0.toISOString() } as never); });
     reads.set(W1, { nonce: 6, balanceWei: 300_000_000_000_000n });
-    expect((await watcher.tick()).killed).toBe(false);
-    expect(kills).toEqual([]);
+    expect((await watcher.tick()).killed).toBe(true);
+    expect(kills).toEqual(['fleet-watch-unknown_activity']);
   });
 
   it('writes the finding record once per distinct state, not on every check', async () => {
@@ -391,7 +391,7 @@ describe('FleetWatcher review fixes (T-044)', () => {
     expect(store.snapshot().events.filter((event) => event.type === 'fleet_watch_finding')).toHaveLength(1);
   });
 
-  it('lets the same unresolved finding alert again the next day, but not within the day', async () => {
+  it('sends a review reminder once on repeat, then deduplicates until the next day', async () => {
     const { watcher, reads, sent, advance } = build();
     await watcher.tick();
     reads.set(W1, { nonce: 6, balanceWei: 300_000_000_000_000n });
@@ -399,10 +399,10 @@ describe('FleetWatcher review fixes (T-044)', () => {
     await watcher.tick();
     advance(WATCH_IDLE_INTERVAL_MS);
     await watcher.tick();
-    expect(sent.filter((item) => item.dedupe.includes('unknown_activity'))).toHaveLength(1);
+    expect(sent.filter((item) => item.dedupe.includes('unknown_activity'))).toHaveLength(2);
     advance(24 * HOUR);
     await watcher.tick();
-    expect(sent.filter((item) => item.dedupe.includes('unknown_activity'))).toHaveLength(2);
+    expect(sent.filter((item) => item.dedupe.includes('unknown_activity'))).toHaveLength(3);
   });
 
   it('escalates a provider that keeps reporting a lower transaction count to an immediate alert, still without a kill', async () => {

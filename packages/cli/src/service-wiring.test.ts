@@ -104,10 +104,11 @@ describe('RPC failover wiring (owner instruction 2026-10-23)', () => {
   const adapter = read('engine-adapter.ts');
   const watch = read('fleet-watch-service.ts');
   const readiness = read('turnkey-readiness-service.ts');
-  it('every service read path uses the failover transport', () => {
+  it('every service read path supports endpoint failover', () => {
     expect(service).toContain('rpcUrls: (chainId) => [watcherRpcSecretName(chainId), ...chainRpcSecretNames(');
     expect(service).toContain('EngineIntelligencePort.fromRpcUrls(rpcUrls)');
-    expect(watch).toContain('transport: failoverTransport(urls)');
+    expect(watch).toContain('for (const reader of endpointReaders.get(target.chainId) ?? [])');
+    expect(watch).toContain('try { return await reader(target); }');
     expect(readiness).toContain('transport: failoverTransport(chain.rpcEndpoints)');
     expect(adapter).toContain('failoverTransport(isBase ? splitBaseEndpoints(config.rpcEndpoints).primary : config.rpcEndpoints)');
   });

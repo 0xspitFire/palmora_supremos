@@ -3,7 +3,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { redactText } from './observability.js';
 import type { NotificationMessage, NotificationSink } from './notifications.js';
 import { dashboardLink, renderAlertCard, renderDigest, type RenderedAlert } from './alert-card.js';
-import { renderSystemCard } from './system-card.js';
+import { parseSystemCard, renderSystemCard } from './system-card.js';
 
 export interface HostSecretStore { has(name: string): boolean; get(name: string): string | undefined; }
 export interface TelegramCredentials { token: string; chatId: string; }
@@ -86,8 +86,11 @@ export class TelegramNotifier implements NotificationSink {
     let rich: RenderedAlert | undefined;
     try { rich = this.render(message); } catch { rich = undefined; }
     if (rich) {
-      const buttons = rich.buttons.map((button) => ({ text: button.text, url: button.url }));
-      // Link buttons only: no callback data, so Telegram can never send anything back to the bot.
+      const buttons: Array<{ text: string; url: string } | { text: string; callback_data: string }> = rich.buttons.map((button) => ({ text: button.text, url: button.url }));
+      const review = parseSystemCard(message.system)?.watchReview;
+      // This only opens the existing owner/private-chat guided review, with its fresh confirmation and session checks.
+      // It cannot accept a baseline, mute an alert, unlock a session or release the kill switch.
+      if (review) buttons.push({ text: 'Review / I took action', callback_data: `/watchaccept ${review.chainId} ${review.address}` });
       const response = await this.post({ text: rich.html, parse_mode: 'HTML', ...(buttons.length > 0 ? { reply_markup: { inline_keyboard: [buttons] } } : {}) });
       if (response.ok) return this.confirm(response);
       // Telegram refused the formatting (HTTP 400): resend the same facts as plain text so the alert is never lost.

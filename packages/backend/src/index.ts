@@ -86,7 +86,7 @@ export type { ExcessObservation, ExcessReminder, ExcessState, ExcessStates, Fund
 export { excessBalanceCard, fleetWatchCard, fundingRequestCard } from './fleet-messages.js';
 export type { FleetWatchFinding } from './fleet-messages.js';
 export { FleetWatcher, WATCH_ACTIVE_INTERVAL_MS, WATCH_BLIND_AFTER_FAILURES, WATCH_IDLE_INTERVAL_MS, judgeWallet } from './fleet-watcher.js';
-export type { FleetWatcherOptions, WalletBaseline, WalletLedger, WalletReading, WalletVerdict, WatchTarget, WatchTickResult, WatcherAlertSink } from './fleet-watcher.js';
+export type { FleetWatcherOptions, TreasuryWatchInput, TreasuryWatchProof, WalletBaseline, WalletLedger, WalletReading, WalletVerdict, WatchTarget, WatchTickResult, WatcherAlertSink } from './fleet-watcher.js';
 export { COMPENSATING_ASSURANCE_KIND, COMPENSATING_CONTROL_IDS, COMPENSATING_OBSERVATION_MAX_AGE_MS, assertCompensatingControls, computeWalletSetDigest, describeCustodyAssurance, evaluateCompensatingControls } from './compensating-controls.js';
 export type { BalanceCeiling, BalanceCeilings, CompensatingAssuranceConfig, CompensatingAssuranceContext, CompensatingControlId, CompensatingControlsEvidence, ControlResult } from './compensating-controls.js';
 export type { ApprovedCustodyProvider, CustodyAttestationStatus, CustodyHealthStatus, CustodyPolicyBinding, CustodyPolicyStatus, CustodyProvider, CustodyReadiness } from './custody.js';

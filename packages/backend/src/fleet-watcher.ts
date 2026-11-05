@@ -68,6 +68,16 @@ export interface WatcherAlertSink {
   send(input: { kind: 'fleet_watch' | 'excess_balance' | 'funding_request'; dedupe: string; priority: 'immediate' | 'grouped'; text: string; system: SystemCard; at: string }): Promise<boolean>;
 }
 
+export interface TreasuryWatchProof {
+  chainId: number; address: string; fromNonce: number; toNonce: number;
+  nonce: number; balanceWei: bigint; baselineNonce: number; baselineBalanceWei: string;
+  baselineObservedAt: string; hashes: string[]; blockNumber: bigint; blockHash: string;
+  totalValueWei: bigint; totalFeeWei: bigint;
+}
+export interface TreasuryWatchInput {
+  target: WatchTarget; baseline: WalletBaseline; reading: WalletReading; ledger: WalletLedger;
+}
+
 export interface FleetWatcherOptions {
   store: BackendStore;
   targets: readonly WatchTarget[];
@@ -75,6 +85,8 @@ export interface FleetWatcherOptions {
   treasury: string;
   read(target: WatchTarget): Promise<WalletReading>;
   alerts: WatcherAlertSink;
+  /** Only a complete two-provider, chain-bound proof may advance a treasury-return baseline. */
+  verifyTreasuryReturn?(input: TreasuryWatchInput): Promise<TreasuryWatchProof | undefined>;
   /** Engages the kill switch (the kill file and the coordinator). Must throw if it could not be engaged. */
   kill(reason: string): Promise<void>;
   now?: () => Date;
@@ -157,7 +169,7 @@ export class FleetWatcher {
     return state.runs.some((run) => run.state === 'Armed' || run.state === 'Active');
   }
 
-  /** What MintBot's own records say this wallet may have done since its baseline. A record that cannot be tied to a chain counts for every chain (never causes a false miss). */
+  /** What MintBot's own records say this wallet may have done since its baseline. Records without a chain cannot explain activity on any chain. */
   private ledgerFor(state: BackendState, target: WatchTarget, baseline: WalletBaseline | undefined): WalletLedger {
     const address = target.address.toLowerCase();
     const chainOfCampaign = new Map<string, number>();
@@ -171,17 +183,53 @@ export class FleetWatcher {
     for (const attempt of state.attempts) {
       if (attempt.wallet.toLowerCase() !== address || attempt.nonce === undefined) continue;
       const chain = runChain(attempt.runId);
-      if (chain !== undefined && chain !== target.chainId) continue;
+      if (chain !== target.chainId) continue;
       knownNextNonce = Math.max(knownNextNonce ?? 0, attempt.nonce + 1);
     }
     let allowedFallWei = 0n;
     for (const reservation of state.reservations) {
       if (reservation.wallet.toLowerCase() !== address) continue;
       const chain = reservation.chainId ?? runChain(reservation.runId);
-      if (chain !== undefined && chain !== target.chainId) continue;
+      if (chain !== target.chainId) continue;
       if (reservation.status === 'reserved' || reservation.status === 'reorged' || (baseline !== undefined && reservation.updatedAt >= baseline.observedAt)) allowedFallWei += reservation.amountWei;
     }
     return { knownNextNonce, allowedFallWei };
+  }
+
+  /** Unknown-chain pending exposure also blocks an exemption; spend accounting is unchanged. */
+  private returnBlocked(state: BackendState, target: WatchTarget): boolean {
+    return this.runActive(state) || state.reservations.some(item =>
+      item.wallet.toLowerCase() === target.address.toLowerCase() &&
+      (item.status === 'reserved' || item.status === 'reorged') &&
+      (item.chainId === undefined || item.chainId === target.chainId));
+  }
+
+  private async provenReturn(target: WatchTarget, baseline: WalletBaseline, reading: WalletReading): Promise<{ proof: TreasuryWatchProof; ledger: WalletLedger } | undefined> {
+    if (!this.options.verifyTreasuryReturn) return undefined;
+    const state = this.options.store.snapshot();
+    if (this.returnBlocked(state, target)) return undefined;
+    const ledger = this.ledgerFor(state, target, baseline);
+    try {
+      const proof = await this.options.verifyTreasuryReturn({ target, baseline, reading, ledger });
+      const fresh = this.options.store.snapshot();
+      const current = this.baselines.get(keyOf(target));
+      const freshLedger = this.ledgerFor(fresh, target, baseline);
+      const start = Math.max(baseline.nonce, ledger.knownNextNonce ?? baseline.nonce);
+      const cap = this.options.ceilings[target.chainId]?.walletMaxWei;
+      if (!proof || this.returnBlocked(fresh, target) || current !== baseline ||
+        freshLedger.knownNextNonce !== ledger.knownNextNonce || freshLedger.allowedFallWei !== ledger.allowedFallWei ||
+        proof.chainId !== target.chainId || proof.address.toLowerCase() !== target.address.toLowerCase() ||
+        proof.baselineNonce !== baseline.nonce || proof.baselineBalanceWei !== baseline.balanceWei || proof.baselineObservedAt !== baseline.observedAt ||
+        proof.fromNonce !== start || proof.toNonce !== reading.nonce || proof.nonce !== reading.nonce || proof.balanceWei !== reading.balanceWei ||
+        reading.nonce <= start || reading.nonce - start > 8 || proof.hashes.length !== reading.nonce - start ||
+        new Set(proof.hashes.map(hash => hash.toLowerCase())).size !== proof.hashes.length ||
+        !proof.hashes.every(hash => /^0x[0-9a-f]{64}$/i.test(hash)) || !/^0x[0-9a-f]{64}$/i.test(proof.blockHash) ||
+        typeof proof.blockNumber !== 'bigint' || proof.blockNumber < 0n ||
+        typeof proof.totalValueWei !== 'bigint' || proof.totalValueWei <= 0n ||
+        typeof proof.totalFeeWei !== 'bigint' || proof.totalFeeWei < 0n || cap === undefined || proof.totalFeeWei > cap ||
+        BigInt(baseline.balanceWei) - reading.balanceWei > proof.totalValueWei + proof.totalFeeWei + ledger.allowedFallWei) return undefined;
+      return { proof, ledger };
+    } catch { return undefined; }
   }
 
   /** Records the owner's acceptance of a wallet's current state directly (used in tests and by tools that already hold a reading). */
@@ -292,6 +340,37 @@ export class FleetWatcher {
         else { verdict = again; effective = second; }
       } catch { /* the second read failed: act on the first, which is the safe side */ }
     }
+    if (verdict.kind === 'unknown_activity' && baseline) {
+      const verified = await this.provenReturn(target, baseline, effective);
+      if (verified) {
+        const { proof, ledger } = verified;
+        const next: WalletBaseline = { nonce: effective.nonce, balanceWei: effective.balanceWei.toString(), observedAt: this.now().toISOString(), ...(baseline.excess ? { excess: baseline.excess } : {}) };
+        // Admission, owner acceptance and baseline writes share the store's atomic
+        // boundary. Do not grant an exemption based on a pre-transaction snapshot.
+        const committed = await this.options.store.transaction(fresh => {
+          const freshLedger = this.ledgerFor(fresh, target, baseline);
+          const latest = fresh.events.filter(event =>
+            (event.type === 'fleet_watch_baseline' || event.type === 'fleet_watch_accept') &&
+            event.data.chainId === target.chainId && event.data.address === address).at(-1);
+          if (this.returnBlocked(fresh, target) || this.baselines.get(key) !== baseline ||
+            freshLedger.knownNextNonce !== ledger.knownNextNonce || freshLedger.allowedFallWei !== ledger.allowedFallWei ||
+            !latest || latest.data.nonce !== baseline.nonce || latest.data.balanceWei !== baseline.balanceWei ||
+            (latest.data.observedAt ?? latest.at) !== baseline.observedAt) return false;
+          fresh.events.push(this.event('fleet_watch_treasury_return_verified', {
+            chainId: target.chainId, address, fromNonce: proof.fromNonce, toNonce: proof.toNonce,
+            hashes: proof.hashes, blockNumber: proof.blockNumber.toString(), blockHash: proof.blockHash,
+            totalValueWei: proof.totalValueWei.toString(), totalFeeWei: proof.totalFeeWei.toString(),
+          }));
+          fresh.events.push(this.event('fleet_watch_baseline', { chainId: target.chainId, address, ...next }));
+          return true;
+        });
+        if (committed) {
+          this.baselines.set(key, next);
+          this.lastFinding.delete(key);
+          return;
+        }
+      }
+    }
     if (verdict.kind !== 'rpc_inconsistent') this.inconsistent.delete(key);
     const changed = baseline === undefined || baseline.nonce !== effective.nonce || baseline.balanceWei !== effective.balanceWei.toString();
     const stale = baseline !== undefined && now.getTime() - Date.parse(baseline.observedAt) >= BASELINE_REFRESH_MS;
@@ -336,8 +415,14 @@ export class FleetWatcher {
         const lastKillAt = this.options.store.snapshot().events.filter(event => event.type === 'kill').at(-1)?.at;
         const stopTime = lastKillAt ? Date.parse(lastKillAt) : NaN;
         const identity = `${effective.nonce}:${effective.balanceWei}:${Math.floor(now.getTime() / DAY_MS)}${Number.isFinite(stopTime) ? `:stop:${stopTime}` : ''}`;
-        await this.finding(verdict.kind, target, now, killFailed ? `${identity}:kill-failed` : identity, 'immediate', killFailed);
         const findingKey = `${verdict.kind}:${effective.nonce}:${effective.balanceWei}`;
+        // A persisted identical finding after this baseline survives a service restart.
+        const repeated = this.lastFinding.get(key) === findingKey || this.options.store.snapshot().events.some(event =>
+          event.type === 'fleet_watch_finding' && event.at >= (baseline?.observedAt ?? '') &&
+          event.data.chainId === target.chainId && event.data.address === address && event.data.kind === verdict.kind &&
+          event.data.nonce === effective.nonce && event.data.balanceWei === effective.balanceWei.toString());
+        const alertIdentity = `${identity}:${repeated ? 'repeat' : 'initial'}${killFailed ? ':kill-failed' : ''}`;
+        await this.finding(verdict.kind, target, now, alertIdentity, 'immediate', killFailed, false, repeated);
         if (this.lastFinding.get(key) !== findingKey) {
           this.lastFinding.set(key, findingKey);
           await this.persist('fleet_watch_finding', { chainId: target.chainId, address, kind: verdict.kind, nonce: effective.nonce, balanceWei: effective.balanceWei.toString(), killFailed });
@@ -360,8 +445,8 @@ export class FleetWatcher {
     return false;
   }
 
-  private async finding(kind: FleetWatchFinding, target: WatchTarget, now: Date, identity: string, priority: 'immediate' | 'grouped', killFailed?: boolean, noWallet?: boolean): Promise<void> {
-    const card = fleetWatchCard({ finding: kind, chainId: target.chainId, ...(noWallet ? {} : { wallet: target.address }), ...(killFailed ? { killFailed: true } : {}), at: now });
+  private async finding(kind: FleetWatchFinding, target: WatchTarget, now: Date, identity: string, priority: 'immediate' | 'grouped', killFailed?: boolean, noWallet?: boolean, repeat = false): Promise<void> {
+    const card = fleetWatchCard({ finding: kind, repeat, chainId: target.chainId, ...(noWallet ? {} : { wallet: target.address }), ...(killFailed ? { killFailed: true } : {}), at: now });
     await this.options.alerts.send({ kind: 'fleet_watch', dedupe: `fleet_watch:${kind}:${target.chainId}:${noWallet ? 'service' : target.address.toLowerCase()}:${identity}`, priority, text: card.summary, system: card, at: now.toISOString() }).catch(() => false);
   }
 

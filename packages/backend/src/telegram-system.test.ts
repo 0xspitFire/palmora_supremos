@@ -5,6 +5,7 @@ import { DurableStore } from './store.js';
 import { TelegramNotifier, type TelegramFetcher } from './telegram.js';
 import { mintSubmittedCard } from './live-run-messages.js';
 import { killEngagedCard, spendCapCard, startCard } from './system-messages.js';
+import { fleetWatchCard } from './fleet-messages.js';
 
 const NOW = new Date('2026-10-03T14:03:22.000Z');
 
@@ -44,6 +45,34 @@ describe('system messages reach Telegram formatted, with a plain fallback (T-030
     await notifier(fetcher).send(message({ system: mintSubmittedCard({ runId: 'r', chainId: 1, collection: 'X', at: NOW, hash }) }));
     expect(calls[1]!.body.reply_markup).toEqual({ inline_keyboard: [[{ text: 'Transaction', url: `https://etherscan.io/tx/${hash}` }]] });
     expect(String(calls[1]!.body.text)).not.toContain(hash);
+  });
+
+  it('routes repeated wallet review only to the existing fresh guided flow, preserving link buttons', async () => {
+    const { calls, fetcher } = recorder();
+    const address = `0x${'ab'.repeat(20)}`;
+    const hash = `0x${'ab'.repeat(32)}`;
+    for (const chainId of [1, 8453, 4663] as const) {
+      const card = fleetWatchCard({ finding: 'unknown_activity', chainId, wallet: address, repeat: true, at: NOW });
+      await notifier(fetcher).send(message({ system: { ...card, txLinks: [{ text: 'Transaction', chainId: 1, hash }] } }));
+      const keyboard = (calls.at(-1)!.body.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> }).inline_keyboard;
+      expect(keyboard[0]![0]).toEqual({ text: 'Transaction', url: `https://etherscan.io/tx/${hash}` });
+      expect(keyboard[0]![1]).toEqual({ text: 'Review / I took action', callback_data: `/watchaccept ${chainId} ${address}` });
+      expect(Buffer.byteLength(keyboard[0]![1]!.callback_data!, 'utf8')).toBeLessThanOrEqual(64);
+      expect(keyboard[0]![1]!.callback_data!.split(' ')).toHaveLength(3);
+    }
+  });
+
+  it('omits malformed review actions and keeps the plain resend free of action buttons', async () => {
+    const address = `0x${'ab'.repeat(20)}`;
+    for (const watchReview of [{ chainId: 10, address }, { chainId: 1, address: `0x${'0'.repeat(40)}` }, { chainId: 1, address: `${address} CONFIRM` }]) {
+      const { calls, fetcher } = recorder();
+      await notifier(fetcher).send(message({ system: { ...kill(), watchReview } as never }));
+      expect(calls[0]!.body.reply_markup).toBeUndefined();
+    }
+    const { calls, fetcher } = recorder([400, 200]);
+    await notifier(fetcher).send(message({ system: fleetWatchCard({ finding: 'unexplained_fall', chainId: 1, wallet: address, repeat: true, at: NOW }) }));
+    expect(calls[0]!.body.reply_markup).toBeDefined();
+    expect(calls[1]!.body.reply_markup).toBeUndefined();
   });
 
   it('resends the same facts as redacted plain text when Telegram refuses the formatting', async () => {

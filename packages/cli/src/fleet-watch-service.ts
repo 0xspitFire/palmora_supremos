@@ -1,4 +1,5 @@
-import { createPublicClient } from 'viem';
+import { createPublicClient, http } from 'viem';
+import { verifyTrustedTreasuryReturns, type TreasuryReturnClient } from './treasury-return-verifier.js';
 import {
   DEFAULT_IDLE_BALANCE_CEILINGS,
   FleetWatcher,
@@ -6,10 +7,10 @@ import {
   type BackendStore,
   type BalanceCeilings,
   type WalletReading,
+  type TreasuryWatchInput,
   type WatchTarget,
   type WatcherAlertSink,
 } from '@mint-bot/backend';
-import { failoverTransport } from '@mint-bot/engine';
 
 /**
  * D-059 item 6 wiring: starts the independent on-chain watcher inside the existing service. Off unless the owner sets
@@ -24,6 +25,7 @@ export interface FleetWatchConfig {
   targets: WatchTarget[];
   treasury: string;
   ceilings: BalanceCeilings;
+  trustedTreasuryReturns?: readonly string[];
   activeIntervalMs?: number;
   idleIntervalMs?: number;
 }
@@ -60,14 +62,24 @@ export function parseFleetWatchEnv(environment: NodeJS.ProcessEnv): FleetWatchCo
   const treasury = environment.MINT_BOT_TREASURY_ADDRESS ?? '';
   if (!ADDRESS.test(treasury)) throw new Error('FLEET_WATCH_TREASURY_INVALID');
   for (const target of targets) if (!DEFAULT_IDLE_BALANCE_CEILINGS[target.chainId]) throw new Error('FLEET_WATCH_NO_CEILING_FOR_CHAIN');
+  const returnFlag = environment.MINT_BOT_WATCH_TRUSTED_TREASURY_RETURNS;
+  if (returnFlag !== undefined && returnFlag !== '' && returnFlag !== 'false' && returnFlag !== 'true') throw new Error('FLEET_WATCH_TREASURY_RETURNS_INVALID');
+  let trustedTreasuryReturns: string[] | undefined;
+  if (returnFlag === 'true') {
+    let extra: unknown;
+    try { extra = JSON.parse(environment.MINT_BOT_WATCH_TREASURY_DESTINATIONS ?? '[]'); } catch { throw new Error('FLEET_WATCH_TREASURY_DESTINATIONS_INVALID'); }
+    if (!Array.isArray(extra) || extra.length > 16 || !extra.every(item => typeof item === 'string' && ADDRESS.test(item) && BigInt(item) !== 0n) || BigInt(treasury) === 0n) throw new Error('FLEET_WATCH_TREASURY_DESTINATIONS_INVALID');
+    trustedTreasuryReturns = [...new Set([treasury, ...extra as string[]].map(item => item.toLowerCase()))];
+  }
   const activeIntervalMs = intervalFrom(environment.MINT_BOT_WATCHER_ACTIVE_INTERVAL_MS);
   const idleIntervalMs = intervalFrom(environment.MINT_BOT_WATCHER_IDLE_INTERVAL_MS);
-  return { targets, treasury, ceilings: DEFAULT_IDLE_BALANCE_CEILINGS, ...(activeIntervalMs !== undefined ? { activeIntervalMs } : {}), ...(idleIntervalMs !== undefined ? { idleIntervalMs } : {}) };
+  return { targets, treasury, ceilings: DEFAULT_IDLE_BALANCE_CEILINGS, ...(trustedTreasuryReturns ? { trustedTreasuryReturns } : {}), ...(activeIntervalMs !== undefined ? { activeIntervalMs } : {}), ...(idleIntervalMs !== undefined ? { idleIntervalMs } : {}) };
 }
 
 export const watcherRpcSecretName = (chainId: number): string => `WATCHER_RPC_${chainId}`;
 
 interface ReaderClient {
+  getChainId(): Promise<number>;
   getBlockNumber(): Promise<bigint>;
   getTransactionCount(args: { address: `0x${string}`; blockNumber: bigint }): Promise<number>;
   getBalance(args: { address: `0x${string}`; blockNumber: bigint }): Promise<bigint>;
@@ -78,9 +90,11 @@ export function createChainReader(clients: ReadonlyMap<number, ReaderClient>): (
   return async (target) => {
     const client = clients.get(target.chainId);
     if (!client) throw new Error('FLEET_WATCH_CHAIN_UNAVAILABLE');
+    if (await client.getChainId() !== target.chainId) throw new Error('FLEET_WATCH_RPC_CHAIN_MISMATCH');
     const blockNumber = await client.getBlockNumber();
     const address = target.address as `0x${string}`;
     const [nonce, balanceWei] = await Promise.all([client.getTransactionCount({ address, blockNumber }), client.getBalance({ address, blockNumber })]);
+    if (await client.getChainId() !== target.chainId) throw new Error('FLEET_WATCH_RPC_CHAIN_MISMATCH');
     return { nonce, balanceWei };
   };
 }
@@ -103,13 +117,45 @@ export interface StartFleetWatcherOptions {
 }
 
 export function startFleetWatcher(options: StartFleetWatcherOptions): { stop(): void; watcher: FleetWatcher; tick(): Promise<void> } {
-  const clients = options.clients ?? new Map<number, ReaderClient>();
-  if (!options.clients) {
-    for (const chainId of new Set(options.config.targets.map((target) => target.chainId))) {
+  let read: (target: WatchTarget) => Promise<WalletReading>;
+  if (options.clients) read = createChainReader(options.clients);
+  else {
+    const endpointReaders = new Map<number, Array<(target: WatchTarget) => Promise<WalletReading>>>();
+    for (const chainId of new Set(options.config.targets.map(target => target.chainId))) {
       const urls = options.rpcUrls(chainId);
       if (urls.length === 0) throw new Error('WATCHER_RPC_SECRET_MISSING');
-      for (const url of urls) options.logger?.registerSecret?.(url);
-      (clients as Map<number, ReaderClient>).set(chainId, createPublicClient({ transport: failoverTransport(urls) }) as unknown as ReaderClient);
+      const readers = urls.map(url => {
+        options.logger?.registerSecret?.(url);
+        const client = createPublicClient({ transport: http(url, { timeout: 5_000, retryCount: 0 }) }) as unknown as ReaderClient;
+        return createChainReader(new Map([[chainId, client]]));
+      });
+      endpointReaders.set(chainId, readers);
+    }
+    // A complete reading comes from one concrete endpoint. Never mix nonce or
+    // balance from a failed-over, possibly misconfigured different-chain URL.
+    read = async target => {
+      for (const reader of endpointReaders.get(target.chainId) ?? []) {
+        try { return await reader(target); } catch { /* retry the whole pinned reading */ }
+      }
+      throw new Error('FLEET_WATCH_CHAIN_UNAVAILABLE');
+    };
+  }
+  const returnClients = new Map<number, TreasuryReturnClient[]>();
+  if (options.config.trustedTreasuryReturns) {
+    for (const chainId of new Set(options.config.targets.map(target => target.chainId))) {
+      const hosts = new Set<string>();
+      const independent: TreasuryReturnClient[] = [];
+      for (const url of options.rpcUrls(chainId)) {
+        let parsed: URL;
+        try { parsed = new URL(url); } catch { continue; }
+        if (parsed.protocol !== 'https:' || hosts.has(parsed.hostname.toLowerCase())) continue;
+        hosts.add(parsed.hostname.toLowerCase());
+        options.logger?.registerSecret?.(url);
+        independent.push(createPublicClient({ transport: http(url, { timeout: 5_000, retryCount: 0 }) }) as unknown as TreasuryReturnClient);
+        if (independent.length === 2) break;
+      }
+      // Missing independent authority never turns a treasury destination into an exemption.
+      returnClients.set(chainId, independent);
     }
   }
   const watcher = new FleetWatcher({
@@ -117,8 +163,13 @@ export function startFleetWatcher(options: StartFleetWatcherOptions): { stop(): 
     targets: options.config.targets,
     ceilings: options.config.ceilings,
     treasury: options.config.treasury,
-    read: createChainReader(clients),
+    read,
     alerts: alertSinkFor(options.alerts),
+    ...(options.config.trustedTreasuryReturns ? { verifyTreasuryReturn: async (input: TreasuryWatchInput) => verifyTrustedTreasuryReturns({
+      ...input,
+      approvedRecipients: options.config.trustedTreasuryReturns!,
+      feeAllowanceWei: options.config.ceilings[input.target.chainId]?.walletMaxWei ?? 0n,
+    }, returnClients.get(input.target.chainId) ?? []) } : {}),
     kill: options.kill,
     ...(options.config.activeIntervalMs !== undefined ? { activeIntervalMs: options.config.activeIntervalMs } : {}),
     ...(options.config.idleIntervalMs !== undefined ? { idleIntervalMs: options.config.idleIntervalMs } : {}),

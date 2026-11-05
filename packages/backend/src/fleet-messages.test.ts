@@ -62,4 +62,22 @@ describe('owner messages for funding, left-over balance and the watcher (D-059)'
     expect(rejected.severity).toBe('attention');
     expect(rejected.steps.join(' ')).toContain('security problem');
   });
+
+  it('offers fresh review only for repeated stopping findings, never the first alert or other findings', () => {
+    for (const finding of ['unknown_activity', 'unexplained_fall'] as const) {
+      expect(fleetWatchCard({ finding, chainId: 1, wallet: W1, at: AT }).watchReview).toBeUndefined();
+      for (const chainId of [1, 8453, 4663] as const) {
+        const repeated = fleetWatchCard({ finding, chainId, wallet: W1, repeat: true, at: AT });
+        expect(repeated.watchReview).toEqual({ chainId, address: W1 });
+        expect(repeated.steps.join(' ')).toContain('review the fresh wallet state');
+        expect(repeated.steps.join(' ')).toContain('does not mute the alert or release the kill switch');
+      }
+    }
+    for (const finding of ['rise_above_limit', 'rpc_inconsistent', 'watcher_blind', 'baseline_accepted', 'accept_rejected'] as const) {
+      expect(fleetWatchCard({ finding, chainId: 1, wallet: W1, repeat: true, at: AT }).watchReview).toBeUndefined();
+    }
+    expect(fleetWatchCard({ finding: 'unknown_activity', chainId: 10, wallet: W1, repeat: true, at: AT }).watchReview).toBeUndefined();
+    expect(fleetWatchCard({ finding: 'unknown_activity', chainId: 1, repeat: true, at: AT }).watchReview).toBeUndefined();
+    expect(fleetWatchCard({ finding: 'unknown_activity', chainId: 1, wallet: `0x${'0'.repeat(40)}`, repeat: true, at: AT }).watchReview).toBeUndefined();
+  });
 });

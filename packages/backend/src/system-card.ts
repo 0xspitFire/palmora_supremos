@@ -10,6 +10,8 @@ import { HTML_BUDGET, PLAIN_BUDGET, clock, cleanText, dashboardLink, escapeHtml,
 export type Severity = 'info' | 'attention' | 'critical';
 export interface SystemLine { label: string; value: string; /** Shows the value in bold: the fact the owner should not miss. */ strong?: boolean; }
 export interface SystemTxLink { text: string; chainId: number; hash: string; }
+/** Opens the owner's fresh guided wallet review; never accepts a baseline itself. */
+export interface SystemWatchReview { chainId: 1 | 8453 | 4663; address: string; }
 export interface SystemCard {
   v: 1;
   kind: 'system';
@@ -24,6 +26,7 @@ export interface SystemCard {
   /** Adds a dashboard line when a dashboard address is configured. */
   dashboard?: boolean;
   txLinks?: SystemTxLink[];
+  watchReview?: SystemWatchReview;
   /** When the thing this message reports happened (ISO); the message then says how long after it was sent. */
   eventAt?: string;
   /** Finishes "... after <label>", for example `the kill`. */
@@ -40,6 +43,7 @@ export interface SystemCardInput {
   code?: { label: string; value: string };
   dashboard?: boolean;
   txLinks?: SystemTxLink[];
+  watchReview?: SystemWatchReview;
   eventAt?: Date | number | string;
   eventLabel?: string;
   summary?: string;
@@ -78,6 +82,11 @@ export function parseSystemCard(raw: unknown): SystemCard | null {
     if (!text || typeof link.chainId !== 'number' || typeof link.hash !== 'string' || !explorerTxUrl(link.chainId, link.hash)) return [];
     return [{ text, chainId: link.chainId, hash: link.hash.toLowerCase() }];
   });
+  const review = card.watchReview !== null && typeof card.watchReview === 'object' ? card.watchReview as Record<string, unknown> : undefined;
+  const watchReview: SystemWatchReview | undefined = review
+    && (review.chainId === 1 || review.chainId === 8453 || review.chainId === 4663)
+    && typeof review.address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(review.address) && !/^0x0{40}$/i.test(review.address)
+    ? { chainId: review.chainId, address: review.address.toLowerCase() } : undefined;
   return {
     v: 1,
     kind: 'system',
@@ -88,6 +97,7 @@ export function parseSystemCard(raw: unknown): SystemCard | null {
     ...(codeLabel && codeValue ? { code: { label: codeLabel, value: codeValue } } : {}),
     ...(card.dashboard === true ? { dashboard: true } : {}),
     ...(links.length > 0 ? { txLinks: links } : {}),
+    ...(watchReview ? { watchReview } : {}),
     ...(eventAt ? { eventAt } : {}),
     ...(eventAt ? { eventLabel: cleanText(card.eventLabel, 60) || 'it happened' } : {}),
     summary: cleanText(card.summary, 300),
