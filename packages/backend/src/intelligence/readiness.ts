@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { PERSONAL_LIVE_FLEET_POLICY } from '../fleet-policy.js';
 import type { BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
-import { READINESS_FRESHNESS_MS, type IntelligenceAlertSink, type IntelligenceChainPort } from './port.js';
+import { READINESS_FRESHNESS_MS, calendarId, type IntelligenceAlertSink, type IntelligenceChainPort } from './port.js';
 import { plainAlertText } from '../alert-card.js';
 import { CollectionNames } from './names.js';
 import { eligibleReadyCard, quantityReducedCard, underfundedCard } from './cards.js';
@@ -41,6 +41,8 @@ export interface ReadinessOptions { now?: () => Date; limits: ReadinessLimits; a
 export type WalletReadinessState = 'ready' | 'funded' | 'unfunded' | 'blocked' | 'skipped' | 'unknown';
 export interface WalletReadiness { wallet: string; state: WalletReadinessState; reason: string; balanceWei: string | null; requiredWei: string; topUpWei: string | null; }
 
+interface ReadinessView { calendars: Map<string, EventRecord>; scores: Map<string, EventRecord>; sweeps: Map<string, EventRecord>; }
+
 interface CalendarView { id: string; contract: string; startMs: number; endMs: number; priceWei: bigint; maxPerWallet: number; }
 
 const HOUR = 60 * 60_000;
@@ -69,38 +71,56 @@ export class ReadinessSweep {
     const nowDate = this.now();
     const now = nowDate.getTime();
     const wallets = [...new Set((await this.wallets()).map((wallet) => wallet.toLowerCase()))].sort();
-    const drops = this.relevantDrops(now);
+    // This is a read-only advisory snapshot for this sweep, never execution authority.
+    const view = this.tickView(this.store.snapshot().events);
+    const drops = this.relevantDrops(now, view);
+    const activeKeys = new Set(drops.map(drop => this.cacheKey(drop.id)));
+    for (const key of this.lastEmit.keys()) if (!activeKeys.has(key)) this.lastEmit.delete(key);
     const events: EventRecord[] = [];
     let alertsRaised = 0;
     for (const drop of drops) {
-      const plan = await this.plan(drop, wallets[0]);
+      const plan = await this.plan(drop, view, wallets[0]);
       const rows: WalletReadiness[] = [];
       for (const wallet of wallets) rows.push(await this.check(wallet, drop, plan, now));
       if (plan.kind === 'paid') this.limitPaidWallets(rows);
       const signature = rows.map((row) => `${row.wallet}:${row.state}:${row.reason}`).join('|');
-      const last = this.lastEmit.get(drop.id) ?? this.restoreLast(drop.id);
+      const last = this.lastEmit.get(this.cacheKey(drop.id)) ?? this.restoreLast(drop.id, view);
       const hot = drop.startMs <= now || drop.startMs - now <= HOT_WINDOW_MS;
       const due = !last || last.signature !== signature || now - last.at >= (hot ? HOT_REFRESH_MS : COLD_REFRESH_MS);
       if (due) {
         events.push({ id: `evt_${randomUUID()}`, type: 'readiness_sweep', at: nowDate.toISOString(), data: { id: `readiness:${drop.id}`, calendarId: drop.id, contract: drop.contract, chainId: this.port.chainId, mintClass: plan.kind, quantity: plan.quantity, ...(plan.quantityPlan ? { quantityPlan: { desired: plan.quantityPlan.desired, planned: plan.quantityPlan.planned, reduced: plan.quantityPlan.reduced, reason: plan.quantityPlan.reason, maxFeeGwei: plan.quantityPlan.maxFeeGwei, message: plan.quantityPlan.message } } : {}), requiredWei: plan.requiredWei.toString(), rows, expiresAt: new Date(now + (hot ? READINESS_FRESHNESS_MS : COLD_REFRESH_MS + 60_000)).toISOString() } });
-        this.lastEmit.set(drop.id, { at: now, signature });
+        this.lastEmit.set(this.cacheKey(drop.id), { at: now, signature });
       }
-      alertsRaised += await this.alert(drop, plan, rows, now);
+      alertsRaised += await this.alert(drop, plan, rows, now, view);
     }
     if (events.length > 0) await this.store.transaction((state) => { state.events.push(...events); });
     return { drops: drops.length, written: events.length, alertsRaised };
   }
 
-  private relevantDrops(now: number): CalendarView[] {
-    const latest = new Map<string, EventRecord>();
-    for (const event of this.store.snapshot().events) {
-      if (event.type !== 'calendar_entry') continue;
-      const id = String(event.data.id ?? '');
-      const prior = latest.get(id);
-      if (!prior || event.at >= prior.at) latest.set(id, event);
+  private cacheKey(id: string): string { return `${this.port.chainId}:${id}`; }
+
+  private tickView(events: readonly EventRecord[]): ReadinessView {
+    const view: ReadinessView = { calendars: new Map(), scores: new Map(), sweeps: new Map() };
+    const newest = (map: Map<string, EventRecord>, key: string, event: EventRecord): void => {
+      const prior = map.get(key);
+      if (!prior || event.at >= prior.at) map.set(key, event);
+    };
+    for (const event of events) {
+      // Legacy records with no explicit chain are not evidence for any chain.
+      // Even matching numeric addresses or an ID prefix cannot supply authority.
+      if (event.data.chainId !== this.port.chainId) continue;
+      const contract = event.data.contract;
+      if (typeof contract !== 'string' || !/^0x[0-9a-f]{40}$/.test(contract)) continue;
+      if (event.type === 'calendar_entry' && event.data.id === calendarId(this.port.chainId, contract)) newest(view.calendars, event.data.id, event);
+      else if (event.type.startsWith('opportunity_')) newest(view.scores, contract, event);
+      else if (event.type === 'readiness_sweep' && event.data.calendarId === calendarId(this.port.chainId, contract)) newest(view.sweeps, event.data.calendarId, event);
     }
+    return view;
+  }
+
+  private relevantDrops(now: number, view: ReadinessView): CalendarView[] {
     const views: CalendarView[] = [];
-    for (const [id, event] of latest) {
+    for (const [id, event] of view.calendars) {
       const startMs = typeof event.data.openingAt === 'string' ? Date.parse(event.data.openingAt) : Number.NaN;
       const endMs = typeof event.data.closingAt === 'string' ? Date.parse(event.data.closingAt) : Number.POSITIVE_INFINITY;
       const price = typeof event.data.priceWei === 'string' && /^\d+$/.test(event.data.priceWei) ? BigInt(event.data.priceWei) : null;
@@ -116,7 +136,7 @@ export class ReadinessSweep {
     return views.sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id)).slice(0, MAX_DROPS_PER_SWEEP);
   }
 
-  private async plan(drop: CalendarView, estimator?: string): Promise<{ kind: 'free' | 'paid'; quantity: number; requiredWei: bigint; blockReason?: string; quantityPlan?: QuantityPlan }> {
+  private async plan(drop: CalendarView, view: ReadinessView, estimator?: string): Promise<{ kind: 'free' | 'paid'; quantity: number; requiredWei: bigint; blockReason?: string; quantityPlan?: QuantityPlan }> {
     const limits = this.options.limits;
     if (drop.priceWei === 0n) {
       if (drop.maxPerWallet <= 0) return { kind: 'free', quantity: 0, requiredWei: limits.freeFeeAllowanceWei, blockReason: 'NO_MINT_ALLOWANCE' };
@@ -126,7 +146,7 @@ export class ReadinessSweep {
       return { kind: 'free', quantity: quantityPlan?.planned ?? drop.maxPerWallet, requiredWei: limits.freeFeeAllowanceWei, ...(quantityPlan ? { quantityPlan } : {}) };
     }
     if (drop.priceWei > limits.paidMaxPricePerNftWei) return { kind: 'paid', quantity: 0, requiredWei: 0n, blockReason: 'PRICE_ABOVE_LIMIT' };
-    const score = this.latestScore(drop.contract);
+    const score = this.latestScore(drop.contract, view);
     const byScore = paidQuantityForScore(score);
     const quantity = drop.maxPerWallet > 0 ? Math.min(byScore, drop.maxPerWallet) : byScore;
     if (quantity === 0) return { kind: 'paid', quantity: 0, requiredWei: 0n, blockReason: score === null ? 'SCORE_UNKNOWN' : 'SCORE_TOO_LOW' };
@@ -161,7 +181,7 @@ export class ReadinessSweep {
     }
   }
 
-  private async alert(drop: CalendarView, plan: Awaited<ReturnType<ReadinessSweep['plan']>>, rows: readonly WalletReadiness[], now: number): Promise<number> {
+  private async alert(drop: CalendarView, plan: Awaited<ReturnType<ReadinessSweep['plan']>>, rows: readonly WalletReadiness[], now: number, view: ReadinessView): Promise<number> {
     const sink = this.options.alerts;
     if (!sink) return 0;
     // The collection name is read from the chain first; the label (ETH MINT) is only for a contract that has none.
@@ -175,7 +195,7 @@ export class ReadinessSweep {
     }
     if (plan.blockReason) return reducedAlerts;
     // Only a drop the scorer rated worth a look may interrupt immediately; everything else waits for the digest.
-    const score = this.latestScore(drop.contract);
+    const score = this.latestScore(drop.contract, view);
     const soon = drop.startMs - now <= HOUR && score !== null && score >= IMMEDIATE_MIN_SCORE;
     let raised = reducedAlerts;
     const unfunded = rows.filter((row) => row.state === 'unfunded');
@@ -211,21 +231,19 @@ export class ReadinessSweep {
     return true;
   }
 
-  private latestScore(contract: string): number | null {
-    let latest: EventRecord | undefined;
-    for (const event of this.store.snapshot().events) if (event.type.startsWith('opportunity_') && String(event.data.contract ?? '') === contract && (!latest || event.at >= latest.at)) latest = event;
+  private latestScore(contract: string, view: ReadinessView): number | null {
+    const latest = view.scores.get(contract);
     if (!latest || latest.data.blocked === true) return null;
     const score = Number(latest.data.score);
     return Number.isFinite(score) ? score : null;
   }
 
-  private restoreLast(id: string): { at: number; signature: string } | undefined {
-    let latest: EventRecord | undefined;
-    for (const event of this.store.snapshot().events) if (event.type === 'readiness_sweep' && event.data.calendarId === id && (!latest || event.at >= latest.at)) latest = event;
+  private restoreLast(id: string, view: ReadinessView): { at: number; signature: string } | undefined {
+    const latest = view.sweeps.get(id);
     if (!latest || !Array.isArray(latest.data.rows)) return undefined;
     const rows = latest.data.rows as WalletReadiness[];
     const value = { at: Date.parse(latest.at), signature: rows.map((row) => `${row.wallet}:${row.state}:${row.reason}`).join('|') };
-    this.lastEmit.set(id, value);
+    this.lastEmit.set(this.cacheKey(id), value);
     return value;
   }
 }

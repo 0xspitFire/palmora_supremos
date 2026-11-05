@@ -187,7 +187,7 @@ describe('ReadinessSweep', () => {
     t.port.drops.set(snapshot.nftContract, snapshot);
     t.port.mints = [mint(900n, W1, 1n, snapshot.priceWei, snapshot.nftContract)];
     await t.discovery.tick();
-    if (score !== undefined) await t.store.transaction((state) => { state.events.push({ id: `score-${snapshot.nftContract}`, type: 'opportunity_notified', at: new Date(t.clock.ms + 1).toISOString(), data: { contract: snapshot.nftContract, score, blocked: false } }); });
+    if (score !== undefined) await t.store.transaction((state) => { state.events.push({ id: `score-${snapshot.nftContract}`, type: 'opportunity_notified', at: new Date(t.clock.ms + 1).toISOString(), data: { chainId: t.port.chainId, contract: snapshot.nftContract, score, blocked: false } }); });
   }
 
   it('marks funded wallets ready after a passing simulation and tells the owner exactly how much ETH an underfunded wallet needs', async () => {
@@ -424,7 +424,7 @@ describe('Telegram delivery retry and top-up bundling (T-011)', () => {
     t.port.mints = [mint(1_005n, W1)];
     t.port.head = 1_010n;
     await t.discovery.tick();
-    await t.store.transaction((state) => { state.events.push({ id: 'score-soon', type: 'opportunity_notified', at: new Date(t.clock.ms + 1).toISOString(), data: { contract: NFT, score: 80, blocked: false } }); });
+    await t.store.transaction((state) => { state.events.push({ id: 'score-soon', type: 'opportunity_notified', at: new Date(t.clock.ms + 1).toISOString(), data: { chainId: t.port.chainId, contract: NFT, score: 80, blocked: false } }); });
     t.port.balances.set(W1, 1n);
     await new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS, alerts: t.alerts }).tick();
     const underfunded = events(t.store, 'alert_underfunded');
@@ -721,5 +721,123 @@ describe('calendar price-alert hot-path dedupe', () => {
     await t.discovery.tick();
     expect(priceAttempts).toBe(2);
     expect(events(t.store, 'alert_price_above_limit')).toHaveLength(1);
+  });
+});
+
+describe('discovery watch-list query budget', () => {
+  it.each([1, 64, 128])('reads watched addresses once per tick for %i tracked collections across eight slices', async count => {
+    const t = setup();
+    t.repo.watched = [WHALE];
+    t.port.maxRange = 10n;
+    t.port.mints = Array.from({ length: count }, (_, index) => {
+      const contract = `0x${(index + 100).toString(16).padStart(40, '0')}`;
+      t.port.drops.set(contract, drop({ nftContract: contract }));
+      return mint(701n, W1, 1n, 0n, contract);
+    });
+    const queries = vi.spyOn(t.repo, 'observedAddresses');
+    // Alert delivery has its own persistence tests; keep this query-budget test
+    // independent of outbox size and notification side effects.
+    const discovery = new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT });
+    await discovery.tick();
+    expect(t.port.scans).toHaveLength(8);
+    expect(queries).toHaveBeenCalledTimes(1);
+    expect(events(t.store, 'opportunity_scored').length + events(t.store, 'opportunity_notified').length).toBe(count);
+    t.repo.watched = [];
+    await discovery.tick();
+    expect(queries).toHaveBeenCalledTimes(2);
+    expect(t.port.scans).toHaveLength(16);
+  });
+});
+
+describe('readiness advisory snapshot and chain isolation', () => {
+  const calendar = (chainId: unknown = 1, overrides: Record<string, unknown> = {}) => ({
+    id: `calendar:${typeof chainId === 'number' ? chainId : 1}:${NFT}`,
+    contract: NFT, ...(chainId === undefined ? {} : { chainId }),
+    openingAt: new Date(START - 60_000).toISOString(), closingAt: new Date(START + 3_600_000).toISOString(),
+    expiresAt: new Date(START + 15 * 60_000).toISOString(), priceWei: '1000000000000000', maxPerWallet: 5, ...overrides,
+  });
+  const add = async (t: ReturnType<typeof setup>, type: string, id: string, data: Record<string, unknown>, at = START) => t.store.transaction(state => {
+    state.events.push({ id, type, at: new Date(at).toISOString(), data });
+  });
+
+  it('does not use a newer other-chain score or calendar for the same address', async () => {
+    const t = setup();
+    await add(t, 'calendar_entry', 'eth_calendar', calendar());
+    await add(t, 'calendar_entry', 'base_calendar', calendar(8453, { priceWei: '0', maxPerWallet: 100 }), START + 1);
+    await add(t, 'opportunity_notified', 'eth_score', { chainId: 1, contract: NFT, score: 30, blocked: false });
+    await add(t, 'opportunity_notified', 'base_score', { chainId: 8453, contract: NFT, score: 100, blocked: false }, START + 1);
+    t.port.balances.set(W1, 10n ** 18n);
+    const simulations = vi.spyOn(t.port, 'simulateMint');
+    const result = await new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS }).tick();
+    expect(result.drops).toBe(1);
+    expect(events(t.store, 'readiness_sweep')[0]?.data).toMatchObject({ chainId: 1, mintClass: 'paid', quantity: 0,
+      rows: [expect.objectContaining({ reason: 'SCORE_TOO_LOW' })] });
+    expect(simulations).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, '1', null, 8453, 4663, 9999])('does not borrow score authority with chain metadata %s', async chainId => {
+    const t = setup();
+    await add(t, 'calendar_entry', 'eth_calendar', calendar());
+    await add(t, 'opportunity_notified', 'not_eth_score', { ...(chainId === undefined ? {} : { chainId }), contract: NFT, score: 100, blocked: false });
+    await new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS }).tick();
+    expect(events(t.store, 'readiness_sweep')[0]?.data).toMatchObject({ quantity: 0,
+      rows: [expect.objectContaining({ reason: 'SCORE_UNKNOWN' })] });
+  });
+
+  it.each([undefined, '1', null, 8453, 4663, 9999])('does not query wallets for calendar metadata %s on Ethereum', async chainId => {
+    const t = setup();
+    const data = calendar(chainId);
+    if (chainId === undefined) delete data.chainId;
+    await add(t, 'calendar_entry', 'unbound_calendar', data);
+    const balance = vi.spyOn(t.port, 'balance');
+    const result = await new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS }).tick();
+    expect(result).toMatchObject({ drops: 0, written: 0 });
+    expect(balance).not.toHaveBeenCalled();
+  });
+
+  it('refuses inconsistent canonical calendar IDs even with matching explicit chain metadata', async () => {
+    const t = setup();
+    await add(t, 'calendar_entry', 'bad_id', calendar(1, { id: `calendar:8453:${NFT}` }));
+    expect((await new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS }).tick()).drops).toBe(0);
+  });
+
+  it.each([undefined, '1', null, 8453, 4663, 9999])('does not restore another or unidentified chain sweep (%s)', async chainId => {
+    const t = setup();
+    await add(t, 'calendar_entry', 'eth_free_calendar', calendar(1, { priceWei: '0' }));
+    await add(t, 'readiness_sweep', 'unbound_sweep', { ...(chainId === undefined ? {} : { chainId }), calendarId: `calendar:1:${NFT}`, contract: NFT,
+      rows: [{ wallet: W1, state: 'ready', reason: 'SIMULATION_PASSED' }] });
+    t.port.balances.set(W1, 10n ** 18n);
+    const result = await new ReadinessSweep(t.store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS }).tick();
+    expect(result.written).toBe(1);
+  });
+
+  it('uses the correct own-chain view for Base and restores only that chain\'s sweep', async () => {
+    const t = setup();
+    await add(t, 'calendar_entry', 'eth_calendar', calendar(1));
+    await add(t, 'calendar_entry', 'base_calendar', calendar(8453, { priceWei: '0' }));
+    await add(t, 'readiness_sweep', 'base_sweep', { chainId: 8453, calendarId: `calendar:8453:${NFT}`, contract: NFT,
+      rows: [{ wallet: W1, state: 'ready', reason: 'SIMULATION_PASSED' }] });
+    t.port.balances.set(W1, 10n ** 18n);
+    const port = Object.assign(t.port, { chainId: 8453 }) as unknown as IntelligenceChainPort;
+    const result = await new ReadinessSweep(t.store, port, async () => [W1], { now: t.clock.now, limits: LIMITS }).tick();
+    expect(result).toMatchObject({ drops: 1, written: 0 });
+  });
+
+  it('takes one advisory snapshot regardless of the number of drops', async () => {
+    const t = setup();
+    t.port.dropUpdates = Array.from({ length: 20 }, (_, index) => ({
+      nftContract: `0x${(index + 100).toString(16).padStart(40, '0')}`, mintPriceWei: 0n,
+      startTime: seconds(START) - 60, endTime: seconds(START) + 3600, maxPerWallet: 1, blockNumber: 900n,
+    }));
+    await t.discovery.tick();
+    t.port.balances.set(W1, 10n ** 18n);
+    const reads = vi.fn(() => t.store.snapshot());
+    const store: BackendStore = {
+      open: () => t.store.open(), capabilities: () => t.store.capabilities(), snapshot: reads,
+      transaction: mutate => t.store.transaction(mutate), commit: () => t.store.commit(),
+    };
+    const result = await new ReadinessSweep(store, t.port, async () => [W1], { now: t.clock.now, limits: LIMITS }).tick();
+    expect(result.drops).toBe(20);
+    expect(reads).toHaveBeenCalledTimes(1);
   });
 });

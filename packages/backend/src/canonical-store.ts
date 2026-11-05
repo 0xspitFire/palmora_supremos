@@ -3,6 +3,7 @@ import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { assertBaseFirstRehearsal, assertBaseLiveAllowed } from './base-enablement.js';
 import { unresolvedRunIds } from './kill-switch-release.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   AuditEventRecord,
   ExecutionRunRecord,
@@ -35,7 +36,7 @@ import type {
   SpendPolicy,
   StoreCapabilities,
 } from './types.js';
-import type { BackendStore } from './store.js';
+import type { BackendControlSnapshot, BackendStore } from './store.js';
 import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
@@ -529,6 +530,21 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return state;
   }
 
+  public eventSnapshot(): EventRecord[] { this.ensureOpen(); return this.readEvents(); }
+
+  /** No event, receipt or campaign history is needed for an idle scheduler check. Never cached. */
+  public controlSnapshot(): BackendControlSnapshot {
+    this.ensureOpen();
+    const killed = this.databaseStore.isKillSwitchEngaged();
+    const runtime = this.readRuntime();
+    return {
+      killed,
+      runtime: killed ? { ...runtime, startupState: 'Blocked', blockingReasons: [...new Set([...runtime.blockingReasons, 'KILLED'])] } : runtime,
+      reconciliations: this.readReconciliations(),
+      jobs: this.readJobs(),
+    };
+  }
+
   public async transaction<T>(mutate: (state: BackendState) => T): Promise<T> {
     this.ensureOpen();
     this.db.exec('BEGIN IMMEDIATE');
@@ -956,7 +972,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     }
     const rows = this.db.prepare("SELECT rowid AS rid, id, entity_type, entity_id, prior_state, new_state, actor, reason, policy_snapshot_json, occurred_at FROM audit_event WHERE rowid > ? ORDER BY rowid").all(this.eventCacheRowid) as Array<DatabaseEventRow & { rid: number }>;
     if (rows.length > 0) {
-      let outOfOrder = false;
+      const batch: EventRecord[] = [];
       for (const row of rows) {
         this.eventCacheRowid = Math.max(this.eventCacheRowid, row.rid);
         this.eventCacheTail = { rid: row.rid, id: row.id, at: row.occurred_at };
@@ -964,12 +980,26 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         if (snapshot?.kind !== 'event' && row.entity_type !== 'execution_run') continue;
         const event = { id: row.id, ...(snapshot?.runId || row.entity_type === 'execution_run' ? { runId: snapshot?.runId ?? row.entity_id } : {}), type: snapshot?.eventType ?? row.new_state ?? row.reason, at: row.occurred_at, data: snapshot?.eventData ?? {} } satisfies EventRecord;
         for (const value of Object.values(event.data)) deepFreeze(value);
-        const last = this.eventCache.at(-1);
-        if (last && (event.at < last.at || (event.at === last.at && event.id < last.id))) outOfOrder = true;
-        this.eventCache.push(event);
+        batch.push(event);
       }
-      // The original query ordered by time then id; new rows normally arrive in that order, and a sort restores it when they do not.
-      if (outOfOrder) this.eventCache.sort((left, right) => left.at < right.at ? -1 : left.at > right.at ? 1 : left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+      // Same-time UUID batches often interleave with history. Sort only the new batch, then merge the two sorted sequences.
+      const compare = (left: EventRecord, right: EventRecord): number => left.at < right.at ? -1 : left.at > right.at ? 1 : left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+      batch.sort(compare);
+      if (batch.length > 0) {
+        const last = this.eventCache.at(-1);
+        if (!last || compare(last, batch[0]!) <= 0) { for (const event of batch) this.eventCache.push(event); }
+        else {
+          const merged: EventRecord[] = [];
+          let oldIndex = 0;
+          let newIndex = 0;
+          while (oldIndex < this.eventCache.length && newIndex < batch.length) {
+            merged.push(compare(this.eventCache[oldIndex]!, batch[newIndex]!) <= 0 ? this.eventCache[oldIndex++]! : batch[newIndex++]!);
+          }
+          while (oldIndex < this.eventCache.length) merged.push(this.eventCache[oldIndex++]!);
+          while (newIndex < batch.length) merged.push(batch[newIndex++]!);
+          this.eventCache = merged;
+        }
+      }
     }
     // Each caller gets fresh top-level objects. Anything nested inside an event's data is frozen, so a caller that tried to change it
     // would fail loudly instead of silently altering every later snapshot.
@@ -1043,18 +1073,18 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const readiness = new Map<string, BackendState['readiness'][number]>();
     for (const item of previous.readiness) if (!readiness.has(readinessKey(item))) readiness.set(readinessKey(item), item);
     for (const campaign of next.campaigns) this.persistCampaign(campaign, campaigns.get(campaign.id));
-    for (const run of next.runs) this.persistRun(run, runs.get(run.id));
-    for (const intent of next.intents) this.persistIntent(intent, intents.get(intent.id));
-    for (const attempt of next.attempts) this.persistAttempt(attempt, attempts.get(attempt.id));
-    for (const receipt of next.receipts) this.persistReceipt(receipt, receipts.get(receipt.id));
-    for (const reconciliation of next.reconciliations) this.persistReconciliation(reconciliation, reconciliations.get(reconciliation.id));
-    for (const reservation of next.reservations) this.persistReservation(reservation, reservations.get(reservation.id));
-    for (const event of next.events) this.persistEvent(event, events.get(event.id));
-    for (const notification of next.notificationOutbox) this.persistNotification(notification, notifications.get(notification.id));
-    for (const evidence of next.chainEvidence) this.persistChainEvidence(evidence, chainEvidence.get(evidence.id));
-    for (const simulation of next.simulations) this.persistSimulation(simulation, simulations.get(simulation.id));
-    for (const item of next.readiness) this.persistReadiness(item, readiness.get(readinessKey(item)));
-    for (const job of next.jobs) this.persistJob(job, jobs.get(job.id));
+    for (const run of next.runs) { const prior = runs.get(run.id); if (!prior || !isDeepStrictEqual(prior, run)) this.persistRun(run, prior); }
+    for (const intent of next.intents) if (!intents.has(intent.id)) this.persistIntent(intent, undefined);
+    for (const attempt of next.attempts) if (!attempts.has(attempt.id)) this.persistAttempt(attempt, undefined);
+    for (const receipt of next.receipts) if (!receipts.has(receipt.id)) this.persistReceipt(receipt, undefined);
+    for (const reconciliation of next.reconciliations) if (!reconciliations.has(reconciliation.id)) this.persistReconciliation(reconciliation, undefined);
+    for (const reservation of next.reservations) { const prior = reservations.get(reservation.id); if (!prior || !isDeepStrictEqual(prior, reservation)) this.persistReservation(reservation, prior); }
+    for (const event of next.events) if (!events.has(event.id)) this.persistEvent(event, undefined);
+    for (const notification of next.notificationOutbox) { const prior = notifications.get(notification.id); if (!prior || !isDeepStrictEqual(prior, notification)) this.persistNotification(notification, prior); }
+    for (const evidence of next.chainEvidence) { const prior = chainEvidence.get(evidence.id); if (!prior || !isDeepStrictEqual(prior, evidence)) this.persistChainEvidence(evidence, prior); }
+    for (const simulation of next.simulations) { const prior = simulations.get(simulation.id); if (!prior || !isDeepStrictEqual(prior, simulation)) this.persistSimulation(simulation, prior); }
+    for (const item of next.readiness) { const prior = readiness.get(readinessKey(item)); if (!prior || !isDeepStrictEqual(prior, item)) this.persistReadiness(item, prior); }
+    for (const job of next.jobs) { const prior = jobs.get(job.id); if (!prior || !isDeepStrictEqual(prior, job)) this.persistJob(job, prior); }
     const nextJobIds = new Set(next.jobs.map((item) => item.id));
     for (const job of previous.jobs) if (!nextJobIds.has(job.id)) this.db.prepare('DELETE FROM orchestrator_job WHERE id = ?').run(job.id);
     const nextNotificationIds = new Set(next.notificationOutbox.map((item) => item.id));
@@ -1069,6 +1099,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private persistCampaign(campaign: Campaign, prior: Campaign | undefined): void {
+    if (prior && isDeepStrictEqual(prior, campaign)) return;
     const graph = this.ensureCampaignGraph(campaign);
     if (!prior) {
       this.db.prepare('INSERT INTO campaign (id, drop_id, state, policy_snapshot_json, created_at) VALUES (?, ?, ?, ?, ?)').run(campaign.id, graph.dropId, dbCampaignState(campaign.state), encode({ campaignSnapshot: campaign }), campaign.createdAt);
@@ -1270,7 +1301,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   private persistRuntime(runtime: BackendState['runtime']): void {
     const capturedAt = this.now().toISOString();
-    this.db.prepare('INSERT INTO runtime_readiness_snapshot (id, chain_profile_id, readiness_state, kill_switch_engaged, reconciliation_age_seconds, policy_snapshot_json, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(`readiness_${digest(encode(runtime) + capturedAt)}`, null, runtime.startupState, runtime.startupState === 'Blocked' && runtime.blockingReasons.includes('KILLED') ? 1 : 0, null, encode({ kind: 'runtime', runtime }), capturedAt);
+    this.db.prepare('INSERT INTO runtime_readiness_snapshot (id, chain_profile_id, readiness_state, kill_switch_engaged, reconciliation_age_seconds, policy_snapshot_json, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(`readiness_${randomUUID()}`, null, runtime.startupState, runtime.startupState === 'Blocked' && runtime.blockingReasons.includes('KILLED') ? 1 : 0, null, encode({ kind: 'runtime', runtime }), capturedAt);
   }
 
   private recordLifecycle(record: LifecycleEventRecord): void {

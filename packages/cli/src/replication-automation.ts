@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { campaignInputDigest, evaluateQualifiedAutomationGate, type BackendStore, type Campaign, type EventRecord } from '@mint-bot/backend';
+import { campaignInputDigest, evaluateQualifiedAutomationGate, readEventSnapshot, type BackendStore, type Campaign, type EventRecord } from '@mint-bot/backend';
 import type { Address } from 'viem';
 import type { FireDeps } from './fire.js';
 import type { FireResult } from './fire.js';
@@ -42,7 +42,8 @@ export function createReplicationAutomation(deps: ReplicationAutomationDeps): { 
       if (busy) return;
       busy = true;
       try {
-        const events = deps.store.snapshot().events;
+        const events = readEventSnapshot(deps.store);
+        const claims = new Set(events.filter((event) => event.type === 'replication_claim').map((event) => event.id));
         // Always use the newest score, including a downgrade or blocking risk.
         const scores = new Map<string, EventRecord>();
         for (const event of events) if (event.type.startsWith('opportunity_') && typeof event.data.contract === 'string') scores.set(`${event.data.chainId}:${event.data.contract}`, event);
@@ -52,7 +53,7 @@ export function createReplicationAutomation(deps: ReplicationAutomationDeps): { 
           const source = [...events].reverse().find((e) => e.type === 'watched_wallet_mint' && e.data.chainId === score.data.chainId && e.data.contract === score.data.contract && deps.watchedWallets(Number(e.data.chainId)).some((wallet) => wallet.toLowerCase() === String(e.data.wallet).toLowerCase()));
           if (!source) continue;
           const key = `replication_claim:${score.data.chainId}:${score.data.contract}`;
-          if (deps.store.snapshot().events.some((e) => e.id === key)) continue;
+          if (claims.has(key)) continue;
           let claimed = false;
           try {
             const wallets = await deps.wallets();
@@ -61,6 +62,7 @@ export function createReplicationAutomation(deps: ReplicationAutomationDeps): { 
             // Persist before any campaign/request is created; crash recovery never repeats it.
             await deps.store.transaction((state) => { if (!state.events.some((e) => e.id === key)) { state.events.push({ id: key, type: 'replication_claim', at: now().toISOString(), data: { sourceEventId: source.id, scoreEventId: score.id, policyVersion: 'free-watched-v1' } }); claimed = true; } });
             if (!claimed) continue;
+            claims.add(key);
             const preparedResult = await deps.prepare(qualified, wallets);
             for (const prepared of Array.isArray(preparedResult) ? preparedResult : [preparedResult]) {
             const simulations = await deps.fire.recordSimulations(prepared.campaign, prepared.wallets);

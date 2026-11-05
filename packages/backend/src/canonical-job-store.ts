@@ -1,5 +1,5 @@
 import { redactText } from './observability.js';
-import type { BackendStore } from './store.js';
+import { readControlSnapshot, type BackendStore } from './store.js';
 import type { ScheduledJob } from './job-store.js';
 import type { ScheduledJobRecord } from './types.js';
 
@@ -60,7 +60,7 @@ export class CanonicalJobStore {
   public async open(): Promise<void> {}
 
   public async list(): Promise<ScheduledJob[]> {
-    return this.store.snapshot().jobs.filter((record) => record.kind === 'phase2').map(fromRecord).map(clone);
+    return readControlSnapshot(this.store).jobs.filter((record) => record.kind === 'phase2').map(fromRecord).map(clone);
   }
 
   public async put(input: Omit<ScheduledJob, 'state' | 'attempts' | 'createdAt' | 'updatedAt'> & Partial<Pick<ScheduledJob, 'state' | 'attempts' | 'createdAt' | 'updatedAt'>>): Promise<ScheduledJob> {
