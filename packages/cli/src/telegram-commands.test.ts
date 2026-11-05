@@ -342,6 +342,33 @@ describe('the unlocked session (D-063 items 5 and 6)', () => {
     expect(t.lastTo(OWNER)).toContain('needs an unlocked session');
   });
 
+  it('distinguishes a failed kill-state check from a confirmed safety kill without leaking its error', async () => {
+    for (const fails of [true, false]) {
+      const t = setup();
+      await t.send(t.message(OWNER, `/unlock ${t.code()}`));
+      const records: Array<{ outcome: string }> = [];
+      const logs: Array<{ event: string; code?: unknown }> = [];
+      const router = new TelegramCommandRouter({
+        api: { getUpdates: async () => [], sendMessage: async (_chat, text) => { t.sent.push({ chatId: String(OWNER), text }); }, answerCallback: async () => undefined, deleteMessage: async () => undefined },
+        access: t.access,
+        actions: { killEngagedSince: () => { if (fails) throw new Error('SQLITE_BUSY https://rpc.invalid/never-print'); return true; } } as unknown as TelegramActions,
+        ownerUserId: String(OWNER), totpKey: KEY, record: async (row) => { records.push(row); }, alert: async () => undefined, now: t.now,
+        log: (event, fields) => { logs.push({ event, code: fields?.code }); },
+      });
+      t.advance(4 * 60_000);
+      await router.checkSession();
+      expect(t.access.openSession()).toBeUndefined();
+      const expected = fails ? 'KILL_STATE_CHECK_UNAVAILABLE' : 'KILL_SWITCH_ENGAGED';
+      expect(records).toContainEqual(expect.objectContaining({ command: 'session', outcome: `closed:${expected}` }));
+      expect(logs).toContainEqual({ event: 'telegram_session_closed', code: expected });
+      expect(t.lastTo(OWNER)).toContain(fails ? 'kill-switch state could not be checked' : 'The kill switch was engaged');
+      expect(t.lastTo(OWNER)).not.toContain('never-print');
+      expect(JSON.stringify(logs)).not.toContain('never-print');
+      expect(JSON.stringify(records)).not.toContain('never-print');
+      expect(t.lastTo(OWNER)).not.toContain('12-hour');
+    }
+  });
+
   it('the session ends after 12 hours, and the owner is told', async () => {
     const t = setup();
     await t.send(t.message(OWNER, `/unlock ${t.code()}`));

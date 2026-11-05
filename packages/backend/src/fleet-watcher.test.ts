@@ -41,7 +41,7 @@ describe('judgeWallet (pure)', () => {
 });
 
 describe('FleetWatcher (D-059 item 6)', () => {
-  function setup(options: { reads?: Map<string, WalletReading>; failing?: boolean; ceilings?: typeof CEILINGS | Record<number, never> } = {}) {
+  function setup(options: { reads?: Map<string, WalletReading>; failing?: boolean; ceilings?: typeof CEILINGS | Record<number, never>; persistKills?: boolean } = {}) {
     const store = new Store();
     const reads = options.reads ?? new Map<string, WalletReading>([[W1, { nonce: 5, balanceWei: 300_000_000_000_000n }], [W2, { nonce: 2, balanceWei: 0n }]]);
     const sent: Array<{ kind: string; dedupe: string; priority: string; text: string }> = [];
@@ -56,7 +56,10 @@ describe('FleetWatcher (D-059 item 6)', () => {
       treasury: TREASURY,
       read: async (target) => { if (failing) throw new Error('rpc down'); return reads.get(target.address)!; },
       alerts: sink,
-      kill: async (reason) => { kills.push(reason); },
+      kill: async (reason) => {
+        kills.push(reason);
+        if (options.persistKills) await store.transaction(state => { state.killed = true; state.events.push({ id: `kill-${kills.length}`, type: 'kill', at: clock.toISOString(), data: { reason } }); });
+      },
       now: () => clock,
     });
     return { store, reads, sent, kills, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, fail: (value: boolean) => { failing = value; }, make, watcher: make() };
@@ -92,6 +95,28 @@ describe('FleetWatcher (D-059 item 6)', () => {
     await watcher.acceptCurrent({ chainId: 1, address: W1 }, { nonce: 6, balanceWei: 250_000_000_000_000n });
     advance(WATCH_IDLE_INTERVAL_MS);
     expect((await watcher.tick()).killed).toBe(false);
+  });
+
+  it('alerts once per renewed safety stop without accepting the unresolved wallet baseline', async () => {
+    const { watcher, reads, sent, kills, advance, store, make } = setup({ persistKills: true });
+    await watcher.tick();
+    reads.set(W1, { nonce: 6, balanceWei: 250_000_000_000_000n });
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await watcher.tick();
+    expect(sent).toHaveLength(1);
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await watcher.tick();
+    expect(sent).toHaveLength(1);
+    await store.transaction(state => { state.killed = false; });
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await watcher.tick();
+    expect(kills).toHaveLength(2);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.dedupe).not.toBe(sent[0]!.dedupe);
+    advance(WATCH_IDLE_INTERVAL_MS);
+    await make().tick();
+    expect(sent).toHaveLength(2);
+    expect(store.snapshot().events.filter(event => event.type === 'fleet_watch_baseline' && event.data.address === W1).at(-1)?.data.nonce).toBe(5);
   });
 
   it('adopts an accept recorded by the owner command in another process, without a restart, and only for a watched wallet', async () => {

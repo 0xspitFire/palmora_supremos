@@ -330,7 +330,12 @@ export class FleetWatcher {
           try { await this.options.kill(`fleet-watch-${verdict.kind}`); } catch { killFailed = true; }
         }
         if (killFailed) result.killFailed = true; else result.killed = true;
-        const identity = `${effective.nonce}:${effective.balanceWei}:${Math.floor(now.getTime() / DAY_MS)}`;
+        // A release followed by another stop is a new safety episode even when
+        // the unresolved wallet reading is unchanged. Keep ordinary killed
+        // polling deduplicated, but explain every renewed stop to the owner.
+        const lastKillAt = this.options.store.snapshot().events.filter(event => event.type === 'kill').at(-1)?.at;
+        const stopTime = lastKillAt ? Date.parse(lastKillAt) : NaN;
+        const identity = `${effective.nonce}:${effective.balanceWei}:${Math.floor(now.getTime() / DAY_MS)}${Number.isFinite(stopTime) ? `:stop:${stopTime}` : ''}`;
         await this.finding(verdict.kind, target, now, killFailed ? `${identity}:kill-failed` : identity, 'immediate', killFailed);
         const findingKey = `${verdict.kind}:${effective.nonce}:${effective.balanceWei}`;
         if (this.lastFinding.get(key) !== findingKey) {

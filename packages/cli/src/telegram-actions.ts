@@ -235,25 +235,62 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   const releaseResult = (outcome: { state: string; message: string; phrase?: string }): string =>
     outcome.state === 'Released' ? `${outcome.message} The service accepts live work again within a few seconds if nothing else blocks it. /kill stops everything at any time.` : outcome.message;
 
+  const readinessCodes = (values: unknown): string[] => Array.isArray(values)
+    ? values.map((value) => typeof value === 'string' && /^[A-Z][A-Z0-9_]{1,95}(?::[A-Z][A-Z0-9_]{1,95})?$/.test(value) ? value : 'READINESS_CHECK_FAILED')
+    : [];
+  const reportedHealth = async () => {
+    try {
+      const response = await deps.application.command<{ state?: string; ready?: boolean; blockingReasons?: string[]; reasons?: string[] }>('health');
+      const data = response.data ?? {};
+      let state = ['Ready', 'NotReady', 'Killed'].includes(data.state ?? response.state) ? data.state ?? response.state : 'Unknown';
+      const reasons = [...new Set(readinessCodes(data.blockingReasons ?? data.reasons))];
+      try {
+        if (killFile().present) { state = 'Killed'; if (!reasons.includes('KILL_SWITCH_ENGAGED')) reasons.push('KILL_SWITCH_ENGAGED'); }
+      } catch { state = 'Unknown'; reasons.push('KILL_STATE_CHECK_UNAVAILABLE'); }
+      return { state, ready: state === 'Ready' && data.ready === true && reasons.length === 0, reasons };
+    } catch { return { state: 'Unknown', ready: false, reasons: ['HEALTH_CHECK_UNAVAILABLE'] }; }
+  };
+  const killFile = (): { present: boolean; modifiedAt?: number } => {
+    try { return { present: true, modifiedAt: statSync(deps.killSwitchPath).mtimeMs }; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { present: false };
+      throw new Error('KILL_STATE_CHECK_UNAVAILABLE');
+    }
+  };
+
   const actions: TelegramActions = {
     async status(role: TelegramRole) {
       const state = deps.store.snapshot();
       const uptimeHours = ((now().getTime() - deps.startedAt.getTime()) / 3_600_000).toFixed(1);
       const version = await codeVersion(deps.projectRoot).catch(() => 'unknown');
       if (role === 'viewer') return `MintBot is running (version ${version.slice(0, 12)}, up ${uptimeHours} h).`;
-      const killed = existsSync(deps.killSwitchPath) || state.killed;
+      const health = await reportedHealth();
+      let killUnknown = health.reasons.includes('KILL_STATE_CHECK_UNAVAILABLE');
+      let killed = state.killed;
+      try { killed = killed || killFile().present; } catch { killUnknown = true; }
+      killed = killed || health.state === 'Killed';
+      const reasons = [...new Set([...readinessCodes(state.runtime.blockingReasons), ...health.reasons,
+        ...(killed ? ['KILL_SWITCH_ENGAGED'] : []), ...(killUnknown ? ['KILL_STATE_CHECK_UNAVAILABLE'] : [])])];
+      const ready = !killed && !killUnknown && state.runtime.startupState === 'Ready' && health.ready && reasons.length === 0;
+      const rawReason = state.killed ? state.killReason : undefined;
+      const stopReason = rawReason === 'fleet-watch-unknown_activity'
+        ? 'Watched wallet activity is not explained by MintBot. Review the wallet’s on-chain transactions before using /watchaccept.'
+        : rawReason === 'fleet-watch-unexplained_fall'
+        ? 'A watched wallet balance fell beyond recorded exposure. Review the wallet’s on-chain transactions before using /watchaccept.'
+        : rawReason === 'provider-probe-failed' ? 'The Turnkey provider check failed. Verify custody before releasing the switch.' : undefined;
       const pending = bridge.recentLiveRunRequests ? bridge.recentLiveRunRequests(20).filter((item) => !item.outcome).length : 0;
       return sections([
         `Mode: ${deps.mode === 'host' ? 'LIVE (host)' : 'practice (dry-run)'}`,
-        `Kill switch: ${killed ? 'ON (nothing can be spent)' : 'off'}`,
-        `Service: ${state.runtime.startupState}${state.runtime.blockingReasons.length > 0 ? ` — ${state.runtime.blockingReasons.join(', ')}` : ''}`,
+        `Kill switch: ${killUnknown ? 'unknown (live work blocked)' : killed ? 'ON (nothing can be spent)' : 'off'}`,
+        `Service: ${ready ? 'Ready' : 'Blocked'}${reasons.length > 0 ? ` — ${reasons.join(', ')}` : ''}`,
+        `Deployment: ${state.runtime.startupState}`,
+        ...(killed && stopReason ? [`Safety stop: ${stopReason}`] : []),
         `Live requests waiting: ${pending}`,
       ], [`Version: ${version.slice(0, 12)}`, `Uptime: ${uptimeHours} h`]);
     },
     async health() {
-      const response = await deps.application.command<{ state?: string; ready?: boolean; reasons?: string[] }>('health');
-      const data = response.data ?? {};
-      return sections([`Health: ${data.ready ? 'ready' : 'not ready'} (${data.state ?? response.state})`], data.reasons && data.reasons.length > 0 ? [`Blocking: ${data.reasons.join(', ')}`] : []);
+      const health = await reportedHealth();
+      return sections([`Health: ${health.ready ? 'ready' : 'not ready'} (${health.state})`], health.reasons.length > 0 ? [`Blocking: ${health.reasons.join(', ')}`] : []);
     },
     async rpc() {
       const lines: string[] = [];
@@ -729,12 +766,13 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     killEngagedSince(openedAt) {
       const since = Date.parse(openedAt);
+      if (!Number.isFinite(since)) throw new Error('KILL_SESSION_TIME_INVALID');
       const state = deps.store.snapshot();
       if (state.events.some((event) => event.type === 'kill' && Date.parse(event.at) > since)) return true;
       const status = (deps.store as { killSwitchStatus?: () => { engaged: boolean; changedAt: string } }).killSwitchStatus?.();
       if (status?.engaged && Date.parse(status.changedAt) > since) return true;
       // A kill file created after the session opened (by the watcher, a provider check or the owner on the host) ends it too.
-      try { if (statSync(deps.killSwitchPath).mtimeMs > since) return true; } catch { /* no file */ }
+      if ((killFile().modifiedAt ?? 0) > since) return true;
       return false;
     },
     async limits() {
