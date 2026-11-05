@@ -139,7 +139,8 @@ describe('truthful blocked readiness diagnostics',()=>{
     expect(health.ready).toBe(false);expect(health.state).toBe('Killed');
     expect(health.blockingReasons).not.toContain('STARTUP_RECONCILIATION_REQUIRED');
     expect(health.blockingReasons).toContain('KILLED');
-    expect(health.blockingReasons).toContain('RUNTIME_PROBE_REQUIRED');
+    expect(health.blockingReasons).not.toContain('RUNTIME_PROBE_REQUIRED');
+    expect(health.liveReadiness.state).toBe('NotChecked');
   });
   it('retains an explicit deployment block when a reconciled blocked state has no reason',async()=>{
     const store=new Store();await store.transaction(s=>{s.runtime={startupState:'Blocked',blockingReasons:[],reconciliationCompletedAt:at,dependencies:{engine:true,chain:true,backup:true,notifications:true}};});

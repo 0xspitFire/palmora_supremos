@@ -2,6 +2,27 @@ import { createHash } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import type { Campaign, ChainEvidenceRecord, RobinhoodNegativeCase, SimulationEvidenceRecord, ValidatedCampaign } from './types.js';
 
+/** New owner-reviewed baseline only; legacy public evidence never acquires allowlist scope implicitly. */
+export const SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE = 'seadrop-v1-baseline-public-free-allowlist@1';
+
+function strategyCompatible(evidence: ChainEvidenceRecord, campaign: Campaign, state: ReturnType<BackendStore['snapshot']>, now: Date): boolean {
+  if (evidence.strategyVersion !== SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE) {
+    return ['seadrop-v1-public', 'seadrop-v1-public@1', 'seadrop-v1-public-1'].includes(evidence.strategyVersion) && campaign.strategy === 'seadrop-v1-public';
+  }
+  if (campaign.strategy === 'seadrop-v1-public') return true;
+  if (campaign.strategy !== 'seadrop-v1-allowlist' || campaign.mintPriceWei !== 0n || campaign.feePolicy.kind !== 'free') return false;
+  // Chain compatibility does not supply custody authority. The actual owner-signed
+  // record is selected/verified by preparation and freshly checked before arm/run;
+  // own-wallet simulation digests below bind this exact policy selection.
+  const binding = campaign.custodyPolicy;
+  const operational = state.runtime.operational;
+  const custody = operational?.custody;
+  return binding?.provider === 'turnkey' && /^sha256:[0-9a-f]{64}$/.test(binding.recordDigest)
+    && custody?.provider === 'turnkey' && custody.policyStatus === 'approved'
+    && custody.policyReference === binding.policyReference && custody.policyDigest === binding.policyDigest && custody.recordDigest === binding.recordDigest
+    && operational?.signerReady === true && Number.isFinite(Date.parse(operational.expiresAt)) && Date.parse(operational.expiresAt) > now.getTime();
+}
+
 const ROBINHOOD_CASES: readonly RobinhoodNegativeCase[] = ['revert', 'sold_out', 'price_drift', 'insufficient_funds', 'quantity_limit', 'stale_phase', 'fee_recipient', 'kill', 'cap'];
 export interface EvidenceApproval { verifierId: string; proof: string; acceptedAt: string; }
 export interface EvidenceAuthority { verify(record: ChainEvidenceRecord, approval: EvidenceApproval): boolean; }
@@ -22,6 +43,7 @@ export class EvidenceService {
       const record = state.chainEvidence.find(item => item.id === id); if (!record) throw new Error('CHAIN_EVIDENCE_NOT_FOUND');
       if (record.status !== 'pending') throw new Error('CHAIN_EVIDENCE_ALREADY_DECIDED');
       if (!this.authority!.verify(structuredClone(record), approval)) throw new Error('EVIDENCE_APPROVAL_REJECTED');
+      if (record.chainId === 1) for (const previous of state.chainEvidence) if (previous.chainId === 1 && previous.id !== id) previous.executionEnabled = false;
       record.status = 'accepted'; record.executionEnabled = true; record.acceptedAt = approval.acceptedAt; record.acceptedBy = approval.verifierId; record.approvalProof = approval.proof;
     });
   }
@@ -38,7 +60,7 @@ export class EvidenceService {
     if (!evidence || evidence.chainId !== input.campaign.chainId) throw new Error('CHAIN_VERIFICATION_EVIDENCE_NOT_FOUND');
     if (evidence.status !== 'accepted' || !evidence.executionEnabled || !evidence.acceptedAt || !evidence.acceptedBy || !evidence.approvalProof) throw new Error('CHAIN_VERIFICATION_NOT_ACCEPTED');
     if (evidence.expiresAt <= this.now().toISOString()) throw new Error('CHAIN_VERIFICATION_EVIDENCE_STALE');
-    if (!evidence.endpointIdentity || !evidence.strategyVersion || !evidence.sourceBlockHash || evidence.endpointIdentity !== verification.endpointReference || !evidence.strategyVersion.startsWith(input.campaign.strategy)) throw new Error('CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
+    if (!evidence.endpointIdentity || !evidence.strategyVersion || !evidence.sourceBlockHash || evidence.endpointIdentity !== verification.endpointReference || !strategyCompatible(evidence, input.campaign, state, this.now())) throw new Error('CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
     if (verification.sourceBlock !== evidence.sourceBlock || verification.checkedAt !== evidence.checkedAt) throw new Error('CHAIN_VERIFICATION_SNAPSHOT_MISMATCH');
     if (!evidence.seaDropCompatible || !evidence.positiveLivePath) throw new Error('SEADROP_EVIDENCE_REQUIRED');
     if (input.campaign.chainId === 4663) {

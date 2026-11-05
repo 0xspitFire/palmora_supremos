@@ -35,6 +35,15 @@ describe('Base fee accounting', () => {
     expect(() => baseReceiptFees({ l1Fee: 0n, operatorFee: 1n << 256n }, 20n)).toThrow('BASE_RECEIPT_OPERATOR_FEE_MALFORMED');
   });
 
+  it('refuses formatter-null and malformed fee fields with stable evidence codes', () => {
+    expect(() => baseReceiptFees({ l1Fee: null, operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_REQUIRED');
+    expect(() => baseReceiptFees({ l1Fee: null, l1DataFee: null, operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_REQUIRED');
+    expect(() => baseReceiptFees({ l1Fee: 1n, operatorFee: null }, 20n)).toThrow('BASE_RECEIPT_OPERATOR_FEE_REQUIRED');
+    expect(() => baseReceiptFees({ l1Fee: {} as never, operatorFee: 0n }, 20n)).toThrow('BASE_RECEIPT_L1_FEE_MALFORMED');
+    expect(() => baseReceiptFees({ l1Fee: 1n, operatorFee: false as never }, 20n)).toThrow('BASE_RECEIPT_OPERATOR_FEE_MALFORMED');
+    expect(baseReceiptFees({ l1Fee: null, l1DataFee: 1n, operatorFee: null }, 20n, 2n)).toEqual({ l1DataFeeWei: 1n, operatorFeeWei: 2n });
+  });
+
   it('quotes the exact unsigned shape through Base predeploys', async () => {
     const values: unknown[] = [100n, 8n, 2, 7n];
     const client = { readContract: async () => values.shift() };

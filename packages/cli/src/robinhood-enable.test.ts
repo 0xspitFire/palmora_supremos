@@ -209,3 +209,29 @@ describe('robinhood-enable command wiring', () => {
     expect(text).not.toContain('enableRobinhood(');
   });
 });
+
+it('adds free allowlist scope only through its chain-specific phrase and exposes actual versus requested scope', () => {
+  const text = goodFile(); const digest = checkEvidenceFile(text, NOW).fileDigest!;
+  const writes: Array<Record<string, unknown>> = [];
+  const current = { recordId: 'existing', approvedBy: 'owner-cli', approvedAt: '2026-10-18T00:00:00.000Z', expiresAt: '9999-12-31T23:59:59.999Z', paidAllowed: false, evidence: Object.fromEntries(EVIDENCE_STEPS.map(step => [step, true])) };
+  const store = { ethereumLiveMintProven: () => true, robinhoodEnablement: () => current, enableRobinhood: (input: Record<string, unknown>) => { writes.push(input); }, revokeRobinhood: () => ({ enablementId: 'existing' }) };
+  const common = { evidenceText: text, evidenceFile: 'robinhood.json', includeFreeAllowlist: true, currentStrategyVersion: 'seadrop-v1-public@1', now: NOW, store: store as never, newId: () => 'new' };
+  const preview = runRobinhoodEnable({ ...common, action: 'status', confirm: undefined });
+  expect(preview).toMatchObject({ installedStrategyVersion: 'seadrop-v1-public@1', requestedStrategyVersion: 'seadrop-v1-baseline-public-free-allowlist@1' });
+  expect(String(preview.copyThisToRecord)).toContain('CHAIN-4663 PUBLIC+FREE-ALLOWLIST-V1');
+  expect(() => runRobinhoodEnable({ ...common, action: 'record', confirm: enablePhrase(digest) })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+  runRobinhoodEnable({ ...common, action: 'record', confirm: enablePhrase(digest, false, true) });
+  expect(writes[0]?.strategyVersion).toBe('seadrop-v1-baseline-public-free-allowlist@1');
+  expect(writes[0]?.confirmationDigest).not.toBe(confirmationDigest(enablePhrase(digest), digest));
+});
+
+it.each(['2026-99-99', '2026-02-31'])('refuses invalid initial Robinhood evidence date %s for free and paid steps', checkedOn => {
+  for (const paid of [false, true]) {
+    const steps = paid ? [...EVIDENCE_STEPS, ...PAID_EVIDENCE_STEPS] : EVIDENCE_STEPS;
+    const text = JSON.stringify(Object.fromEntries(steps.map(step => [step, { passed: true, checkedOn: step === 'E1' || step === 'paidRehearsal' ? checkedOn : '2026-03-03', reference: 'Reviewed evidence reference' }])));
+    const checked = checkEvidenceFile(text, new Date('2026-03-03T12:00:00.000Z'), paid);
+    expect(checked.evidence).toBeUndefined();
+    expect(checked.problems.join(' ')).toContain('E1 needs a date');
+    if (paid) expect(checked.problems.join(' ')).toContain('paidRehearsal needs a valid date');
+  }
+});

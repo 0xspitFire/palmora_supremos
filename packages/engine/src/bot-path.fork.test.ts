@@ -200,7 +200,8 @@ describe.skipIf(!isLoopback(rpcUrl) || !nft)(`${paidMode ? 'paid ' : ''}bot-path
     const before = await Promise.all(accounts.map((account) => balanceOf(account.address)));
     const result = await run(signer, provider, store, killFile('none-1'), 'rehearsal-1');
     expect(signer.signed.sort(), JSON.stringify(result.walletResults.map((wallet) => ({ status: wallet.status, error: wallet.error })))).toEqual([0, 1]);
-    expect(result.walletResults.map((wallet) => wallet.status)).toEqual(['success', 'success']);
+    const failures = result.walletResults.map((wallet) => ({ status: wallet.status, error: wallet.error?.replace(/(?:https?|wss?):\/\/\S+/gi, '[URL]').replace(/0x[0-9a-fA-F]{43,}/g, '[HEX]').slice(0, 180) }));
+    expect(result.walletResults.map((wallet) => wallet.status), JSON.stringify(failures)).toEqual(['success', 'success']);
     expect(result.successCount).toBe(2);
     const after = await Promise.all(accounts.map((account) => balanceOf(account.address)));
     expect(after.map((value, index) => value - before[index]!)).toEqual([1n, 1n]);

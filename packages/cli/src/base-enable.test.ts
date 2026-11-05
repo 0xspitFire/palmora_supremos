@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { BASE_EVIDENCE_STEPS } from '@mint-bot/backend';
-import { baseEnablePhrase, baseRevokePhrase, runBaseEnable } from './base-enable.js';
+import { baseEnablePhrase, baseRevokePhrase, checkBaseEvidenceFile, runBaseEnable } from './base-enable.js';
 
 /** D-062: Base free attended enablement lasts until the owner revokes it; the owner command writes and revokes it with typed phrases. */
 const NOW = new Date('2026-10-23T12:00:00.000Z');
@@ -49,8 +49,43 @@ describe('base-enable (D-062)', () => {
     expect(() => runBaseEnable({ action: 'revoke', confirm: baseRevokePhrase('base-1'), now: NOW, store: store().store as never, newId: () => 'rev' })).toThrow('NOTHING_TO_REVOKE');
   });
 
-  it('status and record need the evidence file', () => {
+  it('record still needs the evidence file', () => {
     expect(() => runBaseEnable({ action: 'record', now: NOW, store: store().store as never, newId: () => 'x' })).toThrow('EVIDENCE_FILE_REQUIRED');
+  });
+
+  it('inspects a permanent grant months later without evidence, a new ID, or writes', () => {
+    const s = store(current);
+    const result = runBaseEnable({ action: 'status', now: new Date('2027-08-01T00:00:00.000Z'), store: s.store as never, newId: () => { throw new Error('must not allocate'); } });
+    expect(result).toMatchObject({ state: 'Enabled', inspection: 'current-grant', recordId: 'base-1', permanent: true, expiresAt: PERM, paidAllowed: false, enabledNow: { until: 'you revoke it' } });
+    expect(result.copyThisToRecord).toBeUndefined();
+    expect(s.writes).toEqual([]);
+    expect(s.revokes).toEqual([]);
+  });
+
+  it('reports absent, revoked, expired or malformed grants disabled and never extends a finite grant', () => {
+    for (const record of [undefined, { ...current, revokedAt: NOW.toISOString() }, { ...current, expiresAt: '2026-10-22T00:00:00.000Z' }, { ...current, freeAllowed: false }]) {
+      const s = store(record);
+      expect(runBaseEnable({ action: 'status', now: NOW, store: s.store as never, newId: () => 'unused' })).toMatchObject({ state: 'Disabled', next: 'NeedsEvidence', enabledNow: null });
+      expect(s.writes).toEqual([]);
+    }
+    const s = store({ ...current, expiresAt: '2026-10-24T00:00:00.000Z' });
+    expect(runBaseEnable({ action: 'status', now: NOW, store: s.store as never, newId: () => 'unused' })).toMatchObject({ state: 'Enabled', permanent: false, expiresAt: '2026-10-24T00:00:00.000Z', enabledNow: { until: '2026-10-24T00:00:00.000Z' } });
+    expect(s.writes).toEqual([]);
+  });
+
+  it('separates a stale new-grant preview from an enabled permanent grant and retains paid upgrade freshness', () => {
+    const later = new Date('2027-01-01T12:00:00.000Z');
+    const s = store(current);
+    const preview = run(s.store, { action: 'status', now: later });
+    expect(preview).toMatchObject({ state: 'NotReady', inspection: 'new-grant-evidence', enabledNow: { until: 'you revoke it', paidAllowed: false } });
+    expect(preview.copyThisToRecord).toBeUndefined();
+    expect(() => run(s.store, { now: later })).toThrow('EVIDENCE_INCOMPLETE');
+    const paidFile = JSON.stringify(Object.fromEntries([...BASE_EVIDENCE_STEPS, 'paidRehearsal', 'paidPolicyApproved'].map((step) => [step, { passed: true, checkedOn: '2026-10-23', reference: `${step} evidence reference` }])));
+    const paidPreview = run(s.store, { action: 'status', now: later, evidenceText: paidFile, paid: true });
+    expect(paidPreview).toMatchObject({ state: 'NotReady', enabledNow: { paidAllowed: false } });
+    expect(String(paidPreview.problems)).toContain('30-day freshness window');
+    expect(() => run(s.store, { now: later, evidenceText: paidFile, paid: true })).toThrow('EVIDENCE_INCOMPLETE');
+    expect(s.writes).toEqual([]);
   });
 
   it('D-062 item 3: --paid needs the two paid steps in the file and its own phrase, and records paidAllowed', () => {
@@ -64,4 +99,24 @@ describe('base-enable (D-062)', () => {
     // a free file cannot be recorded as paid
     expect(() => run(store().store, { paid: true, confirm: baseEnablePhrase(digest, true) })).toThrow('EVIDENCE_INCOMPLETE');
   });
+});
+
+it('adds explicit free allowlist scope only with the chain-bound owner confirmation', () => {
+  const s = store();
+  const preview = run(s.store, { action: 'status', includeFreeAllowlist: true });
+  expect(String(preview.copyThisToRecord)).toContain('--include-free-allowlist');
+  expect(String(preview.copyThisToRecord)).toContain('CHAIN-8453 PUBLIC+FREE-ALLOWLIST-V1');
+  expect(() => run(s.store, { includeFreeAllowlist: true })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+  run(s.store, { includeFreeAllowlist: true, confirm: baseEnablePhrase(digest, false, true) });
+  expect(s.writes[0]).toMatchObject({ strategyVersion: 'seadrop-v1-baseline-public-free-allowlist@1' });
+  const legacy = store(); run(legacy.store);
+  expect(legacy.writes[0]?.strategyVersion).toBe('seadrop-v1-public');
+  expect(s.writes[0]?.confirmationDigest).not.toBe(legacy.writes[0]?.confirmationDigest);
+});
+
+it.each(['2026-99-99', '2026-02-31'])('refuses invalid initial Base evidence date %s rather than accepting NaN or normalization', checkedOn => {
+  const text = JSON.stringify(Object.fromEntries(BASE_EVIDENCE_STEPS.map(step => [step, { passed: true, checkedOn: step === 'reviewedCode' ? checkedOn : '2026-03-03', reference: 'Reviewed evidence reference' }])));
+  const checked = checkBaseEvidenceFile(text, new Date('2026-03-03T12:00:00.000Z'));
+  expect(checked.evidence).toBeUndefined();
+  expect(checked.problems.join(' ')).toContain('reviewedCode needs a YYYY-MM-DD date');
 });

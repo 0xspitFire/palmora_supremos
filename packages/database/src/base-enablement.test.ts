@@ -53,3 +53,15 @@ describe('Base durable enablement', () => {
     expect(() => db.prepare("INSERT INTO base_enablement (id, approved_by, approved_at, expires_at, free_allowed, paid_allowed, evidence_json, evidence_digest, confirmation_digest, strategy_version, fee_policy_version, primary_endpoint_reference, fallback_endpoint_reference, custody_mode, created_at) VALUES ('sql', 'owner-cli', ?, '9999-12-31T23:59:59.999Z', 1, 1, ?, ?, ?, 's', 'f', 'A', 'B', 'local-personal-live', ?)").run(new Date(Date.now() + 1000).toISOString(), JSON.stringify({ ...evidence, paidRehearsal: true }), 'a'.repeat(64), 'b'.repeat(64), at)).toThrow(/incomplete/);
   });
 });
+
+it('binds the opt-in Base scope to its owner confirmation digest in verification metadata', () => {
+  const db = openDatabase(); open.push(db); migrate(db);
+  const now = new Date().toISOString();
+  db.prepare("INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES ('base-scope', 8453, 'Base', '[]', 1, ?)").run(now);
+  new DurableRepository(db).enableBase({ id: 'scoped-base', approvedAt: now, expiresAt: '9999-12-31T23:59:59.999Z',
+    evidence: { reviewedCode: true, forkRehearsal: true, finality: true, endpointAgreement: true, feeObservation: true, liveSimulation: true, custodyReadiness: true },
+    evidenceDigest: 'a'.repeat(64), confirmationDigest: 'b'.repeat(64), strategyVersion: 'seadrop-v1-baseline-public-free-allowlist@1', feePolicyVersion: 'base-free-d057-v1',
+    primaryEndpointReference: 'BASE_RPC_URL', fallbackEndpointReference: 'BASE_RPC_FBACK', custodyMode: 'local-personal-live' }, { chainProfileId: 'base-scope', verificationId: 'scoped-base-verification' });
+  const row = db.prepare('SELECT evidence_json FROM chain_verification WHERE id = ?').get('scoped-base-verification') as { evidence_json: string };
+  expect(JSON.parse(row.evidence_json)).toMatchObject({ strategyVersion: 'seadrop-v1-baseline-public-free-allowlist@1', evidenceDigest: 'a'.repeat(64), approvalProof: 'b'.repeat(64), baseEnablementId: 'scoped-base' });
+});

@@ -4,6 +4,7 @@ import type { TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } 
 import { TelegramRequestError, type BotCommand, type InlineButton, type TelegramBotApi, type TelegramUpdate } from './telegram-api.js';
 import { GuidedFlows, flowNeedsSession, type FlowKind, type FlowPreset, type FlowResult, type GuidedActions } from './guided-flows.js';
 import { base32Encode, matchTotp } from './totp.js';
+import { watchChainId } from './watch-import.js';
 
 /**
  * T-061 (D-063): the owner's commands over Telegram. This router decides who may do what; the work itself is done by
@@ -55,9 +56,9 @@ export interface TelegramActions extends GuidedActions {
   /** T-086: checks the chain now for runs waiting to settle and says where each stands. Reads the chain; sends nothing. */
   reconcile(): Promise<string>;
   run(runId: string): Promise<string>;
-  watchlist(): Promise<string>;
-  track(address: string, label: string | undefined): Promise<string>;
-  untrack(address: string): Promise<string>;
+  watchlist(chain?: string): Promise<string>;
+  track(address: string, label: string | undefined, chain?: string): Promise<string>;
+  untrack(address: string, chain?: string): Promise<string>;
   prepare(chain: string, contract: string, quantityLimit: number, phrase: string): Promise<string>;
   simulate(campaignId: string): Promise<string>;
   /** Cancels a request the service has not started, or a scheduled mint (id starting `fire_schedule_` or its short form). */
@@ -133,14 +134,14 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   runs: { tier: 'read', roles: OWNER, usage: '/runs', help: 'Recent runs' },
   run: { tier: 'read', roles: OWNER, usage: '/run', help: 'Result, spend and receipts of a run (pick it with a button)' },
   reconcile: { tier: 'change', roles: OWNER, usage: '/reconcile', help: 'Check the chain now for runs that are waiting to settle (reads the chain, sends nothing)' },
-  watchlist: { tier: 'read', roles: BOTH, usage: '/watchlist', help: 'Tracked whale wallets' },
-  track: { tier: 'change', roles: OWNER, usage: '/track <address> [label]', help: 'Track a whale wallet' },
-  untrack: { tier: 'change', roles: OWNER, usage: '/untrack <address>', help: 'Stop tracking a wallet' },
+  watchlist: { tier: 'read', roles: BOTH, usage: '/watchlist [chain]', help: 'Tracked whale wallets on ethereum (default), base or robinhood' },
+  track: { tier: 'change', roles: OWNER, usage: '/track [chain] <address> [label]', help: 'Track a whale wallet on one chain; defaults to Ethereum' },
+  untrack: { tier: 'change', roles: OWNER, usage: '/untrack [chain] <address>', help: 'Stop tracking a wallet on one chain; defaults to Ethereum' },
   prepare: { tier: 'change', roles: OWNER, usage: '/prepare', help: 'Record a live campaign step by step (spends nothing)' },
   simulate: { tier: 'change', roles: OWNER, usage: '/simulate', help: 'Record fresh test mints (good 30 minutes), then choose the wallets' },
   cancel: { tier: 'change', roles: OWNER, usage: '/cancel', help: 'Cancel a request or scheduled mint the service has not started (pick it with a button)' },
   kill: { tier: 'stop', roles: OWNER, usage: '/kill', help: 'Stop everything at once (one tap to confirm)' },
-  revoke: { tier: 'stop', roles: OWNER, usage: '/revoke', help: 'Switch Base or Robinhood off (pick it, then one button)' },
+  revoke: { tier: 'stop', roles: OWNER, usage: '/revoke', help: 'Switch a supported chain off (pick it, then one button)' },
   lock: { tier: 'stop', roles: OWNER, usage: '/lock', help: 'End the unlocked session now' },
   unlock: { tier: 'session', roles: OWNER, usage: '/unlock <6-digit code>', help: 'Unlock start commands for 12 hours' },
   release: { tier: 'start', roles: OWNER, usage: '/release', help: 'Turn the kill switch off (one button)' },
@@ -409,7 +410,11 @@ export class TelegramCommandRouter {
       case 'runs': return reply(await a.runs());
       case 'reconcile': return reply(await a.reconcile());
       case 'run': return args.length === 0 ? this.startFlow(incoming, 'run') : reply(await a.run(args[0]!));
-      case 'watchlist': return reply(await a.watchlist());
+      case 'watchlist': {
+        if (args.length > 1) throw new Error('WATCH_ARGUMENTS_INVALID: use /watchlist [chain]');
+        watchChainId(args[0]);
+        return reply(await a.watchlist(args[0]));
+      }
       case 'limits': return reply(await a.limits());
       case 'history': return reply(await a.history());
       case 'eligible': return reply(await a.eligible());
@@ -418,8 +423,17 @@ export class TelegramCommandRouter {
       case 'portfolio': return reply(await a.portfolio());
       case 'gasalerts': return reply(await a.gasAlerts());
       case 'gasalert': return reply(args[0]?.toLowerCase() === 'remove' ? await a.gasAlertRemove(required(args[1], 'alert id')) : await a.gasAlertSet(required(args[0], 'chain'), required(args[1], 'below or above'), requiredNumber(args[2], 'gwei')));
-      case 'track': return reply(await a.track(required(args[0], 'address'), args.slice(1).join(' ') || undefined));
-      case 'untrack': return reply(await a.untrack(required(args[0], 'address')));
+      case 'track': {
+        const chain = args[0] !== undefined && !/^0x/i.test(args[0]) ? args.shift() : undefined;
+        watchChainId(chain);
+        return reply(await a.track(required(args[0], 'address'), args.slice(1).join(' ') || undefined, chain));
+      }
+      case 'untrack': {
+        const chain = args[0] !== undefined && !/^0x/i.test(args[0]) ? args.shift() : undefined;
+        watchChainId(chain);
+        if (args.length > 1) throw new Error('WATCH_ARGUMENTS_INVALID: use /untrack [chain] <address>');
+        return reply(await a.untrack(required(args[0], 'address'), chain));
+      }
       case 'prepare': {
         // Anything short of the full typed form (with its phrase) opens the guide, with the chain and contract already chosen when given.
         if (args.length < 4) return this.startFlow(incoming, 'prepare', args.length >= 2 ? { chain: args[0]!, contract: args[1]! } : undefined);

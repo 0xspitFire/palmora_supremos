@@ -379,7 +379,7 @@ describe('readiness alert bounds (security review T-004)', () => {
 describe('dashboard labels during the read-only trial (T-006)', () => {
   it('shows live-minting checks as information in dry-run, and as blockers otherwise', async () => {
     const trial = new DurableStore();
-    await trial.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: ['DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED', 'BACKUP_NOT_READY'] }; });
+    await trial.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', reconciliationCompletedAt: new Date(START).toISOString(), blockingReasons: ['DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED', 'BACKUP_NOT_READY'] }; });
     const models = new Phase2ReadModelService(() => new Date(START));
     const trialIssues = models.health(trial.snapshot()).issues;
     expect(trialIssues.length).toBeGreaterThan(0);
@@ -520,7 +520,7 @@ describe('quantity explanation in the run summary and dashboard (T-012, D-037)',
     const run = new Phase2ReadModelService(() => new Date(START)).run(store.snapshot(), runId);
     expect(run.data?.events.find((event) => event.type === 'quantity_plan')?.message).toBe(planData.message);
     const trial = new DurableStore();
-    await trial.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: ['DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED', 'BACKUP_NOT_READY'] }; });
+    await trial.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', reconciliationCompletedAt: new Date(START).toISOString(), blockingReasons: ['DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED', 'BACKUP_NOT_READY'] }; });
     const health = new Phase2ReadModelService(() => new Date(START)).health(trial.snapshot());
     expect(health.issues.every((item) => item.severity === 'info')).toBe(true);
     expect(health.availability).not.toBe('partial');

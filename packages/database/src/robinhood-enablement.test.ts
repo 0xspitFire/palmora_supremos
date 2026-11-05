@@ -218,3 +218,17 @@ describe('revocation (D-062): the owner ends an enablement; nothing else does', 
     expect(paidAllowed()).toBeUndefined();
   });
 });
+
+it('persists explicit free-allowlist baseline scope in owner-linked verification, without changing legacy grants', () => {
+  const t = setup();
+  try {
+    t.enable('legacy-scope');
+    t.repository.enableRobinhood({ id: 'scoped', approvedAt: T0, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false,
+      confirmationDigest: 'b'.repeat(64), strategyVersion: 'seadrop-v1-baseline-public-free-allowlist@1' },
+    { chainProfileId: 'rh', verificationId: 'scoped-verification', sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH });
+    const row = t.db.prepare('SELECT evidence_json FROM chain_verification WHERE id = ?').get('scoped-verification') as { evidence_json: string };
+    expect(JSON.parse(row.evidence_json)).toMatchObject({ strategyVersion: 'seadrop-v1-baseline-public-free-allowlist@1', evidenceDigest: 'b'.repeat(64), robinhoodEnablementId: 'scoped' });
+    const legacy = t.db.prepare('SELECT evidence_json FROM chain_verification WHERE id = ?').get('ver-legacy-scope') as { evidence_json: string };
+    expect(JSON.parse(legacy.evidence_json).strategyVersion).toBe('seadrop-v1-public@1');
+  } finally { t.db.close(); }
+});

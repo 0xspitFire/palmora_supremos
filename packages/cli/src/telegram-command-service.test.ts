@@ -6,6 +6,7 @@ import type { AlertManager, IntelligenceAlertInput } from '@mint-bot/backend';
 import { startTelegramCommands, withViewerFanout } from './telegram-command-service.js';
 import { createTelegramBotApi, type TelegramUpdate } from './telegram-api.js';
 import { createTelegramActions, type TelegramActionDeps } from './telegram-actions.js';
+import { openDatabase, IntelligenceRepository } from '@mint-bot/database';
 
 describe('Telegram polling (T-061, D-063 item 1)', () => {
   it('saves each update\'s offset before handling it, so a command never runs twice', async () => {
@@ -182,6 +183,34 @@ describe('Telegram actions', () => {
     intelligence: () => ({}) as never,
     gasAlerts: () => ({}) as never,
     ...overrides,
+  });
+
+  it('keeps watch lists and untracking isolated by chain, with Ethereum backward compatibility and custody guards', async () => {
+    const db = openDatabase();
+    const intelligence = new IntelligenceRepository(db);
+    const actions = createTelegramActions(deps({ intelligence: () => intelligence }));
+    const address = '0x1111111111111111111111111111111111111111';
+    try {
+      expect(await actions.track(address, 'original')).toContain('Ethereum');
+      expect(await actions.watchlist('base')).toContain('No wallets are tracked on Base');
+      expect(await actions.track(address, 'base whale', 'base')).toContain('Base');
+      expect(await actions.track(address, undefined, '4663')).toContain('Robinhood');
+      expect(await actions.watchlist()).toContain('original');
+      expect(await actions.watchlist('8453')).toContain('base whale');
+      await actions.untrack(address, 'base');
+      expect(intelligence.observedAddresses(8453)).toEqual([]);
+      expect(intelligence.observedAddresses(1)).toHaveLength(1);
+      expect(intelligence.observedAddresses(4663)).toHaveLength(1);
+      await expect(actions.track(address, 'wrong', 'polygon')).rejects.toThrow('CHAIN_INVALID');
+      await expect(actions.untrack(address, 'polygon')).rejects.toThrow('CHAIN_INVALID');
+      await expect(actions.watchlist('all')).rejects.toThrow('CHAIN_INVALID');
+      await expect(actions.track(address, 'bad\nlabel', 'base')).rejects.toThrow('OBSERVED_ADDRESS_LABEL_INVALID');
+      db.prepare('INSERT INTO chain_profile (id, chain_id, name, rpc_endpoints_json, confirmation_depth, created_at) VALUES (?, ?, ?, ?, ?, ?)').run('base-watch-action-test', 8453, 'Base', '[]', 2, '2026-01-01T00:00:00.000Z');
+      const custody = '0x2222222222222222222222222222222222222222';
+      db.prepare('INSERT INTO wallet (id, chain_profile_id, address, key_reference, created_at) VALUES (?, ?, ?, ?, ?)').run('base-action-custody-test', 'base-watch-action-test', custody, 'test-reference', '2026-01-01T00:00:00.000Z');
+      await expect(actions.track(custody, undefined, 'base')).rejects.toThrow('observed address is a custody wallet');
+      expect(intelligence.observedAddresses(8453)).toEqual([]);
+    } finally { db.close(); }
   });
 
   it('/kill engages the kill file and the coordinator, each on its own; it fails only when neither worked', async () => {
@@ -606,6 +635,45 @@ describe('Telegram actions', () => {
     const third = await actions.watchStatus('ethereum', WALLET);
     await expect(actions.watchAcceptNow('ethereum', WALLET, third.phrase)).resolves.toContain('Accepted');
     expect(events).toEqual([expect.objectContaining({ type: 'fleet_watch_accept' })]);
+  });
+
+  it('reports idle service readiness separately from future mint checks in Telegram', async () => {
+    const { HealthService, CanonicalStoreBridge } = await import('@mint-bot/backend');
+    const directory = await mkdtemp(join(tmpdir(), 'mint-telegram-idle-'));
+    const store = new CanonicalStoreBridge(openDatabase(join(directory, 'state.sqlite')));
+    await store.open();
+    const at = new Date('2026-11-05T18:00:00.000Z');
+    try {
+      await store.transaction(state => { state.runtime = { startupState: 'Ready', reconciliationCompletedAt: at.toISOString(), blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
+      const health = new HealthService(store, () => at);
+      const actions = createTelegramActions(deps({ mode: 'host', startedAt: at, store, application: { command: async () => { const report = health.check(); return { state: report.state, data: report }; } } as never, now: () => at }));
+      const status = await actions.status('owner');
+      expect(status).toContain('Service: Ready');
+      expect(status).toContain('Mint checks: refreshed during preparation and arming');
+      expect(status).not.toContain('RUNTIME_PROBE_REQUIRED');
+      expect(await actions.health()).toContain('idle health does not authorize a mint');
+      expect(store.snapshot().runtime.operational).toBeUndefined();
+    } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('shows real Ethereum authority and keeps guided revocation bound to the shown record', async () => {
+    const { DurableStore, buildEthereumChainEvidence, acceptEthereumChainEvidence, ethereumChainEvidencePhrase } = await import('@mint-bot/backend');
+    const store = new DurableStore(); await store.open();
+    let at = new Date('2026-11-05T18:00:00.000Z');
+    const actions = createTelegramActions(deps({ store, now: () => at }));
+    expect(await actions.enablement()).toContain('Ethereum: off');
+    const record = () => buildEthereumChainEvidence({ now: at, sourceBlock: 100n, sourceBlockHash: `0x${'a'.repeat(64)}`, strategy: 'seadrop-v1-public' });
+    await acceptEthereumChainEvidence(store, record(), ethereumChainEvidencePhrase(), () => at);
+    expect(await actions.enablement()).toContain('Ethereum: ON, until revoked');
+    expect(await actions.revokeChoices()).toContainEqual({ key: 'ethereum', name: 'Ethereum' });
+    const preview = await actions.revokeStatus('ethereum');
+    expect(preview.phrase).toBeTruthy();
+    at = new Date(at.getTime() + 1_000);
+    await acceptEthereumChainEvidence(store, record(), ethereumChainEvidencePhrase(), () => at);
+    await expect(actions.revokeNow('ethereum', preview.phrase!)).rejects.toThrow('ENABLEMENT_CHANGED');
+    const current = await actions.revokeStatus('ethereum');
+    expect(await actions.revokeNow('ethereum', current.phrase!)).toContain('Ethereum execution is off');
+    expect(await actions.enablement()).toContain('Ethereum: off');
   });
 
 });

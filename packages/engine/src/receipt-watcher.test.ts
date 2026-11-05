@@ -62,4 +62,29 @@ describe('receipt watcher recovery boundaries', () => {
     const watcher = new ReceiptWatcherImpl(client, { chainId: 8453, baseFallbackClient: fallback, initialPollMs: 1, maxPollMs: 1, maxWaitMs: 100, finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final' }, finalityObserver: { observe: async () => ({ chainId: 8453 as const, stage: 'ethereum_final' as const, ready: true, canonical: true, observedAt: new Date() }) } });
     await expect(watcher.waitForReceipt(hash, 1)).rejects.toThrow('BASE_PROVIDER_FEE_DISAGREEMENT');
   });
+
+  it('refuses formatter-null Base fee evidence immediately instead of retrying to receipt timeout', async () => {
+    let lookups = 0;
+    const receipt = { transactionHash: hash, blockHash, blockNumber: 42n, status: 'success', gasUsed: 21_000n, effectiveGasPrice: 2n, l1Fee: null, operatorFee: 0n };
+    const client = { getTransactionReceipt: async () => { lookups += 1; return receipt; }, getBlockNumber: async () => 42n } as unknown as PublicClient;
+    const fallback = { getTransactionReceipt: async () => receipt } as unknown as PublicClient;
+    const watcher = new ReceiptWatcherImpl(client, { chainId: 8453, baseFallbackClient: fallback, initialPollMs: 1, maxPollMs: 1, maxWaitMs: 100, finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final' }, finalityObserver: { observe: async () => ({ chainId: 8453 as const, stage: 'ethereum_final' as const, ready: true, canonical: true, observedAt: new Date() }) } });
+    await expect(watcher.waitForReceipt(hash, 1)).rejects.toThrow('BASE_RECEIPT_L1_FEE_REQUIRED');
+    expect(lookups).toBe(1);
+  });
+
+  it('requires a real independent oracle observation when receipt operator fees are null', async () => {
+    const calls: unknown[] = [];
+    let oracleValue: unknown = 4n;
+    const receipt = { transactionHash: hash, blockHash, blockNumber: 42n, status: 'success', gasUsed: 21_000n, effectiveGasPrice: 2n, l1Fee: 3n, operatorFee: null };
+    const oracle = async (request: unknown) => { calls.push(request); return oracleValue; };
+    const client = { getTransactionReceipt: async () => receipt, getBlockNumber: async () => 42n, readContract: oracle } as unknown as PublicClient;
+    const fallback = { getTransactionReceipt: async () => receipt, readContract: oracle } as unknown as PublicClient;
+    const watcher = new ReceiptWatcherImpl(client, { chainId: 8453, baseFallbackClient: fallback, initialPollMs: 1, maxPollMs: 1, maxWaitMs: 100, finalityPolicy: { stages: ['soft', 'posted', 'ethereum_final'], settlementStage: 'ethereum_final' }, finalityObserver: { observe: async () => ({ chainId: 8453 as const, stage: 'ethereum_final' as const, ready: true, canonical: true, observedAt: new Date() }) } });
+    await expect(watcher.waitForReceipt(hash, 1)).resolves.toMatchObject({ l1DataFeeWei: 3n, operatorFeeWei: 4n });
+    expect(calls).toHaveLength(2);
+    expect(calls).toEqual([expect.objectContaining({ functionName: 'getOperatorFee', args: [21_000n], blockNumber: 42n }), expect.objectContaining({ functionName: 'getOperatorFee', args: [21_000n], blockNumber: 42n })]);
+    oracleValue = null;
+    await expect(watcher.waitForReceipt(hash, 1)).rejects.toThrow('BASE_OPERATOR_FEE_ORACLE_MALFORMED');
+  });
 });

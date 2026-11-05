@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { assessLiveRuntimeProbe, liveReadinessHealth, requiresLiveRuntimeProbe, serviceHealthBlockingReasons, type LiveReadinessHealth } from './health.js';
 import { formatEth } from './intelligence/scoring.js';
 import type {
   AttemptRecord,
@@ -343,6 +344,7 @@ export interface AlertReadModel {
 }
 
 export interface SystemHealthReadModel {
+  readonly liveReadiness: LiveReadinessHealth;
   readonly state: 'Ready' | 'Not ready' | 'Killed' | 'Unknown';
   readonly killSwitch: 'clear' | 'engaged' | 'unknown';
   readonly dependencies: {
@@ -888,26 +890,24 @@ export class Phase2ReadModelService {
     const runtime = context.state.runtime;
     const operational = runtime.operational;
     const freshness = operational ? classifyFreshness(operational.observedAt, operational.expiresAt, context.now, context.freshnessPolicyVersion) : UNKNOWN_FRESHNESS;
-    const dependencyBlockers = Object.entries(runtime.dependencies).filter(([, ready]) => !ready).map(([dependency]) => `${dependency.toUpperCase()}_NOT_READY`);
-    const probeBlockers = operational === undefined ? ['RUNTIME_PROBE_REQUIRED'] : freshness.status === 'fresh' ? [] : ['RUNTIME_PROBE_STALE'];
-    // In the read-only trial (dry-run service) the live-minting checks are off by design: shown as
-    // information, not blockers. Live admission enforces its own checks and is unaffected by this label.
+    const required = requiresLiveRuntimeProbe(context.state);
+    const assessment = required ? assessLiveRuntimeProbe(operational, context.now) : { reasons: [], custodyAssessed: false };
+    const probeReasons = assessment.reasons;
+    // Trial-only live dependencies remain information. Neither service readiness
+    // nor a deferred probe is authority to arm or execute a mint.
     const readOnlyTrial = runtime.blockingReasons.includes('DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED');
-    const trialOff = (reason: string): boolean => readOnlyTrial && (reason === 'DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED' || reason === 'KILL_SWITCH_ENGAGED' || reason === 'RUNTIME_PROBE_REQUIRED' || reason === 'OPERATIONAL_READINESS_UNKNOWN' || reason.endsWith('_NOT_READY'));
-    const blockers = [...new Set([...runtime.blockingReasons, ...dependencyBlockers, ...probeBlockers])].map(reason => trialOff(reason) ? issue(reason, trialMessage(reason), 'info', 'Inspect') : issue(reason, safeHealthMessage(reason), 'blocking', 'No safe action'));
-    const liveOnly = (code: string, message: string, action: SafeAction): ReadModelIssue => readOnlyTrial ? issue(code, `Live minting is off during the read-only trial: ${message}`, 'info', 'Inspect') : issue(code, message, 'blocking', action);
-    for (const [name, ready] of Object.entries(runtime.dependencies)) if (!ready) blockers.push(liveOnly(`${name.toUpperCase()}_NOT_READY`, `${name} dependency is not ready.`, name === 'notifications' ? 'Inspect' : 'Wait for reconciliation'));
-    if (!operational) blockers.push(liveOnly('OPERATIONAL_READINESS_UNKNOWN', 'Operational readiness evidence is unavailable.', 'Inspect'));
-    else {
-      if (!operational.secretStoreReference || !operational.storePath || !operational.lastReconciliationAt) blockers.push(issue('OPERATIONAL_READINESS_INCOMPLETE', 'Operational readiness evidence is incomplete.', 'blocking', 'Inspect'));
-      if (!operational.signerReady) blockers.push(issue('SIGNER_NOT_READY', 'The configured signer is not ready.', 'blocking', 'Inspect'));
-      if (!operational.notificationReady) blockers.push(issue('NOTIFICATIONS_NOT_READY', 'Notification delivery is not ready.', 'blocking', 'Inspect'));
-      if (operational.chainVerification !== 'verified') blockers.push(issue('CHAIN_VERIFICATION_REQUIRED', 'Chain verification is not current.', 'blocking', 'Refresh read model'));
-      if (freshness.status !== 'fresh') blockers.push(issue(freshness.status === 'stale' ? 'OPERATIONAL_READINESS_STALE' : 'OPERATIONAL_READINESS_UNKNOWN', 'Operational readiness evidence is not current.', 'blocking', 'Refresh read model'));
-    }
+    const trialOff = (reason: string): boolean => readOnlyTrial && (reason === 'DRY_RUN_EXTERNAL_DEPENDENCIES_DISABLED' || reason === 'KILL_SWITCH_ENGAGED' || reason.endsWith('_NOT_READY'));
+    const blockers = [...new Set([...serviceHealthBlockingReasons(context.state, context.now), ...probeReasons])]
+      .map(reason => trialOff(reason) ? issue(reason, trialMessage(reason), 'info', 'Inspect') : issue(reason, safeHealthMessage(reason), 'blocking', 'No safe action'));
+    if (required && !assessment.custodyAssessed && probeReasons.length === 0) blockers.push(issue('CUSTODY_AUTHORIZATION_NOT_ASSESSED', liveReadinessHealth(true, [], false).message, 'info', 'Inspect'));
+    if (!required) blockers.push(issue('LIVE_READINESS_DEFERRED', liveReadinessHealth(false, []).message, 'info', 'Inspect'));
+    else if (!operational) blockers.push(issue('OPERATIONAL_READINESS_UNKNOWN', 'Live work has no current operational readiness evidence.', 'blocking', 'Inspect'));
+    else if (freshness.status !== 'fresh') blockers.push(issue('OPERATIONAL_READINESS_STALE', 'Live operational readiness evidence is not current.', 'blocking', 'Refresh read model'));
+
     const uniqueBlockers = [...new Map(blockers.map(item => [item.code, item])).values()];
-    const reconciliation: SystemHealthReadModel['dependencies']['reconciliation'] = runtime.blockingReasons.some(reason => /RECONCILIATION|UNRESOLVED/i.test(reason)) ? 'required' : runtime.startupState === 'Reconciling' ? 'in_progress' : operational ? 'clear' : 'unknown';
-     const data: SystemHealthReadModel = { state: context.state.killed ? 'Killed' : runtime.startupState === 'Ready' && uniqueBlockers.length === 0 ? 'Ready' : runtime.startupState === 'Cold' ? 'Unknown' : 'Not ready', killSwitch: context.state.killed || operational?.killSwitchEngaged ? 'engaged' : operational ? 'clear' : 'unknown', dependencies: { engine: runtime.dependencies.engine ? 'ready' : 'not_ready', chain: runtime.dependencies.chain ? 'ready' : 'not_ready', backup: runtime.dependencies.backup ? 'ready' : 'not_ready', notifications: runtime.dependencies.notifications ? 'ready' : 'not_ready', reconciliation }, blockers: uniqueBlockers, checkedAt: operational?.observedAt ?? context.generatedAt, freshness };
+    const reconciliation: SystemHealthReadModel['dependencies']['reconciliation'] = runtime.startupState === 'Reconciling' ? 'in_progress' : uniqueBlockers.some(item => /RECONCILIATION|UNRESOLVED/i.test(item.code)) ? 'required' : runtime.reconciliationCompletedAt ? 'clear' : 'unknown';
+    const killed = uniqueBlockers.some(item => item.code === 'KILL_SWITCH_ENGAGED' || item.code === 'KILLED');
+    const data: SystemHealthReadModel = { state: killed ? 'Killed' : runtime.startupState === 'Ready' && uniqueBlockers.every(item => item.severity === 'info') ? 'Ready' : runtime.startupState === 'Cold' ? 'Unknown' : 'Not ready', liveReadiness: liveReadinessHealth(required, probeReasons, assessment.custodyAssessed), killSwitch: killed ? 'engaged' : runtime.startupState === 'Cold' ? 'unknown' : 'clear', dependencies: { engine: runtime.dependencies.engine ? 'ready' : 'not_ready', chain: runtime.dependencies.chain ? 'ready' : 'not_ready', backup: runtime.dependencies.backup ? 'ready' : 'not_ready', notifications: runtime.dependencies.notifications ? 'ready' : 'not_ready', reconciliation }, blockers: uniqueBlockers, checkedAt: context.generatedAt, freshness };
      return { data, issues: uniqueBlockers, freshness };
   }
 }
