@@ -39,15 +39,32 @@ export function createTelegramBotApi(options: { token: string; apiBaseUrl?: stri
   const fetcher = options.fetcher ?? (globalThis.fetch as unknown as TelegramFetcher);
   const timeoutMs = options.timeoutMs ?? 10_000;
   const call = async (method: string, payload: Record<string, unknown>, timeout = timeoutMs): Promise<unknown> => {
-    let response;
-    // A network error can carry the request address, which holds the token: only a fixed code leaves this function.
-    try { response = await fetcher(`${base}/bot${options.token}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeout) }); }
-    catch { throw new Error(`TELEGRAM_${method.toUpperCase()}_UNREACHABLE`); }
-    if (!response.ok) throw new Error(`TELEGRAM_${method.toUpperCase()}_FAILED:${response.status}`);
-    let body: unknown;
-    try { body = await response.json(); } catch { throw new Error('TELEGRAM_RESPONSE_INVALID'); }
-    if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) throw new Error(`TELEGRAM_${method.toUpperCase()}_REJECTED`);
-    return (body as { result?: unknown }).result;
+    let retryWaitMs = 0;
+    for (let attempt = 0; ; attempt += 1) {
+      let response;
+      // A network error can carry the request address, which holds the token: only a fixed code leaves this function.
+      try { response = await fetcher(`${base}/bot${options.token}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeout) }); }
+      catch { throw new Error(`TELEGRAM_${method.toUpperCase()}_UNREACHABLE`); }
+      if (!response.ok) {
+        // Retry only Telegram's explicit rejection, never a network error or an ambiguous send result.
+        // Honor its full delay or stop; capping the delay and retrying early would worsen the flood.
+        if (response.status === 429 && attempt < 2) {
+          let limited: unknown;
+          try { limited = await response.json(); } catch { limited = undefined; }
+          const seconds = limited && typeof limited === 'object' ? (limited as { parameters?: { retry_after?: unknown } }).parameters?.retry_after : undefined;
+          if (typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds > 0 && retryWaitMs + seconds * 1_000 <= 15_000) {
+            retryWaitMs += seconds * 1_000;
+            await new Promise((resolve) => setTimeout(resolve, seconds * 1_000));
+            continue;
+          }
+        }
+        throw new Error(`TELEGRAM_${method.toUpperCase()}_FAILED:${response.status}`);
+      }
+      let body: unknown;
+      try { body = await response.json(); } catch { throw new Error('TELEGRAM_RESPONSE_INVALID'); }
+      if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) throw new Error(`TELEGRAM_${method.toUpperCase()}_REJECTED`);
+      return (body as { result?: unknown }).result;
+    }
   };
   return {
     async getUpdates(offset, timeoutSeconds) {

@@ -223,9 +223,31 @@ export class TelegramCommandRouter {
   /** Ends a session that expired or that a kill ended, and says so. Called on every polling pass. */
   public async checkSession(): Promise<void> { await this.currentSession(); }
 
+  private readonly sensitiveCleanups = new Map<string, Promise<void>>();
+
+  /** Delete owner codes on ingress, even if a busy worker queue makes the command too old to run. */
+  public async cleanSensitive(update: TelegramUpdate): Promise<void> {
+    const incoming = this.incoming(update);
+    if (!incoming || incoming.userId !== this.options.ownerUserId || incoming.messageId === undefined || incoming.plain) return;
+    const command = incoming.text.trim().split(/\s+/)[0]!.replace(/^\//, '').replace(/@.*$/, '').toLowerCase();
+    if (command !== 'unlock') return;
+    const key = `${incoming.chatId}:${incoming.messageId}`;
+    let cleanup = this.sensitiveCleanups.get(key);
+    if (!cleanup) {
+      cleanup = this.options.api.deleteMessage(incoming.chatId, incoming.messageId).catch(async () => {
+        try { this.options.log?.('telegram_sensitive_delete_failed', { code: 'UNLOCK_MESSAGE_DELETE_FAILED' }); } catch { /* never retain a code in diagnostics */ }
+        await this.record('owner', incoming, 'unlock', 'warning:MESSAGE_DELETE_FAILED');
+      });
+      this.sensitiveCleanups.set(key, cleanup);
+      if (this.sensitiveCleanups.size > 256) this.sensitiveCleanups.delete(this.sensitiveCleanups.keys().next().value!);
+    }
+    await cleanup;
+  }
+
   public async handle(update: TelegramUpdate): Promise<void> {
     const incoming = this.incoming(update);
     if (!incoming) return;
+    await this.cleanSensitive(update);
     if (incoming.callbackId) await this.options.api.answerCallback(incoming.callbackId).catch(() => undefined);
     const role = this.roleOf(incoming.userId);
     // Plain text (not a command) is only ever the owner's answer to a guided flow; anyone else's is ignored without a reply.
@@ -506,8 +528,7 @@ export class TelegramCommandRouter {
   }
 
   private async unlock(incoming: Incoming, code: string | undefined): Promise<void> {
-    // The code is taken out of the chat history at once, whatever happens next.
-    if (incoming.messageId !== undefined) await this.options.api.deleteMessage(incoming.chatId, incoming.messageId).catch(() => undefined);
+    // Owner code cleanup already ran on ingress, including for commands too old to execute.
     const now = this.now();
     const failures = this.options.access.unlockFailuresSince(new Date(now.getTime() - UNLOCK_WINDOW_MS));
     if (failures.length >= UNLOCK_FAILURE_LIMIT) {

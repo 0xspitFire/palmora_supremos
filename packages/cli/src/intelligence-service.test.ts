@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AlertManager, DurableStore, plainSystemText, type ChainScanOutcome, type DropSnapshot, type IntelligenceChainPort, type IntelligenceRepositoryPort, type SimulationOutcome } from '@mint-bot/backend';
+import { AlertManager, DurableStore, NotificationDispatcher, plainSystemText, type ChainScanOutcome, type DropSnapshot, type IntelligenceChainPort, type IntelligenceRepositoryPort, type SimulationOutcome } from '@mint-bot/backend';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,8 +29,8 @@ class Repo implements IntelligenceRepositoryPort {
 function harness(now: () => Date, repo = new Repo(90, 21_000_000n)) {
   const store = new DurableStore();
   const sent: string[] = [];
-  const dispatcher = { dispatch: async (_id: string, text?: string) => { sent.push(text ?? ''); } };
-  const alerts = new AlertManager(store, dispatcher as never, undefined, { now });
+  const dispatcher = new NotificationDispatcher(store, { send: async message => { sent.push(message.text); } }, { now });
+  const alerts = new AlertManager(store, dispatcher, undefined, { now });
   return { store, sent, alerts, repo };
 }
 
@@ -265,5 +265,299 @@ describe('jump log line is not repeated by the start-up re-check (tidy after T-0
     second.stop();
     expect(logs.filter((entry) => entry.event === 'discovery_skipped')).toHaveLength(1);
     expect(h.sent.filter((text) => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(1);
+  });
+});
+
+describe('bounded restart-safe scan-gap summaries', () => {
+  const START = Date.parse('2026-10-15T12:00:00.000Z');
+  const recordGaps = async (h: ReturnType<typeof harness>, count: number, at: string, offset = 0, chainId = 1) => {
+    await h.store.transaction(state => {
+      for (let index = offset; index < offset + count; index++) {
+        const from = 1000 + index * 200;
+        state.events.push({ id: `gap_${chainId}_${index}`, type: 'discovery_skipped', at, data: {
+          chainId, fromBlock: String(from), toBlock: String(from + 99), blocks: '100', headBlock: String(from + 400),
+        } });
+      }
+    });
+  };
+  const settings = (h: ReturnType<typeof harness>, now: () => Date, port: IntelligenceChainPort = new IdlePort()) => ({
+    store: h.store, repo: h.repo, port, alerts: h.alerts, wallets: OWN,
+    discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now,
+  });
+  const notices = (h: ReturnType<typeof harness>) => h.sent.filter(text => text.includes('SCAN JUMPED AHEAD'));
+
+  it('turns 150 retained gaps into one bounded notice with explicit separate ranges, keeping all audit events', async () => {
+    const now = () => new Date(START);
+    const h = harness(now);
+    await recordGaps(h, 150, now().toISOString());
+    const service = startIntelligence(settings(h, now));
+    try {
+      await vi.waitFor(() => expect(notices(h)).toHaveLength(1));
+      await service.runOnce();
+      expect(notices(h)).toHaveLength(1);
+      expect(notices(h)[0]).toContain('150 scan jumps');
+      expect(notices(h)[0]).toContain('15000 distinct blocks');
+      expect(notices(h)[0]).toContain('blocks between separate ranges are not included');
+      expect(notices(h)[0]).toContain('147 additional ranges');
+      expect(notices(h)[0]!.length).toBeLessThan(1800);
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skipped')).toHaveLength(150);
+      const marker = h.store.snapshot().events.find(event => event.type === 'discovery_skip_notice');
+      expect(marker?.data.rangeKeys).toHaveLength(150);
+    } finally { service.stop(); }
+  });
+
+  it('does not replay covered gaps after restart, and coalesces later gaps until the cooldown ends', async () => {
+    let clock = START;
+    const now = () => new Date(clock);
+    const h = harness(now);
+    await recordGaps(h, 150, now().toISOString());
+    const first = startIntelligence(settings(h, now));
+    await vi.waitFor(() => expect(h.store.snapshot().events.some(event => event.type === 'discovery_skip_notice')).toBe(true));
+    first.stop();
+    clock += 60_000;
+    await recordGaps(h, 2, now().toISOString(), 150);
+    const second = startIntelligence(settings(h, now));
+    try {
+      await second.runOnce();
+      expect(notices(h)).toHaveLength(1);
+      clock = START + 15 * 60_000;
+      await second.runOnce();
+      expect(notices(h)).toHaveLength(2);
+      expect(notices(h)[1]).toContain('2 scan jumps');
+      expect(notices(h)[1]).toContain('200 distinct blocks');
+      await second.runOnce();
+      expect(notices(h)).toHaveLength(2);
+    } finally { second.stop(); }
+  });
+
+  it('recovers the crash window after the durable alert but before the final coverage marker', async () => {
+    let clock = START;
+    const now = () => new Date(clock);
+    const h = harness(now);
+    await recordGaps(h, 2, now().toISOString());
+    const first = startIntelligence(settings(h, now));
+    await vi.waitFor(() => expect(h.store.snapshot().events.some(event => event.type === 'discovery_skip_notice')).toBe(true));
+    first.stop();
+    // Keep the plan and alert as if the process died before the final marker.
+    await h.store.transaction(state => { state.events = state.events.filter(event => event.type !== 'discovery_skip_notice'); });
+    clock += 16 * 60_000;
+    await recordGaps(h, 1, now().toISOString(), 2);
+    const second = startIntelligence(settings(h, now));
+    try {
+      await vi.waitFor(() => expect(notices(h)).toHaveLength(2));
+      expect(notices(h)[1]).toContain('blocks 1,400 to 1,499 were not read');
+      expect(notices(h)[1]).not.toContain('blocks 1,000');
+    } finally { second.stop(); }
+  });
+
+  it('honors old individual notifications and keeps other-chain ranges separate', async () => {
+    const now = () => new Date(START);
+    const h = harness(now);
+    await recordGaps(h, 2, now().toISOString());
+    await recordGaps(h, 2, now().toISOString(), 0, 8453);
+    await h.store.transaction(state => {
+      for (const event of state.events) if (event.type === 'discovery_skipped' && event.data.chainId === 1) delete event.data.chainId;
+      state.events.push({ id: 'old_individual_notice', type: 'alert_health', at: now().toISOString(), data: { dedupe: 'skip:1000' } });
+    });
+    const ethereum = startIntelligence(settings(h, now));
+    await vi.waitFor(() => expect(notices(h)).toHaveLength(2));
+    ethereum.stop();
+    expect(notices(h)[0]).toContain('blocks 1,200 to 1,299 were not read');
+    expect(notices(h)[0]).not.toContain('blocks 1,000');
+    expect(notices(h)[0]).toContain('Not recorded in the legacy scan audit');
+    const basePort = Object.assign(new IdlePort(), { chainId: 8453 as const }) as unknown as IntelligenceChainPort;
+    const base = startIntelligence(settings(h, now, basePort));
+    try {
+      await vi.waitFor(() => expect(notices(h)).toHaveLength(2));
+      expect(notices(h)[1]).toContain('Chain: Base');
+      expect(notices(h)[1]).toContain('2 scan jumps');
+    } finally { base.stop(); }
+  });
+
+  it('serializes startup recovery and concurrent failed ticks into one notice', async () => {
+    const now = () => new Date(START);
+    const h = harness(now);
+    await recordGaps(h, 150, now().toISOString());
+    class ThrowingPort extends IdlePort { public override async safeHead(): Promise<bigint | null> { throw new Error('scan failed'); } }
+    const service = startIntelligence(settings(h, now, new ThrowingPort()));
+    try {
+      await Promise.all([service.runOnce(), service.runOnce(), service.runOnce()]);
+      await vi.waitFor(() => expect(notices(h)).toHaveLength(1));
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skip_notice')).toHaveLength(1);
+    } finally { service.stop(); }
+  });
+
+  it('marks coverage when dispatch fails after the alert became durable, leaving the same alert to retry', async () => {
+    const now = () => new Date(START);
+    const h = harness(now);
+    await recordGaps(h, 2, now().toISOString());
+    const original = h.alerts.intelligence.bind(h.alerts);
+    vi.spyOn(h.alerts, 'intelligence').mockImplementation(async input => {
+      const result = await original(input);
+      if (input.dedupe.startsWith('skip-summary:')) throw new Error('delivery failed after durable alert');
+      return result;
+    });
+    const service = startIntelligence(settings(h, now));
+    try {
+      await vi.waitFor(() => expect(h.store.snapshot().events.some(event => event.type === 'discovery_skip_notice')).toBe(true));
+      await service.runOnce();
+      expect(h.store.snapshot().events.filter(event => event.type === 'alert_health' && String(event.data.dedupe).startsWith('skip-summary:'))).toHaveLength(1);
+      expect(notices(h)).toHaveLength(1);
+    } finally { service.stop(); }
+  });
+});
+
+describe('legacy scan gaps do not invent a chain', () => {
+  it('separates unknown legacy ranges from known Ethereum and refuses unsupported chain metadata', async () => {
+    const now = () => new Date('2026-10-15T12:00:00.000Z');
+    const h = harness(now);
+    await h.store.transaction(state => {
+      state.events.push(
+        { id: 'unknown_gap', type: 'discovery_skipped', at: now().toISOString(), data: { fromBlock: '1000', toBlock: '1099', blocks: '100' } },
+        { id: 'known_eth_gap', type: 'discovery_skipped', at: now().toISOString(), data: { chainId: 1, fromBlock: '1000', toBlock: '1099', blocks: '100' } },
+        { id: 'bad_chain_gap', type: 'discovery_skipped', at: now().toISOString(), data: { chainId: 9999, fromBlock: '1000', toBlock: '1099', blocks: '100' } },
+      );
+    });
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN,
+      discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    try {
+      await vi.waitFor(() => expect(h.sent.filter(text => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(2));
+      const unknown = h.sent.find(text => text.includes('Not recorded in the legacy scan audit'))!;
+      expect(unknown).toContain('different chains');
+      expect(unknown).not.toContain('distinct blocks were not read');
+      expect(unknown).not.toMatch(/Ethereum|Base|Robinhood|hours|minutes/);
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skipped')).toHaveLength(3);
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skip_notice').map(event => event.data.chainId).sort()).toEqual([1, 'unknown']);
+    } finally { service.stop(); }
+  });
+});
+
+describe('primary intelligence service summarizes every scanner chain', () => {
+  it('bounds 150 gaps across all supported chains and unknown legacy data to four restart-safe notices', async () => {
+    let clock = Date.parse('2026-10-15T12:00:00.000Z');
+    const now = () => new Date(clock);
+    const h = harness(now);
+    const chains = [1, 8453, 4663, undefined] as const;
+    await h.store.transaction(state => {
+      for (let index = 0; index < 150; index++) {
+        const chainId = chains[index % chains.length];
+        state.events.push({ id: `mixed_gap_${index}`, type: 'discovery_skipped', at: now().toISOString(), data: {
+          ...(chainId === undefined ? {} : { chainId }), fromBlock: String(1000 + index * 200), toBlock: String(1099 + index * 200), blocks: '100',
+        } });
+      }
+    });
+    const settings = { store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN,
+      discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now };
+    const notices = () => h.sent.filter(text => text.includes('SCAN JUMPED AHEAD'));
+    const first = startIntelligence(settings);
+    await vi.waitFor(() => expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skip_notice')).toHaveLength(4));
+    first.stop();
+    expect(notices()).toHaveLength(4);
+    expect(notices().some(text => text.includes('Chain: Base'))).toBe(true);
+    expect(notices().some(text => text.includes('Chain: Robinhood'))).toBe(true);
+    expect(notices().some(text => text.includes('Not recorded in the legacy scan audit'))).toBe(true);
+    expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skipped')).toHaveLength(150);
+    clock += 60_000;
+    const second = startIntelligence(settings);
+    try {
+      await second.runOnce();
+      expect(notices()).toHaveLength(4);
+    } finally { second.stop(); }
+  });
+});
+
+describe('scan-gap recovery horizon and bounded durable batches', () => {
+  const START = Date.parse('2026-10-15T12:00:00.000Z');
+  const settings = (h: ReturnType<typeof harness>, now: () => Date) => ({
+    store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN,
+    discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now,
+  });
+  it('retains old, malformed and future source records without sending them as recent alerts', async () => {
+    const now = () => new Date(START);
+    const h = harness(now);
+    await h.store.transaction(state => {
+      const times = [new Date(START - 24 * 60 * 60_000 - 1).toISOString(), 'not-a-time', new Date(START + 1).toISOString()];
+      for (const [index, at] of times.entries()) state.events.push({ id: `outside_horizon_${index}`, type: 'discovery_skipped', at,
+        data: { chainId: 1, fromBlock: String(1000 + 100 * index), toBlock: String(1099 + 100 * index), blocks: '100' } });
+    });
+    const service = startIntelligence(settings(h, now));
+    try {
+      await vi.waitFor(() => expect(h.sent.length).toBeGreaterThan(0));
+      await service.runOnce();
+      expect(h.sent.filter(text => text.includes('SCAN JUMPED AHEAD'))).toHaveLength(0);
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skipped')).toHaveLength(3);
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skip_notice_plan')).toHaveLength(0);
+    } finally { service.stop(); }
+  });
+
+  it('limits plans and coverage to 1000 ranges, preserving the remainder through restart and the next cooldown', async () => {
+    let clock = START;
+    const now = () => new Date(clock);
+    const h = harness(now);
+    await h.store.transaction(state => {
+      for (let index = 0; index < 1001; index++) state.events.push({ id: `large_gap_${index}`, type: 'discovery_skipped', at: now().toISOString(),
+        data: { chainId: 1, fromBlock: String(1000 + 200 * index), toBlock: String(1099 + 200 * index), blocks: '100' } });
+    });
+    const notices = () => h.sent.filter(text => text.includes('SCAN JUMPED AHEAD'));
+    const markers = () => h.store.snapshot().events.filter(event => event.type === 'discovery_skip_notice');
+    const first = startIntelligence(settings(h, now));
+    await vi.waitFor(() => expect(markers()).toHaveLength(1));
+    first.stop();
+    expect(notices()).toHaveLength(1);
+    expect(markers()[0]?.data.rangeKeys).toHaveLength(1000);
+    clock += 60_000;
+    const second = startIntelligence(settings(h, now));
+    try {
+      await second.runOnce();
+      expect(notices()).toHaveLength(1);
+      clock = START + 15 * 60_000;
+      await second.runOnce();
+      expect(notices()).toHaveLength(2);
+      expect(markers()).toHaveLength(2);
+      expect(markers()[1]?.data.rangeKeys).toHaveLength(1);
+      const plans = h.store.snapshot().events.filter(event => event.type === 'discovery_skip_notice_plan');
+      expect(plans.map(event => (event.data.rangeKeys as string[]).length)).toEqual([1000, 1]);
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skipped')).toHaveLength(1001);
+      await second.runOnce();
+      expect(notices()).toHaveLength(2);
+    } finally { second.stop(); }
+  });
+});
+
+describe('scan-gap coverage expires from the in-memory rolling window', () => {
+  it('forgets expired coverage while preserving dedupe for valid recent notices', async () => {
+    const START = Date.parse('2026-10-15T12:00:00.000Z');
+    let clock = START;
+    const now = () => new Date(clock);
+    const h = harness(now);
+    const addGap = async (id: string, from: number) => h.store.transaction(state => {
+      state.events.push({ id, type: 'discovery_skipped', at: now().toISOString(),
+        data: { chainId: 1, fromBlock: String(from), toBlock: String(from + 99), blocks: '100' } });
+    });
+    await addGap('old_range', 1000);
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN,
+      discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    const notices = () => h.sent.filter(text => text.includes('SCAN JUMPED AHEAD'));
+    try {
+      await vi.waitFor(() => expect(h.store.snapshot().events.some(event => event.type === 'discovery_skip_notice')).toBe(true));
+      clock = START + 24 * 60 * 60_000 - 60_000;
+      await addGap('recent_range', 2000);
+      await service.runOnce();
+      expect(notices()).toHaveLength(2);
+      clock += 16 * 60_000;
+      // Re-recording an identity after its old coverage expires must no longer
+      // be hidden by a forever-growing Set. The still-recent range stays covered.
+      await addGap('fresh_record_of_expired_range', 1000);
+      await addGap('new_range', 3000);
+      await service.runOnce();
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toContain('2 scan jumps');
+      expect(notices()[2]).toContain('blocks 1,000 to 1,099 were not read');
+      expect(notices()[2]).toContain('blocks 3,000 to 3,099 were not read');
+      expect(notices()[2]).not.toContain('blocks 2,000');
+      await service.runOnce();
+      expect(notices()).toHaveLength(3);
+      expect(h.store.snapshot().events.filter(event => event.type === 'discovery_skipped')).toHaveLength(4);
+    } finally { service.stop(); }
   });
 });

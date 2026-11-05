@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import type { MetricsRegistry } from './observability.js';
-import type { NotificationDispatcher } from './notifications.js';
+import { enqueueNotification, type NotificationDispatcher } from './notifications.js';
 import type { AlertCard } from './alert-card.js';
 import { plainSystemText, type SystemCard } from './system-card.js';
 import { killEngagedCard, runProblemCard, spendCapCard } from './system-messages.js';
@@ -83,6 +83,11 @@ function alertText(input: AlertInput): string {
   return `${input.kind}${input.runId ? `: ${input.runId}` : ''}${suffix}`;
 }
 
+const CRITICAL_DELIVERY_TYPES = new Set(['alert_started', 'alert_kill', 'alert_cap', 'alert_blocked', 'alert_failed', 'alert_sent', 'alert_confirmed', 'alert_mint_failed', 'alert_fleet_watch']);
+function retryRank(type: string): number {
+  return CRITICAL_DELIVERY_TYPES.has(type) ? 0 : type === 'alert_health' ? 3 : type === 'alert_status' || type === 'alert_digest' ? 2 : 1;
+}
+
 /** Durable alert/reminder coordinator. It never changes execution truth. */
 export class AlertManager {
   private readonly grouped = new Set<string>();
@@ -112,7 +117,15 @@ export class AlertManager {
     const at = input.at ?? this.now().toISOString();
     const retentionUntil = new Date(Date.parse(at) + this.policy.retentionDays * 86_400_000).toISOString();
     const eventId = `alert_${input.kind}_${shortDigest(input.dedupe)}`;
-    await this.store.transaction((current) => { current.events.push({ id: eventId, type, at, data: { dedupe: input.dedupe, text: input.text, priority: input.priority, retentionUntil, ...(input.card ? { card: input.card } : {}), ...(input.system ? { system: input.system } : {}) } }); });
+    const inserted = await this.store.transaction((current) => {
+      // A second producer may have inserted the same identity while this caller waited for the store lock.
+      if (current.events.some(event => event.id === eventId || event.type === type && event.data.dedupe === input.dedupe)) return false;
+      const event = { id: eventId, type, at, data: { dedupe: input.dedupe, text: input.text, priority: input.priority, retentionUntil, ...(input.card ? { card: input.card } : {}), ...(input.system ? { system: input.system } : {}) } };
+      current.events.push(event);
+      if (input.priority === 'immediate' && this.dispatcher) enqueueNotification(current, event, input.text, this.now(), this.policy.retentionDays);
+      return true;
+    });
+    if (!inserted) return false;
     this.metrics?.recordNotification('pending');
     if (input.priority === 'immediate' && this.dispatcher) await this.dispatcher.dispatch(eventId, input.text);
     return true;
@@ -144,12 +157,26 @@ export class AlertManager {
    * Retries undelivered messages (pending or failed) created within `maxAgeMs`, respecting the
    * outbox backoff and lease. Older ones stay failed: stale news is not resent. Returns attempts made.
    */
-  public async retryUndelivered(maxAgeMs = 6 * 60 * 60_000): Promise<number> {
+  public async retryUndelivered(maxAgeMs = 6 * 60 * 60_000, maxAttempts = 20): Promise<number> {
     if (!this.dispatcher) return 0;
     const now = this.now().getTime();
+    // Repair the legacy event-before-outbox crash window without changing the event identity or original age.
+    await this.store.transaction(state => {
+      const queued = new Set(state.notificationOutbox.map(item => item.sourceEventId));
+      const delivered = new Set(state.events.filter(event => event.type === 'notification_delivered').map(event => event.data.sourceEventId));
+      const digestCovered = new Set(state.events.filter(event => event.type === 'alert_digest').flatMap(event => Array.isArray(event.data.includes) ? event.data.includes.map(String) : []));
+      const orphans = state.events.filter(event => event.type.startsWith('alert_') &&
+        (event.data.priority === 'immediate' || event.data.priority === undefined && ['alert_kill', 'alert_cap', 'alert_blocked', 'alert_failed', 'alert_sent', 'alert_confirmed', 'alert_mint_failed'].includes(event.type)) &&
+        !queued.has(event.id) && !delivered.has(event.id) && !digestCovered.has(event.id) && Number.isFinite(Date.parse(event.at)) &&
+        Date.parse(event.at) <= now && now - Date.parse(event.at) <= maxAgeMs)
+        .sort((a, b) => retryRank(a.type) - retryRank(b.type) || a.at.localeCompare(b.at)).slice(0, 20);
+      for (const event of orphans) enqueueNotification(state, event, String(event.data.text ?? ''), this.now(), this.policy.retentionDays);
+    });
     const due = this.store.snapshot().notificationOutbox.filter((item) => item.state !== 'delivered' && now - Date.parse(item.createdAt) <= maxAgeMs && (!item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= now));
+    // Keep a large informational backlog from monopolizing the retry worker. Safety/run outcomes go first.
+    const bounded = due.sort((a, b) => retryRank(a.type) - retryRank(b.type) || a.createdAt.localeCompare(b.createdAt)).slice(0, Number.isSafeInteger(maxAttempts) && maxAttempts > 0 ? Math.min(maxAttempts, 100) : 20);
     let attempts = 0;
-    for (const item of due) {
+    for (const item of bounded) {
       attempts += 1;
       try { await this.dispatcher.dispatch(item.sourceEventId, item.text); } catch { /* stays failed with a later nextAttemptAt; retried on a later tick */ }
     }
@@ -179,9 +206,13 @@ export class AlertManager {
     // are already shortened in the card; the full transaction hash remains
     // only where the explorer button needs it.
     const stored = input.sent ? { ...input, sent: { ...input.sent, wallet: undefined } } : input.final ? { ...input, final: { ...input.final, wallet: undefined } } : input;
-    await this.store.transaction((current) => { current.events.push({ id: eventId, ...(input.runId ? { runId: input.runId } : {}), type, at, data: { ...stored, text, retentionUntil, ...(system ? { system } : {}) } }); });
-    this.metrics?.recordNotification('pending');
     const priority: AlertPriority = this.policy.immediateKinds.includes(input.kind) ? 'immediate' : 'grouped';
+    await this.store.transaction(current => {
+      const event = { id: eventId, ...(input.runId ? { runId: input.runId } : {}), type, at, data: { ...stored, text, ...(priority === 'immediate' ? { priority } : {}), retentionUntil, ...(system ? { system } : {}) } };
+      current.events.push(event);
+      if (priority === 'immediate' && this.dispatcher) enqueueNotification(current, event, text, this.now(), this.policy.retentionDays);
+    });
+    this.metrics?.recordNotification('pending');
     if (priority === 'grouped') this.grouped.add(eventId);
     else if (this.dispatcher) await this.dispatcher.dispatch(eventId, text);
   }

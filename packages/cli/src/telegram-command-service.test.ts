@@ -1,7 +1,7 @@
 import { mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AlertManager, IntelligenceAlertInput } from '@mint-bot/backend';
 import { startTelegramCommands, withViewerFanout } from './telegram-command-service.js';
 import { createTelegramBotApi, type TelegramUpdate } from './telegram-api.js';
@@ -25,6 +25,26 @@ describe('Telegram polling (T-061, D-063 item 1)', () => {
 });
 
 describe('stop commands are never held up (D-063 item 4)', () => {
+  it('never waits for sensitive-message cleanup before dispatching a stop or polling again', async () => {
+    const order: string[] = [];
+    let offset = 0;
+    let polls = 0;
+    const batches: TelegramUpdate[][] = [[
+      { update_id: 1, message: { message_id: 1, date: 0, chat: { id: 1, type: 'private' }, from: { id: 1 }, text: '/unlock 123456' } },
+      { update_id: 2, message: { message_id: 2, date: 0, chat: { id: 1, type: 'private' }, from: { id: 1 }, text: '/kill' } },
+    ]];
+    const service = startTelegramCommands({
+      api: { getUpdates: async () => { polls += 1; return batches.shift() ?? new Promise(() => undefined); }, sendMessage: async () => undefined, answerCallback: async () => undefined, deleteMessage: async () => undefined },
+      offsets: { pollOffset: () => offset, savePollOffset: (value) => { offset = value; } },
+      router: { cleanSensitive: async () => new Promise(() => undefined), handle: async (update) => { order.push(update.message!.text!.split(' ')[0]!); }, checkSession: async () => undefined, onStart: async () => undefined },
+      log: () => undefined,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    service.stop();
+    expect(order).toEqual(['/unlock', '/kill']);
+    expect(polls).toBe(2);
+  });
+
   it('a /kill tap is handled while a slow command is still running, and a failing session check never stops polling', async () => {
     const order: string[] = [];
     let release: () => void = () => undefined;
@@ -79,6 +99,44 @@ const FAKE_TOKEN = ['123', 'SECRET'].join(':');
 const BAD_TOKEN = ['bad', 'token'].join(' ');
 
 describe('Telegram client', () => {
+  it('honors explicit 429 retry_after for sends and deletes, retrying only the rejected request', async () => {
+    vi.useFakeTimers();
+    try {
+      for (const method of ['sendMessage', 'deleteMessage'] as const) {
+        const calls: string[] = [];
+        const api = createTelegramBotApi({ token: FAKE_TOKEN, fetcher: async (_url, init) => { calls.push(init?.body ?? ''); return calls.length === 1 ? { ok: false, status: 429, json: async () => ({ ok: false, parameters: { retry_after: 1 } }) } : { ok: true, status: 200, json: async () => ({ ok: true, result: true }) }; } });
+        const result = method === 'sendMessage' ? api.sendMessage(1, 'reply') : api.deleteMessage(1, 7);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(calls).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await result;
+        expect(calls).toHaveLength(2);
+        expect(calls[1]).toBe(calls[0]);
+      }
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('bounds rate-limit waits and never retries invalid delays or an ambiguous network send', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const api = createTelegramBotApi({ token: FAKE_TOKEN, fetcher: async () => { calls += 1; return { ok: false, status: 429, json: async () => ({ parameters: { retry_after: 10 } }) }; } });
+      const result = expect(api.deleteMessage(1, 7)).rejects.toThrow('TELEGRAM_DELETEMESSAGE_FAILED:429');
+      await vi.advanceTimersByTimeAsync(10_000);
+      await result;
+      expect(calls).toBe(2);
+      for (const delay of [undefined, '1', 0, -1, 0.5, 16]) {
+        let attempted = 0;
+        const invalid = createTelegramBotApi({ token: FAKE_TOKEN, fetcher: async () => { attempted += 1; return { ok: false, status: 429, json: async () => ({ parameters: { retry_after: delay } }) }; } });
+        await expect(invalid.sendMessage(1, 'reply')).rejects.toThrow('TELEGRAM_SENDMESSAGE_FAILED:429');
+        expect(attempted).toBe(1);
+      }
+      let attempted = 0;
+      const ambiguous = createTelegramBotApi({ token: FAKE_TOKEN, fetcher: async () => { attempted += 1; throw new Error('network error with token'); } });
+      await expect(ambiguous.sendMessage(1, 'reply')).rejects.toThrow('TELEGRAM_SENDMESSAGE_UNREACHABLE');
+      expect(attempted).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
   it('never lets the token out in an error, and refuses plain http except an approved local proxy', async () => {
     const api = createTelegramBotApi({ token: FAKE_TOKEN, fetcher: async () => { throw new Error('connect failed https://api.telegram.org/bot123:SECRET/getUpdates'); } });
     await expect(api.sendMessage(1, 'x')).rejects.toThrow('TELEGRAM_SENDMESSAGE_UNREACHABLE');

@@ -12,7 +12,10 @@ export class HealthService {
     const state = this.store.snapshot(); const capabilities = this.store.capabilities(); const reasons = [...state.runtime.blockingReasons];
     if (!capabilities.durable) reasons.push('DURABLE_STORE_REQUIRED');
     if (!capabilities.atomicAcrossProcesses) reasons.push('ATOMIC_STORE_REQUIRED');
-    if (state.runtime.startupState !== 'Ready') reasons.push('STARTUP_RECONCILIATION_REQUIRED');
+    if (state.runtime.startupState !== 'Ready') {
+      if (!state.runtime.reconciliationCompletedAt || state.runtime.startupState === 'Cold' || state.runtime.startupState === 'Reconciling') reasons.push('STARTUP_RECONCILIATION_REQUIRED');
+      else if (state.runtime.blockingReasons.length === 0) reasons.push('DEPLOYMENT_NOT_READY');
+    }
     if (!state.runtime.dependencies.engine) reasons.push('ENGINE_NOT_READY');
     if (!state.runtime.dependencies.chain) reasons.push('CHAIN_NOT_READY');
     if (!state.runtime.dependencies.backup) reasons.push('BACKUP_NOT_READY');

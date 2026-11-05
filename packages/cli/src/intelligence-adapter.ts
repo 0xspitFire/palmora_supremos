@@ -22,6 +22,11 @@ function isRateLimit(detail: string | undefined): boolean {
   return detail !== undefined && /HTTP 429|rate.?limit|too many requests|throttl|exceeded.*(?:capacity|quota|compute units)/i.test(detail);
 }
 
+/** Only evidence of a range/result-size limit warrants adding requests by shrinking. */
+function isRangeLimit(detail: string | undefined): boolean {
+  return detail !== undefined && /blocks?[ -]?range.{0,100}(?:too (?:large|wide)|exceed|limit|maximum)|(?:exceed|maximum|max|smaller|reduce|limited|up to).{0,100}blocks?[ -]?range|query returned more than [\d,]+|(?:log )?response size exceed|response (?:is )?too large|too many (?:results|logs)|(?:please limit|limited to).{0,80}[\d,]+ blocks/i.test(detail);
+}
+
 /**
  * Engine-backed, read-only chain port for Phase 2 intelligence (T-004). It reads
  * logs, drop configuration, code and balances, and runs eth_call simulations.
@@ -70,9 +75,9 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   public async scan(fromBlock: bigint, toBlock: bigint, watched: readonly string[]): Promise<ChainScanOutcome> {
     const addresses = watched.filter((address) => ADDRESS.test(address)) as Address[];
     let outcome = await this.observer.scan(fromBlock, this.clamp(fromBlock, toBlock), addresses);
-    // A rejected request usually means the range is above the provider's limit: halve and retry.
-    // Rate limiting is different: shrinking would only add requests, so wait for the next tick instead.
-    while (!outcome.ok && outcome.reason === 'LOGS_UNAVAILABLE' && !isRateLimit(outcome.detail) && this.range > 1n) {
+    // Shrink only for an explicit provider range/result-size limit. Timeouts,
+    // auth errors and outages retain the range and wait for the next tick.
+    while (!outcome.ok && outcome.reason === 'LOGS_UNAVAILABLE' && !isRateLimit(outcome.detail) && isRangeLimit(outcome.detail) && this.range > 1n) {
       this.range = this.range / 2n > 1n ? this.range / 2n : 1n;
       this.successes = 0;
       outcome = await this.observer.scan(fromBlock, this.clamp(fromBlock, toBlock), addresses);

@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 import { ScanTracker } from './scan-tracker.js';
 import { readHeartbeat, writeHeartbeat } from './heartbeat.js';
 import type { MonitorPing } from './monitor-ping.js';
-import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, pauseCard, scanSkippedCard, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
+import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, buildSystemCard, pauseCard, scanSkippedCard, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
   store: BackendStore;
@@ -60,31 +61,156 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   const now = options.now ?? (() => new Date());
   const startedAt = now();
   const tracker = new ScanTracker(startedAt);
-  const announceSkip = async (skipped: { fromBlock: string; toBlock: string; blocks: string }): Promise<void> => {
-    const system = scanSkippedCard({ blocks: BigInt(skipped.blocks), fromBlock: skipped.fromBlock, toBlock: skipped.toBlock, at: now() });
-    try {
-      // The alert's dedupe answers false for a jump already announced (for example the re-check at start-up); only a new one is logged.
-      const sent = await options.alerts.intelligence({ kind: 'health', dedupe: `skip:${skipped.fromBlock}`, text: plainSystemText(system), priority: 'immediate', system, at: now().toISOString() });
-      if (sent) options.logger?.warn({ event: 'discovery_skipped', ...skipped }, 'scan jumped ahead');
-    } catch (error) { options.logger?.warn({ event: 'skip_message_failed', error }, 'skip message failed'); }
+  type SkipChain = 1 | 8453 | 4663 | 'unknown';
+  type SkippedRange = { fromBlock: string; toBlock: string; blocks: string; at: string; chainId: SkipChain };
+  const SKIP_NOTICE_INTERVAL_MS = 15 * 60_000;
+  const SKIP_SOURCE_HORIZON_MS = 24 * 60 * 60_000;
+  const MAX_SKIP_NOTICE_RANGES = 1_000;
+  const pendingSkips = new Map<string, SkippedRange>();
+  const coveredSkips = new Set<string>();
+  const lastSkipNoticeAt = new Map<SkipChain, number>();
+  let lastSkipJournalReadAt: number | undefined;
+  let skipNoticeBusy = false;
+  const skipKey = (chain: SkipChain, from: string, to: string): string => `${chain}:${from}:${to}`;
+  const validSkipChain = (chain: unknown): chain is SkipChain => chain === 1 || chain === 8453 || chain === 4663 || chain === 'unknown';
+  const validRange = (value: { fromBlock?: unknown; toBlock?: unknown; blocks?: unknown }): value is { fromBlock: string; toBlock: string; blocks: string; chainId?: unknown } => {
+    const fields = [value.fromBlock, value.toBlock, value.blocks];
+    if (!fields.every(field => typeof field === 'string' && /^(0|[1-9][0-9]{0,23})$/.test(field))) return false;
+    return BigInt(value.toBlock as string) >= BigInt(value.fromBlock as string)
+      && BigInt(value.blocks as string) === BigInt(value.toBlock as string) - BigInt(value.fromBlock as string) + 1n;
   };
-  // A jump is announced right after the tick, and again at start-up and after a failed tick for any recent jump that has no card yet
-  // (the alert's own dedupe makes repeats harmless), so a crash between the jump and the card cannot lose the notice.
+  const loadSkipJournal = (): void => {
+    const journalNow = now().getTime();
+    const snapshot = options.store.snapshot();
+    // Rebuild, rather than accumulate, the rolling coverage window. Long-lived
+    // processes must not retain every range identity ever announced.
+    coveredSkips.clear();
+    lastSkipNoticeAt.clear();
+    const legacy = new Set(snapshot.events.filter(event => event.type === 'alert_health' && typeof event.data.dedupe === 'string')
+      .map(event => String(event.data.dedupe)));
+    for (const event of snapshot.events) {
+      if (!['discovery_skip_notice', 'discovery_skip_notice_plan'].includes(event.type) || !validSkipChain(event.data.chainId)) continue;
+      const chain = event.data.chainId;
+      const at = Date.parse(event.at);
+      if (!Number.isFinite(at) || at > journalNow || journalNow - at > SKIP_SOURCE_HORIZON_MS) continue;
+      if (event.type === 'discovery_skip_notice_plan' && !legacy.has(String(event.data.alertDedupe))) continue;
+      for (const key of Array.isArray(event.data.rangeKeys) ? event.data.rangeKeys : []) if (typeof key === 'string') coveredSkips.add(key);
+      if (journalNow - at < SKIP_NOTICE_INTERVAL_MS) lastSkipNoticeAt.set(chain, Math.max(lastSkipNoticeAt.get(chain) ?? at, at));
+    }
+    for (const event of snapshot.events) {
+      if (event.type !== 'discovery_skipped' || !validRange(event.data)) continue;
+      const at = Date.parse(event.at);
+      // Preserve the original recovery horizon: old, future-dated or malformed
+      // audit records remain retained, but are not announced as current news.
+      if (!Number.isFinite(at) || at > journalNow || journalNow - at > SKIP_SOURCE_HORIZON_MS) continue;
+      if (event.data.chainId !== undefined && ![1, 8453, 4663].includes(event.data.chainId as number)) continue;
+      // Earlier discovery writers served multiple chains without recording the
+      // chain. Do not infer Ethereum from the primary intelligence service.
+      const chain: unknown = event.data.chainId === undefined ? 'unknown' : event.data.chainId;
+      if (!validSkipChain(chain)) continue;
+      const key = skipKey(chain, event.data.fromBlock, event.data.toBlock);
+      // Preserve the old chain-less dedupe only for chain-less source records.
+      if (chain === 'unknown' && legacy.has(`skip:${event.data.fromBlock}`)) coveredSkips.add(key);
+      if (!coveredSkips.has(key)) pendingSkips.set(key, { ...event.data, at: event.at, chainId: chain } as SkippedRange);
+    }
+    for (const [key, range] of pendingSkips) {
+      const at = Date.parse(range.at);
+      if (coveredSkips.has(key) || !Number.isFinite(at) || at > journalNow || journalNow - at > SKIP_SOURCE_HORIZON_MS) pendingSkips.delete(key);
+    }
+    lastSkipJournalReadAt = journalNow;
+  };
+  const summaryCard = (ranges: readonly SkippedRange[], chain: SkipChain): SystemCard => {
+    if (ranges.length === 1 && chain === 1) {
+      const range = ranges[0]!;
+      return scanSkippedCard({ blocks: BigInt(range.blocks), fromBlock: range.fromBlock, toBlock: range.toBlock, at: new Date(range.at) });
+    }
+    // Merge overlaps only for the count, never claim the whole bounding interval
+    // was unread: there can be successfully scanned blocks between these ranges.
+    const sorted = ranges.map(range => [BigInt(range.fromBlock), BigInt(range.toBlock)] as const).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+    const merged: Array<[bigint, bigint]> = [];
+    for (const [from, to] of sorted) {
+      const last = merged.at(-1);
+      if (last && from <= last[1] + 1n) last[1] = to > last[1] ? to : last[1];
+      else merged.push([from, to]);
+    }
+    const blocks = merged.reduce((sum, [from, to]) => sum + to - from + 1n, 0n);
+    const examples = [...ranges].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 3);
+    const latest = examples[0]!;
+    return buildSystemCard({
+      title: 'SCAN JUMPED AHEAD', severity: 'attention',
+      lines: [
+        { label: 'Chain', value: chain === 'unknown' ? 'Not recorded in the legacy scan audit' : chain === 1 ? 'Ethereum' : chain === 8453 ? 'Base' : 'Robinhood' },
+        { label: 'What happened', value: chain === 'unknown'
+          ? `${ranges.length} recorded scan jumps are combined into this notice. Their block ranges may overlap or belong to different chains; a distinct-block total cannot be established.`
+          : `${ranges.length} scan jumps are combined into this notice; ${blocks.toString()} distinct blocks were not read.`, strong: true },
+        ...examples.map(range => ({ label: 'Skipped range', value: `blocks ${BigInt(range.fromBlock).toLocaleString('en-US')} to ${BigInt(range.toBlock).toLocaleString('en-US')} were not read.` })),
+        { label: 'Coverage', value: `Only the recorded ranges were skipped; blocks between separate ranges are not included.${ranges.length > examples.length ? ` ${ranges.length - examples.length} additional ranges remain in the scan audit history.` : ''}` },
+        { label: 'What it means', value: 'Mint and watched-wallet discovery in those ranges is incomplete. This notice does not change spending permissions or the kill switch.' },
+      ],
+      steps: ['If jumps continue, inspect scan duration and RPC errors. Keep the retained scan history for the exact ranges.'],
+      dashboard: true, eventAt: latest.at, eventLabel: 'the latest recorded jump',
+      summary: chain === 'unknown' ? `${ranges.length} scan jumps; chain was not recorded.` : `${ranges.length} scan jumps; ${blocks.toString()} distinct unread blocks.`,
+    });
+  };
   const announcePendingSkips = async (): Promise<void> => {
+    if (skipNoticeBusy) return;
+    skipNoticeBusy = true;
     try {
-      const since = now().getTime() - 24 * 60 * 60_000;
-      for (const event of options.store.snapshot().events) {
-        if (event.type !== 'discovery_skipped' || Date.parse(event.at) < since) continue;
-        const { fromBlock, toBlock, blocks } = event.data as { fromBlock?: unknown; toBlock?: unknown; blocks?: unknown };
-        if (typeof fromBlock === 'string' && typeof toBlock === 'string' && typeof blocks === 'string' && /^\d+$/.test(blocks)) await announceSkip({ fromBlock, toBlock, blocks });
+      const current = now().getTime();
+      // Startup recovery is one bounded summary, not one immediate send per
+      // retained jump. Re-read at most once per cooldown to repair a crash or an
+      // exception between recording a jump and returning its tick result.
+      if (lastSkipJournalReadAt === undefined || current - lastSkipJournalReadAt >= SKIP_NOTICE_INTERVAL_MS) loadSkipJournal();
+      for (const chain of new Set([...pendingSkips.values()].map(range => range.chainId))) {
+        const priorNotice = lastSkipNoticeAt.get(chain);
+        if (priorNotice !== undefined && current - priorNotice >= 0 && current - priorNotice < SKIP_NOTICE_INTERVAL_MS) continue;
+        // Bound both the card's represented scope and its durable plan/coverage
+        // metadata. Remaining ranges stay pending for the next cooldown.
+        const entries = [...pendingSkips.entries()].filter(([key, range]) => {
+          const at = Date.parse(range.at);
+          return range.chainId === chain && !coveredSkips.has(key) && Number.isFinite(at) && at <= current && current - at <= SKIP_SOURCE_HORIZON_MS;
+        })
+          .sort(([aKey, a], [bKey, b]) => a.at.localeCompare(b.at) || aKey.localeCompare(bKey)).slice(0, MAX_SKIP_NOTICE_RANGES);
+        if (entries.length === 0) continue;
+        const keys = entries.map(([key]) => key).sort();
+        const dedupe = `skip-summary:${chain}:${createHash('sha256').update(keys.join('\n')).digest('hex').slice(0, 24)}`;
+        const system = summaryCard(entries.map(([, range]) => range), chain);
+        // This plan is not an acknowledgement. Recovery only treats its ranges as
+        // represented if the matching durable alert exists, closing the crash
+        // window before the final coverage marker without losing a failed send.
+        await options.store.transaction(state => {
+          if (!state.events.some(event => event.type === 'discovery_skip_notice_plan' && event.data.alertDedupe === dedupe)) {
+            state.events.push({ id: `skip_plan_${createHash('sha256').update(dedupe).digest('hex').slice(0, 24)}`, type: 'discovery_skip_notice_plan', at: now().toISOString(), data: { chainId: chain, alertDedupe: dedupe, rangeKeys: keys } });
+          }
+        });
+        let sent = false;
+        try {
+          sent = await options.alerts.intelligence({ kind: 'health', dedupe, text: plainSystemText(system), priority: 'immediate', system, at: now().toISOString() });
+        } catch (error) { options.logger?.warn({ event: 'skip_message_failed', error }, 'skip summary delivery failed; durable outbox will retry'); }
+        // A sink can fail after the alert is committed. Mark its ranges covered
+        // only when that durable alert exists, leaving delivery to the outbox.
+        if (!options.store.snapshot().events.some(event => event.type === 'alert_health' && event.data.dedupe === dedupe)) continue;
+        for (const key of keys) { coveredSkips.add(key); pendingSkips.delete(key); }
+        lastSkipNoticeAt.set(chain, current);
+        await options.store.transaction(state => {
+          if (!state.events.some(event => event.type === 'discovery_skip_notice' && event.data.alertDedupe === dedupe)) {
+            state.events.push({ id: `skip_notice_${createHash('sha256').update(dedupe).digest('hex').slice(0, 24)}`, type: 'discovery_skip_notice', at: now().toISOString(), data: { chainId: chain, alertDedupe: dedupe, rangeKeys: keys, jumps: keys.length } });
+          }
+        });
+        if (sent) options.logger?.warn({ event: 'discovery_skipped', jumps: keys.length, chainId: chain }, 'scan jumps summarized');
       }
-    } catch (error) { options.logger?.warn({ event: 'skip_recheck_failed', error }, 'could not re-check for jump notices'); }
+    } catch (error) { options.logger?.warn({ event: 'skip_recheck_failed', error }, 'could not summarize scan jumps'); }
+    finally { skipNoticeBusy = false; }
   };
   const runDiscovery = guarded('discovery', async () => {
     try {
       const result = await discovery.tick();
       tracker.record(result, now(), options.repo.cursor(1, 'seadrop-v1')?.toString());
-      if (result.skipped) await announceSkip(result.skipped);
+      if (result.skipped && validRange(result.skipped)) {
+        const key = skipKey(options.port.chainId, result.skipped.fromBlock, result.skipped.toBlock);
+        if (!coveredSkips.has(key)) pendingSkips.set(key, { ...result.skipped, at: now().toISOString(), chainId: options.port.chainId });
+      }
+      await announcePendingSkips();
       return result;
     } catch (error) { tracker.recordFailure(now()); await announcePendingSkips(); throw error; }
   });
@@ -172,7 +298,7 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   };
   void runMonitor();
   void sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, startedAt, ...(options.startNumber !== undefined ? { startNumber: options.startNumber } : {}), ...(options.version ? { version: options.version } : {}) }));
-  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void runHeartbeat(), options.heartbeatIntervalMs ?? 30_000), setInterval(() => void runMonitor(), options.monitorIntervalMs ?? 60_000)];
+  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void runHeartbeat(), options.heartbeatIntervalMs ?? 30_000), setInterval(() => void runMonitor(), options.monitorIntervalMs ?? 60_000), setInterval(() => void announcePendingSkips(), SKIP_NOTICE_INTERVAL_MS)];
   for (const timer of timers) timer.unref();
   void runDiscovery().then(runReadiness);
   return {
