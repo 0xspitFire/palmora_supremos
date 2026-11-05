@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, selectTurnkeyAllowlistFamilyPolicy, type SpendAlertSink } from './runtime.js';
+import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, selectTurnkeyAllowlistFamilyPolicy, selectTurnkeyPublicFamilyPolicy, type SpendAlertSink } from './runtime.js';
 import { PERSONAL_LIVE_FLEET_POLICY, type EngineAdapter } from '@mint-bot/backend';
 import { createTurnkeyPolicyRecord, turnkeyProviderPolicyExpressions, SEADROP_V1_ADDRESS, type TurnkeyPolicyAst } from '@mint-bot/engine';
 import type { Address, Hex } from 'viem';
@@ -9,13 +9,13 @@ import type { Address, Hex } from 'viem';
 const FAMILY_WALLET = '0x1111111111111111111111111111111111111111' as Address;
 const FAMILY_KEY = 'key-family';
 
-function familyRecord(maxQuantity = 4, policyId = 'policy-family', allowlist = false) {
+function familyRecord(maxQuantity = 4, policyId = 'policy-family', allowlist = false, publicChain?: 1 | 8453 | 4663) {
   const policy: TurnkeyPolicyAst = {
     version: 1,
     effect: 'allow',
     scope: { provider: 'turnkey', environment: 'production', organizationId: 'org', userId: 'runtime', policyId, keyIds: [FAMILY_KEY] },
-    transaction: { chainId: 4663, from: [FAMILY_WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: (allowlist ? '0x4300a4e6' : '0x161ac21f') as Hex, gasLimitMax: '500000', maxFeePerGasMax: '200000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
-    family: { kind: allowlist ? 'seadrop-free-allowlist-v1' : 'robinhood-seadrop-public-v1', maxQuantity },
+    transaction: { chainId: publicChain ?? 4663, from: [FAMILY_WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: (allowlist ? '0x4300a4e6' : '0x161ac21f') as Hex, gasLimitMax: '500000', maxFeePerGasMax: '200000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
+    family: { kind: allowlist ? 'seadrop-free-allowlist-v1' : publicChain !== undefined ? 'seadrop-free-public-v1' : 'robinhood-seadrop-public-v1', maxQuantity },
   };
   const expressions = turnkeyProviderPolicyExpressions(policy);
   return createTurnkeyPolicyRecord({
@@ -124,5 +124,23 @@ describe('free allowlist family selection', () => {
     expect(selectTurnkeyAllowlistFamilyPolicy([record()], { ...input, quantity: 5 })).toBeUndefined();
     expect(selectTurnkeyAllowlistFamilyPolicy([record()], { ...input, walletScope: ['0x2222222222222222222222222222222222222222'] })).toBeUndefined();
     expect(selectTurnkeyAllowlistFamilyPolicy([familyRecord()], input)).toBeUndefined();
+  });
+});
+
+
+describe('chain-specific free public family selection', () => {
+  it('selects only the matching chain, method, zero price, quantity and wallet scope', () => {
+    const records = [familyRecord(10, 'public-eth', false, 1), familyRecord(4, 'public-base', false, 8453), familyRecord(10, 'public-rh', false, 4663)];
+    for (const chainId of [1, 8453, 4663] as const) {
+      const input = { chainId, strategy: 'seadrop-v1-public', quantity: chainId === 8453 ? 4 : 10, mintPriceWei: 0n, walletScope: [FAMILY_WALLET] };
+      expect(selectTurnkeyPublicFamilyPolicy(records, input)).toBeDefined();
+      expect(selectTurnkeyPublicFamilyPolicy(records, { ...input, quantity: input.quantity + 1 })).toBeUndefined();
+      expect(selectTurnkeyPublicFamilyPolicy(records, { ...input, mintPriceWei: 1n })).toBeUndefined();
+      expect(selectTurnkeyPublicFamilyPolicy(records, { ...input, mintPriceWei: undefined })).toBeUndefined();
+      expect(selectTurnkeyPublicFamilyPolicy(records, { ...input, strategy: 'seadrop-v1-allowlist' })).toBeUndefined();
+      expect(selectTurnkeyPublicFamilyPolicy(records, { ...input, walletScope: [] })).toBeUndefined();
+      expect(selectTurnkeyPublicFamilyPolicy(records, { ...input, walletScope: ['0x3333333333333333333333333333333333333333'] })).toBeUndefined();
+    }
+    expect(() => selectTurnkeyPublicFamilyPolicy([familyRecord(), familyRecord(4, 'public-rh', false, 4663)], { chainId: 4663, strategy: 'seadrop-v1-public', quantity: 1, mintPriceWei: 0n })).toThrow('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
   });
 });

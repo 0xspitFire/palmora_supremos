@@ -219,3 +219,27 @@ describe('free allowlist family signing boundary', () => {
     expect(sent).toBe(2);
   });
 });
+
+describe('free public family signing boundary', () => {
+  it('checks current authority then readiness before every signature and isolates rehearsal', async () => {
+    const ast: TurnkeyPolicyAst = { ...familyPolicy(), transaction: { ...familyPolicy().transaction, chainId: 1, maxFeePerGasMax: '200000000' }, family: { kind: 'seadrop-free-public-v1', maxQuantity: 10 } };
+    const order: string[] = [];
+    const client = clientFor({ signTransaction: async (input) => { order.push('sign'); return clientFor().signTransaction(input); } });
+    const make = (verifyPublicAuthority?: (value: import('./types.js').TransactionIntent) => Promise<void>) => new TurnkeySigner({ organizationId: ORG, environment: ENVIRONMENT, userId: USER, wallets: [{ index: 0, address: WALLET, signWith: KEY_ID }], policyRecord: record(ast), client, verifyPublicAuthority });
+    const base = { ...familyIntent(ast, { chainId: 1, maxFeePerGas: 200000000n }), campaignId: 'campaign', runId: 'run', familyContext: { ...familyIntent(ast).familyContext, assertReady: () => { order.push('ready'); } } };
+    await expect(make().signTransaction(0, base)).rejects.toThrow('TURNKEY_PUBLIC_AUTHORITY_REQUIRED');
+    await expect(make(async () => { throw new Error('TURNKEY_PUBLIC_RPC_DISAGREEMENT'); }).signTransaction(0, base)).rejects.toThrow('TURNKEY_PUBLIC_RPC_DISAGREEMENT');
+    await expect(make(async () => undefined).signTransaction(0, { ...base, familyContext: { ...base.familyContext, assertReady: () => { throw new Error('KILLED'); } } })).rejects.toThrow('KILLED');
+    await expect(make(async () => undefined).signTransaction(0, { ...base, gasLimit: 0n })).rejects.toThrow('TURNKEY_PUBLIC_AUTHORITY_REQUIRED');
+    expect(order).toEqual([]);
+    await expect(make(async () => { order.push('authority'); }).signTransaction(0, base)).resolves.toMatch(/^0x/);
+    expect(order).toEqual(['authority', 'ready', 'sign']);
+    const changed = { ...base };
+    await expect(make(async () => { changed.value = 1n; }).signTransaction(0, changed)).rejects.toThrow('TURNKEY_POLICY_INTENT_BLOCKED');
+    const rehearsal = await make().rehearseFreePublic(0, async () => undefined);
+    expect(rehearsal.signedTransactionHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(rehearsal).not.toHaveProperty('signedTransaction');
+    await expect(make().rehearseFreePublic(0, async () => { throw new Error('KILL_SWITCH_NOT_ENGAGED'); })).rejects.toThrow('KILL_SWITCH_NOT_ENGAGED');
+    expect(order.filter((step) => step === 'sign')).toHaveLength(2);
+  });
+});

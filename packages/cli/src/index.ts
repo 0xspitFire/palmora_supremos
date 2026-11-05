@@ -369,6 +369,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .command('turnkey-robinhood-policy-prepare', 'Create an owner-only exact free-mint enforcement policy for chain 4663', (args) => args
     .option('policy-id', { type: 'string', default: 'pending-provider-policy', description: 'Exact provider policy ID returned by Turnkey; omit only to print the provider-policy template before creation' })
     .option('nft-contract', { type: 'string', description: 'Exact NFT contract for legacy exact mode; omit with --policy-family' })
+    .option('free-public-family', { type: 'boolean', default: false, description: 'Owner-approved reusable free public SeaDrop family for the selected chain' })
     .option('free-allowlist-family', { type: 'boolean', default: false, description: 'Prepare one reusable free SeaDrop allowlist family for the specified chain' })
     .option('chain-id', { type: 'number', default: 4663, choices: [1, 8453, 4663] as const })
     .option('policy-family', { type: 'boolean', default: false, description: 'Prepare the bounded Robinhood SeaDrop policy family (one-time setup; no per-drop contract pin)' })
@@ -381,18 +382,19 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('fleet-change', { type: 'string', description: 'D-078: a draft public wallet list (from turnkey-fleet-inventory --write) that replaces the installed bundle\'s wallets in this UNSIGNED proposal; the owner still creates the provider policy and signs offline' })
     .option('output', { type: 'string', description: 'Policy AST output under the secret root' }), async (args) => {
       try {
-        if (!args.freeAllowlistFamily && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-        if ((!(args.policyFamily || args.freeAllowlistFamily) && (typeof args.nftContract !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
+        if ([args.freeAllowlistFamily, args.freePublicFamily, 'policyFamily' in args && args.policyFamily].filter(Boolean).length > 1) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if (!(args.freeAllowlistFamily || args.freePublicFamily) && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if ((!(args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily) && (typeof args.nftContract !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
         const secretRoot = configuredSecretRoot(runtimeRoot);
         const config = await readTurnkeySecretConfig(secretRoot);
         const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
         const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
         const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
-        if (!(args.policyFamily || args.freeAllowlistFamily) && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
-        const feeRecipient = args.policyFamily || args.freeAllowlistFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
+        if (!(args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily) && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
+        const feeRecipient = args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
         const { artifact, change: walletChange } = await policyWalletArtifact(config, installedBundle, args);
         const wallets = walletReferencesFromArtifact(artifact);
-        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei, ...(args.policyFamily ? { policyFamily: true } : {}), ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}) });
+        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei, ...(args.policyFamily ? { policyFamily: true } : {}), ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freePublicFamily ? { publicFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}) });
         const providerPolicy = turnkeyProviderPolicyExpressions(policy);
         const output = turnkeySecretPath(args.output, 'turnkey-robinhood-policy-ast.json');
         await writeTurnkeyJson(output, policy);
@@ -402,6 +404,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .command('turnkey-policy-renew', 'Preview or prepare an exact Robinhood policy renewal without granting policy-admin access to the service', (args) => args
     .option('policy-id', { type: 'string', description: 'Provider policy ID after the exact policy has been created; omit to reuse an exact existing policy or print its creation text' })
     .option('nft-contract', { type: 'string' })
+    .option('free-public-family', { type: 'boolean', default: false, description: 'Owner-approved reusable free public SeaDrop family for the selected chain' })
     .option('free-allowlist-family', { type: 'boolean', default: false })
     .option('chain-id', { type: 'number', default: 4663, choices: [1, 8453, 4663] as const })
     .option('fee-recipient', { type: 'string', description: 'Override the on-chain SeaDrop recipient resolution' })
@@ -417,16 +420,17 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('valid-hours', { type: 'number', default: 168 })
     .option('apply', { type: 'boolean', default: false, description: 'Write the AST, unsigned proposal and resumable state; preview is the default' }), async (args) => {
       try {
-        if (!args.freeAllowlistFamily && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-        if ((!args.freeAllowlistFamily && (!args.nftContract || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
+        if ([args.freeAllowlistFamily, args.freePublicFamily, 'policyFamily' in args && args.policyFamily].filter(Boolean).length > 1) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if (!(args.freeAllowlistFamily || args.freePublicFamily) && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if ((!(args.freeAllowlistFamily || args.freePublicFamily) && (!args.nftContract || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
         if (!Number.isSafeInteger(args.validHours) || args.validHours < 1 || args.validHours > 720) throw new Error('TURNKEY_POLICY_VALIDITY_INVALID');
         const secretRoot = configuredSecretRoot(runtimeRoot);
         const config = await readTurnkeySecretConfig(secretRoot);
         const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
         const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
         const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
-        if (!args.freeAllowlistFamily && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
-        const feeRecipient = args.freeAllowlistFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
+        if (!(args.freeAllowlistFamily || args.freePublicFamily) && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
+        const feeRecipient = args.freeAllowlistFamily || args.freePublicFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
         const { artifact, change: walletChange } = await policyWalletArtifact(config, installedBundle, args);
         const wallets = walletReferencesFromArtifact(artifact);
         const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
@@ -436,7 +440,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           client.getPolicies({ organizationId: config.organizationId }),
           client.getPrivateKeys({ organizationId: config.organizationId }),
         ]);
-        const plan = planTurnkeyPolicyRenewal({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, ...(args.policyId ? { policyId: args.policyId } : {}), wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei }, policies.policies);
+        const plan = planTurnkeyPolicyRenewal({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, ...(args.policyId ? { policyId: args.policyId } : {}), wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freePublicFamily ? { publicFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei }, policies.policies);
         const policyOutput = turnkeySecretPath(args.policyOutput, 'turnkey-robinhood-policy-ast.json');
         const stateOutput = turnkeySecretPath(args.stateOutput, 'turnkey-policy-renewal.json');
         if (plan.stage === 'provider-policy-required') {
@@ -776,6 +780,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           : tx.data;
         const result = record.enforcementPolicy.family?.kind === 'seadrop-free-allowlist-v1'
           ? await signer.rehearseFreeAllowlist(wallet.index, () => requireEngagedKillSwitch(resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE)))
+          : record.enforcementPolicy.family?.kind === 'seadrop-free-public-v1'
+          ? await signer.rehearseFreePublic(wallet.index, () => requireEngagedKillSwitch(resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE)))
           : await signer.signTransactionWithEvidence(wallet.index, {
           chainId: tx.chainId,
           nonce: Number.MAX_SAFE_INTEGER,
@@ -804,7 +810,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           activityFingerprint: result.evidence.activityFingerprint,
           appProofCount: result.evidence.appProofCount,
           signedTransactionHash: 'signedTransactionHash' in result ? result.signedTransactionHash : keccak256(result.signedTransaction),
-          ...(record.enforcementPolicy.family?.kind === 'seadrop-free-allowlist-v1' ? { rehearsalKind: 'synthetic-policy-only', chainAuthorityVerified: false } : {}),
+          ...(['seadrop-free-allowlist-v1', 'seadrop-free-public-v1'].includes(record.enforcementPolicy.family?.kind ?? '') ? { rehearsalKind: 'synthetic-policy-only', chainAuthorityVerified: false } : {}),
           safety: { broadcastAttempted: false, gasLimit: '0', nonce: String(Number.MAX_SAFE_INTEGER), signedTransactionRetained: false },
         };
         await writeTurnkeyJson(output, evidence);

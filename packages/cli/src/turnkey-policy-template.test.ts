@@ -42,3 +42,16 @@ describe('reusable free allowlist templates', () => {
     expect(() => robinhoodTurnkeyPolicy({ ...input, chainId: 8453, allowlistFamily: true, quantity: 5 })).toThrow('TURNKEY_POLICY_FAMILY_INVALID');
   });
 });
+
+describe('reusable free public templates', () => {
+  it('creates separate chain-bound public families without a collection', () => {
+    for (const chainId of [1, 8453, 4663] as const) {
+      const policy = robinhoodTurnkeyPolicy({ ...input, chainId, publicFamily: true, quantity: chainId === 8453 ? 4 : 10 });
+      expect(policy.transaction).toMatchObject({ chainId, data: '0x161ac21f', valueWei: '0' });
+      expect(policy.family?.kind).toBe('seadrop-free-public-v1');
+    }
+    expect(() => robinhoodTurnkeyPolicy({ ...input, publicFamily: true, allowlistFamily: true })).toThrow('TURNKEY_POLICY_FAMILY_INVALID');
+    expect(() => robinhoodTurnkeyPolicy({ ...input, publicFamily: true, policyFamily: true })).toThrow('TURNKEY_POLICY_FAMILY_INVALID');
+    expect(() => robinhoodTurnkeyPolicy({ ...input, chainId: 8453, publicFamily: true, quantity: 5 })).toThrow('TURNKEY_POLICY_FAMILY_INVALID');
+  });
+});

@@ -96,6 +96,19 @@ export function selectTurnkeyRobinhoodFamilyPolicy(
   return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
 }
 
+/** Select an approved public family on the exact free chain/fleet; reject ambiguous grants. */
+export function selectTurnkeyPublicFamilyPolicy(records: readonly TurnkeyCanonicalPolicyRecord[], input: Pick<import('@mint-bot/backend').CampaignInput, 'chainId' | 'quantity' | 'mintPriceWei' | 'strategy' | 'walletScope'>): TurnkeyPolicySelection | undefined {
+  if (input.strategy !== 'seadrop-v1-public' || input.mintPriceWei !== 0n || !Number.isSafeInteger(input.quantity) || input.quantity < 1 || input.walletScope?.length === 0) return undefined;
+  const matches = records.filter(({ enforcementPolicy: policy }) =>
+    (policy.family?.kind === 'seadrop-free-public-v1' || policy.family?.kind === 'robinhood-seadrop-public-v1' && input.chainId === 4663)
+    && policy.family.maxQuantity >= input.quantity && policy.transaction.chainId === input.chainId
+    && policy.transaction.to.toLowerCase() === SEADROP_V1_ADDRESS.toLowerCase()
+    && policy.transaction.valueWei === '0' && policy.transaction.data === '0x161ac21f'
+    && (!input.walletScope || input.walletScope.every((wallet) => policy.transaction.from.some((address) => address.toLowerCase() === wallet.toLowerCase()))));
+  if (matches.length > 1) throw new Error('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
+  return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
+}
+
 /** Select only an owner-signed free allowlist family on the exact chain and wallet scope. */
 export function selectTurnkeyAllowlistFamilyPolicy(records: readonly TurnkeyCanonicalPolicyRecord[], input: Pick<import('@mint-bot/backend').CampaignInput, 'chainId' | 'quantity' | 'mintPriceWei' | 'strategy' | 'walletScope'>): TurnkeyPolicySelection | undefined {
   if (input.strategy !== 'seadrop-v1-allowlist' || input.mintPriceWei !== 0n || !Number.isSafeInteger(input.quantity) || input.quantity < 1) return undefined;
@@ -136,7 +149,7 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     // The bounded family is the fast path: `/prepare` binds the campaign to
     // one already-approved record and the signer performs the exact contract
     // and fee-recipient checks from the live drop at signing time.
-    const family = selectTurnkeyAllowlistFamilyPolicy(records, input) ?? selectTurnkeyRobinhoodFamilyPolicy(records, input);
+    const family = selectTurnkeyAllowlistFamilyPolicy(records, input) ?? selectTurnkeyPublicFamilyPolicy(records, input);
     if (family) return { provider: 'turnkey' as const, ...family };
     const chain = await resolveChainConfigFromSecrets(input.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
     if (!chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
