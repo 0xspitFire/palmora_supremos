@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { redactText } from '@mint-bot/backend';
 import type { TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } from '@mint-bot/database';
-import type { BotCommand, InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
+import { TelegramRequestError, type BotCommand, type InlineButton, type TelegramBotApi, type TelegramUpdate } from './telegram-api.js';
 import { GuidedFlows, flowNeedsSession, type FlowKind, type FlowPreset, type FlowResult, type GuidedActions } from './guided-flows.js';
 import { base32Encode, matchTotp } from './totp.js';
 
@@ -223,31 +223,71 @@ export class TelegramCommandRouter {
   /** Ends a session that expired or that a kill ended, and says so. Called on every polling pass. */
   public async checkSession(): Promise<void> { await this.currentSession(); }
 
-  private readonly sensitiveCleanups = new Map<string, Promise<void>>();
+  private cleanupCapacityWarned = false;
+  private readonly sensitiveCleanups = new Map<string, { pending?: Promise<void>; state: 'pending' | 'succeeded' | 'failed'; attempts: number; warned: boolean; retryable: boolean; retryAt?: number }>();
 
   /** Delete owner codes on ingress, even if a busy worker queue makes the command too old to run. */
-  public async cleanSensitive(update: TelegramUpdate): Promise<void> {
+  public cleanSensitive(update: TelegramUpdate): Promise<void> {
     const incoming = this.incoming(update);
-    if (!incoming || incoming.userId !== this.options.ownerUserId || incoming.messageId === undefined || incoming.plain) return;
+    if (!incoming || incoming.userId !== this.options.ownerUserId || incoming.messageId === undefined || incoming.plain) return Promise.resolve();
     const command = incoming.text.trim().split(/\s+/)[0]!.replace(/^\//, '').replace(/@.*$/, '').toLowerCase();
-    if (command !== 'unlock') return;
-    const key = `${incoming.chatId}:${incoming.messageId}`;
-    let cleanup = this.sensitiveCleanups.get(key);
-    if (!cleanup) {
-      cleanup = this.options.api.deleteMessage(incoming.chatId, incoming.messageId).catch(async () => {
-        try { this.options.log?.('telegram_sensitive_delete_failed', { code: 'UNLOCK_MESSAGE_DELETE_FAILED' }); } catch { /* never retain a code in diagnostics */ }
-        await this.record('owner', incoming, 'unlock', 'warning:MESSAGE_DELETE_FAILED');
-      });
-      this.sensitiveCleanups.set(key, cleanup);
-      if (this.sensitiveCleanups.size > 256) this.sensitiveCleanups.delete(this.sensitiveCleanups.keys().next().value!);
+    if (command !== 'unlock') return Promise.resolve();
+    // Leave the original update/text behind before scheduling any asynchronous work.
+    return this.cleanSensitiveMessage({ userId: incoming.userId, chatId: incoming.chatId, messageId: incoming.messageId, sentAt: incoming.sentAt, text: '/unlock' });
+  }
+
+  private cleanSensitiveMessage(audit: Incoming): Promise<void> {
+    const key = `${audit.chatId}:${audit.messageId}`;
+    let entry = this.sensitiveCleanups.get(key);
+    if (entry?.pending) return entry.pending;
+    if (entry?.state === 'succeeded' || entry && (entry.attempts >= 2 || !entry.retryable || (entry.retryAt !== undefined && this.now().getTime() < entry.retryAt))) return Promise.resolve();
+    if (!entry) {
+      if (this.sensitiveCleanups.size >= 256) {
+        // Never evict in-flight work: its ingress/handle callers must continue to share one deletion.
+        const oldest = [...this.sensitiveCleanups].find(([, value]) => !value.pending)?.[0];
+        if (oldest === undefined) {
+          try { this.options.log?.('telegram_sensitive_delete_failed', { code: 'UNLOCK_MESSAGE_DELETE_FAILED', reason: 'CAPACITY' }); } catch { /* fixed diagnostics only */ }
+          if (this.cleanupCapacityWarned) return Promise.reject(new Error('UNLOCK_MESSAGE_CLEANUP_CAPACITY'));
+          this.cleanupCapacityWarned = true;
+          return this.record('owner', audit, 'unlock', 'warning:MESSAGE_DELETE_FAILED').then(() => this.reply(audit, 'Message cleanup is busy. Delete your /unlock messages manually from this private chat.')).then(() => { throw new Error('UNLOCK_MESSAGE_CLEANUP_CAPACITY'); });
+        }
+        this.sensitiveCleanups.delete(oldest);
+      }
+      this.cleanupCapacityWarned = false;
+      entry = { state: 'pending', attempts: 0, warned: false, retryable: true };
+      this.sensitiveCleanups.set(key, entry);
     }
-    await cleanup;
+    // Retry bookkeeping and asynchronous closures contain identifiers only, never the owner's code or original message text.
+    const current = entry;
+    current.state = 'pending';
+    current.attempts += 1;
+    current.pending = Promise.resolve().then(() => this.options.api.deleteMessage(audit.chatId, audit.messageId!)).then(() => {
+      current.state = 'succeeded';
+    }).catch(async (error: unknown) => {
+      current.state = 'failed';
+      const reasons = ['TIMEOUT', 'DNS', 'CONNECT', 'TLS', 'NETWORK', 'RESPONSE_INVALID', 'RATE_LIMITED', 'FORBIDDEN', 'BAD_REQUEST', 'SERVER', 'REJECTED'];
+      const reason = error instanceof TelegramRequestError && reasons.includes(error.reason) ? error.reason : 'FAILED';
+      current.retryable = !['BAD_REQUEST', 'FORBIDDEN', 'TLS', 'REJECTED'].includes(reason);
+      if (error instanceof TelegramRequestError && typeof error.retryAfterMs === 'number' && Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0) {
+        current.retryAt = Math.min(Number.MAX_SAFE_INTEGER, this.now().getTime() + error.retryAfterMs);
+      } else delete current.retryAt;
+      try { this.options.log?.('telegram_sensitive_delete_failed', { code: 'UNLOCK_MESSAGE_DELETE_FAILED', reason }); } catch { /* never retain a code in diagnostics */ }
+      await this.record('owner', audit, 'unlock', 'warning:MESSAGE_DELETE_FAILED');
+      if (!current.warned) {
+        current.warned = true;
+        await this.reply(audit, 'I could not delete your /unlock message. Delete that message manually from this private chat. This cleanup warning does not change whether your code is accepted.');
+      }
+    }).finally(() => { delete current.pending; });
+    return current.pending;
   }
 
   public async handle(update: TelegramUpdate): Promise<void> {
     const incoming = this.incoming(update);
     if (!incoming) return;
-    await this.cleanSensitive(update);
+    // Deletion is hygiene, never authentication authority: a slow Telegram delete must not age out a fresh TOTP or delay /kill.
+    void this.cleanSensitive(update).catch(() => {
+      try { this.options.log?.('telegram_sensitive_delete_failed', { code: 'UNLOCK_MESSAGE_DELETE_FAILED', reason: 'FAILED' }); } catch { /* fixed diagnostics only */ }
+    });
     if (incoming.callbackId) await this.options.api.answerCallback(incoming.callbackId).catch(() => undefined);
     const role = this.roleOf(incoming.userId);
     // Plain text (not a command) is only ever the owner's answer to a guided flow; anyone else's is ignored without a reply.

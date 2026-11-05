@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openDatabase, TelegramAccessRepository } from '@mint-bot/database';
 import { COMMANDS, TelegramCommandRouter, menuFor, type TelegramActions } from './telegram-commands.js';
-import type { InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
+import { TelegramRequestError, type InlineButton, type TelegramBotApi, type TelegramUpdate } from './telegram-api.js';
 import { timeStepAt, totpCode } from './totp.js';
 import { startTelegramCommands } from './telegram-command-service.js';
 
@@ -304,11 +304,18 @@ describe('the unlocked session (D-063 items 5 and 6)', () => {
     expect(t.deleted).toEqual([update.message!.message_id]);
   });
 
-  it('cleans owner unlock on actual polling ingress while all four ordinary workers are blocked', async () => {
+  it.each([false, true])('cleans owner unlock on actual polling ingress with four blocked workers (first cleanup fails: %s)', async (firstFails) => {
     const t = setup();
     let release: () => void = () => undefined;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     let started = 0;
+    let deletions = 0;
+    const deleteMessage = t.api.deleteMessage;
+    t.api.deleteMessage = async (chat, messageId) => {
+      deletions += 1;
+      if (firstFails && deletions === 1) throw new Error('TELEGRAM_DELETEMESSAGE_UNREACHABLE');
+      await deleteMessage(chat, messageId);
+    };
     t.actions.reconcile = async () => { started += 1; await blocked; return 'done'; };
     const update = t.message(OWNER, `/unlock ${t.code()}`);
     const batch = [...Array.from({ length: 4 }, () => t.message(OWNER, '/reconcile')), update];
@@ -320,25 +327,117 @@ describe('the unlocked session (D-063 items 5 and 6)', () => {
     try {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(started).toBe(4);
-      expect(t.deleted).toEqual([update.message!.message_id]);
+      expect(t.deleted).toEqual(firstFails ? [] : [update.message!.message_id]);
       expect(t.access.openSession()).toBeUndefined();
       release();
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(t.deleted).toEqual([update.message!.message_id]);
+      expect(deletions).toBe(firstFails ? 2 : 1);
       expect(t.access.openSession()).toBeDefined();
     } finally { release(); service.stop(); }
   });
 
   it('audits cleanup failure with a fixed marker without leaking the TOTP or transport error', async () => {
     const t = setup();
-    t.api.deleteMessage = async () => { throw new Error('token=secret request body 123456'); };
+    let deletions = 0;
+    t.api.deleteMessage = async () => { deletions += 1; throw new Error('token=secret request body 123456'); };
     const update = t.message(OWNER, '/unlock 123456', { ageMs: 6 * 60_000 });
     await t.router.cleanSensitive(update);
     await t.send(update);
-    expect(t.logs).toEqual([{ event: 'telegram_sensitive_delete_failed', fields: { code: 'UNLOCK_MESSAGE_DELETE_FAILED' } }]);
+    await t.router.cleanSensitive(update);
+    for (let index = 0; index < 3; index += 1) await t.router.cleanSensitive(update);
+    expect(deletions).toBe(2);
+    expect(t.logs).toEqual(Array.from({ length: 2 }, () => ({ event: 'telegram_sensitive_delete_failed', fields: { code: 'UNLOCK_MESSAGE_DELETE_FAILED', reason: 'FAILED' } })));
     expect(t.records).toContainEqual(expect.objectContaining({ command: 'unlock', outcome: 'warning:MESSAGE_DELETE_FAILED' }));
-    expect(JSON.stringify([t.logs, t.records])).not.toMatch(/123456|secret/);
+    expect(t.sent.filter((item) => item.text.includes('Delete that message manually'))).toHaveLength(1);
+    expect(JSON.stringify([t.logs, t.records, t.sent])).not.toMatch(/123456|secret/);
     expect(t.access.openSession()).toBeUndefined();
+  });
+
+  it('coalesces delayed deletion while a fresh unlock and kill continue without waiting for Telegram cleanup', async () => {
+    const t = setup();
+    let finish: () => void = () => undefined;
+    const delayed = new Promise<void>((resolve) => { finish = resolve; });
+    let deletions = 0;
+    t.api.deleteMessage = async () => { deletions += 1; await delayed; };
+    const update = t.message(OWNER, `/unlock ${t.code()}`);
+    const ingress = t.router.cleanSensitive(update);
+    try {
+      await t.send(update);
+      expect(t.access.openSession()).toBeDefined();
+      expect(t.lastTo(OWNER)).toContain('Unlocked until');
+      expect(deletions).toBe(1);
+      await t.send(t.message(OWNER, '/kill'));
+      const button = t.sent.at(-1)!.buttons![0]![0]!;
+      await t.send(t.tap(OWNER, button.callback_data));
+      expect(t.calls).toContain('kill()');
+      expect(t.access.openSession()).toBeUndefined();
+      expect(deletions).toBe(1);
+    } finally { finish(); await ingress; }
+    await t.router.cleanSensitive(update);
+    expect(deletions).toBe(1);
+  });
+
+  it.each(['DNS', 'TIMEOUT', 'RATE_LIMITED', 'FORBIDDEN', 'BAD_REQUEST'] as const)('records only the allowlisted cleanup classification %s', async (reason) => {
+    const t = setup();
+    t.api.deleteMessage = async () => { throw new TelegramRequestError('raw provider token=secret 123456', reason); };
+    await t.router.cleanSensitive(t.message(OWNER, '/unlock 123456'));
+    expect(t.logs).toEqual([{ event: 'telegram_sensitive_delete_failed', fields: { code: 'UNLOCK_MESSAGE_DELETE_FAILED', reason } }]);
+    expect(JSON.stringify([t.logs, t.records, t.sent])).not.toMatch(/123456|secret|raw provider/);
+  });
+
+  it('honors provider retry_after before a later router cleanup attempt', async () => {
+    const t = setup();
+    let calls = 0;
+    t.api.deleteMessage = async () => {
+      calls += 1;
+      if (calls === 1) throw new TelegramRequestError('TELEGRAM_DELETEMESSAGE_FAILED:429', 'RATE_LIMITED', 30_000);
+    };
+    const update = t.message(OWNER, '/unlock 123456');
+    await t.router.cleanSensitive(update);
+    await t.router.cleanSensitive(update);
+    t.advance(29_999);
+    await t.router.cleanSensitive(update);
+    expect(calls).toBe(1);
+    t.advance(1);
+    await t.router.cleanSensitive(update);
+    expect(calls).toBe(2);
+    await t.router.cleanSensitive(update);
+    expect(calls).toBe(2);
+    expect(t.sent.filter((item) => item.text.includes('Delete that message manually'))).toHaveLength(1);
+  });
+
+  it.each(['BAD_REQUEST', 'FORBIDDEN', 'TLS', 'REJECTED'] as const)('does not retry permanent cleanup failure %s', async (reason) => {
+    const t = setup();
+    let calls = 0;
+    t.api.deleteMessage = async () => { calls += 1; throw new TelegramRequestError('TELEGRAM_DELETEMESSAGE_REJECTED', reason); };
+    const update = t.message(OWNER, '/unlock 123456');
+    await t.router.cleanSensitive(update);
+    t.advance(60_000);
+    await t.router.cleanSensitive(update);
+    await t.router.cleanSensitive(update);
+    expect(calls).toBe(1);
+    expect(t.sent.filter((item) => item.text.includes('Delete that message manually'))).toHaveLength(1);
+  });
+
+  it('bounds pending cleanup capacity without evicting a deletion shared by ingress and handle', async () => {
+    const t = setup();
+    let finish: () => void = () => undefined;
+    const delayed = new Promise<void>((resolve) => { finish = resolve; });
+    let calls = 0;
+    t.api.deleteMessage = async () => { calls += 1; await delayed; };
+    const updates = Array.from({ length: 256 }, () => t.message(OWNER, '/unlock 123456'));
+    const cleanups = updates.map((update) => t.router.cleanSensitive(update));
+    try {
+      await expect(t.router.cleanSensitive(t.message(OWNER, '/unlock 123456'))).rejects.toThrow('UNLOCK_MESSAGE_CLEANUP_CAPACITY');
+      await expect(t.router.cleanSensitive(t.message(OWNER, '/unlock 123456'))).rejects.toThrow('UNLOCK_MESSAGE_CLEANUP_CAPACITY');
+      expect(t.sent.filter((item) => item.text.includes('Message cleanup is busy'))).toHaveLength(1);
+      expect(t.router.cleanSensitive(updates[0]!)).toBe(cleanups[0]);
+      expect(calls).toBe(256);
+      expect(t.logs).toContainEqual({ event: 'telegram_sensitive_delete_failed', fields: { code: 'UNLOCK_MESSAGE_DELETE_FAILED', reason: 'CAPACITY' } });
+      expect(t.sent.at(-1)!.text).toContain('Message cleanup is busy');
+      expect(JSON.stringify([t.logs, t.records, t.sent])).not.toContain('123456');
+    } finally { finish(); await Promise.all(cleanups); }
   });
 
   it('a code works once, wrong codes are counted, and the fifth wrong code in an hour blocks unlocking and alerts (fail closed)', async () => {

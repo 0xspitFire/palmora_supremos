@@ -1,5 +1,5 @@
 import type { AlertManager, IntelligenceAlertInput } from '@mint-bot/backend';
-import type { TelegramBotApi, TelegramUpdate } from './telegram-api.js';
+import { TelegramRequestError, type TelegramBotApi, type TelegramUpdate } from './telegram-api.js';
 import { isStopUpdate, type TelegramCommandRouter } from './telegram-commands.js';
 
 /**
@@ -19,6 +19,8 @@ export function startTelegramCommands(options: {
   workers?: number;
 }): { stop(): void; pollOnce(): Promise<void>; done: Promise<void> } {
   let running = true;
+  let failedPolls = 0;
+  let wakeRetry: (() => void) | undefined;
   const pollTimeout = options.pollTimeoutSeconds ?? 25;
   const retryDelay = options.retryDelayMs ?? 5_000;
   const workers = options.workers ?? 4;
@@ -54,14 +56,21 @@ export function startTelegramCommands(options: {
     try { await options.router.onStart(); } catch { options.log('telegram_start_notice_failed'); }
     try { await options.router.registerMenus?.(); } catch { options.log('telegram_menu_failed'); }
     while (running) {
-      try { await pollOnce(); }
+      try { await pollOnce(); failedPolls = 0; }
       catch (error) {
-        options.log('telegram_poll_failed', { code: error instanceof Error && /^[A-Z][A-Z0-9_:]+$/.test(error.message) ? error.message : 'FAILED' });
-        if (running) await new Promise((resolve) => setTimeout(resolve, retryDelay).unref?.());
+        failedPolls = Math.min(failedPolls + 1, 4);
+        const backoffMs = Math.min(Math.max(30_000, retryDelay), retryDelay * 2 ** (failedPolls - 1));
+        const waitMs = Math.max(backoffMs, error instanceof TelegramRequestError ? error.retryAfterMs ?? 0 : 0);
+        options.log('telegram_poll_failed', { code: error instanceof Error && /^[A-Z][A-Z0-9_:]+$/.test(error.message) ? error.message : 'FAILED', ...(error instanceof TelegramRequestError ? { reason: error.reason } : {}), retryInMs: waitMs });
+        if (running) await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => { wakeRetry = undefined; resolve(); }, waitMs);
+          timer.unref?.();
+          wakeRetry = () => { clearTimeout(timer); wakeRetry = undefined; resolve(); };
+        });
       }
     }
   })();
-  return { stop: () => { running = false; }, pollOnce, done };
+  return { stop: () => { running = false; wakeRetry?.(); }, pollOnce, done };
 }
 
 /** D-063 item 8: viewers receive opportunity and opening-soon alerts. These alerts never name the owner's wallets. */

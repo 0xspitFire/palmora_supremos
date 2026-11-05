@@ -27,6 +27,23 @@ export interface BotCommand { command: string; description: string }
 const MAX_TEXT = 4_000;
 const MAX_FORMATTED = 4_096;
 
+export type TelegramFailureReason = 'TIMEOUT' | 'DNS' | 'CONNECT' | 'TLS' | 'NETWORK' | 'RESPONSE_INVALID' | 'RATE_LIMITED' | 'FORBIDDEN' | 'BAD_REQUEST' | 'SERVER' | 'REJECTED';
+/** Only fixed classifications cross this boundary; never expose fetch errors, URLs or Telegram descriptions. */
+export class TelegramRequestError extends Error {
+  constructor(code: string, public readonly reason: TelegramFailureReason, public readonly retryAfterMs?: number) { super(code); this.name = 'TelegramRequestError'; }
+}
+function networkReason(error: unknown): TelegramFailureReason {
+  const value = error as { name?: unknown; code?: unknown; cause?: { code?: unknown } } | undefined;
+  if (value?.name === 'TimeoutError' || value?.name === 'AbortError') return 'TIMEOUT';
+  const code = value?.cause?.code ?? value?.code;
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'DNS';
+  if (code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'ETIMEDOUT') return 'TIMEOUT';
+  if (code === 'ECONNREFUSED' || code === 'ENETUNREACH' || code === 'EHOSTUNREACH') return 'CONNECT';
+  if (code === 'CERT_HAS_EXPIRED' || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || code === 'DEPTH_ZERO_SELF_SIGNED_CERT') return 'TLS';
+  return 'NETWORK';
+}
+const pause = async (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds));
+
 export function createTelegramBotApi(options: { token: string; apiBaseUrl?: string; approvedProxy?: string; fetcher?: TelegramFetcher; timeoutMs?: number }): TelegramBotApi {
   if (!options.token || /\s/.test(options.token)) throw new Error('TELEGRAM_TOKEN_INVALID');
   const base = (options.apiBaseUrl ?? 'https://api.telegram.org').replace(/\/$/, '');
@@ -40,30 +57,46 @@ export function createTelegramBotApi(options: { token: string; apiBaseUrl?: stri
   const timeoutMs = options.timeoutMs ?? 10_000;
   const call = async (method: string, payload: Record<string, unknown>, timeout = timeoutMs): Promise<unknown> => {
     let retryWaitMs = 0;
+    const deleting = method === 'deleteMessage';
     for (let attempt = 0; ; attempt += 1) {
       let response;
-      // A network error can carry the request address, which holds the token: only a fixed code leaves this function.
       try { response = await fetcher(`${base}/bot${options.token}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeout) }); }
-      catch { throw new Error(`TELEGRAM_${method.toUpperCase()}_UNREACHABLE`); }
-      if (!response.ok) {
-        // Retry only Telegram's explicit rejection, never a network error or an ambiguous send result.
-        // Honor its full delay or stop; capping the delay and retrying early would worsen the flood.
-        if (response.status === 429 && attempt < 2) {
-          let limited: unknown;
-          try { limited = await response.json(); } catch { limited = undefined; }
-          const seconds = limited && typeof limited === 'object' ? (limited as { parameters?: { retry_after?: unknown } }).parameters?.retry_after : undefined;
-          if (typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds > 0 && retryWaitMs + seconds * 1_000 <= 15_000) {
-            retryWaitMs += seconds * 1_000;
-            await new Promise((resolve) => setTimeout(resolve, seconds * 1_000));
-            continue;
-          }
-        }
-        throw new Error(`TELEGRAM_${method.toUpperCase()}_FAILED:${response.status}`);
+      catch (error) {
+        const reason = networkReason(error);
+        // Deleting this exact message again is safe even if the first response was lost. Never retry an ambiguous send.
+        if (deleting && attempt < 2 && reason !== 'TLS') { await pause(250 * (attempt + 1)); continue; }
+        throw new TelegramRequestError(`TELEGRAM_${method.toUpperCase()}_UNREACHABLE`, reason);
       }
       let body: unknown;
-      try { body = await response.json(); } catch { throw new Error('TELEGRAM_RESPONSE_INVALID'); }
-      if (!body || typeof body !== 'object' || (body as { ok?: unknown }).ok !== true) throw new Error(`TELEGRAM_${method.toUpperCase()}_REJECTED`);
-      return (body as { result?: unknown }).result;
+      try { body = await response.json(); } catch { body = undefined; }
+      const result = body && typeof body === 'object' ? body as { ok?: unknown; result?: unknown; description?: unknown; parameters?: { retry_after?: unknown } } : undefined;
+      if (!response.ok) {
+        // The only accepted non-success deletion response is this exact already-absent result, never a permission error.
+        if (deleting && response.status === 400 && result?.ok === false && result.description === 'Bad Request: message to delete not found') return true;
+        if (response.status === 429) {
+          const seconds = result?.parameters?.retry_after;
+          const retryAfterMs = typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 7 * 24 * 3600 ? seconds * 1_000 : undefined;
+          if (retryAfterMs !== undefined && attempt < 2 && retryWaitMs + retryAfterMs <= 15_000) {
+            retryWaitMs += retryAfterMs;
+            await pause(retryAfterMs);
+            continue;
+          }
+          throw new TelegramRequestError(`TELEGRAM_${method.toUpperCase()}_FAILED:429`, 'RATE_LIMITED', retryAfterMs);
+        }
+        if (deleting && response.status >= 500 && response.status <= 599 && attempt < 2) { await pause(250 * (attempt + 1)); continue; }
+        const reason = response.status === 403 ? 'FORBIDDEN' : response.status === 400 ? 'BAD_REQUEST' : response.status >= 500 && response.status <= 599 ? 'SERVER' : 'REJECTED';
+        throw new TelegramRequestError(`TELEGRAM_${method.toUpperCase()}_FAILED:${response.status}`, reason);
+      }
+      if (!result) {
+        if (deleting && attempt < 2) { await pause(250 * (attempt + 1)); continue; }
+        throw new TelegramRequestError('TELEGRAM_RESPONSE_INVALID', 'RESPONSE_INVALID');
+      }
+      if (result.ok !== true) throw new TelegramRequestError(`TELEGRAM_${method.toUpperCase()}_REJECTED`, 'REJECTED');
+      if (deleting && result.result !== true) {
+        if (attempt < 2) { await pause(250 * (attempt + 1)); continue; }
+        throw new TelegramRequestError('TELEGRAM_RESPONSE_INVALID', 'RESPONSE_INVALID');
+      }
+      return result.result;
     }
   };
   return {
