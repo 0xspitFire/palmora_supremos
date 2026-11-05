@@ -85,6 +85,8 @@ export class DiscoveryService {
   private readonly calendar = new Map<string, CalendarItem>();
   private readonly seenLogs = new Set<string>();
   private readonly openingAlertTimes: number[] = [];
+  /** At most one acknowledged price identity per calendar contract; durable alerts remain authoritative across restart. */
+  private readonly priceAlertIdentities = new Map<string, string>();
   private readonly now: () => Date;
   private readonly names: CollectionNames;
   private restored = false;
@@ -112,7 +114,7 @@ export class DiscoveryService {
       const resume = head - lookback;
       if (resume > from) {
         const skipped = { fromBlock: from.toString(), toBlock: (resume - 1n).toString(), blocks: (resume - from).toString() };
-        await this.store.transaction((state) => { state.events.push({ id: `evt_${randomUUID()}`, type: 'discovery_skipped', at: this.now().toISOString(), data: { ...skipped, headBlock: head.toString() } }); });
+        await this.store.transaction((state) => { state.events.push({ id: `evt_${randomUUID()}`, type: 'discovery_skipped', at: this.now().toISOString(), data: { ...skipped, chainId, headBlock: head.toString() } }); });
         this.repo.advanceCursor(chainId, SOURCE, resume - 1n);
         result.skipped = skipped;
         from = resume;
@@ -309,8 +311,11 @@ export class DiscoveryService {
       }
       const chainId = this.port.chainId;
       if (drop.priceWei > this.options.budgetPerNftWei) {
-        const card = priceAboveLimitCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now, limitWei: this.options.budgetPerNftWei });
-        alerts.push({ kind: 'price_above_limit', dedupe: `price:${contract}:${drop.priceWei}`, priority: 'grouped', text: plainAlertText(card), card });
+        const dedupe = `price:${contract}:${drop.priceWei}`;
+        if (this.priceAlertIdentities.get(contract) !== dedupe) {
+          const card = priceAboveLimitCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now, limitWei: this.options.budgetPerNftWei });
+          alerts.push({ kind: 'price_above_limit', dedupe, priority: 'grouped', text: plainAlertText(card), card });
+        }
       } else if (upcoming && drop.maxPerWallet > 0) {
         const minutes = Math.round((startMs - now) / 60_000);
         // Anyone can publish a drop, so opening reminders are grouped and capped per day rather than pushed immediately.
@@ -329,7 +334,16 @@ export class DiscoveryService {
 
   private async raise(alerts: ReadonlyArray<Parameters<IntelligenceAlertSink['intelligence']>[0]>, result: DiscoveryTickResult): Promise<void> {
     for (const alert of alerts) {
-      try { if (await this.options.alerts?.intelligence(alert)) result.alertsRaised += 1; }
+      try {
+        const recorded = await this.options.alerts?.intelligence(alert);
+        if (recorded) result.alertsRaised += 1;
+        // Both true (inserted) and false (already durable) establish dedupe.
+        // A missing sink or a throw does not, so the next slice/tick retries.
+        if (typeof recorded === 'boolean' && alert.kind === 'price_above_limit' && alert.card) {
+          this.priceAlertIdentities.set(alert.card.contract, alert.dedupe);
+          if (this.priceAlertIdentities.size > MAX_CALENDAR) this.priceAlertIdentities.delete(this.priceAlertIdentities.keys().next().value!);
+        }
+      }
       catch { /* alert delivery never blocks discovery */ }
     }
   }
@@ -349,7 +363,7 @@ export class DiscoveryService {
     if (this.calendar.size <= MAX_CALENDAR) return;
     // Keep the soonest entries; the one opening furthest away is dropped first.
     const furthest = [...this.calendar.entries()].filter(([key]) => key !== contract).sort((left, right) => right[1].drop.startTime - left[1].drop.startTime)[0];
-    if (furthest) this.calendar.delete(furthest[0]);
+    if (furthest) { this.calendar.delete(furthest[0]); this.priceAlertIdentities.delete(furthest[0]); }
   }
 
   private openingAlertAllowed(now: number): boolean {
@@ -369,7 +383,7 @@ export class DiscoveryService {
     for (const [contract, entry] of this.calendar) {
       const ended = entry.drop.endTime !== 0 && entry.drop.endTime * 1000 <= now;
       const startedAndQuiet = entry.drop.startTime * 1000 <= now && entry.lastEmit !== null && !this.tracked.has(contract);
-      if (ended || startedAndQuiet) this.calendar.delete(contract);
+      if (ended || startedAndQuiet) { this.calendar.delete(contract); this.priceAlertIdentities.delete(contract); }
     }
   }
 }

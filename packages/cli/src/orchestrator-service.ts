@@ -141,7 +141,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     logger.registerSecret(secrets.get(config.telegramTokenName) ?? '');
     logger.registerSecret(secrets.get(config.telegramChatIdName) ?? '');
     notifier = new TelegramNotifier({ secretStore: secrets, tokenName: config.telegramTokenName, chatIdName: config.telegramChatIdName, apiBaseUrl: config.telegramApiBaseUrl, dashboardUrl, ...(config.telegramApprovedProxy ? { approvedProxy: config.telegramApprovedProxy } : {}) });
-    dispatcher = new NotificationDispatcher(runtime.store, notifier, { metrics, retentionDays: config.alertRetentionDays });
+    dispatcher = new NotificationDispatcher(runtime.store, notifier, { metrics, retentionDays: config.alertRetentionDays, minIntervalMs: 1_100 });
     const telegramHealth = await notifier.health();
     metrics.set('mintbot_notification_up', telegramHealth.status === 'ok' ? 1 : 0);
     logger.info({ event: 'telegram_health', status: telegramHealth.status, ...(telegramHealth.reason ? { reason: telegramHealth.reason } : {}) }, 'telegram notifier health checked');

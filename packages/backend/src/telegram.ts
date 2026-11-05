@@ -1,7 +1,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { redactText } from './observability.js';
-import type { NotificationMessage, NotificationSink } from './notifications.js';
+import { NotificationRateLimitError, type NotificationMessage, type NotificationSink } from './notifications.js';
 import { dashboardLink, renderAlertCard, renderDigest, type RenderedAlert } from './alert-card.js';
 import { parseSystemCard, renderSystemCard } from './system-card.js';
 
@@ -108,12 +108,20 @@ export class TelegramNotifier implements NotificationSink {
     return undefined;
   }
 
-  private post(payload: Record<string, unknown>): Promise<TelegramFetcherResponse> {
-    return this.fetcher(`${this.apiBaseUrl}/bot${this.config.token}/sendMessage`, {
+  private async post(payload: Record<string, unknown>): Promise<TelegramFetcherResponse> {
+    const response = await this.fetcher(`${this.apiBaseUrl}/bot${this.config.token}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chat_id: this.config.chatId, disable_web_page_preview: true, ...payload }),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
+    if (response.status === 429) {
+      let body: unknown;
+      try { body = await response.json(); } catch { /* retry on normal durable backoff */ }
+      const seconds = (body as { parameters?: { retry_after?: unknown } } | undefined)?.parameters?.retry_after;
+      if (typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 7 * 24 * 3600) throw new NotificationRateLimitError(seconds * 1000);
+      throw new Error('TELEGRAM_DELIVERY_FAILED:429');
+    }
+    return response;
   }
 
   private async confirm(response: TelegramFetcherResponse): Promise<void> {

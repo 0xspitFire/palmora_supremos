@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import { PHASE2_DEFAULTS } from './phase2-defaults.js';
-import type { EventRecord, NotificationOutboxRecord } from './types.js';
+import type { BackendState, EventRecord, NotificationOutboxRecord } from './types.js';
 import type { MetricsRegistry } from './observability.js';
 import { parseAlertCard, parseDigestItems, type AlertCard, type DigestItem } from './alert-card.js';
 import { parseSystemCard, type SystemCard } from './system-card.js';
@@ -41,6 +41,43 @@ function sourceText(source: EventRecord, supplied?: string): string {
   return redactNotificationText(candidate).slice(0, 1_000);
 }
 
+/** Queue alongside the source event so a crash before delivery cannot lose an immediate alert. */
+export function enqueueNotification(state: BackendState, source: EventRecord, text: string | undefined, now: Date, retentionDays: number): NotificationOutboxRecord {
+  const existing = state.notificationOutbox.find(item => item.sourceEventId === source.id);
+  if (existing) return existing;
+  const sourceTime = Date.parse(source.at);
+  const createdAt = Number.isFinite(sourceTime) && sourceTime <= now.getTime() ? source.at : now.toISOString();
+  const item: NotificationOutboxRecord = {
+    id: `notify_${source.id}`, sourceEventId: source.id, ...(source.runId ? { runId: source.runId } : {}),
+    type: source.type, text: sourceText(source, text), state: 'pending', attempts: 0, createdAt,
+    retentionUntil: new Date(Date.parse(createdAt) + retentionDays * 86_400_000).toISOString(),
+    ...(canonicalRunLink(source.runId) ? { canonicalLink: canonicalRunLink(source.runId) } : {}),
+  };
+  state.notificationOutbox.push(item);
+  return item;
+}
+
+/** A retained explicit Telegram refusal applies to the shared owner delivery channel, across restarts. */
+function sharedBackoff(state: BackendState, now: number): number {
+  return state.notificationOutbox.reduce((until, item) => {
+    const next = Date.parse(item.nextAttemptAt ?? '');
+    return item.lastError === 'TELEGRAM_DELIVERY_FAILED:429' && item.state !== 'delivered' && Number.isFinite(next) && next > now ? Math.max(until, next) : until;
+  }, 0);
+}
+function deferForProvider(state: BackendState, item: NotificationOutboxRecord, now: number): boolean {
+  const until = sharedBackoff(state, now);
+  if (until <= now) return false;
+  if (item.state !== 'delivered' && !(item.deliveryLeaseUntil && Date.parse(item.deliveryLeaseUntil) > now)) {
+    item.nextAttemptAt = new Date(Math.max(until, Date.parse(item.nextAttemptAt ?? '') || 0)).toISOString();
+  }
+  return true;
+}
+
+/** An explicit provider refusal with a minimum retry delay; never evidence of delivery. */
+export class NotificationRateLimitError extends Error {
+  constructor(public readonly retryAfterMs: number) { super('TELEGRAM_DELIVERY_FAILED:429'); this.name = 'NotificationRateLimitError'; }
+}
+
 export class NotificationDispatcher {
   private readonly active = new Set<string>();
   private readonly now: () => Date;
@@ -49,14 +86,17 @@ export class NotificationDispatcher {
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
   private readonly leaseMs: number;
+  private readonly minIntervalMs: number;
+  private nextDeliveryAt = 0;
 
-  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, options: (() => Date) | { now?: () => Date; metrics?: MetricsRegistry; retentionDays?: number; leaseMs?: number; retryBaseMs?: number; retryMaxMs?: number } = {}) {
+  constructor(private readonly store: BackendStore, private readonly sink: NotificationSink, options: (() => Date) | { now?: () => Date; metrics?: MetricsRegistry; retentionDays?: number; leaseMs?: number; retryBaseMs?: number; retryMaxMs?: number; minIntervalMs?: number } = {}) {
     if (typeof options === 'function') {
       this.now = options;
       this.retentionDays = Math.floor(PHASE2_DEFAULTS.alertRetentionMs / 86_400_000);
       this.retryBaseMs = 1_000;
       this.retryMaxMs = 60_000;
       this.leaseMs = 30_000;
+      this.minIntervalMs = 0;
     } else {
       this.now = options.now ?? (() => new Date());
       this.metrics = options.metrics;
@@ -64,6 +104,8 @@ export class NotificationDispatcher {
       this.retryBaseMs = options.retryBaseMs ?? 1_000;
       this.retryMaxMs = options.retryMaxMs ?? 60_000;
       this.leaseMs = options.leaseMs ?? 30_000;
+      this.minIntervalMs = options.minIntervalMs ?? 0;
+      if (!Number.isSafeInteger(this.minIntervalMs) || this.minIntervalMs < 0 || this.minIntervalMs > 10_000) throw new Error('NOTIFICATION_INTERVAL_INVALID');
     }
   }
 
@@ -76,38 +118,37 @@ export class NotificationDispatcher {
     let items: DigestItem[] | undefined;
     let system: SystemCard | undefined;
     try {
+      // Persist pending work before pacing. A restart can then retry the same event without losing it.
+      const eligible = await this.store.transaction(state => {
+        const source = state.events.find(event => event.id === sourceEventId);
+        if (!source) throw new Error('NOTIFICATION_SOURCE_EVENT_NOT_FOUND');
+        const queued = enqueueNotification(state, source, text, this.now(), this.retentionDays);
+        return queued.state !== 'delivered' && !deferForProvider(state, queued, this.now().getTime());
+      });
+      if (!eligible) return;
+      // Pace before acquiring the durable delivery lease, so a waiting slot cannot expire that lease.
+      if (this.minIntervalMs > 0) {
+        const slot = Math.max(this.now().getTime(), this.nextDeliveryAt);
+        this.nextDeliveryAt = slot + this.minIntervalMs;
+        const delay = slot - this.now().getTime();
+        if (delay > 0) await new Promise<void>(resolve => { setTimeout(resolve, delay); });
+      }
       item = await this.store.transaction(state => {
         const source = state.events.find(event => event.id === sourceEventId);
         if (!source) throw new Error('NOTIFICATION_SOURCE_EVENT_NOT_FOUND');
-        const safeText = sourceText(source, text);
-        // The structured form is re-read from the stored event on every attempt, so a retry renders at the moment it is sent.
+        // The structured form is re-read on every attempt so retry rendering uses current delivery time.
         card = parseAlertCard(source.data.card) ?? undefined;
         items = parseDigestItems(source.data.items) ?? undefined;
         system = parseSystemCard(source.data.system) ?? undefined;
-      const existing = state.notificationOutbox.find(entry => entry.sourceEventId === sourceEventId);
-      if (existing?.state === 'delivered') {
-        return undefined;
-      }
-      if (existing?.deliveryLeaseUntil && Date.parse(existing.deliveryLeaseUntil) > this.now().getTime()) return undefined;
-      const createdAt = this.now().toISOString();
-      const outbox = existing ?? {
-          id: `notify_${source.id}`,
-          sourceEventId: source.id,
-          ...(source.runId ? { runId: source.runId } : {}),
-          type: source.type,
-          text: safeText,
-          state: 'pending' as const,
-          attempts: 0,
-          createdAt,
-          retentionUntil: new Date(Date.parse(createdAt) + this.retentionDays * 86_400_000).toISOString(),
-          ...(canonicalRunLink(source.runId) ? { canonicalLink: canonicalRunLink(source.runId) } : {}),
-        };
-        if (!existing) state.notificationOutbox.push(outbox);
+        const outbox = enqueueNotification(state, source, text, this.now(), this.retentionDays);
+        if (outbox.state === 'delivered' || deferForProvider(state, outbox, this.now().getTime())) return undefined;
+        if (outbox.nextAttemptAt && Date.parse(outbox.nextAttemptAt) > this.now().getTime()) return undefined;
+        if (outbox.deliveryLeaseUntil && Date.parse(outbox.deliveryLeaseUntil) > this.now().getTime()) return undefined;
         outbox.state = 'delivering';
         outbox.attempts += 1;
         outbox.lastError = undefined;
         outbox.nextAttemptAt = undefined;
-        outbox.deliveryLeaseUntil = new Date(Date.parse(createdAt) + this.leaseMs).toISOString();
+        outbox.deliveryLeaseUntil = new Date(this.now().getTime() + this.leaseMs).toISOString();
         return structuredClone(outbox);
       });
       if (!item) return;
@@ -135,7 +176,7 @@ export class NotificationDispatcher {
           failed.state = 'failed';
           failed.deliveryLeaseUntil = undefined;
           failed.lastError = safeError;
-          failed.nextAttemptAt = new Date(this.now().getTime() + Math.min(this.retryMaxMs, this.retryBaseMs * Math.max(1, 2 ** Math.min(8, failed.attempts)))).toISOString();
+          failed.nextAttemptAt = new Date(this.now().getTime() + Math.max(Math.min(this.retryMaxMs, this.retryBaseMs * Math.max(1, 2 ** Math.min(8, failed.attempts))), error instanceof NotificationRateLimitError && Number.isSafeInteger(error.retryAfterMs) && error.retryAfterMs > 0 ? error.retryAfterMs : 0)).toISOString();
         });
       }
       this.metrics?.recordNotification('failed');

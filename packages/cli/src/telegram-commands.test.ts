@@ -3,6 +3,7 @@ import { openDatabase, TelegramAccessRepository } from '@mint-bot/database';
 import { COMMANDS, TelegramCommandRouter, menuFor, type TelegramActions } from './telegram-commands.js';
 import type { InlineButton, TelegramBotApi, TelegramUpdate } from './telegram-api.js';
 import { timeStepAt, totpCode } from './totp.js';
+import { startTelegramCommands } from './telegram-command-service.js';
 
 /** T-061 (D-063): who may use which command, the unlocked session, codes, taps, invites and the record of every command. */
 const OWNER = 1001;
@@ -64,7 +65,8 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
   };
   const records: Array<{ role: string; userId: string; command: string; outcome: string }> = [];
   const alerts: string[] = [];
-  const router = new TelegramCommandRouter({ api, access, actions, ownerUserId: String(OWNER), totpKey: KEY, record: async (event) => { records.push(event); }, alert: async (text) => { alerts.push(text); }, now: clock });
+  const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+  const router = new TelegramCommandRouter({ api, access, actions, ownerUserId: String(OWNER), totpKey: KEY, record: async (event) => { records.push(event); }, alert: async (text) => { alerts.push(text); }, log: (event, fields) => { logs.push({ event, fields }); }, now: clock });
   let updateId = 1;
   let messageId = 100;
   const message = (from: number, text: string, options: { chatId?: number; type?: string; ageMs?: number } = {}): TelegramUpdate => ({ update_id: updateId++, message: { message_id: messageId++, date: Math.floor((now.getTime() - (options.ageMs ?? 0)) / 1000), chat: { id: options.chatId ?? from, type: options.type ?? 'private' }, from: { id: from }, text } });
@@ -72,7 +74,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
   const send = (update: TelegramUpdate) => router.handle(update);
   const code = (offsetSteps = 0) => totpCode(KEY, timeStepAt(now) + offsetSteps);
   const lastTo = (chat: number) => [...sent].reverse().find((item) => item.chatId === String(chat))?.text ?? '';
-  return { now: clock, menus, access, sent, deleted, calls, records, alerts, router, message, tap, send, code, lastTo, advance: (ms: number) => { now = new Date(now.getTime() + ms); }, killAt: (iso: string) => { killedAfter = iso; } };
+  return { now: clock, menus, access, sent, deleted, calls, records, alerts, logs, api, actions, router, message, tap, send, code, lastTo, advance: (ms: number) => { now = new Date(now.getTime() + ms); }, killAt: (iso: string) => { killedAfter = iso; } };
 }
 
 const admitViewer = async (t: ReturnType<typeof setup>) => {
@@ -285,6 +287,58 @@ describe('the unlocked session (D-063 items 5 and 6)', () => {
     expect(t.lastTo(OWNER)).toContain('Unlocked until 2026-10-24 22:00 UTC');
     await t.send(t.message(OWNER, '/release RELEASE-KILL 2026-10-24'));
     expect(t.calls).toEqual(['release(RELEASE-KILL 2026-10-24)']);
+  });
+
+  it('deletes stale owner unlock codes before refusing them, without opening a session or counting a wrong code', async () => {
+    const t = setup();
+    const update = t.message(OWNER, `/unlock ${t.code()}`, { ageMs: 6 * 60_000 });
+    await t.send(update);
+    expect(t.deleted).toEqual([update.message!.message_id]);
+    expect(t.lastTo(OWNER)).toContain('more than 5 minutes old');
+    expect(t.access.openSession()).toBeUndefined();
+    expect(t.access.unlockFailuresSince(new Date(0))).toEqual([]);
+    const stranger = t.message(STRANGER, '/unlock 123456');
+    const group = t.message(OWNER, '/unlock 123456', { type: 'group' });
+    const mismatch = t.message(OWNER, '/unlock 123456', { chatId: STRANGER });
+    for (const incoming of [stranger, group, mismatch]) await t.router.cleanSensitive(incoming);
+    expect(t.deleted).toEqual([update.message!.message_id]);
+  });
+
+  it('cleans owner unlock on actual polling ingress while all four ordinary workers are blocked', async () => {
+    const t = setup();
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let started = 0;
+    t.actions.reconcile = async () => { started += 1; await blocked; return 'done'; };
+    const update = t.message(OWNER, `/unlock ${t.code()}`);
+    const batch = [...Array.from({ length: 4 }, () => t.message(OWNER, '/reconcile')), update];
+    // Telegram update IDs determine ordering; put the unlock after all four reads.
+    batch.forEach((item, index) => { item.update_id = index + 1; });
+    let offset = 0;
+    let polled = false;
+    const service = startTelegramCommands({ api: { ...t.api, getUpdates: async () => { if (!polled) { polled = true; return batch; } return new Promise(() => undefined); } }, offsets: { pollOffset: () => offset, savePollOffset: (value) => { offset = value; } }, router: t.router, log: () => undefined });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(started).toBe(4);
+      expect(t.deleted).toEqual([update.message!.message_id]);
+      expect(t.access.openSession()).toBeUndefined();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(t.deleted).toEqual([update.message!.message_id]);
+      expect(t.access.openSession()).toBeDefined();
+    } finally { release(); service.stop(); }
+  });
+
+  it('audits cleanup failure with a fixed marker without leaking the TOTP or transport error', async () => {
+    const t = setup();
+    t.api.deleteMessage = async () => { throw new Error('token=secret request body 123456'); };
+    const update = t.message(OWNER, '/unlock 123456', { ageMs: 6 * 60_000 });
+    await t.router.cleanSensitive(update);
+    await t.send(update);
+    expect(t.logs).toEqual([{ event: 'telegram_sensitive_delete_failed', fields: { code: 'UNLOCK_MESSAGE_DELETE_FAILED' } }]);
+    expect(t.records).toContainEqual(expect.objectContaining({ command: 'unlock', outcome: 'warning:MESSAGE_DELETE_FAILED' }));
+    expect(JSON.stringify([t.logs, t.records])).not.toMatch(/123456|secret/);
+    expect(t.access.openSession()).toBeUndefined();
   });
 
   it('a code works once, wrong codes are counted, and the fifth wrong code in an hour blocks unlocking and alerts (fail closed)', async () => {

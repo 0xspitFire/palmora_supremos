@@ -9,7 +9,7 @@ function node(limit: bigint, calls: Array<[bigint, bigint]>): PublicClient {
     getBlock: async () => ({ hash: `0x${'b'.repeat(64)}`, timestamp: 1n }),
     getLogs: async (request: { fromBlock: bigint; toBlock: bigint }) => {
       calls.push([request.fromBlock, request.toBlock]);
-      if (request.toBlock - request.fromBlock + 1n > limit) throw new Error('Invalid parameters were provided to the RPC method.');
+      if (request.toBlock - request.fromBlock + 1n > limit) throw new Error('query exceeds max block range');
       return [];
     },
   } as unknown as PublicClient;
@@ -34,7 +34,7 @@ describe('EngineIntelligencePort adaptive block range (T-006)', () => {
 
   it('fails only when even a single block is rejected, and refuses invalid range settings', async () => {
     const port = new EngineIntelligencePort(node(0n, []), { initialRange: 4n, maxRange: 4n });
-    expect(await port.scan(1n, 100n, [])).toEqual({ ok: false, reason: 'LOGS_UNAVAILABLE: Invalid parameters were provided to the RPC method.' });
+    expect(await port.scan(1n, 100n, [])).toEqual({ ok: false, reason: 'LOGS_UNAVAILABLE: query exceeds max block range' });
     expect(port.currentRange()).toBe(1n);
     expect(() => new EngineIntelligencePort(node(1n, []), { initialRange: 10n, maxRange: 5n })).toThrow('INTELLIGENCE_RANGE_INVALID');
   });
@@ -56,7 +56,7 @@ describe('EngineIntelligencePort adaptive block range (T-006)', () => {
   it('includes the provider reason when a range is rejected', async () => {
     const port = new EngineIntelligencePort(node(0n, []), { initialRange: 2n, maxRange: 2n });
     const outcome = await port.scan(1n, 100n, []);
-    expect(outcome).toEqual({ ok: false, reason: 'LOGS_UNAVAILABLE: Invalid parameters were provided to the RPC method.' });
+    expect(outcome).toEqual({ ok: false, reason: 'LOGS_UNAVAILABLE: query exceeds max block range' });
   });
 });
 
@@ -100,5 +100,33 @@ describe('EngineIntelligencePort.readName (T-029)', () => {
     expect(answeredWithoutName(new Error('plain'))).toBe(false);
     expect(answeredWithoutName(null)).toBe(false);
     expect(answeredWithoutName({ walk: () => null })).toBe(false);
+  });
+});
+
+describe('adaptive scan range only responds to explicit range limits', () => {
+  it.each(['request timed out', 'HTTP 401 Unauthorized', 'HTTP 503 Service Unavailable',
+    'Invalid parameters were provided to the RPC method.', 'socket connection reset'])('does not multiply requests for %s', async problem => {
+    const calls: Array<[bigint, bigint]> = [];
+    const client = { ...node(1000n, calls), getLogs: async (args: { fromBlock: bigint; toBlock: bigint }) => {
+      calls.push([args.fromBlock, args.toBlock]); throw new Error(problem);
+    } } as unknown as PublicClient;
+    const port = new EngineIntelligencePort(client, { initialRange: 100n });
+    expect((await port.scan(1000n, 5000n, [])).ok).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(port.currentRange()).toBe(100n);
+  });
+
+  it.each(['block range is too large', 'query returned more than 10000 results', 'Log response size exceeded',
+    'eth_getLogs requests with up to a 10 block range', 'eth_getLogs is limited to 10 blocks'])('still adapts to %s', async problem => {
+    const calls: Array<[bigint, bigint]> = [];
+    const client = { ...node(1000n, calls), getLogs: async (args: { fromBlock: bigint; toBlock: bigint }) => {
+      calls.push([args.fromBlock, args.toBlock]);
+      if (args.toBlock - args.fromBlock + 1n > 10n) throw new Error(problem);
+      return [];
+    } } as unknown as PublicClient;
+    const port = new EngineIntelligencePort(client, { initialRange: 100n });
+    expect((await port.scan(1000n, 5000n, [])).ok).toBe(true);
+    expect(calls).toHaveLength(5);
+    expect(port.currentRange()).toBe(6n);
   });
 });

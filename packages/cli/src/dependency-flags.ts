@@ -69,10 +69,11 @@ export function createDependencyFlags(deps: DependencyFlagDeps): { tick(): Promi
         state.runtime = { ...state.runtime, dependencies: next, startupState: 'Blocked', blockingReasons: [...new Set([...others, REASON])] };
         return;
       }
-      // Lifted only when this probe caused the block and nothing else blocks: no other reason, no kill (stored, file or unreadable),
-      // reconciliation done, no unresolved run. Otherwise its reason stays, so the block never loses its explanation.
-      const clear = hadReason && state.runtime.startupState === 'Blocked' && others.length === 0 && !state.killed && !killed && state.runtime.reconciliationCompletedAt !== undefined && unresolvedRunIds(state).length === 0;
-      state.runtime = clear ? { ...state.runtime, dependencies: next, blockingReasons: others, startupState: 'Ready' } : { ...state.runtime, dependencies: next };
+      // Remove only our recovered dependency reason. A kill or reconciliation block must retain its actual explanation,
+      // rather than claiming that a currently passing dependency is still broken.
+      const remaining = [...new Set([...others, ...(state.killed ? ['KILLED'] : []), ...(killed ? ['KILL_SWITCH_ENGAGED'] : [])])];
+      const clear = hadReason && state.runtime.startupState === 'Blocked' && remaining.length === 0 && state.runtime.reconciliationCompletedAt !== undefined && unresolvedRunIds(state).length === 0;
+      state.runtime = { ...state.runtime, dependencies: next, blockingReasons: remaining, ...(clear ? { startupState: 'Ready' as const } : {}) };
     });
     return changed;
   };

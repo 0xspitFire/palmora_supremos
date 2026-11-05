@@ -11,7 +11,7 @@ export { SpendLedger } from './spend-ledger.js';
 export { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY, ethToWei, validateFleetSpendPolicy } from './fleet-policy.js';
 export type { FleetNotice, FleetSpendPolicy } from './fleet-policy.js';
 export { ReadinessService } from './readiness.js';
-export { NotificationDispatcher, OneWayNotificationDispatcher, redactNotificationText } from './notifications.js';
+export { NotificationRateLimitError, NotificationDispatcher, OneWayNotificationDispatcher, redactNotificationText } from './notifications.js';
 export type { NotificationMessage, NotificationSink } from './notifications.js';
 export { buildAlertCard, chainDisplay, cleanCollectionName, cleanText, dashboardAnchor, dashboardLink, explorerAddressUrl, openSeaUrl, parseAlertCard, parseDigestItems, plainAlertText, renderAlertCard, renderDigest } from './alert-card.js';
 export type { AlertButton, AlertCard, AlertCardField, AlertCardInput, DashboardRecord, DigestItem, RenderContext, RenderedAlert } from './alert-card.js';

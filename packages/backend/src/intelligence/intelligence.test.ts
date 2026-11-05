@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { IntelligenceRepository, openDatabase } from '@mint-bot/database';
 import { AlertManager } from '../alerts.js';
 import { parseAlertCard } from '../alert-card.js';
@@ -668,5 +668,58 @@ describe('discovery jumps ahead when it is too far behind (T-034)', () => {
     const { port, result } = await tickWith(4_000n, 5_000n, { maxRange: 10n });
     expect(result.skipped).toBeUndefined();
     expect(port.scans).toHaveLength(8);
+  });
+});
+
+describe('calendar price-alert hot-path dedupe', () => {
+  const expensiveUpdate = (blockNumber: bigint, mintPriceWei = LIMIT + 1n): ObservedDropUpdate => ({
+    blockNumber, nftContract: NFT, mintPriceWei, startTime: seconds(START) + 3600,
+    endTime: seconds(START) + 7200, maxPerWallet: 5,
+  });
+  it('checks durable dedupe once across many slices and ticks, then checks a changed price', async () => {
+    const t = setup();
+    t.port.maxRange = 10n;
+    t.port.dropUpdates = [expensiveUpdate(701n)];
+    const calls = vi.spyOn(t.alerts, 'intelligence');
+    const priceCalls = () => calls.mock.calls.filter(([input]) => input.kind === 'price_above_limit');
+    await t.discovery.tick();
+    expect(t.port.scans).toHaveLength(8);
+    expect(priceCalls()).toHaveLength(1);
+    await t.discovery.tick();
+    expect(t.port.scans).toHaveLength(16);
+    expect(priceCalls()).toHaveLength(1);
+    t.port.dropUpdates.push(expensiveUpdate(861n, LIMIT + 2n));
+    await t.discovery.tick();
+    expect(priceCalls()).toHaveLength(2);
+    expect(events(t.store, 'alert_price_above_limit')).toHaveLength(2);
+  });
+
+  it('rebuilds the optimization only after checking durable dedupe on restart', async () => {
+    const t = setup();
+    t.port.maxRange = 10n;
+    t.port.dropUpdates = [expensiveUpdate(701n)];
+    const calls = vi.spyOn(t.alerts, 'intelligence');
+    await t.discovery.tick();
+    const restarted = new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT, alerts: t.alerts });
+    await restarted.tick();
+    await restarted.tick();
+    expect(calls.mock.calls.filter(([input]) => input.kind === 'price_above_limit')).toHaveLength(2);
+    expect(events(t.store, 'alert_price_above_limit')).toHaveLength(1);
+  });
+
+  it('does not cache failed recording, so the next slice retries and establishes durable dedupe', async () => {
+    const t = setup();
+    t.port.maxRange = 10n;
+    t.port.dropUpdates = [expensiveUpdate(701n)];
+    const original = t.alerts.intelligence.bind(t.alerts);
+    let priceAttempts = 0;
+    vi.spyOn(t.alerts, 'intelligence').mockImplementation(async input => {
+      if (input.kind === 'price_above_limit' && ++priceAttempts === 1) throw new Error('temporary recording failure');
+      return original(input);
+    });
+    await t.discovery.tick();
+    await t.discovery.tick();
+    expect(priceAttempts).toBe(2);
+    expect(events(t.store, 'alert_price_above_limit')).toHaveLength(1);
   });
 });

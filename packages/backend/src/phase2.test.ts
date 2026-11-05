@@ -126,9 +126,11 @@ describe('Phase 2 backend operational shell', () => {
     await store.transaction((state) => { state.events.push({ id: 'event-notification', runId: 'run-notification', type: 'run_failed', at: NOW, data: {} }); });
     const sent: string[] = [];
     let failures = 1;
-    const dispatcher = new NotificationDispatcher(store, { send: async ({ eventId, text }) => { if (failures-- > 0) throw new Error('provider payload=secret'); sent.push(`${eventId}:${text}`); } }, () => new Date(NOW));
+    let deliveryNow = new Date(NOW);
+    const dispatcher = new NotificationDispatcher(store, { send: async ({ eventId, text }) => { if (failures-- > 0) throw new Error('provider payload=secret'); sent.push(`${eventId}:${text}`); } }, () => deliveryNow);
     await expect(dispatcher.dispatch('event-notification', 'failed calldata=0xbeef')).rejects.toThrow('provider payload=secret');
     expect(store.snapshot().notificationOutbox[0]?.state).toBe('failed');
+    deliveryNow = new Date(Date.parse(NOW) + 5_000);
     await dispatcher.dispatch('event-notification', 'failed calldata=0xbeef');
     await dispatcher.dispatch('event-notification', 'failed calldata=0xbeef');
     expect(sent).toHaveLength(1);

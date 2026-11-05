@@ -597,10 +597,12 @@ describe('CanonicalStoreBridge', () => {
       await value.store.transaction((state) => { state.events.push({ id: 'notification-event', type: 'run_failed', at: NOW, data: {} }); });
       let failures = 1;
       const sent: string[] = [];
-      const dispatcher = new NotificationDispatcher(value.store, { send: async ({ eventId }) => { if (failures-- > 0) throw new Error('provider payload=secret'); sent.push(eventId); } }, () => new Date(NOW));
+      let deliveryNow = new Date(NOW);
+      const dispatcher = new NotificationDispatcher(value.store, { send: async ({ eventId }) => { if (failures-- > 0) throw new Error('provider payload=secret'); sent.push(eventId); } }, () => deliveryNow);
       await expect(dispatcher.dispatch('notification-event', 'failed')).rejects.toThrow('provider payload=secret');
       expect(value.db.prepare('SELECT delivery_state, payload_json FROM notification WHERE id = ?').get('notify_notification-event')).toMatchObject({ delivery_state: 'failed' });
       expect(value.store.snapshot().notificationOutbox[0]?.state).toBe('failed');
+      deliveryNow = new Date(Date.parse(NOW) + 5_000);
       await dispatcher.dispatch('notification-event', 'failed');
       await dispatcher.dispatch('notification-event', 'failed');
       expect(sent).toEqual(['notify_notification-event']);

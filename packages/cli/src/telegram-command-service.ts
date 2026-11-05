@@ -12,7 +12,7 @@ export interface PollOffsetStore { pollOffset(): number; savePollOffset(offset: 
 export function startTelegramCommands(options: {
   api: TelegramBotApi;
   offsets: PollOffsetStore;
-  router: Pick<TelegramCommandRouter, 'handle' | 'checkSession' | 'onStart'> & { registerMenus?(): Promise<void> };
+  router: Pick<TelegramCommandRouter, 'handle' | 'checkSession' | 'onStart'> & { registerMenus?(): Promise<void>; cleanSensitive?(update: TelegramUpdate): Promise<void> };
   log(event: string, fields?: Record<string, unknown>): void;
   pollTimeoutSeconds?: number;
   retryDelayMs?: number;
@@ -43,6 +43,9 @@ export function startTelegramCommands(options: {
     for (const update of [...updates].sort((left, right) => left.update_id - right.update_id)) {
       if (!Number.isSafeInteger(update.update_id) || update.update_id + 1 <= options.offsets.pollOffset()) continue;
       options.offsets.savePollOffset(update.update_id + 1);
+      // Start code cleanup before ordinary workers can queue it behind slow RPC work. Do not await it here:
+      // bounded transport retries must not postpone a /kill or the next poll. The router shares this work with handle().
+      void options.router.cleanSensitive?.(update).catch(() => options.log('telegram_sensitive_cleanup_failed'));
       if (isStopUpdate(update)) await handle(update);
       else { queue.push(update); drain(); }
     }

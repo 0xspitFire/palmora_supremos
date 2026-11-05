@@ -119,10 +119,11 @@ describe('failure paths and hysteresis (review fixes)', () => {
     expect(t.runtime().startupState).toBe('Blocked');
   });
 
-  it('keeps its reason while an unresolved run or a kill still blocks, and lifts only a block it caused', async () => {
+  it('reports the actual kill after dependencies recover, and lifts only a block it caused', async () => {
     const withKill = await setup({ killSwitchOn: async () => true });
     await withKill.flags.tick();
-    expect(withKill.runtime().blockingReasons).toContain('DEPLOYMENT_DEPENDENCIES_NOT_READY');
+    expect(withKill.runtime().blockingReasons).not.toContain('DEPLOYMENT_DEPENDENCIES_NOT_READY');
+    expect(withKill.runtime().blockingReasons).toContain('KILL_SWITCH_ENGAGED');
     expect(withKill.runtime().startupState).toBe('Blocked');
     const notOurs = await setup({}, { blockingReasons: [] });
     await notOurs.flags.tick();
