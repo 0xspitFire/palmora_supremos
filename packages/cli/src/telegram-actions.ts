@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { createPublicClient, formatGwei, parseEther, http as httpTransport, parseAbi, type Address } from 'viem';
-import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
+import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, PERMANENT_ENABLEMENT_EXPIRY, ethereumChainEvidenceRevokePhrase, revokeEthereumChainEvidence, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import type { FireScheduleRepository, GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
 import { cleanName, describeActivity, describeHistory, describeLimits } from './owner-reports.js';
@@ -26,6 +26,7 @@ import { sections, shortEth, shortenBalancesInParens } from './display.js';
 import { usdText, type EthPriceProvider } from './price-provider.js';
 import type { OpenSeaFloors } from './opensea-client.js';
 import { scheduleConfirmationDigest, type FireWiring } from './fire-wiring.js';
+import { watchChainId } from './watch-import.js';
 
 /**
  * T-061 (D-063 item 9): the work behind each Telegram command, built on the same functions as the host commands. Replies are
@@ -224,8 +225,15 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     const prepared = await livePrepareAction({ chainId, contract, priorityFeeGwei, confirm: phrase, planned, killFile: deps.killSwitchPath, walletFileAddresses: wallets, store: deps.store as unknown as PrepareStore, createCampaign: (input) => deps.application.createCampaign(input), newId: () => `evt_${randomBytes(8).toString('hex')}`, now: now() });
     return sections([`Campaign recorded: ${prepared.campaign.id}`], [`${prepared.wallets.length} wallet(s), ${prepared.quantity} NFT(s) each, most it can spend ${prepared.maxExposureEth} ETH. Nothing was sent.`]);
   };
-  const revokeRun = (chainId: ChainId, phrase: string | undefined): Record<string, unknown> => {
-    if (chainId === 1) throw new Error('NOTHING_TO_REVOKE: Ethereum has no enablement record');
+  const revokeRun = async (chainId: ChainId, phrase: string | undefined): Promise<Record<string, unknown>> => {
+    if (chainId === 1) {
+      const active = [...(deps.store.snapshot().chainEvidence ?? [])].reverse().find(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
+      if (!active) throw new Error('NOTHING_TO_REVOKE: Ethereum has no active evidence');
+      const expected = ethereumChainEvidenceRevokePhrase(active.id);
+      if (phrase !== expected) return { state: 'ConfirmToRevoke', message: 'Revoke Ethereum strategy acceptance? New Ethereum execution will stop.', copyThisToRevoke: `chain-evidence revoke --confirm "${expected}"` };
+      await revokeEthereumChainEvidence(deps.store, active.id, phrase, now);
+      return { state: 'Revoked', message: 'Ethereum execution is off. New owner acceptance is required to enable it again.' };
+    }
     const newId = () => `${chainId === 4663 ? 'rh' : 'base'}_revoke_${randomBytes(8).toString('hex')}`;
     return chainId === 4663
       ? runRobinhoodEnable({ action: 'revoke', confirm: phrase, now: now(), store: deps.store as unknown as EnableStore, newId })
@@ -240,14 +248,14 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     : [];
   const reportedHealth = async () => {
     try {
-      const response = await deps.application.command<{ state?: string; ready?: boolean; blockingReasons?: string[]; reasons?: string[] }>('health');
+      const response = await deps.application.command<{ state?: string; ready?: boolean; blockingReasons?: string[]; reasons?: string[]; liveReadiness?: { required?: boolean; state?: string } }>('health');
       const data = response.data ?? {};
       let state = ['Ready', 'NotReady', 'Killed'].includes(data.state ?? response.state) ? data.state ?? response.state : 'Unknown';
       const reasons = [...new Set(readinessCodes(data.blockingReasons ?? data.reasons))];
       try {
         if (killFile().present) { state = 'Killed'; if (!reasons.includes('KILL_SWITCH_ENGAGED')) reasons.push('KILL_SWITCH_ENGAGED'); }
       } catch { state = 'Unknown'; reasons.push('KILL_STATE_CHECK_UNAVAILABLE'); }
-      return { state, ready: state === 'Ready' && data.ready === true && reasons.length === 0, reasons };
+      return { state, ready: state === 'Ready' && data.ready === true && reasons.length === 0, reasons, liveChecksDeferred: data.liveReadiness?.required === false && data.liveReadiness.state === 'NotChecked', custodyChecksUnassessed: data.liveReadiness?.required === true && data.liveReadiness.state === 'NotChecked' };
     } catch { return { state: 'Unknown', ready: false, reasons: ['HEALTH_CHECK_UNAVAILABLE'] }; }
   };
   const killFile = (): { present: boolean; modifiedAt?: number } => {
@@ -284,13 +292,14 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         `Kill switch: ${killUnknown ? 'unknown (live work blocked)' : killed ? 'ON (nothing can be spent)' : 'off'}`,
         `Service: ${ready ? 'Ready' : 'Blocked'}${reasons.length > 0 ? ` — ${reasons.join(', ')}` : ''}`,
         `Deployment: ${state.runtime.startupState}`,
+        ...(health.liveChecksDeferred ? ['Mint checks: refreshed during preparation and arming'] : health.custodyChecksUnassessed ? ['Mint custody: authorization checked separately before arming and execution'] : []),
         ...(killed && stopReason ? [`Safety stop: ${stopReason}`] : []),
         `Live requests waiting: ${pending}`,
       ], [`Version: ${version.slice(0, 12)}`, `Uptime: ${uptimeHours} h`]);
     },
     async health() {
       const health = await reportedHealth();
-      return sections([`Health: ${health.ready ? 'ready' : 'not ready'} (${health.state})`], health.reasons.length > 0 ? [`Blocking: ${health.reasons.join(', ')}`] : []);
+      return sections([`Health: ${health.ready ? 'ready' : 'not ready'} (${health.state})`], health.reasons.length > 0 ? [`Blocking: ${health.reasons.join(', ')}`] : health.liveChecksDeferred ? ['Mint checks run during preparation and arming; idle health does not authorize a mint.'] : health.custodyChecksUnassessed ? ['This service report does not verify mint custody authorization. Arming and execution still require current trusted checks.'] : []);
     },
     async rpc() {
       const lines: string[] = [];
@@ -360,10 +369,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async enablement() {
       const at = now();
+      const ethereum = [...(deps.store.snapshot().chainEvidence ?? [])].reverse().find(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled && item.expiresAt > at.toISOString());
       const robinhood = validRobinhoodEnablement((deps.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), at);
       const base = validBaseEnablement((deps.store as { baseEnablement?: () => unknown }).baseEnablement?.(), at);
       return sections([
-        'Ethereum: on (no record needed)',
+        `Ethereum: ${ethereum ? `ON, ${ethereum.expiresAt === PERMANENT_ENABLEMENT_EXPIRY ? 'until revoked' : `until ${minutes(ethereum.expiresAt)} UTC`}` : 'off (owner chain-evidence acceptance required)'}`,
         `Base: ${base ? `ON since ${minutes(base.approvedAt)} UTC, ${base.paidAllowed ? 'free and paid' : 'free only'}, until revoked` : 'off (needs its own evidence and record; nothing has been recorded for Base)'}`,
         `Robinhood: ${robinhood ? `ON since ${minutes(robinhood.approvedAt)} UTC, ${robinhood.paidAllowed ? 'free and paid' : 'free only'}, until revoked` : 'off'}`,
       ], ['Recording an enablement is done on the host; /revoke switches one off.']);
@@ -476,18 +486,21 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         ...(lines.length > 0 ? ['', 'On Robinhood a mint is final only after Ethereum finalises it, which can take some time. The bot settles it by itself; this just shows where it stands.'] : []),
       ].join('\n');
     },
-    async watchlist() {
-      const rows = deps.intelligence().observedAddresses(1);
-      return rows.length === 0 ? 'No wallets are tracked. Add one with /track <address> [label].' : ['Tracked wallets (Ethereum):', ...rows.map((row) => `• ${row.address}${row.label ? ` — ${row.label}` : ''}`)].join('\n');
+    async watchlist(chain) {
+      const chainId = watchChainId(chain);
+      const rows = deps.intelligence().observedAddresses(chainId);
+      return rows.length === 0 ? `No wallets are tracked on ${chainName(chainId)}. Add one with /track ${chain ?? 'ethereum'} <address> [label].` : [`Tracked wallets (${chainName(chainId)}):`, ...rows.map((row) => `• ${row.address}${row.label ? ` — ${row.label}` : ''}`)].join('\n');
     },
-    async track(address, label) {
+    async track(address, label, chain) {
+      const chainId = watchChainId(chain);
       if (!ADDRESS.test(address)) throw new Error('ADDRESS_INVALID');
-      const row = deps.intelligence().addObservedAddress(1, address.toLowerCase(), label);
-      return `Tracking ${row.address}${row.label ? ` (${row.label})` : ''}.`;
+      const row = deps.intelligence().addObservedAddress(chainId, address.toLowerCase(), label);
+      return `Tracking ${row.address}${row.label ? ` (${row.label})` : ''} on ${chainName(chainId)}.`;
     },
-    async untrack(address) {
+    async untrack(address, chain) {
+      const chainId = watchChainId(chain);
       if (!ADDRESS.test(address)) throw new Error('ADDRESS_INVALID');
-      return deps.intelligence().disableObservedAddress(1, address.toLowerCase()) ? `Stopped tracking ${address.toLowerCase()}.` : 'That wallet was not tracked.';
+      return deps.intelligence().disableObservedAddress(chainId, address.toLowerCase()) ? `Stopped tracking ${address.toLowerCase()} on ${chainName(chainId)}.` : `That wallet was not tracked on ${chainName(chainId)}.`;
     },
     async prepare(chainText, contract, quantityLimit, phrase) {
       return prepareFor(chainText, contract, quantityLimit, phrase);
@@ -586,29 +599,30 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async revoke(chainText, phrase) {
       const chainId = chainFrom(chainText);
-      const result = revokeRun(chainId, phrase);
+      const result = await revokeRun(chainId, phrase);
       if (result.state === 'ConfirmToRevoke') return `${String(result.message)}\n\nSend /revoke to switch ${chainName(chainId)} off with a button.`;
       return String(result.message);
     },
     async revokeChoices() {
       const at = now();
+      const ethereum = (deps.store.snapshot().chainEvidence ?? []).some(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
       const robinhood = validRobinhoodEnablement((deps.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), at);
       const base = validBaseEnablement((deps.store as { baseEnablement?: () => unknown }).baseEnablement?.(), at);
-      return [...(base ? [{ key: 'base' as const, name: 'Base' }] : []), ...(robinhood ? [{ key: 'robinhood' as const, name: 'Robinhood' }] : [])];
+      return [...(ethereum ? [{ key: 'ethereum' as const, name: 'Ethereum' }] : []), ...(base ? [{ key: 'base' as const, name: 'Base' }] : []), ...(robinhood ? [{ key: 'robinhood' as const, name: 'Robinhood' }] : [])];
     },
     async revokeStatus(chainText) {
       const chainId = chainFrom(chainText);
-      const result = revokeRun(chainId, undefined);
+      const result = await revokeRun(chainId, undefined);
       const phrase = result.state === 'ConfirmToRevoke' ? revokePhraseOf(result) : undefined;
       return { text: String(result.message), ...(phrase ? { phrase } : {}) };
     },
     async revokeNow(chainText, expectedPhrase) {
       const chainId = chainFrom(chainText);
       // The phrase names the enablement record that was shown; if a different record is current now, the old button does not switch it off.
-      const current = revokePhraseOf(revokeRun(chainId, undefined));
+      const current = revokePhraseOf(await revokeRun(chainId, undefined));
       if (!current) throw new Error('NOTHING_TO_REVOKE: that chain is not switched on');
       if (!expectedPhrase || current !== expectedPhrase) throw new Error('ENABLEMENT_CHANGED: the enablement record is a different one now. Send /revoke to see the current state.');
-      return String(revokeRun(chainId, current).message);
+      return String((await revokeRun(chainId, current)).message);
     },
     async watchChains() {
       return CHAINS.filter((chain) => deps.watchedWallets(chain.id).length > 0).map((chain) => ({ key: (chain.id === 1 ? 'ethereum' : chain.id === 8453 ? 'base' : 'robinhood') as 'ethereum' | 'base' | 'robinhood', name: chain.name }));

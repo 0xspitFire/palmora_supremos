@@ -53,9 +53,9 @@ export async function quoteBaseFeeBound(client: PublicClient, tx: TransactionSer
 
 export interface BaseReceiptFeeFields {
   /** Unknown-chain RPCs can expose EIP-2718 quantities as raw hex strings. */
-  readonly l1Fee?: bigint | string;
-  readonly l1DataFee?: bigint | string;
-  readonly operatorFee?: bigint | string;
+  readonly l1Fee?: bigint | string | null;
+  readonly l1DataFee?: bigint | string | null;
+  readonly operatorFee?: bigint | string | null;
   readonly operatorFeeScalar?: bigint | number;
   readonly operatorFeeConstant?: bigint;
 }
@@ -77,18 +77,21 @@ export async function readBaseOperatorFee(client: PublicClient, gasUsed: bigint,
 }
 
 export function baseReceiptFees(fields: BaseReceiptFeeFields, _gasUsed: bigint, oracleOperatorFee?: bigint): { l1DataFeeWei: bigint; operatorFeeWei: bigint } {
-  const normalize = (value: bigint | string | undefined, required: string, malformed: string): bigint => {
-    if (value === undefined) throw new Error(required);
+  const normalize = (value: bigint | string | null | undefined, required: string, malformed: string): bigint => {
+    // OP receipt formatters represent absent RPC fee quantities as null.
+    // Missing evidence must raise the stable fail-closed code, not a TypeError
+    // that a receipt watcher could mistake for ordinary propagation delay.
+    if (value === undefined || value === null) throw new Error(required);
     if (typeof value === 'bigint') {
       if (value < 0n || value > MAX_UINT256) throw new Error(malformed);
       return value;
     }
-    if (value.length > 66 || !/^0x(?:0|[1-9a-f][0-9a-f]{0,63})$/i.test(value)) throw new Error(malformed);
+    if (typeof value !== 'string' || value.length > 66 || !/^0x(?:0|[1-9a-f][0-9a-f]{0,63})$/i.test(value)) throw new Error(malformed);
     return BigInt(value);
   };
-  if (fields.l1DataFee === undefined && fields.l1Fee === undefined) throw new Error('BASE_RECEIPT_L1_FEE_REQUIRED');
-  const normalizedL1DataFee = fields.l1DataFee === undefined ? undefined : normalize(fields.l1DataFee, 'BASE_RECEIPT_L1_FEE_REQUIRED', 'BASE_RECEIPT_L1_FEE_MALFORMED');
-  const normalizedL1Fee = fields.l1Fee === undefined ? undefined : normalize(fields.l1Fee, 'BASE_RECEIPT_L1_FEE_REQUIRED', 'BASE_RECEIPT_L1_FEE_MALFORMED');
+  if (fields.l1DataFee == null && fields.l1Fee == null) throw new Error('BASE_RECEIPT_L1_FEE_REQUIRED');
+  const normalizedL1DataFee = fields.l1DataFee == null ? undefined : normalize(fields.l1DataFee, 'BASE_RECEIPT_L1_FEE_REQUIRED', 'BASE_RECEIPT_L1_FEE_MALFORMED');
+  const normalizedL1Fee = fields.l1Fee == null ? undefined : normalize(fields.l1Fee, 'BASE_RECEIPT_L1_FEE_REQUIRED', 'BASE_RECEIPT_L1_FEE_MALFORMED');
   if (normalizedL1DataFee !== undefined && normalizedL1Fee !== undefined && normalizedL1DataFee !== normalizedL1Fee) throw new Error('BASE_RECEIPT_L1_FEE_MALFORMED');
   const l1DataFeeWei = normalizedL1DataFee ?? normalizedL1Fee!;
   const operatorFeeWei = normalize(fields.operatorFee ?? oracleOperatorFee, 'BASE_RECEIPT_OPERATOR_FEE_REQUIRED', 'BASE_RECEIPT_OPERATOR_FEE_MALFORMED');

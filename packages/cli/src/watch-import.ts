@@ -7,8 +7,18 @@ export interface WatchImportTarget {
   observedAddresses(chainId: number): readonly unknown[];
 }
 
+/** Watch additions are scoped to one explicitly selected chain; omission preserves the original Ethereum behavior. */
+export function watchChainId(value: string | number | undefined): 1 | 8453 | 4663 {
+  const chain = String(value ?? 'ethereum').toLowerCase();
+  if (chain === 'ethereum' || chain === 'eth' || chain === '1') return 1;
+  if (chain === 'base' || chain === '8453') return 8453;
+  if (chain === 'robinhood' || chain === 'rh' || chain === '4663') return 4663;
+  throw new Error('CHAIN_INVALID: use ethereum, base or robinhood');
+}
+
 /** Adds the addresses of a `watch list` output (or a plain list of {address, label}) to the watch list. A bad entry is skipped and counted; a bad file stops it by name before anything is added. */
-export async function importWatchList(file: string, repo: WatchImportTarget): Promise<{ imported: number; skipped: number; nowWatching: number }> {
+export async function importWatchList(file: string, repo: WatchImportTarget, selectedChain: number = 1): Promise<{ imported: number; skipped: number; nowWatching: number }> {
+  const chainId = watchChainId(selectedChain);
   // The path must be a real location (no symlink anywhere in it), and the file is checked and read through one open handle so it cannot be swapped in between.
   if (await realpath(file) !== resolve(file)) throw new Error('FILE_INVALID: the path must not go through a link');
   let text: string;
@@ -20,6 +30,13 @@ export async function importWatchList(file: string, repo: WatchImportTarget): Pr
   } finally { await handle.close(); }
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { throw new Error('FILE_INVALID: it is not valid JSON'); }
+  // A chain-tagged export must never be silently reassigned to the default (or any other) chain.
+  // Legacy arrays and older untagged exports retain the original explicitly selected/default Ethereum behavior.
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.hasOwn(parsed, 'chainId')) {
+    const exportedChain = (parsed as { chainId: unknown }).chainId;
+    if (typeof exportedChain !== 'number' || ![1, 8453, 4663].includes(exportedChain)) throw new Error('WATCH_IMPORT_CHAIN_INVALID: the exported chainId must be 1, 8453 or 4663');
+    if (exportedChain !== chainId) throw new Error('WATCH_IMPORT_CHAIN_MISMATCH: select the same chain as the exported watch list');
+  }
   const items = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { watched?: unknown }).watched) ? (parsed as { watched: unknown[] }).watched : undefined);
   if (!items) throw new Error('FILE_INVALID: expected the output of `watch list` or a list of {address, label}');
   if (items.length > 1_000) throw new Error('FILE_TOO_LARGE: at most 1000 wallets at a time');
@@ -34,6 +51,6 @@ export async function importWatchList(file: string, repo: WatchImportTarget): Pr
     accepted.push({ address, ...(label ? { label } : {}) });
   }
   // Every entry is checked first; only then are any added.
-  for (const entry of accepted) repo.addObservedAddress(1, entry.address, entry.label);
-  return { imported: accepted.length, skipped, nowWatching: repo.observedAddresses(1).length };
+  for (const entry of accepted) repo.addObservedAddress(chainId, entry.address, entry.label);
+  return { imported: accepted.length, skipped, nowWatching: repo.observedAddresses(chainId).length };
 }

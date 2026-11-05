@@ -151,7 +151,7 @@ describe('owner-accepted chain evidence and simulation records', () => {
     const phrase = ethereumChainEvidencePhrase();
     await acceptEthereumChainEvidence(store, record, phrase, () => NOW);
     expect(store.snapshot().chainEvidence[0]).toMatchObject({ status: 'accepted', executionEnabled: true, acceptedBy: 'owner-cli' });
-    expect(Date.parse(store.snapshot().chainEvidence[0]!.expiresAt) - NOW.getTime()).toBe(7 * 24 * 3_600_000);
+    expect(store.snapshot().chainEvidence[0]!.expiresAt).toBe('9999-12-31T23:59:59.999Z');
     // A second, different record cannot be accepted with another phrase.
     const other = { ...buildEthereumChainEvidence({ now: NOW, sourceBlock: 124n, sourceBlockHash: `0x${'33'.repeat(32)}`, strategy: 'seadrop-v1-public' }) };
     const { EvidenceService } = await import('./evidence.js');
@@ -179,7 +179,7 @@ describe('chain evidence for a fresh database (T-027 review points)', () => {
       const first = buildEthereumChainEvidence({ now: new Date(), sourceBlock: 123n, sourceBlockHash: `0x${'22'.repeat(32)}`, strategy: 'seadrop-v1-public' });
       await acceptEthereumChainEvidence(store, first, ethereumChainEvidencePhrase());
       const second = buildEthereumChainEvidence({ now: new Date(Date.now() + 1_000), sourceBlock: 124n, sourceBlockHash: `0x${'33'.repeat(32)}`, strategy: 'seadrop-v1-public' });
-      await acceptEthereumChainEvidence(store, second, ethereumChainEvidencePhrase());
+      await acceptEthereumChainEvidence(store, second, ethereumChainEvidencePhrase(), () => new Date(Date.parse(second.checkedAt) + 1));
       const accepted = store.snapshot().chainEvidence.filter((item) => item.status === 'accepted');
       expect(accepted.map((item) => item.id).sort()).toEqual([first.id, second.id].sort());
       expect(accepted.find((item) => item.id === second.id)?.executionEnabled).toBe(true);
@@ -189,7 +189,7 @@ describe('chain evidence for a fresh database (T-027 review points)', () => {
   });
 
   it('keeps the phrase the same whatever the block, so it cannot go stale while a block arrives', () => {
-    expect(ethereumChainEvidencePhrase()).toBe('ACCEPT-ETHEREUM-SEADROP-EVIDENCE 7 days');
+    expect(ethereumChainEvidencePhrase()).toBe('ACCEPT-ETHEREUM-SEADROP-EVIDENCE PERMANENT');
   });
 
   it('records no readiness when chain evidence is missing or has expired', async () => {
@@ -201,8 +201,8 @@ describe('chain evidence for a fresh database (T-027 review points)', () => {
       expect(none.recorded).toBe(false);
       if (!none.recorded) expect(none.failures.map((failure) => failure.check)).toContain('chain_evidence');
       // Accepted 8 days ago, so it expired a day ago.
-      const old = buildEthereumChainEvidence({ now: new Date(Date.now() - 8 * 24 * 3_600_000), sourceBlock: 100n, sourceBlockHash: `0x${'44'.repeat(32)}`, strategy: 'seadrop-v1-public' });
-      await acceptEthereumChainEvidence(store, old, ethereumChainEvidencePhrase(), () => new Date(Date.now() - 8 * 24 * 3_600_000 + 1_000));
+      const old = buildEthereumChainEvidence({ validity: '7-days', now: new Date(Date.now() - 8 * 24 * 3_600_000), sourceBlock: 100n, sourceBlockHash: `0x${'44'.repeat(32)}`, strategy: 'seadrop-v1-public' });
+      await acceptEthereumChainEvidence(store, old, ethereumChainEvidencePhrase('7-days'), () => new Date(Date.now() - 8 * 24 * 3_600_000 + 1_000));
       const expired = await new PersonalLiveReadinessService(store, probes, () => new Date()).record(args);
       expect(expired.recorded).toBe(false);
       if (!expired.recorded) expect(expired.failures.map((failure) => failure.check)).toContain('chain_evidence');

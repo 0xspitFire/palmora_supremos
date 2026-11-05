@@ -160,6 +160,8 @@ export interface RobinhoodEnablementInput {
   paidAllowed: boolean;
   /** SHA-256 (hex) of the typed confirmation phrase the owner entered. */
   confirmationDigest: string;
+  /** Explicit owner-reviewed method scope; absent retains legacy public-only authority. */
+  strategyVersion?: string;
 }
 
 export interface RobinhoodEnablementRow {
@@ -517,6 +519,7 @@ export class DurableRepository {
    * and is valid at the approval time. Nothing here is reachable except from the owner-run command.
    */
   public enableRobinhood(record: RobinhoodEnablementInput, chain: { chainProfileId: string; verificationId: string; sequencerEndpointReference: string; archiveEndpointReference: string; paidFeePolicy?: { id: string; version: string; maxTotalFeeWei: bigint; freeCapWei: bigint } }): void {
+    if (record.strategyVersion !== undefined && record.strategyVersion !== 'seadrop-v1-baseline-public-free-allowlist@1') throw new Error('Robinhood strategy scope is not supported');
     if (!record.confirmationDigest || !/^[0-9a-f]{64}$/.test(record.confirmationDigest)) throw new Error('Robinhood enablement requires a confirmation digest');
     const steps = record.paidAllowed ? ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'paidRehearsal', 'paidPolicyApproved'] as const : ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7'] as const;
     if (Object.keys(record.evidence).length !== steps.length || steps.some((step) => record.evidence[step] !== true)) throw new Error('Robinhood enablement requires E1 to E7 all passed');
@@ -539,7 +542,7 @@ export class DurableRepository {
           finalityPassed: true, seaDropCompatible: true, positiveLivePath: true, archiveForkPassed: true, reconciliationPassed: true,
           negativeCases: { revert: true, sold_out: true, price_drift: true, insufficient_funds: true, quantity_limit: true, stale_phase: true, fee_recipient: true, kill: true, cap: true },
           robinhoodEnablementId: record.id, expiresAt: record.expiresAt, evidence: record.evidence, evidenceDigest: record.confirmationDigest,
-          endpointIdentity: 'robinhood-sequencer', archiveEndpointIdentity: 'robinhood-archive', strategyVersion: 'seadrop-v1-public@1',
+          endpointIdentity: 'robinhood-sequencer', archiveEndpointIdentity: 'robinhood-archive', strategyVersion: record.strategyVersion ?? 'seadrop-v1-public@1',
           sourceBlock: '1', sourceBlockHash: 'robinhood-owner-attested-anchor',
         },
         checkedAt: record.approvedAt,
@@ -682,7 +685,7 @@ export class DurableRepository {
     if (record.primaryEndpointReference === record.fallbackEndpointReference) throw new Error('Base enablement requires independent endpoint references');
     this.immediate(() => {
       this.db.prepare("INSERT INTO base_enablement (id, approved_by, approved_at, expires_at, free_allowed, paid_allowed, evidence_json, evidence_digest, confirmation_digest, strategy_version, fee_policy_version, primary_endpoint_reference, fallback_endpoint_reference, custody_mode, created_at) VALUES (?, 'owner-cli', ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, record.approvedAt, record.expiresAt, paid ? 1 : 0, JSON.stringify(record.evidence), record.evidenceDigest, record.confirmationDigest, record.strategyVersion, record.feePolicyVersion, record.primaryEndpointReference, record.fallbackEndpointReference, record.custodyMode, record.approvedAt);
-      this.recordChainVerification({ id: chain.verificationId, chainProfileId: chain.chainProfileId, chainId: 8453, status: 'verified', evidence: { finalityPassed: true, seaDropCompatible: true, positiveLivePath: false, archiveForkPassed: true, reconciliationPassed: true, baseEnablementId: record.id, expiresAt: record.expiresAt, evidenceDigest: record.evidenceDigest, endpointIdentity: record.primaryEndpointReference, archiveEndpointIdentity: record.fallbackEndpointReference, strategyVersion: record.strategyVersion, sourceBlock: '10000000', sourceBlockHash: 'base-archive-verification-anchor' }, checkedAt: record.approvedAt, approvedBy: 'owner-cli', approvedAt: record.approvedAt, executionEnabled: true });
+      this.recordChainVerification({ id: chain.verificationId, chainProfileId: chain.chainProfileId, chainId: 8453, status: 'verified', evidence: { finalityPassed: true, seaDropCompatible: true, positiveLivePath: false, archiveForkPassed: true, reconciliationPassed: true, baseEnablementId: record.id, expiresAt: record.expiresAt, evidenceDigest: record.evidenceDigest, ...(record.strategyVersion === 'seadrop-v1-baseline-public-free-allowlist@1' ? { approvalProof: record.confirmationDigest } : {}), endpointIdentity: record.primaryEndpointReference, archiveEndpointIdentity: record.fallbackEndpointReference, strategyVersion: record.strategyVersion, sourceBlock: '10000000', sourceBlockHash: 'base-archive-verification-anchor' }, checkedAt: record.approvedAt, approvedBy: 'owner-cli', approvedAt: record.approvedAt, executionEnabled: true });
       if (paid && chain.paidFeePolicy) {
         // The active Base policy stays as it is for free mints; a new version of it also allows paid mints, with the D-057 fee allowance.
         const current = this.db.prepare('SELECT * FROM fee_policy WHERE chain_profile_id = ? AND active = 1 ORDER BY rowid DESC LIMIT 1').get(chain.chainProfileId) as Record<string, unknown> | undefined;

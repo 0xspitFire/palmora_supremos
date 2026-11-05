@@ -41,7 +41,7 @@ import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, reco
 import { newTotpSecret, totpUri } from './totp.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
-import { PersonalLiveReadinessService, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, loadHostSecretStore, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
+import { PersonalLiveReadinessService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, ethereumChainEvidenceRevokePhrase, revokeEthereumChainEvidence, PERMANENT_ENABLEMENT_EXPIRY, loadHostSecretStore, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
 import { assertFeePolicyApplyAllowed, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -1155,6 +1155,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
     .option('evidence-file', { type: 'string', describe: 'Your JSON file with E1 to E7 (status and record; see Docs/robinhood-enable-evidence.template.json)' })
     .option('paid', { type: 'boolean', default: false, describe: 'Enable paid mints too; requires paidRehearsal and paidPolicyApproved evidence' })
+    .option('include-free-allowlist', { type: 'boolean', default: false, describe: 'Explicitly approve public v1 plus free allowlist v1 baseline; existing grants retain their original scope' })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status (record) or revoke printed' }), async (args) => {
       try {
         let evidenceText: string | undefined;
@@ -1167,7 +1168,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<EnableStore>;
         if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function' || typeof store.robinhoodEnablement !== 'function' || typeof store.revokeRobinhood !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), paid: args.paid, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), paid: args.paid, includeFreeAllowlist: args.includeFreeAllowlist, currentStrategyVersion: runtime.store.snapshot().chainEvidence.filter(item => item.chainId === 4663 && item.status === 'accepted' && item.executionEnabled).at(-1)?.strategyVersion, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('ethereum-proof <action>', 'Owner-run (D-064): record an earlier live Ethereum mint as the proof Robinhood needs (status | record). Each transaction is read from Ethereum and checked first', (args) => args
@@ -1220,13 +1221,14 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   })
   .command('base-enable <action>', 'Owner-run: record Base free attended enablement until you revoke it (status | record | revoke)', (args) => args
     .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
-    .option('evidence-file', { type: 'string', describe: 'Completed copy of Docs/base-enable-evidence.template.json (status and record)' })
+    .option('evidence-file', { type: 'string', describe: 'Completed evidence for a new grant: optional for status, required for record; omit to inspect the installed grant' })
     .option('paid', { type: 'boolean', default: false, describe: 'Enable paid Base too (D-062); the file must also contain paidRehearsal and paidPolicyApproved' })
+    .option('include-free-allowlist', { type: 'boolean', default: false, describe: 'Explicitly approve public v1 plus free allowlist v1 baseline; existing grants retain their original scope' })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status (record) or revoke printed' }), async (args) => {
       try {
         let evidenceText: string | undefined;
-        if (args.action !== 'revoke') {
-          if (!args.evidenceFile) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
+        if (args.action === 'record' && !args.evidenceFile) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
+        if (args.action !== 'revoke' && args.evidenceFile) {
           const info = await lstat(args.evidenceFile);
           if (!info.isFile() || info.isSymbolicLink() || info.size > 20_000) throw new Error('EVIDENCE_FILE_INVALID: it must be a plain file under 20 KB');
           evidenceText = await readFile(args.evidenceFile, 'utf8');
@@ -1234,31 +1236,48 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<BaseEnableStore>;
         if (typeof store.enableBase !== 'function' || typeof store.baseEnablement !== 'function' || typeof store.revokeBase !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runBaseEnable({ action: args.action, paid: args.paid, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), ...(args.confirm !== undefined ? { confirm: args.confirm } : {}), now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        process.stdout.write(`${json(runBaseEnable({ action: args.action, paid: args.paid, includeFreeAllowlist: args.includeFreeAllowlist, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), ...(args.confirm !== undefined ? { confirm: args.confirm } : {}), now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
-  .command('chain-evidence <action>', 'Owner-run: record Ethereum SeaDrop chain evidence for 7 days after a typed confirmation (needed before a live arm)', (args) => args
-    .positional('action', { type: 'string', choices: ['status', 'accept'] as const, demandOption: true })
-    .option('confirm', { type: 'string', describe: 'The confirmation phrase status printed (accept only)' })
+  .command('chain-evidence <action>', 'Owner-run Ethereum SeaDrop acceptance: permanent until revoked, or explicit seven-day legacy validity', (args) => args
+    .positional('action', { type: 'string', choices: ['status', 'accept', 'revoke'] as const, demandOption: true })
+    .option('validity', { type: 'string', choices: ['permanent', '7-days'] as const, default: 'permanent' })
+    .option('include-free-allowlist', { type: 'boolean', default: false, describe: 'Explicitly approve public v1 plus free allowlist v1 baseline; existing grants retain their original scope' })
+    .option('confirm', { type: 'string', describe: 'The exact owner confirmation printed by status/revoke' })
     .option('rpc-url', { type: 'string' }), async (args) => {
       try {
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const now = new Date();
-        const existing = runtime.store.snapshot().chainEvidence.find((item) => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled && item.expiresAt > now.toISOString());
-        if (args.action === 'status' && existing) { process.stdout.write(`${json({ state: 'Accepted', message: `Ethereum chain evidence is accepted until ${existing.expiresAt}.`, evidenceId: existing.id, expiresAt: existing.expiresAt })}\n`); return; }
+        const validity = args.validity === '7-days' ? '7-days' : 'permanent';
+        const active = [...runtime.store.snapshot().chainEvidence].reverse().find((item) => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
+        const existing = active && active.expiresAt > now.toISOString() ? active : undefined;
+        if (args.action === 'revoke') {
+          if (!active) throw new Error('NOTHING_TO_REVOKE: no active Ethereum evidence');
+          const phrase = ethereumChainEvidenceRevokePhrase(active.id);
+          if (args.confirm !== phrase) { process.stdout.write(`${json({ state: 'ConfirmToRevoke', evidenceId: active.id, copyThisToRevoke: `chain-evidence revoke --confirm "${phrase}"`, message: 'Revocation stops new Ethereum execution; submitted transactions still require reconciliation.' })}\n`); return; }
+          await revokeEthereumChainEvidence(runtime.store, active.id, phrase);
+          process.stdout.write(`${json({ state: 'Revoked', evidenceId: active.id })}\n`); return;
+        }
+        const phrase = ethereumChainEvidencePhrase(validity, args.includeFreeAllowlist);
+        const permanent = existing?.expiresAt === PERMANENT_ENABLEMENT_EXPIRY;
+        const sameValidity = existing && permanent === (validity === 'permanent');
+        const requestedStrategyVersion = args.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : 'seadrop-v1-public-1';
+        const sameScope = existing?.strategyVersion === requestedStrategyVersion;
+        if (existing && (args.action === 'status' || sameValidity && sameScope)) {
+          process.stdout.write(`${json({ state: args.action === 'accept' ? 'AlreadyAccepted' : 'Accepted', message: permanent ? 'Ethereum strategy acceptance remains valid until revoked. Each mint still needs fresh runtime, custody and simulation checks.' : `Ethereum evidence is accepted until ${existing.expiresAt}.`, evidenceId: existing.id, expiresAt: existing.expiresAt, validity: permanent ? 'permanent' : '7-days', strategyVersion: existing.strategyVersion, requestedStrategyVersion, ...(!sameValidity || !sameScope ? { copyThisToAccept: `chain-evidence accept --validity ${validity}${args.includeFreeAllowlist ? ' --include-free-allowlist' : ''} --confirm "${phrase}"` } : {}) })}\n`); return;
+        }
+        if (args.action === 'accept' && args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run chain-evidence status and review the statement');
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
-        const endpoint = config.rpcEndpoints[0];
-        if (!endpoint) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
+        if (!config.rpcEndpoints[0]) throw new Error('ETHEREUM_RPC_UNAVAILABLE');
         const client = createPublicClient({ transport: failoverTransport(config.rpcEndpoints) });
         if ((await client.getChainId()) !== 1) throw new Error('RPC_CHAIN_MISMATCH: that RPC is not Ethereum');
         const block = await client.getBlock({ blockTag: 'latest' });
-        const phrase = ethereumChainEvidencePhrase();
-        if (args.action === 'status') { process.stdout.write(`${json({ state: 'NotAccepted', message: 'No accepted Ethereum chain evidence. Accepting it is your own statement, valid for 7 days, that SeaDrop v1 public mints on Ethereum have been rehearsed on a fork and read live (the rehearsal results are in the project evidence notes; this command does not re-run them).', copyThisToAccept: `chain-evidence accept --confirm "${phrase}"`, note: 'The phrase is always the same, so you can copy it at any time.' })}\n`); return; }
-        if (existing) { process.stdout.write(`${json({ state: 'AlreadyAccepted', evidenceId: existing.id, expiresAt: existing.expiresAt })}\n`); return; }
-        if (args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run chain-evidence status and copy the phrase it prints exactly');
-        const record = buildEthereumChainEvidence({ now, sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public' });
+        if (args.action === 'status') {
+          process.stdout.write(`${json({ state: 'NotAccepted', validity, requestedStrategyVersion, message: 'Owner review of genuine SeaDrop strategy rehearsal evidence is required. Permanent acceptance lasts until explicit revocation; it does not waive current mint, RPC, custody, simulation, spend or D-017 checks. This command reads the chain but does not run the rehearsal.', copyThisToAccept: `chain-evidence accept --validity ${validity}${args.includeFreeAllowlist ? ' --include-free-allowlist' : ''} --confirm "${phrase}"` })}\n`); return;
+        }
+        const record = buildEthereumChainEvidence({ now, sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public', validity, includeFreeAllowlist: args.includeFreeAllowlist });
         await acceptEthereumChainEvidence(runtime.store, record, phrase);
-        process.stdout.write(`${json({ state: 'Accepted', message: `Ethereum chain evidence accepted until ${record.expiresAt}.`, evidenceId: record.id })}\n`);
+        process.stdout.write(`${json({ state: 'Accepted', validity, strategyVersion: record.strategyVersion, expiresAt: record.expiresAt, evidenceId: record.id, message: validity === 'permanent' ? 'Ethereum strategy acceptance recorded until revoked; live checks remain mandatory.' : `Ethereum evidence accepted until ${record.expiresAt}.` })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('record-simulation', 'Run the test mint for every wallet of a prepared live campaign and record the result (needed before a live arm)', (args) => args
@@ -1472,19 +1491,22 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .command('watch <action> [address]', 'Manage watched (whale) wallets for discovery: add, list, remove, import (from a file made by `watch list`)', (args) => args
     .positional('action', { type: 'string', choices: ['add', 'list', 'remove', 'import'] as const, demandOption: true })
     .positional('address', { type: 'string' })
+    .option('chain', { type: 'string', choices: ['ethereum', 'base', 'robinhood', '1', '8453', '4663'] as const, default: 'ethereum', describe: 'Watch list to manage; only this chain is changed' })
     .option('file', { type: 'string', describe: 'import: a JSON file, the output of `watch list` or a list of {address, label}' })
     .option('label', { type: 'string' }), async (args) => {
+      const chainId = ({ ethereum: 1, '1': 1, base: 8453, '8453': 8453, robinhood: 4663, '4663': 4663 } as const)[args.chain];
+      if (chainId === undefined) { process.stdout.write(`${blocked(new Error('CHAIN_INVALID: use ethereum, base or robinhood'))}\n`); return; }
       const store = intelligenceRepository();
       try {
         if (args.action === 'import') {
           if (!args.file) throw new Error('FILE_REQUIRED: pass --file <the list>');
-          process.stdout.write(`${json(await importWatchList(args.file, store.repo))}\n`);
+          process.stdout.write(`${json({ chainId, ...(await importWatchList(args.file, store.repo, chainId)) })}\n`);
           return;
         }
-        if (args.action === 'list') { process.stdout.write(`${json({ watched: store.repo.observedAddresses(1).map((row) => ({ address: row.address, label: row.label, since: row.createdAt })) })}\n`); return; }
+        if (args.action === 'list') { process.stdout.write(`${json({ chainId, watched: store.repo.observedAddresses(chainId).map((row) => ({ address: row.address, label: row.label, since: row.createdAt })) })}\n`); return; }
         if (!args.address) throw new Error('ADDRESS_REQUIRED');
-        if (args.action === 'add') { const row = store.repo.addObservedAddress(1, args.address, args.label); process.stdout.write(`${json({ watching: row.address, label: row.label })}\n`); return; }
-        process.stdout.write(`${json({ removed: store.repo.disableObservedAddress(1, args.address.toLowerCase()) })}\n`);
+        if (args.action === 'add') { const row = store.repo.addObservedAddress(chainId, args.address.toLowerCase(), args.label); process.stdout.write(`${json({ chainId, watching: row.address, label: row.label })}\n`); return; }
+        process.stdout.write(`${json({ chainId, removed: store.repo.disableObservedAddress(chainId, args.address.toLowerCase()) })}\n`);
       } catch (error) { process.stdout.write(`${blocked(error)}\n`); }
       finally { store.close(); }
     })

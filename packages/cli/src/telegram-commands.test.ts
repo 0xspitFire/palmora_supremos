@@ -85,6 +85,23 @@ const admitViewer = async (t: ReturnType<typeof setup>) => {
 };
 
 describe('who is listened to (D-063 item 1)', () => {
+  it('routes watch commands to one explicit chain while preserving Ethereum syntax and rejecting unknown chains', async () => {
+    const t = setup();
+    const address = '0x1111111111111111111111111111111111111111';
+    await t.send(t.message(OWNER, `/track ${address} whale one`));
+    await t.send(t.message(OWNER, `/track base ${address} whale two`));
+    await t.send(t.message(OWNER, `/track 4663 ${address}`));
+    await t.send(t.message(OWNER, '/watchlist'));
+    await t.send(t.message(OWNER, '/watchlist robinhood'));
+    await t.send(t.message(OWNER, `/untrack base ${address}`));
+    await t.send(t.message(OWNER, `/untrack ${address}`));
+    expect(t.calls).toEqual([`track(${address}|whale one)`, `track(${address}|whale two|base)`, `track(${address}|4663)`, 'watchlist()', 'watchlist(robinhood)', `untrack(${address}|base)`, `untrack(${address})`]);
+    const count = t.calls.length;
+    for (const command of [`/track polygon ${address}`, `/untrack 10 ${address}`, '/watchlist all', `/untrack base ${address} trailing`]) await t.send(t.message(OWNER, command));
+    expect(t.calls).toHaveLength(count);
+    expect(t.records.slice(-4).every((record) => record.outcome.startsWith('refused:'))).toBe(true);
+  });
+
   it('ignores strangers entirely, except /join, and never runs anything for them', async () => {
     const t = setup();
     for (const text of ['/status', '/kill', '/menu', '/release', '/unlock 123456']) await t.send(t.message(STRANGER, text));

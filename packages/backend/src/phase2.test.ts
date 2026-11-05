@@ -148,12 +148,12 @@ describe('Phase 2 backend operational shell', () => {
     expect(PHASE2_DEFAULTS.readinessFreshnessMs).toBe(300_000);
   });
 
-  it('fails closed when startup is ready but operational evidence is absent', async () => {
+  it('fails closed when startup claims ready without completed reconciliation', async () => {
     const store = new DurableStore();
     await store.transaction((state) => { state.runtime = { startupState: 'Ready', blockingReasons: [], dependencies: { engine: true, chain: true, backup: true, notifications: true } }; });
     const response = new Phase2ReadModelService(() => new Date(NOW)).health(store.snapshot(), { requestId: 'health-fail-closed' });
     expect(response.data?.state).toBe('Not ready');
-    expect(response.issues.some((item) => item.code === 'OPERATIONAL_READINESS_UNKNOWN')).toBe(true);
+    expect(response.issues.some((item) => item.code === 'STARTUP_RECONCILIATION_REQUIRED')).toBe(true);
   });
 
   it('wires the v1 GET API to Phase2ReadModelService', () => {

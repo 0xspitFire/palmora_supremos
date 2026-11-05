@@ -17,44 +17,52 @@ for (const name of ['ETHEREUM_SEADROP_NFT', 'ETHEREUM_SEADROP_FEE_RECIPIENT', 'E
 }
 const testFiles = resolveTestFiles(process.argv.slice(2));
 
-const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', [
-  '--fork-url', forkRpc,
-  '--fork-block-number', forkBlock.toString(),
-  '--chain-id', '1',
-  '--host', '127.0.0.1',
-  '--port', '8546',
-  '--mnemonic-random',
-  '--silent',
-], { cwd: root, stdio: 'ignore', windowsHide: true, env: toolEnvironment() });
-try {
-  await waitForRpc(rpcUrl);
-  const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
-  if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
-  const reportDir = mkdtempSync(join(tmpdir(), 'mintbot-ethereum-replay-'));
-  const reportFile = join(reportDir, 'report.json');
-  const code = await run(process.execPath, [
-    vitest,
-    'run',
-    ...testFiles,
-    '--reporter=json',
-    '--outputFile', reportFile,
-  ], {
-    ANVIL_ETHEREUM_RPC_URL: rpcUrl,
-    ETHEREUM_FORK_BLOCK: forkBlock.toString(),
-    ETHEREUM_SEADROP_NFT: process.env.ETHEREUM_SEADROP_NFT ?? fixtureValues.ETHEREUM_SEADROP_NFT,
-    ETHEREUM_SEADROP_FEE_RECIPIENT: process.env.ETHEREUM_SEADROP_FEE_RECIPIENT ?? fixtureValues.ETHEREUM_SEADROP_FEE_RECIPIENT,
-    ETHEREUM_SEADROP_MINT_VALUE_WEI: process.env.ETHEREUM_SEADROP_MINT_VALUE_WEI ?? fixtureValues.ETHEREUM_SEADROP_MINT_VALUE_WEI,
-  });
-  if (code !== 0) process.exitCode = code;
-  if (code !== 0) printFailures(reportFile);
-  if (existsSync(reportFile)) {
-    const summary = JSON.parse(readFileSync(reportFile, 'utf8'));
-    console.log(`Fork tests: ${summary.numPassedTests ?? 0} passed, ${summary.numFailedTests ?? 0} failed, ${(summary.numPendingTests ?? 0) + (summary.numTodoTests ?? 0)} skipped`);
+// Each test file gets a fresh fork: minting, snapshots and mining controls must
+// never leak into another file's historical-log or state expectations.
+for (const testFile of testFiles) {
+  const anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', [
+    '--fork-url', forkRpc,
+    '--fork-block-number', forkBlock.toString(),
+    '--chain-id', '1',
+    '--host', '127.0.0.1',
+    '--port', '8546',
+    '--mnemonic-random',
+    '--silent',
+  ], { cwd: root, stdio: 'ignore', windowsHide: true, env: toolEnvironment() });
+  try {
+    await waitForRpc(rpcUrl);
+    const vitest = resolve(root, 'packages/engine/node_modules/vitest/vitest.mjs');
+    if (!existsSync(vitest)) throw new Error('Engine Vitest binary is unavailable');
+    const reportDir = mkdtempSync(join(tmpdir(), 'mintbot-ethereum-replay-'));
+    const reportFile = join(reportDir, 'report.json');
+    const code = await run(process.execPath, [
+      vitest,
+      'run',
+      testFile,
+      '--reporter=json',
+      '--outputFile', reportFile,
+    ], {
+      ANVIL_ETHEREUM_RPC_URL: rpcUrl,
+      ETHEREUM_FORK_BLOCK: forkBlock.toString(),
+      ETHEREUM_SEADROP_NFT: process.env.ETHEREUM_SEADROP_NFT ?? fixtureValues.ETHEREUM_SEADROP_NFT,
+      ETHEREUM_SEADROP_FEE_RECIPIENT: process.env.ETHEREUM_SEADROP_FEE_RECIPIENT ?? fixtureValues.ETHEREUM_SEADROP_FEE_RECIPIENT,
+      ETHEREUM_SEADROP_MINT_VALUE_WEI: process.env.ETHEREUM_SEADROP_MINT_VALUE_WEI ?? fixtureValues.ETHEREUM_SEADROP_MINT_VALUE_WEI,
+    });
+    if (code !== 0) process.exitCode = code;
+    if (code !== 0) printFailures(reportFile);
+    if (existsSync(reportFile)) {
+      const summary = JSON.parse(readFileSync(reportFile, 'utf8'));
+      console.log(`Fork tests: ${summary.numPassedTests ?? 0} passed, ${summary.numFailedTests ?? 0} failed, ${(summary.numPendingTests ?? 0) + (summary.numTodoTests ?? 0)} skipped`);
+    }
+    if (code === 0) assertStrictReport(reportFile, 'Ethereum');
+    rmSync(reportDir, { recursive: true, force: true });
+  } finally {
+    if (anvil.exitCode === null && anvil.signalCode === null) {
+      const stopped = new Promise((done) => anvil.once('exit', done));
+      anvil.kill('SIGTERM');
+      await stopped;
+    }
   }
-  if (code === 0) assertStrictReport(reportFile, 'Ethereum');
-  rmSync(reportDir, { recursive: true, force: true });
-} finally {
-  anvil.kill('SIGTERM');
 }
 
 function readReference(file, name) {

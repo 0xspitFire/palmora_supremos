@@ -130,8 +130,8 @@ export class ReceiptWatcherImpl implements IReceiptWatcher {
                 || fallbackReceipt.effectiveGasPrice !== receipt.effectiveGasPrice) throw new Error('BASE_PROVIDER_RECEIPT_DISAGREEMENT');
               const fallbackFields = fallbackReceipt as typeof fallbackReceipt & { l1Fee?: bigint | string; l1DataFee?: bigint | string; operatorFee?: bigint | string };
               const [primaryOracleOperatorFee, fallbackOracleOperatorFee] = await Promise.all([
-                componentReceipt.operatorFee === undefined ? readBaseOperatorFee(this.client, receipt.gasUsed, receipt.blockNumber) : undefined,
-                fallbackFields.operatorFee === undefined ? readBaseOperatorFee(fallbackClient, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber) : undefined,
+                componentReceipt.operatorFee == null ? readBaseOperatorFee(this.client, receipt.gasUsed, receipt.blockNumber) : undefined,
+                fallbackFields.operatorFee == null ? readBaseOperatorFee(fallbackClient, fallbackReceipt.gasUsed, fallbackReceipt.blockNumber) : undefined,
               ]);
               const primaryFees = baseReceiptFees(componentReceipt, receipt.gasUsed, primaryOracleOperatorFee);
               const fallbackFees = baseReceiptFees(fallbackFields, fallbackReceipt.gasUsed, fallbackOracleOperatorFee);

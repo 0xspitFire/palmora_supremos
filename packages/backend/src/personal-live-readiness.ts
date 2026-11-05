@@ -1,6 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { PERMANENT_ENABLEMENT_EXPIRY } from './robinhood-enablement.js';
 import { assertLiveOperationalReadiness, PERSONAL_LIVE_CUSTODY_MAX_MS, type PersonalLiveContext } from './custody.js';
-import { campaignInputDigest, EvidenceService, type EvidenceAuthority, type EvidenceApproval } from './evidence.js';
+import { campaignInputDigest, EvidenceService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, type EvidenceAuthority, type EvidenceApproval } from './evidence.js';
 import type { BackendStore } from './store.js';
 import type { Campaign, ChainEvidenceRecord, OperationalReadiness, SimulationEvidenceRecord } from './types.js';
 
@@ -114,15 +115,19 @@ export function ownerTypedAuthority(phrase: string): EvidenceAuthority {
 export function ownerTypedProof(phrase: string, recordId: string): string { return sha(`${phrase}|${recordId}`); }
 
 /** The same phrase every time: it states what is being accepted, so it cannot go stale while a block arrives. */
-export function ethereumChainEvidencePhrase(): string {
-  return 'ACCEPT-ETHEREUM-SEADROP-EVIDENCE 7 days';
+export type EthereumEvidenceValidity = 'permanent' | '7-days';
+export function ethereumChainEvidencePhrase(validity: EthereumEvidenceValidity = 'permanent', includeFreeAllowlist = false): string {
+  const phrase = validity === 'permanent' ? 'ACCEPT-ETHEREUM-SEADROP-EVIDENCE PERMANENT' : 'ACCEPT-ETHEREUM-SEADROP-EVIDENCE 7 days';
+  return includeFreeAllowlist ? `${phrase} CHAIN-1 PUBLIC+FREE-ALLOWLIST-V1` : phrase;
 }
+export function ethereumChainEvidenceRevokePhrase(id: string): string { return `REVOKE-ETHEREUM-SEADROP-EVIDENCE ${sha(id).slice(-8)}`; }
 
-/** A pending Ethereum SeaDrop evidence record built from a live read, for 7 days. */
-export function buildEthereumChainEvidence(args: { now: Date; sourceBlock: bigint; sourceBlockHash: string; strategy: string }): ChainEvidenceRecord {
+/** Durable owner strategy acceptance; fresh campaign/custody/simulation checks remain independent. */
+export function buildEthereumChainEvidence(args: { now: Date; sourceBlock: bigint; sourceBlockHash: string; strategy: string; validity?: EthereumEvidenceValidity; includeFreeAllowlist?: boolean }): ChainEvidenceRecord {
+  if (args.strategy !== 'seadrop-v1-public') throw new Error('ETHEREUM_CHAIN_APPROVAL_SCOPE_INVALID');
   const checkedAt = args.now.toISOString();
   return {
-    id: `chain-evidence-ethereum-${args.sourceBlock.toString()}`,
+    id: `chain-evidence-ethereum-${args.sourceBlock.toString()}-${randomUUID()}`,
     chainId: 1,
     status: 'pending',
     executionEnabled: false,
@@ -133,21 +138,40 @@ export function buildEthereumChainEvidence(args: { now: Date; sourceBlock: bigin
     reconciliationPassed: true,
     finalityPassed: true,
     endpointIdentity: 'ETHEREUM_RPC_REFERENCE',
-    strategyVersion: `${args.strategy}-1`,
+    strategyVersion: args.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : `${args.strategy}-1`,
     checkedAt,
-    expiresAt: new Date(args.now.getTime() + PERSONAL_LIVE_CHAIN_EVIDENCE_MS).toISOString(),
+    expiresAt: args.validity === '7-days' ? new Date(args.now.getTime() + PERSONAL_LIVE_CHAIN_EVIDENCE_MS).toISOString() : PERMANENT_ENABLEMENT_EXPIRY,
     sourceBlock: args.sourceBlock,
     sourceBlockHash: args.sourceBlockHash,
   };
 }
 
 export async function acceptEthereumChainEvidence(store: BackendStore, record: ChainEvidenceRecord, phrase: string, now: () => Date = () => new Date()): Promise<void> {
+  const acceptedNow = now();
+  const checked = Date.parse(record.checkedAt);
+  const validLifetime = record.expiresAt === PERMANENT_ENABLEMENT_EXPIRY || (Number.isFinite(checked) && record.expiresAt === new Date(checked + PERSONAL_LIVE_CHAIN_EVIDENCE_MS).toISOString());
+  if (!validLifetime || !Number.isFinite(checked) || checked > acceptedNow.getTime() || Date.parse(record.expiresAt) <= acceptedNow.getTime() || record.chainId !== 1 || (!['seadrop-v1-public-1', SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE].includes(record.strategyVersion)) || phrase !== ethereumChainEvidencePhrase(record.expiresAt === PERMANENT_ENABLEMENT_EXPIRY ? 'permanent' : '7-days', record.strategyVersion === SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE)) throw new Error('ETHEREUM_CHAIN_APPROVAL_SCOPE_INVALID');
   // A fresh database has no chain profile yet, and evidence can only be attached to one.
   (store as { ensureEthereumChainProfile?: () => unknown }).ensureEthereumChainProfile?.();
   const service = new EvidenceService(store, now, ownerTypedAuthority(phrase));
   await service.recordChainEvidence(record);
   const approval: EvidenceApproval = { verifierId: 'owner-cli', proof: ownerTypedProof(phrase, record.id), acceptedAt: now().toISOString() };
   await service.acceptChainEvidence(record.id, approval);
+}
+
+/** Append a new owner decision; old evidence stays in the audit history and cannot regain authority. */
+export async function revokeEthereumChainEvidence(store: BackendStore, expectedId: string, phrase: string, now: () => Date = () => new Date()): Promise<void> {
+  if (phrase !== ethereumChainEvidenceRevokePhrase(expectedId)) throw new Error('CONFIRMATION_PHRASE_MISMATCH');
+  await store.transaction(state => {
+    const active = [...state.chainEvidence].reverse().find(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
+    if (!active || active.id !== expectedId) throw new Error('ETHEREUM_CHAIN_EVIDENCE_CHANGED');
+    const at = now().toISOString();
+    if (at < active.checkedAt) throw new Error('ETHEREUM_CHAIN_REVOCATION_CLOCK_INVALID');
+    const id = `chain-evidence-ethereum-revoked-${randomUUID()}`;
+    for (const item of state.chainEvidence) if (item.chainId === 1) item.executionEnabled = false;
+    state.chainEvidence.push({ ...active, id, status: 'rejected', executionEnabled: false, checkedAt: at, expiresAt: PERMANENT_ENABLEMENT_EXPIRY, acceptedAt: at, acceptedBy: 'owner-cli', approvalProof: ownerTypedProof(phrase, id) });
+    state.events.push({ id: `evt_${randomUUID()}`, type: 'ethereum_chain_evidence_revoked', at, data: { evidenceId: expectedId, revocationId: id } });
+  });
 }
 
 // ── per-wallet simulation evidence ────────────────────────────────────────────────────────────────────
