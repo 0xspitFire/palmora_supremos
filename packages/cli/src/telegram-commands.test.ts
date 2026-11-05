@@ -760,6 +760,47 @@ describe('guided flows through the router (D-069)', () => {
     expect(buttonsOf(t).map((item) => item.text)).toEqual(['Accept This Change', 'Cancel']);
   });
 
+  it('watcher alert callbacks open a fresh review for supported numeric chains without accepting anything', async () => {
+    const wallet = '0x1111111111111111111111111111111111111111';
+    const t = setup();
+    await t.send(t.tap(OWNER, `/watchaccept 1 ${wallet}`));
+    expect(t.lastTo(OWNER)).toContain('unlocked session');
+    expect(t.calls).toEqual([]);
+    await unlock(t);
+    for (const chain of ['1', '8453', '4663']) {
+      await t.send(t.tap(OWNER, `/watchaccept ${chain} ${wallet}`));
+      expect(t.lastTo(OWNER)).toContain('now has 3 sent transactions');
+      expect(buttonsOf(t).map((button) => button.text)).toEqual(['Accept This Change', 'Cancel']);
+      expect(t.calls.some((call) => /watchAccept|releaseNow|fireNow/.test(call))).toBe(false);
+    }
+    const confirm = buttonsOf(t).find((button) => button.text === 'Accept This Change')!;
+    await t.send(t.tap(OWNER, confirm.callback_data));
+    expect(t.calls.at(-1)).toBe(`watchAcceptNow(4663|${wallet}|ACCEPT 3)`);
+  });
+
+  it('watcher alert review callbacks refuse viewers and ignore unsafe callback shapes or chat identities', async () => {
+    const wallet = '0x1111111111111111111111111111111111111111';
+    const t = setup();
+    await admitViewer(t);
+    await unlock(t);
+    await t.send(t.tap(VIEWER, `/watchaccept 1 ${wallet}`));
+    expect(t.lastTo(VIEWER)).toContain('not available to you');
+    const before = t.sent.length;
+    for (const data of [`/watchaccept 10 ${wallet}`, `/watchaccept ethereum ${wallet}`, `/watchaccept 1 0x${'0'.repeat(40)}`, `/watchaccept 1 ${wallet} ACCEPT 3`, `/watchaccept 1 ${wallet} `, `/watchaccept 1 ${wallet.slice(0, -1)}`, `/watchaccept 1 ${wallet}\n`]) {
+      await t.send(t.tap(OWNER, data));
+    }
+    for (const type of ['group', 'supergroup']) {
+      const update = t.tap(OWNER, `/watchaccept 1 ${wallet}`);
+      update.callback_query!.message!.chat.type = type;
+      await t.send(update);
+    }
+    const mismatched = t.tap(OWNER, `/watchaccept 1 ${wallet}`);
+    mismatched.callback_query!.message!.chat.id = VIEWER;
+    await t.send(mismatched);
+    expect(t.sent).toHaveLength(before);
+    expect(t.calls.some((call) => /watchAccept|releaseNow|fireNow/.test(call))).toBe(false);
+  });
+
   it('across every guided flow no message shows a phrase or a command with arguments to copy, and the campaign id stays in view (D-070)', async () => {
     const t = setup();
     await unlock(t);

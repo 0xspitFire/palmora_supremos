@@ -74,6 +74,17 @@ describe('system message cards (T-030)', () => {
     expect(lenient?.eventAt).toBeUndefined();
   });
 
+  it('preserves only a supported chain and nonzero plain wallet address for guided review', () => {
+    const address = `0x${'aB'.repeat(20)}`;
+    for (const chainId of [1, 8453, 4663] as const) {
+      const built = card({ watchReview: { chainId, address } });
+      expect(parseSystemCard(JSON.parse(JSON.stringify(built)))?.watchReview).toEqual({ chainId, address: address.toLowerCase() });
+    }
+    for (const watchReview of [null, {}, { chainId: '1', address }, { chainId: 10, address }, { chainId: 1, address: `0x${'0'.repeat(40)}` }, { chainId: 1, address: `${address} extra` }, { chainId: 1, address: 1 }]) {
+      expect(parseSystemCard({ ...card(), watchReview })?.watchReview).toBeUndefined();
+    }
+  });
+
   it('keeps both forms inside their budgets however much text arrives, and never cuts inside a tag', () => {
     const lines = Array.from({ length: 14 }, (_, index) => ({ label: `Line ${index}`, value: 'x'.repeat(390), strong: true }));
     const { html, plain } = renderSystemCard(card({ lines, steps: Array.from({ length: 6 }, () => 'y'.repeat(290)) }), { now: NOW });

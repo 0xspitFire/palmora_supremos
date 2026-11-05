@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DurableStore } from '@mint-bot/backend';
+import * as treasuryVerifier from './treasury-return-verifier.js';
 import { alertSinkFor, createChainReader, parseFleetWatchEnv, startFleetWatcher, watcherRpcSecretName } from './fleet-watch-service.js';
 
 const W1 = '0x1111111111111111111111111111111111111111';
@@ -47,6 +48,21 @@ describe('fleet watcher configuration (D-059)', () => {
     expect(() => parseFleetWatchEnv(env({ MINT_BOT_TREASURY_ADDRESS: 'nope' }))).toThrow('FLEET_WATCH_TREASURY_INVALID');
   });
 
+  it('enables only explicit trusted-return configuration and reuses approved destinations across integrated chains', () => {
+    expect(parseFleetWatchEnv(env())!.trustedTreasuryReturns).toBeUndefined();
+    const config = parseFleetWatchEnv(env({
+      MINT_BOT_WATCH_TRUSTED_TREASURY_RETURNS: 'true',
+      MINT_BOT_WATCH_TREASURY_DESTINATIONS: JSON.stringify([W1, TREASURY.toLowerCase()]),
+      MINT_BOT_WATCH_FLEET: JSON.stringify([1, 8453, 4663].map(chainId => ({ chainId, addresses: [W2] }))),
+    }))!;
+    expect(config.trustedTreasuryReturns).toEqual([TREASURY.toLowerCase(), W1]);
+    expect(config.targets.map(target => target.chainId)).toEqual([1, 8453, 4663]);
+    expect(() => parseFleetWatchEnv(env({ MINT_BOT_WATCH_TRUSTED_TREASURY_RETURNS: 'yes' }))).toThrow('FLEET_WATCH_TREASURY_RETURNS_INVALID');
+    for (const value of ['{}', 'invalid', '["bad"]', '["0x0000000000000000000000000000000000000000"]']) {
+      expect(() => parseFleetWatchEnv(env({ MINT_BOT_WATCH_TRUSTED_TREASURY_RETURNS: 'true', MINT_BOT_WATCH_TREASURY_DESTINATIONS: value }))).toThrow('FLEET_WATCH_TREASURY_DESTINATIONS_INVALID');
+    }
+  });
+
   it('names the provider secret per chain without ever holding the address itself', () => {
     expect(watcherRpcSecretName(8453)).toBe('WATCHER_RPC_8453');
   });
@@ -56,6 +72,7 @@ describe('chain reader', () => {
   it('reads the transaction count and the balance at one pinned block', async () => {
     const calls: string[] = [];
     const client = {
+      getChainId: async () => 1,
       getBlockNumber: async () => { calls.push('block'); return 123n; },
       getTransactionCount: async (args: { blockNumber: bigint }) => { calls.push(`nonce@${args.blockNumber}`); return 7; },
       getBalance: async (args: { blockNumber: bigint }) => { calls.push(`balance@${args.blockNumber}`); return 9n; },
@@ -67,11 +84,33 @@ describe('chain reader', () => {
   });
 });
 
+describe('chain identity isolation', () => {
+  it.each([1, 8453, 4663])('rejects a provider from another chain for chain %s without adopting its nonce', async chainId => {
+    const getTransactionCount = vi.fn(async () => 999);
+    const read = createChainReader(new Map([[chainId, {
+      getChainId: async () => chainId === 1 ? 8453 : 1,
+      getBlockNumber: async () => 123n,
+      getTransactionCount,
+      getBalance: async () => 0n,
+    }]]));
+    await expect(read({ chainId, address: W1 })).rejects.toThrow('FLEET_WATCH_RPC_CHAIN_MISMATCH');
+    expect(getTransactionCount).not.toHaveBeenCalled();
+  });
+
+  it('refuses a chain identity that changes during the pinned read', async () => {
+    const read = createChainReader(new Map([[1, {
+      getChainId: vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(8453),
+      getBlockNumber: async () => 123n, getTransactionCount: async () => 999, getBalance: async () => 0n,
+    }]]));
+    await expect(read({ chainId: 1, address: W1 })).rejects.toThrow('FLEET_WATCH_RPC_CHAIN_MISMATCH');
+  });
+});
+
 describe('startFleetWatcher', () => {
   beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-  const client = (state: { nonce: number; balance: bigint }) => ({ getBlockNumber: async () => 1n, getTransactionCount: async () => state.nonce, getBalance: async () => state.balance });
+  const client = (state: { nonce: number; balance: bigint }) => ({ getChainId: async () => 1, getBlockNumber: async () => 1n, getTransactionCount: async () => state.nonce, getBalance: async () => state.balance });
 
   it('fails to start without a provider address for a watched chain', () => {
     const config = parseFleetWatchEnv(env())!;
@@ -107,12 +146,53 @@ describe('startFleetWatcher', () => {
   it('tells the owner when the watcher keeps failing to run, instead of only logging it', async () => {
     const config = parseFleetWatchEnv(env())!;
     const alerts: string[] = [];
-    const broken = { getBlockNumber: async () => { throw new Error('rpc'); }, getTransactionCount: async () => 0, getBalance: async () => 0n };
+    const broken = { getChainId: async () => 1, getBlockNumber: async () => { throw new Error('rpc'); }, getTransactionCount: async () => 0, getBalance: async () => 0n };
     const running = startFleetWatcher({ store: new Store(), config, alerts: { intelligence: async (input) => { alerts.push(input.dedupe); return true; } }, kill: async () => undefined, rpcUrls: () => ['http://unused'], clients: new Map([[1, broken]]), intervalMs: 30_000 });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(40 * 60_000);
     running.stop();
     expect(alerts.some((dedupe) => dedupe.includes('watcher_blind'))).toBe(true);
+  });
+
+  it('retries the complete pinned reading on the next endpoint after rejecting the first endpoint chain', async () => {
+    const calls: Array<{ host: string; method: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      const request = JSON.parse(init.body as string) as { id: number; method: string };
+      const host = new URL(url).hostname;
+      calls.push({ host, method: request.method });
+      const result = request.method === 'eth_chainId' ? host === 'wrong.invalid' ? '0x2105' : '0x1'
+        : request.method === 'eth_blockNumber' ? '0x7b' : request.method === 'eth_getTransactionCount' ? '0x5' : '0x12c';
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+    const store = new Store();
+    const running = startFleetWatcher({ store, config: parseFleetWatchEnv(env())!, alerts: { intelligence: async () => true }, kill: async () => undefined,
+      rpcUrls: () => ['https://wrong.invalid', 'https://correct.invalid'] });
+    await vi.advanceTimersByTimeAsync(0);
+    running.stop();
+    expect(store.snapshot().events.filter(event => event.type === 'fleet_watch_baseline')).toHaveLength(2);
+    expect(calls.filter(call => call.host === 'wrong.invalid').every(call => call.method === 'eth_chainId')).toBe(true);
+    expect(calls.some(call => call.host === 'correct.invalid' && call.method === 'eth_getTransactionCount')).toBe(true);
+  });
+
+  it.each([
+    { urls: ['https://rpc.example/a', 'https://rpc.example:443/b'], expected: 1 },
+    { urls: ['http://insecure.example', 'https://secure.example'], expected: 1 },
+    { urls: ['https://rpc.example/a', 'https://RPC.example:8443/b', 'https://independent.example'], expected: 2 },
+  ])('uses at most two distinct RPC hosts for treasury proof: $expected', async ({ urls, expected }) => {
+    const verify = vi.spyOn(treasuryVerifier, 'verifyTrustedTreasuryReturns').mockResolvedValue(undefined);
+    const config = parseFleetWatchEnv(env({ MINT_BOT_WATCH_TRUSTED_TREASURY_RETURNS: 'true', MINT_BOT_WATCH_TREASURY_DESTINATIONS: JSON.stringify([W2]) }))!;
+    const state = { nonce: 5, balance: 300n };
+    const running = startFleetWatcher({ store: new Store(), config, alerts: { intelligence: async () => true }, kill: async () => undefined,
+      clients: new Map([[1, client(state)]]), rpcUrls: () => urls });
+    await vi.advanceTimersByTimeAsync(0);
+    state.nonce++;
+    await running.watcher.tick(true);
+    running.stop();
+    expect(verify).toHaveBeenCalled();
+    const [input, clients] = verify.mock.calls[0]!;
+    expect(input.approvedRecipients).toEqual([TREASURY.toLowerCase(), W2]);
+    expect(clients).toHaveLength(expected);
+    expect(input.feeAllowanceWei).toBe(config.ceilings[1]!.walletMaxWei);
   });
 
   it('maps the watcher messages onto the intelligence alert channel with their dedupe identity', async () => {

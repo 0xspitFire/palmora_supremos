@@ -281,8 +281,11 @@ export class TelegramCommandRouter {
       const query = update.callback_query;
       const message = query.message;
       if (!message || message.chat.type !== 'private' || message.chat.id !== query.from.id || query.from.is_bot || typeof query.data !== 'string') return undefined;
-      // Only the bot's own buttons: a menu command without arguments, or a kill or fire confirmation.
-      if (!/^\/(?:tap_kill_[0-9a-f]{18}|tap_fire_[0-9a-f]{18}|f_[0-9a-f]{8}_[0-9][a-z0-9]{1,12}|[a-z]{2,16})$/.test(query.data)) return undefined;
+      // Only the bot's own buttons. A watcher alert may open a fresh guided review with exactly two arguments;
+      // it must never carry the acceptance phrase or bypass the owner/session/confirmation checks below.
+      const watchReview = /^\/watchaccept (?:1|8453|4663) (0x[0-9a-fA-F]{40})$/.exec(query.data);
+      const validWatchReview = watchReview !== null && watchReview[0] === query.data && !/^0x0{40}$/i.test(watchReview[1]!);
+      if (!validWatchReview && !/^\/(?:tap_kill_[0-9a-f]{18}|tap_fire_[0-9a-f]{18}|f_[0-9a-f]{8}_[0-9][a-z0-9]{1,12}|[a-z]{2,16})$/.test(query.data)) return undefined;
       // A tap counts from the moment it was made, not when its message was sent.
       return { userId: String(query.from.id), chatId: message.chat.id, text: query.data, callbackId: query.id, sentAt: this.now().getTime() };
     }
