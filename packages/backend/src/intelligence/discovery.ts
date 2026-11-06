@@ -37,6 +37,10 @@ export interface DiscoveryOptions {
 export interface DiscoveryTickResult {
   status: 'ok' | 'unavailable' | 'idle';
   reason?: string;
+  /** Settled head captured at tick start; not transaction finality or mint permission. */
+  headBlock?: string;
+  /** True only after processing through that head; skipped cursor movement is not scanned coverage. */
+  caughtUp?: boolean;
   fromBlock?: string;
   toBlock?: string;
   mintsObserved: number;
@@ -102,6 +106,8 @@ export class DiscoveryService {
     if (!this.restored) { this.restore(); this.restored = true; }
     const head = await this.port.safeHead();
     if (head === null) return { ...result, status: 'unavailable', reason: 'HEAD_UNAVAILABLE' };
+    result.headBlock = head.toString();
+    result.caughtUp = false;
     const chainId = this.port.chainId;
     // One consistent, read-only watch-list view for all scoring and labels in this tick.
     const watchedRows = this.repo.observedAddresses(chainId);
@@ -178,7 +184,7 @@ export class DiscoveryService {
       result.calendarWritten += await this.emitCalendar(result, true, head);
     }
     this.prune();
-    return { ...result, status: 'ok' };
+    return { ...result, status: 'ok', caughtUp: from > head };
   }
 
   /** Rebuilds recent state from the last opportunity and calendar events, so a restart keeps convergence and refresh timing. */

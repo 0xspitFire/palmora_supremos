@@ -55,6 +55,7 @@ import { allowlistPreparationGroups, prepareReplication } from './replication-pr
 import { simulateAllowlistCampaign } from './allowlist-execution.js';
 import { getStrategy, readTurnkeyApprovedPolicyRecords } from '@mint-bot/engine';
 import { startOpsEvidenceReminders } from './ops-evidence-reminders.js';
+import { startChainDiscovery } from './chain-discovery-service.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -201,7 +202,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   await orchestrator.start();
   let replicationAutomation: ReturnType<typeof createReplicationAutomation> | undefined;
   let replicationTimer: ReturnType<typeof setInterval> | undefined;
-  const replicationDiscoveryTimers: Array<ReturnType<typeof setInterval>> = [];
+  const replicationDiscoveryTimers: Array<{ stop(): void }> = [];
   let intelligence: { stop(): void } | undefined;
   if (config.intelligenceEnabled && config.secretStorePath) {
     const secrets = await loadHostSecretStore(config.secretStorePath);
@@ -433,14 +434,10 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       for (const chainId of [8453, 4663] as const) {
         if (!runtime.store.snapshot().chainEvidence.some((e) => e.chainId === chainId && e.status === 'accepted' && e.executionEnabled)) continue;
         const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints], chainId), { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts });
-        let scanning = false;
-        const timer = setInterval(() => {
-          if (scanning) return;
-          scanning = true;
-          void discovery.tick().catch(() => logger.warn({ event: 'replication_discovery_unavailable', chainId }, 'replication discovery unavailable')).finally(() => { scanning = false; });
-        }, config.discoveryIntervalMs);
-        timer.unref();
-        replicationDiscoveryTimers.push(timer);
+        replicationDiscoveryTimers.push(startChainDiscovery({
+          chainId, intervalMs: config.discoveryIntervalMs, tick: () => discovery.tick(), logger,
+          notify: (text, dedupe) => intelligenceAlerts.intelligence({ kind: 'status', text, dedupe, priority: 'immediate' }),
+        }));
       }
       replicationTimer = setInterval(() => { void replicationAutomation?.tick().catch(() => logger.warn({ event: 'replication_tick_failed' }, 'replication pass failed')); }, 2_000);
       replicationTimer.unref();
@@ -562,7 +559,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     dependencyFlags?.stop();
     fireScheduler?.stop();
     if (replicationTimer) clearInterval(replicationTimer);
-    for (const timer of replicationDiscoveryTimers) clearInterval(timer);
+    for (const timer of replicationDiscoveryTimers) timer.stop();
     telegramCommands?.stop();
     gasAlertChecker?.stop();
     opsEvidenceReminders?.stop();
