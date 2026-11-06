@@ -20,6 +20,8 @@ import type {
 
 export type ChainFactKind = 'head' | 'logs' | 'drop' | 'wallet' | 'receipt' | 'finality' | 'reorg';
 export type ChainFactAvailability = 'available' | 'partial' | 'unavailable';
+/** Fixed diagnostic categories: nested provider error text never leaves the classifier. */
+export type LogReadFailureKind = 'AUTH' | 'RATE_LIMITED' | 'TIMEOUT' | 'RANGE_LIMIT' | 'UNKNOWN';
 export type FreshnessStatus = 'fresh' | 'stale' | 'unknown';
 
 export type ChainFactErrorCode =
@@ -67,6 +69,7 @@ export interface ChainFact<T> {
   readonly errorCode?: ChainFactErrorCode;
   /** Short provider reason with URLs and long hex removed; diagnostic only, never a secret. */
   readonly errorDetail?: string;
+  readonly failureKind?: LogReadFailureKind;
 }
 
 export interface ChainHead {
@@ -377,7 +380,7 @@ export class ChainFactsReader {
       const value = logs.map(normalizeLog);
       return this.fact('logs', value, observedAt, this.freshness.logsMs, sourceRecord('logs', toBlock), 'chain_observation');
     } catch (error) {
-      return { ...this.unavailable<readonly ChainLog[]>('logs', 'LOGS_UNAVAILABLE', observedAt), errorDetail: providerErrorDetail(error) };
+      return { ...this.unavailable<readonly ChainLog[]>('logs', 'LOGS_UNAVAILABLE', observedAt), errorDetail: providerErrorDetail(error), failureKind: classifyLogReadFailure(error) };
     }
   }
 
@@ -631,6 +634,37 @@ export class ChainFactsReader {
     if (!(value instanceof Date) || Number.isNaN(value.getTime())) throw new Error('INVALID_CHAIN_FACT_TIME');
     return value;
   }
+}
+
+/**
+ * viem's public shortMessage is often generic while the useful rejection is in
+ * details or a nested RPC cause. Inspect a bounded cause chain in memory, expose
+ * only a fixed category, and never turn auth/rate/timeout failures into retries
+ * merely because another layer also mentions a block-range limit.
+ */
+export function classifyLogReadFailure(error: unknown): LogReadFailureKind {
+  const seen = new Set<object>();
+  const text: string[] = [];
+  const statuses: number[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current !== null && typeof current === 'object' && !seen.has(current); depth += 1) {
+    seen.add(current);
+    try {
+      const row = current as { status?: unknown; name?: unknown; shortMessage?: unknown; details?: unknown; message?: unknown; cause?: unknown };
+      if (typeof row.status === 'number') statuses.push(row.status);
+      for (const value of [row.name, row.shortMessage, row.details, row.message]) {
+        if (typeof value === 'string') text.push(value.slice(0, 512).split('\n')[0]!);
+      }
+      current = row.cause;
+    } catch { break; }
+  }
+  const detail = text.join('\n');
+  if (statuses.some(status => status === 401 || status === 403) || /\b(?:unauthori[sz]ed|forbidden|authentication|invalid api key|invalid token|access denied)\b/i.test(detail)) return 'AUTH';
+  if (statuses.includes(429) || /HTTP 429|rate.?limit|too many requests|throttl|exceeded.*(?:capacity|quota|compute units)/i.test(detail)) return 'RATE_LIMITED';
+  if (/timeout|timed?\s*out|deadline exceeded/i.test(detail)) return 'TIMEOUT';
+  if (/\branges?\b.{0,80}[\d,]+\s+blocks?\b.{0,40}\b(?:not supported|unsupported)\b|\bunsupported\b.{0,40}\branges?\b.{0,80}[\d,]+\s+blocks?\b/i.test(detail)) return 'RANGE_LIMIT';
+  if (/blocks?[ -]?range.{0,100}(?:too (?:large|wide)|exceed|limit|maximum)|(?:exceed|maximum|max|smaller|reduce|limited|up to).{0,100}blocks?[ -]?range|query returned more than [\d,]+|(?:log )?response size exceed|response (?:is )?too large|too many (?:results|logs)|(?:please limit|limited to).{0,80}[\d,]+ blocks/i.test(detail)) return 'RANGE_LIMIT';
+  return 'UNKNOWN';
 }
 
 /** A short, secret-free description of a provider error: first line, URLs and long hex removed, capped length. */

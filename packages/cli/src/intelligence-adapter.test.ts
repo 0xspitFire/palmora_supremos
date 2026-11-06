@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPublicClient, custom, encodeAbiParameters, HttpRequestError, RpcRequestError, TimeoutError, type PublicClient } from 'viem';
+import { createPublicClient, custom, encodeAbiParameters, HttpRequestError, InvalidParamsRpcError, RpcRequestError, TimeoutError, type PublicClient } from 'viem';
 import { answeredWithoutName, EngineIntelligencePort } from './intelligence-adapter.js';
 
 /** A fake node that rejects getLogs above a block-range limit, like many providers. */
@@ -128,5 +128,58 @@ describe('adaptive scan range only responds to explicit range limits', () => {
     expect((await port.scan(1000n, 5000n, [])).ok).toBe(true);
     expect(calls).toHaveLength(5);
     expect(port.currentRange()).toBe(6n);
+  });
+});
+
+
+describe('adaptive log ranges with real viem error wrappers', () => {
+  const wrapped = (message: string) => new InvalidParamsRpcError(new RpcRequestError({ body: {}, url: 'https://node.invalid/private-placeholder', error: { code: -32602, message } }));
+
+  it('recovers from a real wrapped range rejection and reports the contiguous successful slice', async () => {
+    const calls: Array<[bigint, bigint]> = [];
+    const client = { ...node(1000n, calls), getLogs: async (request: { fromBlock: bigint; toBlock: bigint }) => {
+      calls.push([request.fromBlock, request.toBlock]);
+      if (request.toBlock - request.fromBlock + 1n > 100n) throw wrapped('eth_getLogs is limited to 100 blocks');
+      return [];
+    } } as unknown as PublicClient;
+    const port = new EngineIntelligencePort(client, { initialRange: 200n, maxRange: 500n, chainId: 4663 });
+    expect(await port.scan(1000n, 2000n, [])).toMatchObject({ ok: true, scan: { fromBlock: 1000n, toBlock: 1099n } });
+    expect(calls).toEqual([[1000n, 1199n], [1000n, 1099n]]);
+    expect(port.currentRange()).toBe(100n);
+  });
+
+  it.each(['Range of 10000 blocks is not supported on this chain', 'Ranges over 10000 blocks are not supported by this node'])('recovers from numeric unsupported-range RPC code 35: %s', async problem => {
+    const calls: Array<[bigint, bigint]> = [];
+    const reject = (message: string) => new RpcRequestError({ body: {}, url: 'https://node.invalid/private-placeholder', error: { code: 35, message } });
+    const client = { ...node(1000n, calls), getLogs: async (request: { fromBlock: bigint; toBlock: bigint }) => {
+      calls.push([request.fromBlock, request.toBlock]);
+      if (request.toBlock - request.fromBlock + 1n > 100n) throw reject(problem);
+      return [];
+    } } as unknown as PublicClient;
+    const port = new EngineIntelligencePort(client, { initialRange: 500n, chainId: 4663 });
+    expect(await port.scan(1000n, 2000n, [])).toMatchObject({ ok: true, scan: { fromBlock: 1000n, toBlock: 1061n } });
+    expect(calls.map(([from, to]) => to - from + 1n)).toEqual([500n, 250n, 125n, 62n]);
+    const unknown = new EngineIntelligencePort({ ...client, getLogs: async () => { throw reject('Unsupported request'); } } as unknown as PublicClient, { initialRange: 500n });
+    expect((await unknown.scan(1000n, 2000n, [])).ok).toBe(false);
+    expect(unknown.currentRange()).toBe(500n);
+  });
+
+  it.each([
+    ['rate limit', () => new HttpRequestError({ url: 'https://node.invalid', status: 429, cause: wrapped('block range is too large') })],
+    ['auth', () => new HttpRequestError({ url: 'https://node.invalid', status: 401, cause: wrapped('block range is too large') })],
+    ['timeout', () => wrapped('request timed out checking block range maximum')],
+    ['unknown parameters', () => wrapped('Invalid parameters')],
+  ])('does not shrink or multiply requests for wrapped %s errors', async (_name, error) => {
+    const calls: Array<[bigint, bigint]> = [];
+    const client = { ...node(1000n, calls), getLogs: async (request: { fromBlock: bigint; toBlock: bigint }) => {
+      calls.push([request.fromBlock, request.toBlock]); throw error();
+    } } as unknown as PublicClient;
+    const port = new EngineIntelligencePort(client, { initialRange: 200n, chainId: 4663 });
+    const result = await port.scan(1000n, 2000n, []);
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(port.currentRange()).toBe(200n);
+    expect(JSON.stringify(result)).not.toContain('private-placeholder');
+    expect(JSON.stringify(result)).not.toContain('node.invalid');
   });
 });

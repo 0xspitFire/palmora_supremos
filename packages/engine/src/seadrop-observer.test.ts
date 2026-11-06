@@ -128,3 +128,14 @@ describe('SeaDropObserver', () => {
     expect(() => new SeaDropObserver(new FixedSource(1n, []), { maxRange: 0n })).toThrow('SEADROP_OBSERVER_OPTIONS_INVALID');
   });
 });
+
+
+describe('SeaDrop scan failure category', () => {
+  it('propagates a fixed log-failure category without losing the ordinary diagnostic', async () => {
+    const source: LogSource = {
+      readHead: async () => fact({ number: 200n }),
+      readLogs: async () => ({ ...fact<readonly ChainLog[]>(null), failureKind: 'RANGE_LIMIT', errorDetail: 'RPC Request failed.' }),
+    };
+    expect(await new SeaDropObserver(source).scan(1n, 100n)).toEqual({ ok: false, reason: 'LOGS_UNAVAILABLE', failureKind: 'RANGE_LIMIT', detail: 'RPC Request failed.' });
+  });
+});

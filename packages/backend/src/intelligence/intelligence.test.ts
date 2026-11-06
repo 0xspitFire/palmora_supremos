@@ -668,6 +668,30 @@ describe('discovery jumps ahead when it is too far behind (T-034)', () => {
     const { port, result } = await tickWith(4_000n, 5_000n, { maxRange: 10n });
     expect(result.skipped).toBeUndefined();
     expect(port.scans).toHaveLength(8);
+    expect(result).toMatchObject({ headBlock: '5000', caughtUp: false });
+  });
+
+  it('reports the captured head as caught up only after all its blocks were processed', async () => {
+    const { result } = await tickWith(4_999n, 5_000n);
+    expect(result).toMatchObject({ status: 'ok', headBlock: '5000', toBlock: '5000', caughtUp: true });
+  });
+});
+
+describe('discovery coverage diagnostics', () => {
+  it('does not report jump-only cursor advancement as successful coverage after a failed scan', async () => {
+    const t = setup();
+    t.repo.cursors.set('1:seadrop-v1', 100n);
+    t.port.head = 5_000n;
+    t.port.failScan = true;
+    const failed = await t.discovery.tick();
+    expect(failed).toMatchObject({ status: 'unavailable', headBlock: '5000', caughtUp: false });
+    expect(failed.toBlock).toBeUndefined();
+    expect(t.repo.cursor(1, 'seadrop-v1')).toBe(4_699n);
+    expect(events(t.store, 'discovery_skipped')).toHaveLength(1);
+    t.port.failScan = false;
+    const recovered = await t.discovery.tick();
+    expect(recovered).toMatchObject({ status: 'ok', fromBlock: '4700', toBlock: '5000', caughtUp: true });
+    expect(recovered.skipped).toBeUndefined();
   });
 });
 

@@ -6,7 +6,7 @@
  * watched addresses. It never signs, sends, or builds transactions.
  */
 import { decodeEventLog, encodeEventTopics, pad, parseAbi, zeroAddress, type Address, type Hex } from 'viem';
-import type { ChainFact, ChainHead, ChainLog, ChainLogFilter } from './chain-facts.js';
+import type { ChainFact, ChainHead, ChainLog, ChainLogFilter, LogReadFailureKind } from './chain-facts.js';
 import { SEADROP_V1_ADDRESS } from './chains.js';
 
 export const SEADROP_EVENTS_ABI = parseAbi([
@@ -44,7 +44,7 @@ export interface ScanResult {
   watchedUnavailable: boolean;
 }
 
-export type ScanOutcome = { ok: true; result: ScanResult } | { ok: false; reason: 'HEAD_UNAVAILABLE' | 'LOGS_UNAVAILABLE' | 'REORGED_LOG' | 'INVALID_RANGE'; detail?: string };
+export type ScanOutcome = { ok: true; result: ScanResult } | { ok: false; reason: 'HEAD_UNAVAILABLE' | 'LOGS_UNAVAILABLE' | 'REORGED_LOG' | 'INVALID_RANGE'; detail?: string; failureKind?: LogReadFailureKind };
 
 export interface SeaDropObserverOptions {
   seaDropAddress?: Address;
@@ -83,7 +83,7 @@ export class SeaDropObserver {
     if (fromBlock < 0n || toBlock < fromBlock) return { ok: false, reason: 'INVALID_RANGE' };
     const end = toBlock - fromBlock + 1n > this.maxRange ? fromBlock + this.maxRange - 1n : toBlock;
     const seaDropLogs = await this.source.readLogs({ address: this.seaDrop, fromBlock, toBlock: end, topics: [[SEADROP_MINT_TOPIC, PUBLIC_DROP_UPDATED_TOPIC]] });
-    if (seaDropLogs.availability === 'unavailable' || seaDropLogs.value === null) return { ok: false, reason: 'LOGS_UNAVAILABLE', ...(seaDropLogs.errorDetail ? { detail: seaDropLogs.errorDetail } : {}) };
+    if (seaDropLogs.availability === 'unavailable' || seaDropLogs.value === null) return { ok: false, reason: 'LOGS_UNAVAILABLE', ...(seaDropLogs.errorDetail ? { detail: seaDropLogs.errorDetail } : {}), ...(seaDropLogs.failureKind ? { failureKind: seaDropLogs.failureKind } : {}) };
     // Watched-wallet mints are best-effort evidence: providers often reject large address-less topic
     // queries, so they are asked in small chunks and a rejected chunk never fails the SeaDrop scan.
     const watchedLogs: ChainLog[] = [];

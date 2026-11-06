@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { Address, Hash, Hex, PublicClient } from 'viem';
+import { HttpRequestError, InvalidParamsRpcError, RpcRequestError, TimeoutError, type Address, type Hash, type Hex, type PublicClient } from 'viem';
 import {
   ChainFactsReader,
   appendReceiptObservation,
   classifyFreshness,
+  classifyLogReadFailure,
   detectReorg,
   type ChainFact,
   type ChainReceiptFact,
@@ -174,5 +175,51 @@ describe('pure reorg detector', () => {
     const nonCanonical = { ...canonical, value: { ...canonical.value!, canonical: false, status: 'reorged', finality: { ...canonical.value!.finality, canonical: false, settlementReached: false, ready: false, stage: 'unknown' } } } as unknown as ChainFact<ChainReceiptFact>;
     expect(detectReorg(canonical, nonCanonical, NOW)?.value?.newStage).toBe('unknown');
     expect(detectReorg(nonCanonical, canonical, NOW)).toBeNull();
+  });
+});
+
+
+describe('bounded nested log failure classification', () => {
+  const wrapped = (message: string) => new InvalidParamsRpcError(new RpcRequestError({ body: {}, url: 'https://node.invalid/private-placeholder', error: { code: -32602, message } }));
+
+  it('recognizes explicit range details behind generic real viem errors without publishing the details', async () => {
+    const error = wrapped('eth_getLogs is limited to 100 blocks');
+    expect(classifyLogReadFailure(error)).toBe('RANGE_LIMIT');
+    const reader = new ChainFactsReader(clientFixture({ getLogs: async () => { throw error; } }), { chainId: 4663, now: () => NOW });
+    const result = await reader.readLogs({ fromBlock: 1n, toBlock: 200n });
+    expect(result.failureKind).toBe('RANGE_LIMIT');
+    expect(result.errorDetail).toBe('Invalid parameters were provided to the RPC method.');
+    expect(JSON.stringify(result)).not.toContain('private-placeholder');
+    expect(JSON.stringify(result)).not.toContain('limited to 100');
+  });
+
+  it.each(['Range of 10000 blocks is not supported on this chain', 'Ranges over 10000 blocks are not supported by this node'])('recognizes numeric unsupported ranges behind RPC code 35: %s', message => {
+    const rejected = new RpcRequestError({ body: {}, url: 'https://node.invalid/private-placeholder', error: { code: 35, message } });
+    expect(classifyLogReadFailure(rejected)).toBe('RANGE_LIMIT');
+    expect(classifyLogReadFailure(new RpcRequestError({ body: {}, url: 'https://node.invalid', error: { code: 35, message: 'Unsupported request' } }))).toBe('UNKNOWN');
+    expect(classifyLogReadFailure(new Error('Range of 10000 blocks is supported'))).toBe('UNKNOWN');
+  });
+
+  it.each([
+    ['AUTH', new HttpRequestError({ url: 'https://node.invalid', status: 403, cause: wrapped('block range is too large') })],
+    ['RATE_LIMITED', new HttpRequestError({ url: 'https://node.invalid', status: 429, cause: wrapped('block range is too large') })],
+    ['TIMEOUT', new TimeoutError({ url: 'https://node.invalid', body: {} })],
+    ['TIMEOUT', wrapped('request timed out while checking block range maximum')],
+    ['AUTH', wrapped('Unauthorized request; block range is too large')],
+    ['RATE_LIMITED', wrapped('rate limit exceeded; block range is too large')],
+    ['UNKNOWN', wrapped('Invalid parameters')],
+  ])('prioritizes %s without guessing a range restriction', (kind, error) => {
+    expect(classifyLogReadFailure(error)).toBe(kind);
+  });
+
+  it('bounds cyclic and deeply nested causes and tolerates inaccessible fields', () => {
+    const cyclic: { cause?: unknown; message: string } = { message: 'unknown error' };
+    cyclic.cause = cyclic;
+    expect(classifyLogReadFailure(cyclic)).toBe('UNKNOWN');
+    let deep: unknown = new Error('block range is too large');
+    for (let i = 0; i < 10; i++) deep = { cause: deep };
+    expect(classifyLogReadFailure(deep)).toBe('UNKNOWN');
+    expect(classifyLogReadFailure({ get status() { throw new Error('inaccessible'); } })).toBe('UNKNOWN');
+    expect(classifyLogReadFailure(null)).toBe('UNKNOWN');
   });
 });

@@ -77,12 +77,12 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
     let outcome = await this.observer.scan(fromBlock, this.clamp(fromBlock, toBlock), addresses);
     // Shrink only for an explicit provider range/result-size limit. Timeouts,
     // auth errors and outages retain the range and wait for the next tick.
-    while (!outcome.ok && outcome.reason === 'LOGS_UNAVAILABLE' && !isRateLimit(outcome.detail) && isRangeLimit(outcome.detail) && this.range > 1n) {
+    while (!outcome.ok && outcome.reason === 'LOGS_UNAVAILABLE' && (outcome.failureKind === 'RANGE_LIMIT' || (outcome.failureKind === undefined && !isRateLimit(outcome.detail) && isRangeLimit(outcome.detail))) && this.range > 1n) {
       this.range = this.range / 2n > 1n ? this.range / 2n : 1n;
       this.successes = 0;
       outcome = await this.observer.scan(fromBlock, this.clamp(fromBlock, toBlock), addresses);
     }
-    if (!outcome.ok) return { ok: false, reason: isRateLimit(outcome.detail) ? `RATE_LIMITED: ${outcome.detail ?? ''}` : `${outcome.reason}${outcome.detail ? `: ${outcome.detail}` : ''}` };
+    if (!outcome.ok) return { ok: false, reason: (outcome.failureKind === 'RATE_LIMITED' || (outcome.failureKind === undefined && isRateLimit(outcome.detail))) ? `RATE_LIMITED: ${outcome.detail ?? ''}` : `${outcome.reason}${outcome.detail ? `: ${outcome.detail}` : ''}` };
     this.successes += 1;
     if (this.successes >= 10 && this.range < this.maxRange) { this.range = this.range * 2n < this.maxRange ? this.range * 2n : this.maxRange; this.successes = 0; }
     const { result } = outcome;
