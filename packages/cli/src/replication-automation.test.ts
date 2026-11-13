@@ -29,6 +29,46 @@ async function setup(price = 0n, score = 70) {
 }
 
 describe('discovery to bounded autonomous request', () => {
+  it('keeps an unfunded opportunity unclaimed so funding can arrive without a duplicate spending claim', async () => {
+    const s = await setup();
+    const fundedWallets = vi.fn(async () => [] as Address[]);
+    const automation = createReplicationAutomation({ ...s, fundedWallets });
+    await automation.tick();
+    expect(s.prepare).not.toHaveBeenCalled();
+    expect(s.store.snapshot().events.some(event => event.type === 'replication_claim')).toBe(false);
+    expect(s.store.snapshot().events.find(event => event.type === 'replication_decision')?.data.code).toBe('FUNDING_NOT_ARRIVED');
+    fundedWallets.mockResolvedValue([wallet]);
+    await createReplicationAutomation({ ...s, fundedWallets }).tick();
+    expect(s.fireAutonomous).toHaveBeenCalledOnce();
+    expect(s.store.snapshot().events.filter(event => event.type === 'replication_claim')).toHaveLength(1);
+  });
+  it('records sanitized pre-claim failures once and preserves restart dedupe without pretending a claim exists', async () => {
+    const s = await setup();
+    s.qualify.mockRejectedValue(new Error('SIGNED_MINT_OWN_SIGNATURE_AND_CUSTODY_REQUIRED'));
+    await s.automation.tick();
+    await s.automation.tick();
+    expect(s.qualify).toHaveBeenCalledOnce();
+    await createReplicationAutomation(s).tick();
+    expect(s.prepare).not.toHaveBeenCalled();
+    expect(s.fireAutonomous).not.toHaveBeenCalled();
+    const events = s.store.snapshot().events;
+    expect(events.filter(e => e.type === 'replication_claim')).toHaveLength(0);
+    expect(events.filter(e => e.type === 'replication_decision')).toHaveLength(1);
+    expect(s.notify).toHaveBeenCalledTimes(1);
+    expect(s.notify).toHaveBeenCalledWith(expect.stringContaining('wallet-specific server signature'), expect.any(String));
+  });
+  it('never persists provider error text and reports missing watched authority', async () => {
+    const s = await setup();
+    s.qualify.mockRejectedValue(new Error('https://private.invalid/credential calldata 0xabcdef'));
+    await s.automation.tick();
+    expect(JSON.stringify(s.store.snapshot().events)).not.toContain('private.invalid');
+    expect(JSON.stringify(s.notify.mock.calls)).not.toContain('credential');
+    expect(s.store.snapshot().events.find(e => e.type === 'replication_decision')?.data.code).toBe('REPLICATION_SOURCE_UNAVAILABLE');
+    const missing = await setup(); await missing.store.transaction(state => { state.events = state.events.filter(e => e.type !== 'watched_wallet_mint'); });
+    await missing.automation.tick();
+    expect(missing.qualify).not.toHaveBeenCalled();
+    expect(missing.store.snapshot().events.find(e => e.type === 'replication_decision')?.data.code).toBe('WATCHED_MINT_REQUIRED');
+  });
   it('runs a free score-70 self-mint through preparation and simulation once across repeats and restart', async () => {
     const s = await setup();
     await Promise.all([s.automation.tick(), s.automation.tick()]);

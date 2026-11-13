@@ -27,6 +27,8 @@ import { checkAllowlist, parsePublishedList } from './allowlist-check.js';
 import { probeRpc } from './rpc-probe.js';
 import { checkChainRpc, renderRpcHealth, viemReader, type ChainHealth } from './rpc-health.js';
 import { inventoryFleet, renderFleetInventory } from './turnkey-fleet-inventory.js';
+import { automationStatus } from './automation-status.js';
+import { buildCanonicalAnalyticsReport, readCanonicalAnalyticsActivities, CanonicalStoreBridge, type AnalyticsActivity, type AnalyticsFloorQuote } from '@mint-bot/backend';
 import { assertFleetChanged, chooseWalletSource, diffWallets, type WalletChange } from './turnkey-fleet-change.js';
 import { buildRotationReport } from './turnkey-rotation-report.js';
 import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
@@ -42,7 +44,7 @@ import { asKillStore, killReleaseAction, livePlanAction, livePrepareAction, reco
 import { newTotpSecret, totpUri } from './totp.js';
 import { assertLiveRunAllowed, assertWalletFileMatchesRun, describeLiveRunResult, previewLiveRun, quantityPlanForRun } from './live-run.js';
 import { createPersonalLiveProbes, liveReadinessPhrase, readinessMatchesChain } from './personal-live-cli.js';
-import { PersonalLiveReadinessService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, ethereumChainEvidenceRevokePhrase, revokeEthereumChainEvidence, PERMANENT_ENABLEMENT_EXPIRY, loadHostSecretStore, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
+import { PersonalLiveReadinessService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE, acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, ethereumChainEvidenceRevokePhrase, revokeEthereumChainEvidence, PERMANENT_ENABLEMENT_EXPIRY, loadHostSecretStore, TelegramNotifier, killReleasedCard, plainSystemText, telegramTestCard } from '@mint-bot/backend';
 import { assertFeePolicyApplyAllowed, describeFeePolicy, plainFeePolicyMessage } from './fee-policy.js';
 import { createPublicClient, defineChain, http as httpTransport } from 'viem';
 import { EngineIntelligencePort } from './intelligence-adapter.js';
@@ -370,6 +372,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .command('turnkey-robinhood-policy-prepare', 'Create an owner-only exact free-mint enforcement policy for chain 4663', (args) => args
     .option('policy-id', { type: 'string', default: 'pending-provider-policy', description: 'Exact provider policy ID returned by Turnkey; omit only to print the provider-policy template before creation' })
     .option('nft-contract', { type: 'string', description: 'Exact NFT contract for legacy exact mode; omit with --policy-family' })
+    .option('free-signed-family', { type: 'boolean', default: false, description: 'Prepare a separately owner-approved bounded free server-signed SeaDrop family' })
     .option('free-public-family', { type: 'boolean', default: false, description: 'Owner-approved reusable free public SeaDrop family for the selected chain' })
     .option('free-allowlist-family', { type: 'boolean', default: false, description: 'Prepare one reusable free SeaDrop allowlist family for the specified chain' })
     .option('chain-id', { type: 'number', default: 4663, choices: [1, 8453, 4663] as const })
@@ -383,19 +386,19 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('fleet-change', { type: 'string', description: 'D-078: a draft public wallet list (from turnkey-fleet-inventory --write) that replaces the installed bundle\'s wallets in this UNSIGNED proposal; the owner still creates the provider policy and signs offline' })
     .option('output', { type: 'string', description: 'Policy AST output under the secret root' }), async (args) => {
       try {
-        if ([args.freeAllowlistFamily, args.freePublicFamily, 'policyFamily' in args && args.policyFamily].filter(Boolean).length > 1) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-        if (!(args.freeAllowlistFamily || args.freePublicFamily) && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-        if ((!(args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily) && (typeof args.nftContract !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
+        if ([args.freeSignedFamily, args.freeAllowlistFamily, args.freePublicFamily, 'policyFamily' in args && args.policyFamily].filter(Boolean).length > 1) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if (!(args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily) && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if ((!(args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily) && (typeof args.nftContract !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
         const secretRoot = configuredSecretRoot(runtimeRoot);
         const config = await readTurnkeySecretConfig(secretRoot);
         const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
         const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
         const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
-        if (!(args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily) && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
-        const feeRecipient = args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
+        if (!(args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily) && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
+        const feeRecipient = args.policyFamily || args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
         const { artifact, change: walletChange } = await policyWalletArtifact(config, installedBundle, args);
         const wallets = walletReferencesFromArtifact(artifact);
-        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei, ...(args.policyFamily ? { policyFamily: true } : {}), ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freePublicFamily ? { publicFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}) });
+        const policy = robinhoodTurnkeyPolicy({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, policyId: args.policyId, wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei, ...(args.policyFamily ? { policyFamily: true } : {}), ...(args.freeSignedFamily ? { signedFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freePublicFamily ? { publicFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}) });
         const providerPolicy = turnkeyProviderPolicyExpressions(policy);
         const output = turnkeySecretPath(args.output, 'turnkey-robinhood-policy-ast.json');
         await writeTurnkeyJson(output, policy);
@@ -405,6 +408,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
   .command('turnkey-policy-renew', 'Preview or prepare an exact Robinhood policy renewal without granting policy-admin access to the service', (args) => args
     .option('policy-id', { type: 'string', description: 'Provider policy ID after the exact policy has been created; omit to reuse an exact existing policy or print its creation text' })
     .option('nft-contract', { type: 'string' })
+    .option('free-signed-family', { type: 'boolean', default: false, description: 'Prepare a separately owner-approved bounded free server-signed SeaDrop family' })
     .option('free-public-family', { type: 'boolean', default: false, description: 'Owner-approved reusable free public SeaDrop family for the selected chain' })
     .option('free-allowlist-family', { type: 'boolean', default: false })
     .option('chain-id', { type: 'number', default: 4663, choices: [1, 8453, 4663] as const })
@@ -421,17 +425,17 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .option('valid-hours', { type: 'number', default: 168 })
     .option('apply', { type: 'boolean', default: false, description: 'Write the AST, unsigned proposal and resumable state; preview is the default' }), async (args) => {
       try {
-        if ([args.freeAllowlistFamily, args.freePublicFamily, 'policyFamily' in args && args.policyFamily].filter(Boolean).length > 1) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-        if (!(args.freeAllowlistFamily || args.freePublicFamily) && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-        if ((!(args.freeAllowlistFamily || args.freePublicFamily) && (!args.nftContract || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
+        if ([args.freeSignedFamily, args.freeAllowlistFamily, args.freePublicFamily, 'policyFamily' in args && args.policyFamily].filter(Boolean).length > 1) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if (!(args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily) && args.chainId !== 4663) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+        if ((!(args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily) && (!args.nftContract || !/^0x[0-9a-fA-F]{40}$/.test(args.nftContract))) || (args.feeRecipient && !/^0x[0-9a-fA-F]{40}$/.test(args.feeRecipient))) throw new Error('TURNKEY_ROBINHOOD_POLICY_ADDRESS_INVALID');
         if (!Number.isSafeInteger(args.validHours) || args.validHours < 1 || args.validHours > 720) throw new Error('TURNKEY_POLICY_VALIDITY_INVALID');
         const secretRoot = configuredSecretRoot(runtimeRoot);
         const config = await readTurnkeySecretConfig(secretRoot);
         const publicKey = await readTurnkeyRuntimeText(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
         const installedBundle = await readConfiguredTurnkeyBundle(config, publicKey);
         const chain = await resolveChainConfigFromSecrets(args.chainId as 1 | 8453 | 4663, 'mainnet', secretRoot);
-        if (!(args.freeAllowlistFamily || args.freePublicFamily) && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
-        const feeRecipient = args.freeAllowlistFamily || args.freePublicFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
+        if (!(args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily) && !args.feeRecipient && !chain.rpcEndpoints[0]) throw new Error('TURNKEY_POLICY_FEE_RECIPIENT_RPC_REQUIRED');
+        const feeRecipient = args.freeAllowlistFamily || args.freePublicFamily || args.freeSignedFamily ? zeroAddress : args.feeRecipient as Address | undefined ?? await resolveSeaDropFeeRecipient(createPublicClient({ transport: httpTransport(chain.rpcEndpoints[0]!) }), args.nftContract as Address);
         const { artifact, change: walletChange } = await policyWalletArtifact(config, installedBundle, args);
         const wallets = walletReferencesFromArtifact(artifact);
         const client = createTurnkeyClient(config.organizationId, config.apiPublicKey, config.apiPrivateKey);
@@ -441,7 +445,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           client.getPolicies({ organizationId: config.organizationId }),
           client.getPrivateKeys({ organizationId: config.organizationId }),
         ]);
-        const plan = planTurnkeyPolicyRenewal({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, ...(args.policyId ? { policyId: args.policyId } : {}), wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freePublicFamily ? { publicFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei }, policies.policies);
+        const plan = planTurnkeyPolicyRenewal({ environment: config.environment, organizationId: config.organizationId, userId: config.userId, ...(args.policyId ? { policyId: args.policyId } : {}), wallets, nftContract: (args.nftContract ?? zeroAddress) as Address, feeRecipient, ...(args.freeSignedFamily ? { signedFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freeAllowlistFamily ? { allowlistFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), ...(args.freePublicFamily ? { publicFamily: true, chainId: args.chainId as 1 | 8453 | 4663 } : {}), quantity: args.quantity, gasLimitMax: args.gasLimitMax, maxFeePerGasGwei: args.maxFeeGwei, maxPriorityFeePerGasGwei: args.priorityFeeGwei }, policies.policies);
         const policyOutput = turnkeySecretPath(args.policyOutput, 'turnkey-robinhood-policy-ast.json');
         const stateOutput = turnkeySecretPath(args.stateOutput, 'turnkey-policy-renewal.json');
         if (plan.stage === 'provider-policy-required') {
@@ -779,7 +783,9 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const rehearsalData = record.enforcementPolicy.family
           ? encodeFunctionData({ abi: parseAbi(['function mintPublic(address,address,address,uint256)']), functionName: 'mintPublic', args: [zeroAddress, zeroAddress, zeroAddress, 1n] })
           : tx.data;
-        const result = record.enforcementPolicy.family?.kind === 'seadrop-free-allowlist-v1'
+        const result = record.enforcementPolicy.family?.kind === 'seadrop-free-signed-v1'
+          ? await signer.rehearseFreeSigned(wallet.index, () => requireEngagedKillSwitch(resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE)))
+          : record.enforcementPolicy.family?.kind === 'seadrop-free-allowlist-v1'
           ? await signer.rehearseFreeAllowlist(wallet.index, () => requireEngagedKillSwitch(resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE)))
           : record.enforcementPolicy.family?.kind === 'seadrop-free-public-v1'
           ? await signer.rehearseFreePublic(wallet.index, () => requireEngagedKillSwitch(resolve(process.env.KILL_SWITCH_PATH ?? DEFAULT_KILL_FILE)))
@@ -811,7 +817,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           activityFingerprint: result.evidence.activityFingerprint,
           appProofCount: result.evidence.appProofCount,
           signedTransactionHash: 'signedTransactionHash' in result ? result.signedTransactionHash : keccak256(result.signedTransaction),
-          ...(['seadrop-free-allowlist-v1', 'seadrop-free-public-v1'].includes(record.enforcementPolicy.family?.kind ?? '') ? { rehearsalKind: 'synthetic-policy-only', chainAuthorityVerified: false } : {}),
+          ...(['seadrop-free-allowlist-v1', 'seadrop-free-public-v1', 'seadrop-free-signed-v1'].includes(record.enforcementPolicy.family?.kind ?? '') ? { rehearsalKind: 'synthetic-policy-only', chainAuthorityVerified: false } : {}),
           safety: { broadcastAttempted: false, gasLimit: '0', nonce: String(Number.MAX_SAFE_INTEGER), signedTransactionRetained: false },
         };
         await writeTurnkeyJson(output, evidence);
@@ -1149,6 +1155,35 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         process.stdout.write(`${json({ state: 'Released', message: `The kill switch is off${result.released ? '' : ' (only the file was left)'}. Run live-readiness record next; create the kill switch again with the kill command at any time to stop.`, telegramNoticeSent: noticeSent })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
+  .command('automation-status', 'Read-only: show automatic mint progression and sanitized rejection reasons', (args) => args
+    .option('db', { type: 'string' }), async (args) => {
+      const database = openDatabaseReadOnly(resolve(runtimeRoot, args.db ?? process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite'));
+      try { const store = new CanonicalStoreBridge(database); await store.open(); process.stdout.write(`${json(automationStatus(store.eventSnapshot()))}\n`); }
+      finally { database.close(); }
+    })
+  .command('analytics', 'Read-only: canonical execution costs, ETH FIFO accounting and shadow-only feedback; missing sale data remains unknown', (args) => args
+    .option('db', { type: 'string' })
+    .option('activity-file', { type: 'string', description: 'Optional public JSON array of confirmed/pending/reorged acquisition, sale and transfer observations' })
+    .option('floor-file', { type: 'string', description: 'Optional public JSON floor quotes; estimates never imply sale proceeds' }), async (args) => {
+      const readPublicInput = async (path: string | undefined): Promise<unknown[] | undefined> => {
+        if (!path) return undefined;
+        if (/\.(env|key)$/i.test(path) || /(?:^|[\/\\])(?:keystore|secrets)(?:[\/\\]|$)/i.test(path)) throw new Error('ANALYTICS_PUBLIC_INPUT_REQUIRED');
+        const stat = await lstat(path);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2_097_152) throw new Error('ANALYTICS_INPUT_INVALID');
+        const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+        if (!Array.isArray(raw) || raw.length > 10_000) throw new Error('ANALYTICS_INPUT_INVALID');
+        return raw;
+      };
+      let database: ReturnType<typeof openDatabaseReadOnly> | undefined;
+      try {
+        const activities = await readPublicInput(args.activityFile);
+        const floorQuotes = await readPublicInput(args.floorFile);
+        database = openDatabaseReadOnly(resolve(runtimeRoot, args.db ?? process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite'));
+        const store = new CanonicalStoreBridge(database); await store.open();
+        process.stdout.write(`${json(buildCanonicalAnalyticsReport(store.snapshot(), { ...(activities ? { activities: activities as unknown as AnalyticsActivity[] } : { activities: readCanonicalAnalyticsActivities(store.eventSnapshot()).activities }), ...(floorQuotes ? { floorQuotes: floorQuotes as unknown as AnalyticsFloorQuote[] } : {}) }))}\n`);
+      } catch { process.stdout.write(`${blocked(new Error('ANALYTICS_INPUT_OR_DATABASE_INVALID'))}\n`); }
+      finally { database?.close(); }
+    })
   .command('watch-ranking', 'Read-only: rank your watched wallets by what the bot saw them do (activity and signal; profit and win rate are not measured yet)', (args) => args
     .option('db', { type: 'string', describe: 'The trial database to read (default: MINT_BOT_STATE_PATH, or the standard path)' })
     .option('top', { type: 'number', default: 15, describe: 'How many wallets to list (1 to 500)' })
@@ -1166,6 +1201,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
     .option('evidence-file', { type: 'string', describe: 'Your JSON file with E1 to E7 (status and record; see Docs/robinhood-enable-evidence.template.json)' })
     .option('paid', { type: 'boolean', default: false, describe: 'Enable paid mints too; requires paidRehearsal and paidPolicyApproved evidence' })
+    .option('include-free-signed', { type: 'boolean', default: false, describe: 'Explicitly accept free server-signed SeaDrop in addition to public/free allowlist after a reviewed signed rehearsal' })
+    .option('free-signed-rehearsal-reference', { type: 'string', describe: 'Opaque reference to the reviewed Ethereum signed-method rehearsal' })
     .option('include-free-allowlist', { type: 'boolean', default: false, describe: 'Explicitly approve public v1 plus free allowlist v1 baseline; existing grants retain their original scope' })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status (record) or revoke printed' }), async (args) => {
       try {
@@ -1179,7 +1216,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<EnableStore>;
         if (typeof store.ethereumLiveMintProven !== 'function' || typeof store.enableRobinhood !== 'function' || typeof store.robinhoodEnablement !== 'function' || typeof store.revokeRobinhood !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), paid: args.paid, includeFreeAllowlist: args.includeFreeAllowlist, currentStrategyVersion: runtime.store.snapshot().chainEvidence.filter(item => item.chainId === 4663 && item.status === 'accepted' && item.executionEnabled).at(-1)?.strategyVersion, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        process.stdout.write(`${json(runRobinhoodEnable({ action: args.action, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), paid: args.paid, includeFreeAllowlist: args.includeFreeAllowlist, includeFreeSigned: args.includeFreeSigned, currentStrategyVersion: runtime.store.snapshot().chainEvidence.filter(item => item.chainId === 4663 && item.status === 'accepted' && item.executionEnabled).at(-1)?.strategyVersion, confirm: args.confirm, now: new Date(), store: store as EnableStore, newId: () => `rh_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('ethereum-proof <action>', 'Owner-run (D-064): record an earlier live Ethereum mint as the proof Robinhood needs (status | record). Each transaction is read from Ethereum and checked first', (args) => args
@@ -1234,6 +1271,8 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     .positional('action', { type: 'string', choices: ['status', 'record', 'revoke'] as const, demandOption: true })
     .option('evidence-file', { type: 'string', describe: 'Completed evidence for a new grant: optional for status, required for record; omit to inspect the installed grant' })
     .option('paid', { type: 'boolean', default: false, describe: 'Enable paid Base too (D-062); the file must also contain paidRehearsal and paidPolicyApproved' })
+    .option('include-free-signed', { type: 'boolean', default: false, describe: 'Explicitly accept free server-signed SeaDrop in addition to public/free allowlist after a reviewed signed rehearsal' })
+    .option('free-signed-rehearsal-reference', { type: 'string', describe: 'Opaque reference to the reviewed Ethereum signed-method rehearsal' })
     .option('include-free-allowlist', { type: 'boolean', default: false, describe: 'Explicitly approve public v1 plus free allowlist v1 baseline; existing grants retain their original scope' })
     .option('confirm', { type: 'string', describe: 'The confirmation phrase status (record) or revoke printed' }), async (args) => {
       try {
@@ -1247,12 +1286,14 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const store = runtime.store as unknown as Partial<BaseEnableStore>;
         if (typeof store.enableBase !== 'function' || typeof store.baseEnablement !== 'function' || typeof store.revokeBase !== 'function') throw new Error('CANONICAL_STORE_REQUIRED');
-        process.stdout.write(`${json(runBaseEnable({ action: args.action, paid: args.paid, includeFreeAllowlist: args.includeFreeAllowlist, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), ...(args.confirm !== undefined ? { confirm: args.confirm } : {}), now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
+        process.stdout.write(`${json(runBaseEnable({ action: args.action, paid: args.paid, includeFreeAllowlist: args.includeFreeAllowlist, includeFreeSigned: args.includeFreeSigned, ...(evidenceText !== undefined && args.evidenceFile ? { evidenceText, evidenceFile: args.evidenceFile } : {}), ...(args.confirm !== undefined ? { confirm: args.confirm } : {}), now: new Date(), store: store as BaseEnableStore, newId: () => `base_enable_${randomBytes(8).toString('hex')}` }))}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })
   .command('chain-evidence <action>', 'Owner-run Ethereum SeaDrop acceptance: permanent until revoked, or explicit seven-day legacy validity', (args) => args
     .positional('action', { type: 'string', choices: ['status', 'accept', 'revoke'] as const, demandOption: true })
     .option('validity', { type: 'string', choices: ['permanent', '7-days'] as const, default: 'permanent' })
+    .option('include-free-signed', { type: 'boolean', default: false, describe: 'Explicitly accept free server-signed SeaDrop in addition to public/free allowlist after a reviewed signed rehearsal' })
+    .option('free-signed-rehearsal-reference', { type: 'string', describe: 'Opaque reference to the reviewed Ethereum signed-method rehearsal' })
     .option('include-free-allowlist', { type: 'boolean', default: false, describe: 'Explicitly approve public v1 plus free allowlist v1 baseline; existing grants retain their original scope' })
     .option('confirm', { type: 'string', describe: 'The exact owner confirmation printed by status/revoke' })
     .option('rpc-url', { type: 'string' }), async (args) => {
@@ -1269,13 +1310,13 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           await revokeEthereumChainEvidence(runtime.store, active.id, phrase);
           process.stdout.write(`${json({ state: 'Revoked', evidenceId: active.id })}\n`); return;
         }
-        const phrase = ethereumChainEvidencePhrase(validity, args.includeFreeAllowlist);
+        const phrase = ethereumChainEvidencePhrase(validity, args.includeFreeAllowlist, args.includeFreeSigned);
         const permanent = existing?.expiresAt === PERMANENT_ENABLEMENT_EXPIRY;
         const sameValidity = existing && permanent === (validity === 'permanent');
-        const requestedStrategyVersion = args.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : 'seadrop-v1-public-1';
+        const requestedStrategyVersion = args.includeFreeSigned ? SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE : args.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : 'seadrop-v1-public-1';
         const sameScope = existing?.strategyVersion === requestedStrategyVersion;
         if (existing && (args.action === 'status' || sameValidity && sameScope)) {
-          process.stdout.write(`${json({ state: args.action === 'accept' ? 'AlreadyAccepted' : 'Accepted', message: permanent ? 'Ethereum strategy acceptance remains valid until revoked. Each mint still needs fresh runtime, custody and simulation checks.' : `Ethereum evidence is accepted until ${existing.expiresAt}.`, evidenceId: existing.id, expiresAt: existing.expiresAt, validity: permanent ? 'permanent' : '7-days', strategyVersion: existing.strategyVersion, requestedStrategyVersion, ...(!sameValidity || !sameScope ? { copyThisToAccept: `chain-evidence accept --validity ${validity}${args.includeFreeAllowlist ? ' --include-free-allowlist' : ''} --confirm "${phrase}"` } : {}) })}\n`); return;
+          process.stdout.write(`${json({ state: args.action === 'accept' ? 'AlreadyAccepted' : 'Accepted', message: permanent ? 'Ethereum strategy acceptance remains valid until revoked. Each mint still needs fresh runtime, custody and simulation checks.' : `Ethereum evidence is accepted until ${existing.expiresAt}.`, evidenceId: existing.id, expiresAt: existing.expiresAt, validity: permanent ? 'permanent' : '7-days', strategyVersion: existing.strategyVersion, requestedStrategyVersion, ...(!sameValidity || !sameScope ? { copyThisToAccept: `chain-evidence accept --validity ${validity}${args.includeFreeSigned ? ' --include-free-signed' : args.includeFreeAllowlist ? ' --include-free-allowlist' : ''}${args.includeFreeSigned && args.freeSignedRehearsalReference ? ` --free-signed-rehearsal-reference ${args.freeSignedRehearsalReference}` : ''} --confirm "${phrase}"` } : {}) })}\n`); return;
         }
         if (args.action === 'accept' && args.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run chain-evidence status and review the statement');
         const config = args.rpcUrl ? { rpcEndpoints: [args.rpcUrl] } : await resolveChainByNameFromSecrets('ethereum', 'mainnet', configuredSecretRoot(runtimeRoot));
@@ -1284,10 +1325,10 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         if ((await client.getChainId()) !== 1) throw new Error('RPC_CHAIN_MISMATCH: that RPC is not Ethereum');
         const block = await client.getBlock({ blockTag: 'latest' });
         if (args.action === 'status') {
-          process.stdout.write(`${json({ state: 'NotAccepted', validity, requestedStrategyVersion, message: 'Owner review of genuine SeaDrop strategy rehearsal evidence is required. Permanent acceptance lasts until explicit revocation; it does not waive current mint, RPC, custody, simulation, spend or D-017 checks. This command reads the chain but does not run the rehearsal.', copyThisToAccept: `chain-evidence accept --validity ${validity}${args.includeFreeAllowlist ? ' --include-free-allowlist' : ''} --confirm "${phrase}"` })}\n`); return;
+          process.stdout.write(`${json({ state: 'NotAccepted', validity, requestedStrategyVersion, message: 'Owner review of genuine SeaDrop strategy rehearsal evidence is required. Permanent acceptance lasts until explicit revocation; it does not waive current mint, RPC, custody, simulation, spend or D-017 checks. This command reads the chain but does not run the rehearsal.', copyThisToAccept: `chain-evidence accept --validity ${validity}${args.includeFreeSigned ? ' --include-free-signed' : args.includeFreeAllowlist ? ' --include-free-allowlist' : ''}${args.includeFreeSigned && args.freeSignedRehearsalReference ? ` --free-signed-rehearsal-reference ${args.freeSignedRehearsalReference}` : ''} --confirm "${phrase}"` })}\n`); return;
         }
-        const record = buildEthereumChainEvidence({ now, sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public', validity, includeFreeAllowlist: args.includeFreeAllowlist });
-        await acceptEthereumChainEvidence(runtime.store, record, phrase);
+        const record = buildEthereumChainEvidence({ now, sourceBlock: block.number, sourceBlockHash: block.hash, strategy: 'seadrop-v1-public', validity, includeFreeAllowlist: args.includeFreeAllowlist, includeFreeSigned: args.includeFreeSigned, freeSignedRehearsalReference: args.freeSignedRehearsalReference });
+        await acceptEthereumChainEvidence(runtime.store, record, phrase, () => now, args.freeSignedRehearsalReference);
         process.stdout.write(`${json({ state: 'Accepted', validity, strategyVersion: record.strategyVersion, expiresAt: record.expiresAt, evidenceId: record.id, message: validity === 'permanent' ? 'Ethereum strategy acceptance recorded until revoked; live checks remain mandatory.' : `Ethereum evidence accepted until ${record.expiresAt}.` })}\n`);
       } catch (error) { process.stdout.write(`${blocked(new Error(plainFeePolicyMessage(surveyErrorMessage(error))))}\n`); }
     })

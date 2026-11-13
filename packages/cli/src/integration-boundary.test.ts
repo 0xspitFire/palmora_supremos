@@ -41,6 +41,16 @@ describe('CLI integration boundary', () => {
     }
   });
 
+  it('maps explicit preprocessing evidence without inferring it from missing attempts', () => {
+    const campaign = { id: 'preflight-campaign', chainId: 1, contract: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', strategy: 'seadrop-v1-public' } as Campaign;
+    const stopped = { notStarted: 'engine-preflight-v1' as const, walletIndex: 0, address: '0x1111111111111111111111111111111111111111' as `0x${string}`, status: 'skipped' as const, error: 'WALLET_ESTIMATE_REVERTED', durationMs: 0 };
+    const result: MintJobResult = { jobId: 'backend-run', nftContract: campaign.contract as `0x${string}`, chainId: 1, strategy: campaign.strategy, startedAt: new Date(0), completedAt: new Date(0), dryRun: false, walletResults: [stopped], totalGasSpentWei: 0n, totalMintCostWei: 0n, successCount: 0, failCount: 0 };
+    expect(mapResult(result, 'backend-run', campaign).neverStartedWallets).toEqual([{ runId: 'backend-run', wallet: stopped.address, proof: 'engine-preflight-v1' }]);
+    expect(mapResult({ ...result, walletResults: [{ ...stopped, notStarted: undefined }] }, 'backend-run', campaign).neverStartedWallets).toBeUndefined();
+    for (const conflicting of [{ nonce: 0 }, { txHash: `0x${'a'.repeat(64)}` }, { executionId: 'e' }, { attemptIds: ['a'] }, { reservationId: 'r' }, { status: 'timeout' }]) expect(() => mapResult({ ...result, walletResults: [{ ...stopped, ...conflicting }] } as MintJobResult, 'backend-run', campaign)).toThrow('ENGINE_NOT_STARTED_EVIDENCE_INVALID');
+    expect(() => mapResult({ ...result, jobId: 'different-run' }, 'backend-run', campaign)).toThrow('ENGINE_NOT_STARTED_EVIDENCE_INVALID');
+  });
+
   it('T-094: a wallet with a replacement keeps one hash per attempt, links the replacement, and marks the loser Replaced', () => {
     const campaign: Campaign = { id: 'campaign-rh', state: 'Armed', chainId: 4663, contract: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', strategy: 'seadrop-v1-public', quantity: 1, dryRun: false } as unknown as Campaign;
     const hashA = `0x${'a'.repeat(64)}` as `0x${string}`;

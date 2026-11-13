@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { CAMPAIGN_CHANGED_MID_RUN, createDropRecheck, describeDropChange, isPartialReading } from './drop-recheck.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CAMPAIGN_CHANGED_MID_RUN, DROP_RECHECK_TIMEOUT_MS, SIGNED_DROP_RECHECK_TIMEOUT_MS, createDropRecheck, describeDropChange, isPartialReading } from './drop-recheck.js';
 import type { DropConfig, DropValidation } from './types.js';
 
 const NFT = '0x1111111111111111111111111111111111111111' as const;
@@ -9,6 +9,8 @@ const drop = (overrides: Partial<DropConfig> = {}): DropConfig => ({
   nftContract: NFT, mintPrice: 0n, maxTotalMintableByWallet: 5, maxTokenSupply: 1000n, totalMinted: 10n, startTime: 100, endTime: 9_999_999_999,
   feePayer: '0x2222222222222222222222222222222222222222', strategyName: 'seadrop-v1-public', chainId: 1, extra: extra(), ...overrides,
 });
+afterEach(() => vi.useRealTimers());
+
 const valid: DropValidation = { valid: true, errors: [], warnings: [] };
 
 describe('D-081 describeDropChange', () => {
@@ -50,6 +52,37 @@ describe('D-081 describeDropChange', () => {
 });
 
 describe('D-081 createDropRecheck', () => {
+  it('allows a signed fleet authority refresh past two seconds and shares it until completion', async () => {
+    vi.useFakeTimers();
+    const initial = drop({ strategyName: 'seadrop-v1-signed' });
+    const read = vi.fn(async () => { await new Promise((resolve) => setTimeout(resolve, 5_000)); return { drop: initial, validation: valid }; });
+    const check = createDropRecheck({ initial, read });
+    const first = check();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const second = check();
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await Promise.all([first, second])).toEqual([undefined, undefined]);
+    // The reuse window begins when verification completes, not when it began.
+    expect(await check()).toBeUndefined();
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it('still latches unknown signed authority at its bounded deadline; public reads retain two seconds', async () => {
+    vi.useFakeTimers();
+    const read = vi.fn<() => Promise<{ drop: DropConfig; validation: DropValidation }>>(() => new Promise(() => undefined));
+    const signed = createDropRecheck({ initial: drop({ strategyName: 'seadrop-v1-signed' }), read });
+    const publicCheck = createDropRecheck({ initial: drop(), read });
+    const pendingSigned = signed();
+    const pendingPublic = publicCheck();
+    await vi.advanceTimersByTimeAsync(DROP_RECHECK_TIMEOUT_MS);
+    expect(await pendingPublic).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(SIGNED_DROP_RECHECK_TIMEOUT_MS - DROP_RECHECK_TIMEOUT_MS);
+    expect(await pendingSigned).toBe('SIGNED_MINT_AUTHORITY_UNAVAILABLE');
+    read.mockResolvedValue({ drop: drop({ strategyName: 'seadrop-v1-signed' }), validation: valid });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await signed()).toBe('SIGNED_MINT_AUTHORITY_UNAVAILABLE');
+    expect(read).toHaveBeenCalledTimes(2);
+  });
   it('stops an allowlist run on unavailable or timed-out proof authority and never un-stops it', async () => {
     let clock = 0;
     const read = vi.fn(async () => { throw new Error('ALLOWLIST_RPC_DISAGREEMENT'); });

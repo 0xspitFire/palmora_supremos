@@ -35,6 +35,7 @@ export type { BackendConfig, SecretReference, SecretStore } from './config.js';
 export { Phase2ReadModelService, ReadModelV1Service, READ_MODEL_CONTRACT, READ_MODEL_VERSION } from './read-model-v1.js';
 export type {
   AlertReadModel,
+  AnalyticsReadModel,
   CalendarEntry,
   CampaignSummary,
   CheckOutcome,
@@ -69,7 +70,7 @@ export type { Phase2ReadOnlyApiResponse, ReadOnlyApiRequest } from './api.js';
 export { normalizeTotalFeeBudget } from './fees.js';
 export type { FeeBudgetInput } from './fees.js';
 export { resolveWalletPath } from './keystore-path.js';
-export { EvidenceService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, campaignInputDigest, liveRequestDigest } from './evidence.js';
+export { EvidenceService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE, validFreeSignedRehearsalReference, campaignInputDigest, liveRequestDigest } from './evidence.js';
 export type { EvidenceApproval, EvidenceAuthority } from './evidence.js';
 export { HealthService } from './health.js';
 export type { HealthReport } from './health.js';
@@ -114,3 +115,7 @@ export type { PersonalLiveProbes, ReadinessFailure, ReadinessOutcome } from './p
 export { assertKillReleaseAllowed, killReleasePhrase, unresolvedRunIds } from './kill-switch-release.js';
 export type { KillSwitchStatus } from './kill-switch-release.js';
 export { titleCaseLabel } from './text-style.js';
+export { buildAnalyticsReport, buildCanonicalAnalyticsReport, evaluateShadowPolicies } from './analytics.js';
+export type { AnalyticsActivity, AnalyticsFloorQuote, AnalyticsOptions, ReplayOpportunity, ShadowPolicy } from './analytics.js';
+
+export { ingestCanonicalAnalytics, readCanonicalAnalyticsActivities, type CanonicalAnalyticsPort, type AnalyticsChainLog, type AnalyticsChainReceipt, type AnalyticsChainTransaction } from './canonical-analytics-ingestion.js';

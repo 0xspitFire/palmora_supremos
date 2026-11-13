@@ -14,6 +14,7 @@
 
 import pino from 'pino';
 import type { SupportedChainId } from './types.js';
+import { redactEngineValue } from './log-redaction.js';
 
 export interface LogContext {
   component: string;
@@ -51,21 +52,30 @@ export function createLogger(
     });
   }
 
-  return pino({
+  const logger = pino({
     level,
-    redact: {
-      paths: [
-        '**.privateKey', '**.mnemonic', '**.seed', '**.passphrase', '**.password',
-        '**.token', '**.authorization', '**.apiKey', '**.calldata', '**.rawTx',
-        '**.rawTransaction', '**.payload', '**.providerUrl', '**.endpointUrl',
-      ],
-      censor: '[REDACTED]',
+    // Sanitize before Pino serializes either records or interpolation arguments.
+    hooks: {
+      logMethod(args, method) {
+        method.apply(this, args.map((arg) => redactEngineValue(arg)) as Parameters<typeof method>);
+      },
     },
+    // Child bindings are serialized outside logMethod and need their own boundary.
+    formatters: { bindings: (bindings) => redactEngineValue(bindings) as Record<string, unknown> },
     transport: {
       targets,
     },
     timestamp: pino.stdTimeFunctions.isoTime,
   });
+  return protectBindings(logger);
+}
+
+function protectBindings(logger: pino.Logger, childMethod: pino.Logger['child'] = logger.child, setMethod: pino.Logger['setBindings'] = logger.setBindings): pino.Logger {
+  const child = childMethod.bind(logger);
+  logger.child = ((bindings: pino.Bindings, options?: pino.ChildLoggerOptions) => protectBindings(child(redactEngineValue(bindings) as pino.Bindings, options), childMethod, setMethod)) as unknown as pino.Logger['child'];
+  const setBindings = setMethod.bind(logger);
+  logger.setBindings = (bindings) => setBindings(redactEngineValue(bindings) as pino.Bindings);
+  return logger;
 }
 
 /**

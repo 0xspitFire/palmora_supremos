@@ -103,7 +103,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
 
   const mintState = async (campaign: Campaign): Promise<MintState> => {
     try {
-      if (campaign.strategy === 'seadrop-v1-allowlist') return deps.allowlistMintState ? await deps.allowlistMintState(campaign) : 'unknown';
+      if (campaign.strategy === 'seadrop-v1-allowlist' || campaign.strategy === 'seadrop-v1-signed') return deps.allowlistMintState ? await deps.allowlistMintState(campaign) : 'unknown';
       if (campaign.chainId === 4663) {
         const wallet = (await deps.walletList())[0];
         if (!wallet) return 'unknown';
@@ -144,8 +144,8 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   };
 
   const recordSimulations: FireDeps['recordSimulations'] = async (campaign, wallets) => {
-    if (campaign.strategy === 'seadrop-v1-allowlist') {
-      if (!deps.allowlistSimulation) throw new Error('ALLOWLIST_PROOF_SOURCE_REQUIRED');
+    if (campaign.strategy === 'seadrop-v1-allowlist' || campaign.strategy === 'seadrop-v1-signed') {
+      if (!deps.allowlistSimulation) throw new Error('WALLET_BOUND_MINT_SOURCE_REQUIRED');
       return withFunding(campaign, await deps.allowlistSimulation(campaign, wallets));
     }
     if (campaign.chainId === 4663) {

@@ -549,7 +549,10 @@ describe('Telegram actions', () => {
       const store = { snapshot: () => ({ killed: false, campaigns: [], reservations: [], runs: [], receipts: [], events: [] }) };
       const actions = createTelegramActions(deps({ store: store as never, now: () => new Date('2026-10-24T12:00:00.000Z') }));
       expect(await actions.limits()).toContain('Robinhood: free 0 of 0.002 ETH');
-      expect(await actions.history()).toBe('No live mints yet.');
+      const history = await actions.history();
+      expect(history).toContain('No live mints yet.');
+      expect(history).toContain('0 prepared, 0 requests.');
+      expect(history).toContain('Ready service health is not mint authorization.');
     });
   });
 

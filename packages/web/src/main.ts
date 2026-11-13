@@ -2,7 +2,7 @@ import { READ_MODEL_CONTRACT_STATUS } from './contracts.js';
 import type { ReadOnlySnapshot } from './contracts.js';
 import { renderUnavailableSurface } from './format.js';
 import { WEB_STYLES } from './styles.js';
-import { renderAlerts, renderCalendar, renderHealth, renderHome, renderReadiness, renderRun } from './surfaces.js';
+import { renderAlerts, renderAnalytics, renderCalendar, renderHealth, renderHome, renderReadiness, renderRun } from './surfaces.js';
 
 export function renderApp(snapshot: ReadOnlySnapshot): string {
   const sections: string[] = [snapshot.home ? renderHome(snapshot.home) : renderUnavailableSurface('Intelligence home')];
@@ -23,6 +23,10 @@ export function renderApp(snapshot: ReadOnlySnapshot): string {
   if (snapshot.health) {
     sections.push(renderHealth(snapshot.health));
     navigation.push(['health', 'System status']);
+  }
+  if (snapshot.analytics) {
+    sections.push(renderAnalytics(snapshot.analytics));
+    navigation.push(['analytics', 'Accounting']);
   }
   if (snapshot.run) {
     sections.push(renderRun(snapshot.run));

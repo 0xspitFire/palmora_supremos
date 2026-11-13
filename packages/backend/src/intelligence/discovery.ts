@@ -3,7 +3,7 @@ import type { BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
 import { calendarId, DISCOVERY_FRESHNESS_MS, opportunityId, validChainTime, type DropSnapshot, type IntelligenceAlertSink, type IntelligenceChainPort, type IntelligenceRepositoryPort } from './port.js';
 import { scoreOpportunity, type ScoreResult } from './scoring.js';
-import { plainAlertText } from '../alert-card.js';
+import { parseAlertCard, plainAlertText } from '../alert-card.js';
 import { CollectionNames } from './names.js';
 import { openingSoonCard, opportunityCard, priceAboveLimitCard } from './cards.js';
 
@@ -191,16 +191,20 @@ export class DiscoveryService {
   private restore(): void {
     const now = this.now().getTime();
     const latest = new Map<string, EventRecord>();
-    for (const event of this.store.snapshot().events) {
-      if (event.type !== 'opportunity_scored' && event.type !== 'calendar_entry') continue;
+    const snapshot = this.store.snapshot().events;
+    for (const event of snapshot) {
+      if (event.type !== 'opportunity_scored' && event.type !== 'opportunity_notified' && event.type !== 'calendar_entry') continue;
       if (event.data.chainId !== this.port.chainId) continue;
-      const key = `${event.type}:${String(event.data.contract ?? '')}`;
+      const contract = String(event.data.contract ?? '').toLowerCase();
+      const at = Date.parse(event.at);
+      if (!/^0x[0-9a-f]{40}$/.test(contract) || !Number.isFinite(at) || at > now) continue;
+      // Scored and notified are dispositions of the same opportunity, not separate histories.
+      const key = `${event.type === 'calendar_entry' ? 'calendar' : 'opportunity'}:${contract}`;
       const prior = latest.get(key);
-      if (!prior || event.at >= prior.at) latest.set(key, event);
+      if (!prior || at >= Date.parse(prior.at)) latest.set(key, event);
     }
     for (const event of latest.values()) {
-      const contract = String(event.data.contract ?? '').toLowerCase();
-      if (!/^0x[0-9a-f]{40}$/.test(contract)) continue;
+      const contract = String(event.data.contract).toLowerCase();
       const at = Date.parse(event.at);
       if (event.type === 'calendar_entry') {
         const drop = dropFromEvent(event, contract);
@@ -208,11 +212,39 @@ export class DiscoveryService {
         continue;
       }
       const lastActivity = Date.parse(String(event.data.lastActivityAt ?? event.at));
-      if (!Number.isFinite(lastActivity) || now - lastActivity > CONVERGENCE_WINDOW_MS) continue;
+      const firstSeen = Date.parse(String(event.data.firstSeenAt ?? event.at));
+      if (!Number.isFinite(lastActivity) || lastActivity > at || now - lastActivity > CONVERGENCE_WINDOW_MS || !Number.isFinite(firstSeen) || firstSeen > lastActivity) continue;
       const watched = new Map<string, number>();
-      for (const address of Array.isArray(event.data.watchedMinters) ? event.data.watchedMinters : []) watched.set(String(address).toLowerCase(), lastActivity);
-      this.tracked.set(contract, { contract, firstSeenAt: Date.parse(String(event.data.firstSeenAt ?? event.at)), lastActivityAt: lastActivity, mints: [], totalMinted: Number(event.data.totalMinted ?? 0), watched, received: new Map(), priceWei: typeof event.data.priceWei === 'string' && /^\d+$/.test(event.data.priceWei) ? BigInt(event.data.priceWei) : null, drop: null, dropReadAt: null, hasCode: typeof event.data.hasCode === 'boolean' ? event.data.hasCode : null, lastEmit: { at, score: Number(event.data.score ?? 0), band: String(event.data.band ?? 'log') } });
+      // New records preserve each observation's own time. Legacy address-only lists are
+      // restored only from their original durable self-mint event, never collection activity.
+      const minters = new Set((Array.isArray(event.data.watchedMinters) ? event.data.watchedMinters : []).filter((address): address is string => typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address)).map(address => address.toLowerCase()));
+      const remember = (address: unknown, observedAt: unknown): void => {
+        if (typeof address !== 'string' || !minters.has(address.toLowerCase()) || typeof observedAt !== 'string') return;
+        const observed = Date.parse(observedAt);
+        if (!Number.isFinite(observed) || observed > at || observed > lastActivity || now - observed > CONVERGENCE_WINDOW_MS) return;
+        const key = address.toLowerCase();
+        if (observed > (watched.get(key) ?? -Infinity)) watched.set(key, observed);
+      };
+      if (Array.isArray(event.data.watchedMinterObservations)) {
+        for (const row of event.data.watchedMinterObservations) if (row && typeof row === 'object') {
+          const observation = row as Record<string, unknown>;
+          remember(observation.wallet, observation.at);
+        }
+      } else {
+        for (const source of snapshot) if (source.type === 'watched_wallet_mint' && source.data.chainId === this.port.chainId && typeof source.data.contract === 'string' && source.data.contract.toLowerCase() === contract) remember(source.data.wallet, source.at);
+      }
+      const mints: Tracked['mints'] = [];
+      if (Array.isArray(event.data.mintActivity) && event.data.mintActivity.length <= 61) {
+        for (const row of event.data.mintActivity) if (row && typeof row === 'object') {
+          const activity = row as Record<string, unknown>;
+          const observed = typeof activity.at === 'string' ? Date.parse(activity.at) : NaN;
+          const quantity = activity.quantity;
+          if (Number.isFinite(observed) && observed <= at && observed <= lastActivity && now - observed <= HOUR && typeof quantity === 'number' && Number.isSafeInteger(quantity) && quantity > 0) mints.push({ at: observed, quantity });
+        }
+      }
+      this.tracked.set(contract, { contract, firstSeenAt: firstSeen, lastActivityAt: lastActivity, mints, totalMinted: Number(event.data.totalMinted ?? 0), watched, received: new Map(), priceWei: typeof event.data.priceWei === 'string' && /^\d+$/.test(event.data.priceWei) ? BigInt(event.data.priceWei) : null, drop: null, dropReadAt: null, hasCode: typeof event.data.hasCode === 'boolean' ? event.data.hasCode : null, lastEmit: { at, score: Number(event.data.score ?? 0), band: String(event.data.band ?? 'log') } });
     }
+    for (const [contract, item] of this.tracked) item.drop = this.calendar.get(contract)?.drop ?? null;
   }
 
   private track(contractAddress: string, at: number): Tracked {
@@ -276,7 +308,7 @@ export class DiscoveryService {
       events.push({ id: `evt_${randomUUID()}`, type: `opportunity_${disposition}`, at: nowDate.toISOString(), data: {
         opportunityId: opportunityId(this.port.chainId, item.contract), chainId: this.port.chainId, contract: item.contract, disposition, ...(collectionName ? { collectionName } : {}),
         score: scored.score, scoreVersion: scored.modelVersion, sampleSize: Math.round(scored.confidence * 100).toString(), denominator: '100', confidence: scored.confidenceLabel, band: scored.band, blocked: scored.blocked,
-        factors: scored.factors, risks: scored.risks, watchedMinters, mintsLastHour: item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0), totalMinted: item.totalMinted,
+        factors: scored.factors, risks: scored.risks, watchedMinters, watchedMinterObservations: watchedMinters.map(wallet => ({ wallet, at: new Date(item.watched.get(wallet)!).toISOString() })), mintActivity: compactMintActivity(item.mints, now), mintsLastHour: item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0), totalMinted: item.totalMinted,
         ...(item.priceWei === null ? {} : { priceWei: item.priceWei.toString() }), ...(item.hasCode === null ? {} : { hasCode: item.hasCode }),
         ...(item.drop && item.drop.startTime > 0 ? { openingAt: new Date(item.drop.startTime * 1000).toISOString() } : {}),
         watchedReceivers: [...item.received.keys()].sort(), sourceBlock: sourceBlock.toString(),
@@ -285,7 +317,7 @@ export class DiscoveryService {
       item.lastEmit = { at: now, score: scored.score, band: scored.band };
       if (alertable) {
         const card = opportunityCard({ chainId: this.port.chainId, contract: item.contract, collectionName, score: scored.score, priceWei: item.priceWei, watchingConfigured: labels.size > 0, minters: watchedMinters, receivers: item.received.size, labels, drop: item.drop, seenMinted: item.totalMinted, mintsLastHour, scored, spottedAt: item.lastActivityAt, now });
-        alerts.push({ kind: 'opportunity', dedupe: `opportunity:${item.contract}:${scored.band}`, priority: scored.band === 'proposal' ? 'immediate' : 'grouped', text: plainAlertText(card), card });
+        alerts.push({ kind: 'opportunity', dedupe: `opportunity:${this.port.chainId}:${item.contract}:${scored.band}`, priority: scored.band === 'proposal' ? 'immediate' : 'grouped', text: plainAlertText(card), card });
       }
       } catch { /* one malformed item never blocks the others or the cursor */ }
     }
@@ -319,7 +351,7 @@ export class DiscoveryService {
       }
       const chainId = this.port.chainId;
       if (drop.priceWei > this.options.budgetPerNftWei) {
-        const dedupe = `price:${contract}:${drop.priceWei}`;
+        const dedupe = `price:${chainId}:${contract}:${drop.priceWei}`;
         if (this.priceAlertIdentities.get(contract) !== dedupe) {
           const card = priceAboveLimitCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now, limitWei: this.options.budgetPerNftWei });
           alerts.push({ kind: 'price_above_limit', dedupe, priority: 'grouped', text: plainAlertText(card), card });
@@ -330,7 +362,7 @@ export class DiscoveryService {
         const window = minutes <= 30 ? '30m' : minutes <= 360 ? '6h' : null;
         if (window && this.openingAlertAllowed(now)) {
           const card = openingSoonCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now });
-          alerts.push({ kind: 'opening_soon', dedupe: `opening:${contract}:${drop.startTime}:${window}`, priority: 'grouped', text: plainAlertText(card), card });
+          alerts.push({ kind: 'opening_soon', dedupe: `opening:${chainId}:${contract}:${drop.startTime}:${window}`, priority: 'grouped', text: plainAlertText(card), card });
         }
       }
       } catch { /* one malformed entry never blocks the others or the cursor */ }
@@ -343,7 +375,11 @@ export class DiscoveryService {
   private async raise(alerts: ReadonlyArray<Parameters<IntelligenceAlertSink['intelligence']>[0]>, result: DiscoveryTickResult): Promise<void> {
     for (const alert of alerts) {
       try {
-        const recorded = await this.options.alerts?.intelligence(alert);
+        // Preserve acknowledged legacy notices only on the chain identified by their
+        // stored card. A chainless identity must never suppress another chain.
+        const legacyDedupe = alert.dedupe.replace(`:${this.port.chainId}:`, ':');
+        const legacyRecorded = this.store.snapshot().events.some(event => event.type === `alert_${alert.kind}` && event.data.dedupe === legacyDedupe && parseAlertCard(event.data.card)?.chainId === this.port.chainId);
+        const recorded = legacyRecorded ? false : await this.options.alerts?.intelligence(alert);
         if (recorded) result.alertsRaised += 1;
         // Both true (inserted) and false (already durable) establish dedupe.
         // A missing sink or a throw does not, so the next slice/tick retries.
@@ -411,4 +447,16 @@ function dropFromEvent(event: EventRecord, contract: string): DropSnapshot | nul
   const maxPerWallet = Number(event.data.maxPerWallet);
   if (price === null || !Number.isFinite(start) || !Number.isSafeInteger(maxPerWallet)) return null;
   return { nftContract: contract, priceWei: price, startTime: Math.floor(start / 1000), endTime: Number.isFinite(end) ? Math.floor(end / 1000) : 0, maxPerWallet, maxSupply: null, totalMinted: null };
+}
+
+/** At most 61 minute buckets; use the oldest real time so restoration cannot extend activity. */
+function compactMintActivity(mints: Tracked['mints'], now: number): Array<{ at: string; quantity: number }> {
+  const buckets = new Map<number, { at: number; quantity: number }>();
+  for (const mint of mints) {
+    if (mint.at > now || now - mint.at > HOUR) continue;
+    const key = Math.floor(mint.at / 60_000);
+    const prior = buckets.get(key);
+    buckets.set(key, { at: Math.min(prior?.at ?? mint.at, mint.at), quantity: (prior?.quantity ?? 0) + mint.quantity });
+  }
+  return [...buckets.values()].map(bucket => ({ at: new Date(bucket.at).toISOString(), quantity: bucket.quantity }));
 }

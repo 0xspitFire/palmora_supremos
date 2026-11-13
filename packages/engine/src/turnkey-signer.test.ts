@@ -243,3 +243,69 @@ describe('free public family signing boundary', () => {
     expect(order.filter((step) => step === 'sign')).toHaveLength(2);
   });
 });
+
+// Signed mints are a distinct, owner-approved family. Existing families cannot authorize this selector.
+describe('Turnkey bounded free signed mint family', () => {
+  async function setupSigned(verifyAuthority = true) {
+    const { signedMintTypedData, verifySignedWalletAuthorization, buildSignedMint } = await import('./signed-mint-authority.js');
+    const { assertIndependentSignedAuthority } = await import('./turnkey-signed-authority.js');
+    const seconds = BigInt(Math.floor(Date.now() / 1000));
+    const raw: import('./signed-mint-authority.js').SignedWalletAuthorization = { chainId: 4663, nftContract: TO, wallet: WALLET, feeRecipient: OPENSEA_FEE_COLLECTOR, mintParams: { mintPrice: 0n, maxTotalMintableByWallet: 10n, startTime: seconds - 60n, endTime: seconds + 600n, dropStageIndex: 1n, maxTokenSupplyForStage: 1000n, feeBps: 250n, restrictFeeRecipients: true }, salt: 123n, signature: '0x', source: { chainId: 4663, nftContract: TO, wallet: WALLET, stageIndex: '1', sourceId: 'official-platform', contentDigest: `sha256:${'a'.repeat(64)}` } };
+    raw.signature = await ACCOUNT.signTypedData(signedMintTypedData(raw));
+    const authorityClient = (): import('./signed-mint-authority.js').SignedMintAuthorityClient => ({ getBlockNumber: async () => 100n, getChainId: async () => 4663, getBlock: async () => ({ hash: `0x${'a'.repeat(64)}`, timestamp: seconds }), readContract: async (request) => request.functionName === 'getFeeRecipientIsAllowed' ? true : request.functionName === 'getMintStats' ? [0n, 0n, 2000n] : [0n, 10n, seconds - 120n, seconds + 1000n, 1000n, 0n, 1000n], call: async () => ({ data: '0x' }) });
+    const proof = await verifySignedWalletAuthorization(raw, [authorityClient(), authorityClient()], 4);
+    const ast: TurnkeyPolicyAst = { ...familyPolicy(), transaction: { ...familyPolicy().transaction, data: '0x4b61cd6f', maxFeePerGasMax: '200000000' }, family: { kind: 'seadrop-free-signed-v1', maxQuantity: 4 } };
+    const calls: string[] = [];
+    const client = clientFor({ getPolicies: async () => ({ policies: [providerPolicy(ast)] }) });
+    const sign = client.signTransaction.bind(client);
+    client.signTransaction = async (request) => { calls.push('sign'); return sign(request); };
+    const signer = new TurnkeySigner({ organizationId: ORG, environment: ENVIRONMENT, userId: USER, wallets: [{ index: 0, address: WALLET, signWith: KEY_ID }], policyRecord: record(ast), client, ...(verifyAuthority ? { verifySignedAuthority: async (value: import('./types.js').TransactionIntent) => { calls.push('authority'); await assertIndependentSignedAuthority(value, [authorityClient(), authorityClient()]); } } : {}) });
+    const tx: import('./types.js').TransactionIntent = { chainId: 4663, from: WALLET, to: SEADROP_V1_ADDRESS, value: 0n, data: buildSignedMint(proof, WALLET, 4).data, nonce: 4, gasLimit: 50_000n, maxFeePerGas: 200_000_000n, maxPriorityFeePerGas: 100_000_000n, accessList: [], campaignId: 'signed-campaign', runId: 'signed-run', policyRef: turnkeyPolicyRef(ast.scope.policyId, canonicalPolicyDigest(ast)), familyContext: { nftContract: TO, feeRecipient: OPENSEA_FEE_COLLECTOR, signedAuthorization: proof, assertReady: async () => { calls.push('ready'); } } };
+    return { signer, tx, ast, calls };
+  }
+  it('checks exact own authorization, both providers and readiness before signing', async () => {
+    const { signer, tx, calls } = await setupSigned();
+    const signed = await signer.signTransaction(0, tx);
+    expect(parseTransaction(signed).data).toBe(tx.data);
+    expect(calls).toEqual(['authority', 'ready', 'sign']);
+  });
+  it('cannot sign without independent authority or with a kill after authority reads', async () => {
+    const missing = await setupSigned(false);
+    await expect(missing.signer.signTransaction(0, missing.tx)).rejects.toThrow('TURNKEY_SIGNED_AUTHORITY_REQUIRED');
+    expect(missing.calls).not.toContain('sign');
+    const killed = await setupSigned();
+    await expect(killed.signer.signTransaction(0, { ...killed.tx, familyContext: { ...killed.tx.familyContext!, assertReady: async () => { throw new Error('KILLED'); } } })).rejects.toThrow('KILLED');
+    expect(killed.calls).not.toContain('sign');
+  });
+  it.each([{ value: 1n }, { chainId: 1 }, { maxFeePerGas: 200_000_001n }, { gasLimit: 500_001n }, { familyContext: undefined }])('rejects out-of-policy intents before any provider operation', async (change) => {
+    const { signer, tx, calls } = await setupSigned();
+    await expect(signer.signTransaction(0, { ...tx, ...change } as import('./types.js').TransactionIntent)).rejects.toThrow('TURNKEY_POLICY_INTENT_BLOCKED');
+    expect(calls).toEqual([]);
+  });
+  it('does not allow the signed selector under old public/Merkle policies', async () => {
+    const { tx, ast } = await setupSigned();
+    for (const kind of ['seadrop-free-public-v1', 'seadrop-free-allowlist-v1'] as const) {
+      const old = { ...ast, transaction: { ...ast.transaction, data: kind === 'seadrop-free-public-v1' ? '0x161ac21f' as Hex : '0x4300a4e6' as Hex }, family: { ...ast.family!, kind } };
+      const oldSigner = signer(old);
+      await expect(oldSigner.signTransaction(0, { ...tx, policyRef: turnkeyPolicyRef(old.scope.policyId, canonicalPolicyDigest(old)) })).rejects.toThrow('TURNKEY_POLICY_INTENT_BLOCKED');
+    }
+  });
+  it('rehearses only impossible zero-gas, maximum-nonce transactions and returns no signed bytes', async () => {
+    const { signer, calls } = await setupSigned();
+    let stoppedChecks = 0;
+    const rehearsal = await signer.rehearseFreeSigned(0, async () => { stoppedChecks++; });
+    expect(rehearsal.signedTransactionHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(rehearsal).not.toHaveProperty('signedTransaction');
+    expect(stoppedChecks).toBe(2);
+    expect(calls).toEqual(['sign']);
+  });
+  it('bounds generation by chain, pinned fees and exact provider slices', async () => {
+    const { ast } = await setupSigned();
+    const expression = turnkeyProviderPolicyExpressions(ast).condition;
+    expect(expression).toContain("eth.tx.data[0..10] == '0x4b61cd6f'");
+    expect(expression).toContain("eth.tx.data[266..330] == '0000000000000000000000000000000000000000000000000000000000000000'");
+    expect(expression).toContain("eth.tx.data[714..778] == '0000000000000000000000000000000000000000000000000000000000000001'");
+    expect(() => validateTurnkeyPolicyAst({ ...ast, transaction: { ...ast.transaction, chainId: 8453 }, family: { ...ast.family!, maxQuantity: 5 } })).toThrow('TURNKEY_POLICY_FAMILY_INVALID');
+    expect(() => validateTurnkeyPolicyAst({ ...ast, transaction: { ...ast.transaction, maxFeePerGasMax: '200000001' } })).toThrow('TURNKEY_POLICY_FAMILY_FEE_LIMIT_INVALID');
+  });
+});

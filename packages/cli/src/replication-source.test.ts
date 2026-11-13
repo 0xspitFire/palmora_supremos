@@ -37,4 +37,11 @@ describe('watched self-mint transaction authority', () => {
     s.receipt.logs[0]!.data = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }], [own, 1n, 0n, 0n, 0n]);
     await expect(s.run()).rejects.toThrow('WATCHED_MINT_NOT_VERIFIED');
   });
+  it('classifies server-signed and unsupported selectors before asking for Merkle proofs', async () => {
+    const signed = fixture(); signed.tx.input = `0x4b61cd6f${signed.tx.input.slice(10)}`;
+    await expect(signed.run()).rejects.toThrow('SIGNED_MINT_OWN_SIGNATURE_AND_CUSTODY_REQUIRED');
+    expect(signed.client.readContract).not.toHaveBeenCalled();
+    const unknown = fixture(); unknown.tx.input = `0xdeadbeef${unknown.tx.input.slice(10)}`;
+    await expect(unknown.run()).rejects.toThrow('REPLICATION_METHOD_UNSUPPORTED');
+  });
 });

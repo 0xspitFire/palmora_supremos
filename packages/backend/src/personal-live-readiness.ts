@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { PERMANENT_ENABLEMENT_EXPIRY } from './robinhood-enablement.js';
 import { assertLiveOperationalReadiness, PERSONAL_LIVE_CUSTODY_MAX_MS, type PersonalLiveContext } from './custody.js';
-import { campaignInputDigest, EvidenceService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, type EvidenceAuthority, type EvidenceApproval } from './evidence.js';
+import { campaignInputDigest, EvidenceService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE, validFreeSignedRehearsalReference, type EvidenceAuthority, type EvidenceApproval } from './evidence.js';
 import type { BackendStore } from './store.js';
 import type { Campaign, ChainEvidenceRecord, OperationalReadiness, SimulationEvidenceRecord } from './types.js';
 
@@ -116,15 +116,16 @@ export function ownerTypedProof(phrase: string, recordId: string): string { retu
 
 /** The same phrase every time: it states what is being accepted, so it cannot go stale while a block arrives. */
 export type EthereumEvidenceValidity = 'permanent' | '7-days';
-export function ethereumChainEvidencePhrase(validity: EthereumEvidenceValidity = 'permanent', includeFreeAllowlist = false): string {
+export function ethereumChainEvidencePhrase(validity: EthereumEvidenceValidity = 'permanent', includeFreeAllowlist = false, includeFreeSigned = false): string {
   const phrase = validity === 'permanent' ? 'ACCEPT-ETHEREUM-SEADROP-EVIDENCE PERMANENT' : 'ACCEPT-ETHEREUM-SEADROP-EVIDENCE 7 days';
-  return includeFreeAllowlist ? `${phrase} CHAIN-1 PUBLIC+FREE-ALLOWLIST-V1` : phrase;
+  return includeFreeSigned ? `${phrase} CHAIN-1 PUBLIC+FREE-ALLOWLIST+FREE-SIGNED-V1` : includeFreeAllowlist ? `${phrase} CHAIN-1 PUBLIC+FREE-ALLOWLIST-V1` : phrase;
 }
 export function ethereumChainEvidenceRevokePhrase(id: string): string { return `REVOKE-ETHEREUM-SEADROP-EVIDENCE ${sha(id).slice(-8)}`; }
 
 /** Durable owner strategy acceptance; fresh campaign/custody/simulation checks remain independent. */
-export function buildEthereumChainEvidence(args: { now: Date; sourceBlock: bigint; sourceBlockHash: string; strategy: string; validity?: EthereumEvidenceValidity; includeFreeAllowlist?: boolean }): ChainEvidenceRecord {
+export function buildEthereumChainEvidence(args: { now: Date; sourceBlock: bigint; sourceBlockHash: string; strategy: string; validity?: EthereumEvidenceValidity; includeFreeAllowlist?: boolean; includeFreeSigned?: boolean; freeSignedRehearsalReference?: string }): ChainEvidenceRecord {
   if (args.strategy !== 'seadrop-v1-public') throw new Error('ETHEREUM_CHAIN_APPROVAL_SCOPE_INVALID');
+  if (args.includeFreeSigned && !validFreeSignedRehearsalReference(args.freeSignedRehearsalReference)) throw new Error('FREE_SIGNED_REHEARSAL_REFERENCE_REQUIRED');
   const checkedAt = args.now.toISOString();
   return {
     id: `chain-evidence-ethereum-${args.sourceBlock.toString()}-${randomUUID()}`,
@@ -138,7 +139,7 @@ export function buildEthereumChainEvidence(args: { now: Date; sourceBlock: bigin
     reconciliationPassed: true,
     finalityPassed: true,
     endpointIdentity: 'ETHEREUM_RPC_REFERENCE',
-    strategyVersion: args.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : `${args.strategy}-1`,
+    strategyVersion: args.includeFreeSigned ? SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE : args.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : `${args.strategy}-1`,
     checkedAt,
     expiresAt: args.validity === '7-days' ? new Date(args.now.getTime() + PERSONAL_LIVE_CHAIN_EVIDENCE_MS).toISOString() : PERMANENT_ENABLEMENT_EXPIRY,
     sourceBlock: args.sourceBlock,
@@ -146,16 +147,23 @@ export function buildEthereumChainEvidence(args: { now: Date; sourceBlock: bigin
   };
 }
 
-export async function acceptEthereumChainEvidence(store: BackendStore, record: ChainEvidenceRecord, phrase: string, now: () => Date = () => new Date()): Promise<void> {
+export async function acceptEthereumChainEvidence(store: BackendStore, record: ChainEvidenceRecord, phrase: string, now: () => Date = () => new Date(), freeSignedRehearsalReference?: string): Promise<void> {
   const acceptedNow = now();
+  const signedScope = record.strategyVersion === SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE;
+  if (signedScope && !validFreeSignedRehearsalReference(freeSignedRehearsalReference)) throw new Error('FREE_SIGNED_REHEARSAL_REFERENCE_REQUIRED');
   const checked = Date.parse(record.checkedAt);
   const validLifetime = record.expiresAt === PERMANENT_ENABLEMENT_EXPIRY || (Number.isFinite(checked) && record.expiresAt === new Date(checked + PERSONAL_LIVE_CHAIN_EVIDENCE_MS).toISOString());
-  if (!validLifetime || !Number.isFinite(checked) || checked > acceptedNow.getTime() || Date.parse(record.expiresAt) <= acceptedNow.getTime() || record.chainId !== 1 || (!['seadrop-v1-public-1', SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE].includes(record.strategyVersion)) || phrase !== ethereumChainEvidencePhrase(record.expiresAt === PERMANENT_ENABLEMENT_EXPIRY ? 'permanent' : '7-days', record.strategyVersion === SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE)) throw new Error('ETHEREUM_CHAIN_APPROVAL_SCOPE_INVALID');
+  if (!validLifetime || !Number.isFinite(checked) || checked > acceptedNow.getTime() || Date.parse(record.expiresAt) <= acceptedNow.getTime() || record.chainId !== 1 || (!['seadrop-v1-public-1', SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE].includes(record.strategyVersion)) || phrase !== ethereumChainEvidencePhrase(record.expiresAt === PERMANENT_ENABLEMENT_EXPIRY ? 'permanent' : '7-days', record.strategyVersion === SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, signedScope)) throw new Error('ETHEREUM_CHAIN_APPROVAL_SCOPE_INVALID');
   // A fresh database has no chain profile yet, and evidence can only be attached to one.
   (store as { ensureEthereumChainProfile?: () => unknown }).ensureEthereumChainProfile?.();
-  const service = new EvidenceService(store, now, ownerTypedAuthority(phrase));
+  const approvalScope = signedScope ? `${phrase}|rehearsal:${freeSignedRehearsalReference}` : phrase;
+  if (signedScope) await store.transaction(state => {
+    if (state.chainEvidence.some(item => item.id === record.id)) throw new Error('CHAIN_EVIDENCE_ALREADY_EXISTS');
+    state.events.push({ id: `evt_${randomUUID()}`, type: 'chain_signed_rehearsal_review', at: acceptedNow.toISOString(), data: { chainId: 1, evidenceId: record.id, reference: freeSignedRehearsalReference, strategyVersion: record.strategyVersion } });
+  });
+  const service = new EvidenceService(store, now, ownerTypedAuthority(approvalScope));
   await service.recordChainEvidence(record);
-  const approval: EvidenceApproval = { verifierId: 'owner-cli', proof: ownerTypedProof(phrase, record.id), acceptedAt: now().toISOString() };
+  const approval: EvidenceApproval = { verifierId: 'owner-cli', proof: ownerTypedProof(approvalScope, record.id), acceptedAt: now().toISOString() };
   await service.acceptChainEvidence(record.id, approval);
 }
 

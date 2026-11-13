@@ -22,8 +22,8 @@ export function receiptAuthorizesSettlement(chainId: 1 | 8453 | 4663, receipt: P
 }
 
 /** A pending aggregate may contain a terminal failure in another wallet. */
-export function partialFleetFailurePending(result: Pick<ExecutionResult, 'state' | 'attempts' | 'receipts'>): boolean {
-  return result.state === 'Pending' && (result.attempts.some((attempt) => attempt.state === 'Failed') || result.receipts.some((receipt) => receipt.state === 'Failed'));
+export function partialFleetFailurePending(result: Pick<ExecutionResult, 'state' | 'attempts' | 'receipts' | 'neverStartedWallets'>): boolean {
+  return result.state === 'Pending' && ((result.neverStartedWallets?.length ?? 0) > 0 || result.attempts.some((attempt) => attempt.state === 'Failed') || result.receipts.some((receipt) => receipt.state === 'Failed'));
 }
 
 export class ExecutionCoordinator {
@@ -241,6 +241,10 @@ export class ExecutionCoordinator {
     await this.raiseFleetNotices(runId, notices);
     result = rebindExecutionResult(result, prepared);
     this.assertEngineFacts(runId, campaign.chainId, result.executionIds, result.attempts, result.receipts);
+    if (result.neverStartedWallets?.length) {
+      if (!canonical.releaseNeverStartedWallets) throw new Error('CANONICAL_PREFLIGHT_RELEASE_REQUIRED');
+      await canonical.releaseNeverStartedWallets(runId, result.neverStartedWallets);
+    }
     const killedAfterExecution = this.store.snapshot().killed;
     await this.store.transaction(after => {
       after.attempts.push(...result.attempts);

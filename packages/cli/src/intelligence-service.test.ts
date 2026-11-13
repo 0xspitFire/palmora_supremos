@@ -561,3 +561,26 @@ describe('scan-gap coverage expires from the in-memory rolling window', () => {
     } finally { service.stop(); }
   });
 });
+
+describe('production readiness fleet refresh', () => {
+  it('reads current custody addresses instead of retaining the startup list', async () => {
+    const now = () => new Date('2026-11-07T10:00:00.000Z');
+    const h = harness(now);
+    let current = [OWN[0]!];
+    const walletProvider = vi.fn(async () => current);
+    class FundedPort extends IdlePort {
+      public override async balance(): Promise<bigint | null> { return 10n ** 18n; }
+      public override async simulateMint(): Promise<SimulationOutcome> { return { outcome: 'pass' }; }
+    }
+    await h.store.transaction(state => { state.events.push({ id: 'calendar-refresh', type: 'calendar_entry', at: now().toISOString(), data: { id: `calendar:1:${OWN[0]}`, chainId: 1, contract: OWN[0], openingAt: new Date(now().getTime() - 1_000).toISOString(), closingAt: new Date(now().getTime() + 60_000).toISOString(), priceWei: '0', maxPerWallet: 1, expiresAt: new Date(now().getTime() + 600_000).toISOString() } }); });
+    const service = startIntelligence({ store: h.store, repo: h.repo, port: new FundedPort(), alerts: h.alerts, wallets: OWN, walletProvider, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now });
+    try {
+      await vi.waitFor(() => expect(h.store.snapshot().events.some(e => e.type === 'readiness_sweep')).toBe(true));
+      current = [OWN[1]!];
+      await service.runOnce();
+      const rows = h.store.snapshot().events.filter(e => e.type === 'readiness_sweep').at(-1)?.data.rows;
+      expect(rows).toEqual([expect.objectContaining({ wallet: OWN[1] })]);
+      expect(walletProvider.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally { service.stop(); }
+  });
+});

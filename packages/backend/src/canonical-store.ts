@@ -26,6 +26,7 @@ import type {
   ChainVerification,
   EventRecord,
   ExecutionResult,
+  NeverStartedWalletEvidence,
   FeePolicy,
   IntentRecord,
   ReconciliationRecord,
@@ -76,7 +77,9 @@ export interface CanonicalAdmissionResult {
 export interface CanonicalExecutionStore extends BackendStore {
   admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult>;
   abortRemaining(reason: string): Promise<void>;
-  /** D-074: closes ONE run that provably sent nothing (see the implementation); any doubt leaves it for reconciliation. */
+  /** Release only explicitly preflight-stopped wallets whose canonical signing graph is still untouched. */
+  releaseNeverStartedWallets?(runId: string, evidence: readonly NeverStartedWalletEvidence[]): Promise<{ released: string[]; retained: string[] }>;
+  /** D-074: closes ONE run that provably sent nothing; any doubt leaves it for reconciliation. */
   abortRunIfUnsent?(runId: string, reason: string): Promise<'closed' | 'left' | 'absent'>;
   /** Key 2 for Robinhood (D-040): the owner's enablement record, or undefined when there is none. */
   robinhoodEnablement?(): unknown;
@@ -854,6 +857,49 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution_run', entityId: runId, newState: 'aborted', actor: this.actor, reason, policySnapshot: { kind: 'event', eventType: 'run_closed_unsent', eventData: { reason } }, occurredAt: this.now().toISOString() });
       this.db.exec('COMMIT');
       return 'closed';
+    } catch (error) {
+      if (this.db.inTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  public async releaseNeverStartedWallets(runId: string, evidence: readonly NeverStartedWalletEvidence[]): Promise<{ released: string[]; retained: string[] }> {
+    this.ensureOpen();
+    if (!evidence.length) return { released: [], retained: [] };
+    const seen = new Set<string>();
+    for (const item of evidence) {
+      if (item.runId !== runId || item.proof !== 'engine-preflight-v1' || !/^0x[0-9a-f]{40}$/i.test(item.wallet) || seen.has(item.wallet.toLowerCase())) throw new Error('INVALID_NEVER_STARTED_WALLET_EVIDENCE');
+      seen.add(item.wallet.toLowerCase());
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const released: string[] = []; const retained: string[] = [];
+      const rows = evidence.map((item) => {
+        const row = this.db.prepare(`SELECT e.id, e.state, ti.id AS intent_id, ti.nonce, ti.calldata, r.id AS reservation_id, r.status,
+          (SELECT st.new_state FROM state_transition st WHERE st.entity_type = 'transaction_intent' AND st.entity_id = ti.id ORDER BY st.occurred_at DESC, st.rowid DESC LIMIT 1) AS intent_state,
+          EXISTS (SELECT 1 FROM transaction_attempt a WHERE a.execution_id = e.id OR a.transaction_intent_id = ti.id) AS attempted,
+          EXISTS (SELECT 1 FROM transaction_receipt receipt WHERE receipt.execution_id = e.id OR receipt.transaction_attempt_id IN (SELECT a.id FROM transaction_attempt a WHERE a.transaction_intent_id = ti.id)) AS receipted,
+          EXISTS (SELECT 1 FROM reconciliation_record rec WHERE rec.execution_id = e.id) AS reconciled
+          FROM execution e JOIN transaction_intent ti ON ti.id = e.transaction_intent_id
+          JOIN wallet w ON w.id = e.wallet_id JOIN spend_reservation r ON r.id = e.reservation_id
+          JOIN execution_run er ON er.id = e.run_id AND er.campaign_id = e.campaign_id
+          WHERE ti.wallet_id = e.wallet_id AND ti.campaign_id = e.campaign_id AND r.campaign_id = e.campaign_id AND ti.chain_profile_id = w.chain_profile_id AND r.chain_profile_id = w.chain_profile_id AND e.run_id = ? AND ti.run_id = ? AND lower(w.address) = ? AND r.execution_id = e.id AND r.transaction_intent_id = ti.id AND r.wallet_id = e.wallet_id`).get(runId, runId, item.wallet.toLowerCase()) as { id: string; state: string; intent_id: string; intent_state: string | null; nonce: number | null; calldata: string; reservation_id: string; status: string; attempted: number; receipted: number; reconciled: number } | undefined;
+        if (!row) throw new Error('UNADMITTED_NEVER_STARTED_WALLET');
+        return { item, row };
+      });
+      for (const { item, row } of rows) {
+        // A positive engine report is necessary but insufficient: any durable
+        // signing/send/recovery fact or changed intent keeps the exposure reserved.
+        if (row.attempted || row.receipted || row.reconciled || row.intent_state !== 'prepared' || row.nonce !== null || row.calldata !== '0x' || !['prepared', 'aborted'].includes(row.state) || !['reserved', 'released'].includes(row.status)) { retained.push(item.wallet); continue; }
+        if (row.status === 'released') { released.push(item.wallet); continue; }
+        if (row.state !== 'prepared') { retained.push(item.wallet); continue; }
+        this.transitionExecution(row.id, 'aborted', 'engine preflight', 'ENGINE_PREFLIGHT_NOT_STARTED');
+        this.db.prepare("UPDATE spend_reservation SET status = 'released' WHERE id = ? AND execution_id = ? AND status = 'reserved'").run(row.reservation_id, row.id);
+        this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'spend_reservation', entityId: row.reservation_id, newState: 'released', actor: this.actor, reason: 'ENGINE_PREFLIGHT_NOT_STARTED', policySnapshot: { kind: 'event', eventType: 'wallet_preflight_reservation_released', eventData: { runId, wallet: item.wallet, proof: item.proof } }, occurredAt: this.now().toISOString() });
+        released.push(item.wallet);
+      }
+      this.db.exec('COMMIT');
+      return { released, retained };
     } catch (error) {
       if (this.db.inTransaction) this.db.exec('ROLLBACK');
       throw error;
@@ -1768,6 +1814,13 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 export function rebindExecutionResult(result: ExecutionResult, prepared: readonly PreparedExecution[]): ExecutionResult {
   if (prepared.length === 0) return result;
   const byWallet = new Map(prepared.map((item) => [item.wallet.toLowerCase(), item.executionId]));
+  const evidenceWallets = new Set<string>();
+  for (const item of result.neverStartedWallets ?? []) {
+    const wallet = item.wallet.toLowerCase();
+    const executionId = byWallet.get(wallet);
+    if (item.proof !== 'engine-preflight-v1' || !executionId || evidenceWallets.has(wallet) || result.attempts.some((attempt) => attempt.wallet.toLowerCase() === wallet) || result.executionIds.includes(executionId) || result.receipts.some((receipt) => receipt.executionId === executionId)) throw new Error('INVALID_NEVER_STARTED_WALLET_EVIDENCE');
+    evidenceWallets.add(wallet);
+  }
   const oldToNew = new Map<string, string>();
   const attempts = result.attempts.map((attempt) => {
     const executionId = byWallet.get(attempt.wallet.toLowerCase());

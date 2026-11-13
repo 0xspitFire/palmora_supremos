@@ -131,7 +131,8 @@ export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consen
       // Keep the quantity bound exact without relying on hex_to_uint(), which
       // is not accepted by all Turnkey policy parsers.
       `eth.tx.data[202..266] in ${list(Array.from({ length: policy.family.maxQuantity }, (_, index) => (index + 1).toString(16).padStart(64, '0')))}`,
-      ...(policy.family.kind === 'seadrop-free-allowlist-v1' ? ["eth.tx.data[266..330] == '0000000000000000000000000000000000000000000000000000000000000000'"] : []),
+      ...(['seadrop-free-allowlist-v1', 'seadrop-free-signed-v1'].includes(policy.family.kind) ? ["eth.tx.data[266..330] == '0000000000000000000000000000000000000000000000000000000000000000'"] : []),
+      ...(policy.family.kind === 'seadrop-free-signed-v1' ? ["eth.tx.data[714..778] == '0000000000000000000000000000000000000000000000000000000000000001'"] : []),
     ].join(' && ')
     : `eth.tx.data == ${quote(tx.data.toLowerCase())}`;
   return {

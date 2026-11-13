@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, selectTurnkeyAllowlistFamilyPolicy, selectTurnkeyPublicFamilyPolicy, type SpendAlertSink } from './runtime.js';
+import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, selectTurnkeyAllowlistFamilyPolicy, selectTurnkeyPublicFamilyPolicy, selectTurnkeySignedFamilyPolicy, type SpendAlertSink } from './runtime.js';
 import { PERSONAL_LIVE_FLEET_POLICY, type EngineAdapter } from '@mint-bot/backend';
 import { createTurnkeyPolicyRecord, turnkeyProviderPolicyExpressions, SEADROP_V1_ADDRESS, type TurnkeyPolicyAst } from '@mint-bot/engine';
 import type { Address, Hex } from 'viem';
@@ -9,13 +9,13 @@ import type { Address, Hex } from 'viem';
 const FAMILY_WALLET = '0x1111111111111111111111111111111111111111' as Address;
 const FAMILY_KEY = 'key-family';
 
-function familyRecord(maxQuantity = 4, policyId = 'policy-family', allowlist = false, publicChain?: 1 | 8453 | 4663) {
+function familyRecord(maxQuantity = 4, policyId = 'policy-family', allowlist = false, publicChain?: 1 | 8453 | 4663, signed = false) {
   const policy: TurnkeyPolicyAst = {
     version: 1,
     effect: 'allow',
     scope: { provider: 'turnkey', environment: 'production', organizationId: 'org', userId: 'runtime', policyId, keyIds: [FAMILY_KEY] },
-    transaction: { chainId: publicChain ?? 4663, from: [FAMILY_WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: (allowlist ? '0x4300a4e6' : '0x161ac21f') as Hex, gasLimitMax: '500000', maxFeePerGasMax: '200000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
-    family: { kind: allowlist ? 'seadrop-free-allowlist-v1' : publicChain !== undefined ? 'seadrop-free-public-v1' : 'robinhood-seadrop-public-v1', maxQuantity },
+    transaction: { chainId: publicChain ?? 4663, from: [FAMILY_WALLET], to: SEADROP_V1_ADDRESS, valueWei: '0', data: (signed ? '0x4b61cd6f' : allowlist ? '0x4300a4e6' : '0x161ac21f') as Hex, gasLimitMax: '500000', maxFeePerGasMax: '200000000', maxPriorityFeePerGasMax: '100000000', accessList: [] },
+    family: { kind: signed ? 'seadrop-free-signed-v1' : allowlist ? 'seadrop-free-allowlist-v1' : publicChain !== undefined ? 'seadrop-free-public-v1' : 'robinhood-seadrop-public-v1', maxQuantity },
   };
   const expressions = turnkeyProviderPolicyExpressions(policy);
   return createTurnkeyPolicyRecord({
@@ -142,5 +142,28 @@ describe('chain-specific free public family selection', () => {
       expect(selectTurnkeyPublicFamilyPolicy(records, { ...input, walletScope: ['0x3333333333333333333333333333333333333333'] })).toBeUndefined();
     }
     expect(() => selectTurnkeyPublicFamilyPolicy([familyRecord(), familyRecord(4, 'public-rh', false, 4663)], { chainId: 4663, strategy: 'seadrop-v1-public', quantity: 1, mintPriceWei: 0n })).toThrow('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
+  });
+});
+
+
+describe('explicit signed family custody selection', () => {
+  const record = (chainId: 1 | 8453 | 4663, id = `signed-${chainId}`) => familyRecord(chainId === 8453 ? 4 : 10, id, false, chainId, true);
+  it.each([1, 8453, 4663] as const)('selects only its owner-approved signed chain %s and active wallet scope', chainId => {
+    const input = { chainId, strategy: 'seadrop-v1-signed', quantity: chainId === 8453 ? 4 : 10, mintPriceWei: 0n, walletScope: [FAMILY_WALLET] };
+    const records = [record(1), record(8453), record(4663)];
+    expect(selectTurnkeySignedFamilyPolicy(records, input)?.policyReference).toContain(`turnkey:signed-${chainId}:`);
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, quantity: input.quantity + 1 })).toBeUndefined();
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, mintPriceWei: 1n })).toBeUndefined();
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, mintPriceWei: undefined })).toBeUndefined();
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, strategy: 'seadrop-v1-public' })).toBeUndefined();
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, walletScope: [] })).toBeUndefined();
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, walletScope: undefined })).toBeUndefined();
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, walletScope: [FAMILY_WALLET, FAMILY_WALLET] })).toBeUndefined();
+    expect(selectTurnkeySignedFamilyPolicy(records, { ...input, walletScope: ['0x2222222222222222222222222222222222222222'] })).toBeUndefined();
+  });
+  it('cannot authorize a signed mint from any old public or Merkle family', () => {
+    const input = { chainId: 4663, strategy: 'seadrop-v1-signed', quantity: 1, mintPriceWei: 0n, walletScope: [FAMILY_WALLET] };
+    expect(selectTurnkeySignedFamilyPolicy([familyRecord(), familyRecord(4, 'allowlist', true), familyRecord(10, 'public', false, 4663)], input)).toBeUndefined();
+    expect(() => selectTurnkeySignedFamilyPolicy([record(4663), record(4663, 'duplicate')], input)).toThrow('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
   });
 });

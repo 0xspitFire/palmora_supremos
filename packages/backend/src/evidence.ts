@@ -4,13 +4,22 @@ import type { Campaign, ChainEvidenceRecord, RobinhoodNegativeCase, SimulationEv
 
 /** New owner-reviewed baseline only; legacy public evidence never acquires allowlist scope implicitly. */
 export const SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE = 'seadrop-v1-baseline-public-free-allowlist@1';
+/** Separate owner-reviewed extension; existing public/allowlist approvals never authorize signed mints. */
+export const SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE = 'seadrop-v1-baseline-public-free-allowlist-free-signed@1';
+
+/** Evidence references are opaque artifact identifiers, never endpoint URLs or credentials. */
+export function validFreeSignedRehearsalReference(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._:/@#-]{4,299}$/.test(value)
+    && !/https?:|wss?:|bearer|authorization|password|private[ _-]?key|\.env\b|:\/\//i.test(value);
+}
 
 function strategyCompatible(evidence: ChainEvidenceRecord, campaign: Campaign, state: ReturnType<BackendStore['snapshot']>, now: Date): boolean {
-  if (evidence.strategyVersion !== SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE) {
+  const signedScope = evidence.strategyVersion === SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE;
+  if (evidence.strategyVersion !== SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE && !signedScope) {
     return ['seadrop-v1-public', 'seadrop-v1-public@1', 'seadrop-v1-public-1'].includes(evidence.strategyVersion) && campaign.strategy === 'seadrop-v1-public';
   }
   if (campaign.strategy === 'seadrop-v1-public') return true;
-  if (campaign.strategy !== 'seadrop-v1-allowlist' || campaign.mintPriceWei !== 0n || campaign.feePolicy.kind !== 'free') return false;
+  if ((campaign.strategy !== 'seadrop-v1-allowlist' && !(signedScope && campaign.strategy === 'seadrop-v1-signed')) || campaign.mintPriceWei !== 0n || campaign.feePolicy.kind !== 'free') return false;
   // Chain compatibility does not supply custody authority. The actual owner-signed
   // record is selected/verified by preparation and freshly checked before arm/run;
   // own-wallet simulation digests below bind this exact policy selection.
@@ -18,7 +27,9 @@ function strategyCompatible(evidence: ChainEvidenceRecord, campaign: Campaign, s
   const operational = state.runtime.operational;
   const custody = operational?.custody;
   return binding?.provider === 'turnkey' && /^sha256:[0-9a-f]{64}$/.test(binding.recordDigest)
-    && custody?.provider === 'turnkey' && custody.policyStatus === 'approved'
+    && custody?.provider === 'turnkey' && custody.policyStatus === 'approved' && custody.healthStatus === 'healthy'
+    && Number.isFinite(Date.parse(custody.observedAt)) && Date.parse(custody.observedAt) <= now.getTime()
+    && Number.isFinite(Date.parse(custody.expiresAt)) && Date.parse(custody.expiresAt) > now.getTime()
     && custody.policyReference === binding.policyReference && custody.policyDigest === binding.policyDigest && custody.recordDigest === binding.recordDigest
     && operational?.signerReady === true && Number.isFinite(Date.parse(operational.expiresAt)) && Date.parse(operational.expiresAt) > now.getTime();
 }

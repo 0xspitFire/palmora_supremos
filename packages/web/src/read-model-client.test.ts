@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ReadModelEnvelope } from './contracts.js';
+import type { AnalyticsReadModel, ReadModelEnvelope } from './contracts.js';
 import { ReadModelClient, type ReadModelGetRequest } from './read-model-client.js';
 
 function emptyEnvelope<T>(): ReadModelEnvelope<T> {
@@ -14,6 +14,10 @@ function emptyEnvelope<T>(): ReadModelEnvelope<T> {
     data: null,
     issues: [],
   };
+}
+
+function analytics(): AnalyticsReadModel {
+  return { mode: 'shadow-only', method: 'FIFO', currency: 'ETH', coverage: { scope: 'canonical-finalized-mints-only', canonicalExecutions: 0, completeCosts: 0, incompleteCosts: 0, confirmedActivities: 0, pendingExcluded: 0, reorgedExcluded: 0, unavailableObservations: 0, acquisitionHistory: 'no_samples', externalTransfersAndSalesComplete: false, providerCoverageAsserted: false, groupsOmitted: 0 }, totals: { recordedCanonicalCostWei: null, realizedPnlWei: null, realizedRoiBps: null, unrealizedPnlWei: null, transactionAndMarketplaceFeesWei: null }, groups: [], shadow: [] };
 }
 
 describe('ReadModelClient', () => {
@@ -97,5 +101,56 @@ describe('ReadModelClient', () => {
     expect(frozen).toBe(true);
     expect(result.data).toBeNull();
     expect(result.issues[0]?.code).toBe('READ_MODEL_TRANSPORT_ERROR');
+  });
+  it('accepts mixed known and unknown opening times without discarding backend warnings', async () => {
+    const response = {
+      ...emptyEnvelope<unknown>(),
+      availability: 'partial' as const,
+      data: [
+        { id: 'known', project: {}, chain: {}, openingAt: '2026-11-07T00:00:00.000Z', verification: {} },
+        { id: 'unknown', project: {}, chain: {}, openingAt: null, verification: {} },
+      ],
+      issues: [{ code: 'CALENDAR_TIME_UNKNOWN', severity: 'warning', message: 'Opening time is unknown.', retryable: false, safeAction: 'Inspect' }],
+    };
+    const result = await new ReadModelClient({ get: async () => response }).getCalendar();
+    expect(result.availability).toBe('partial');
+    expect(result.data?.map(entry => entry.openingAt)).toEqual(['2026-11-07T00:00:00.000Z', null]);
+    expect(result.issues).toEqual(response.issues);
+  });
+
+  it.each([undefined, 123, {}, '', 'tomorrow', '2026-02-30T00:00:00.000Z', '2026-11-07T25:00:00.000Z'])('rejects malformed calendar opening time %s', async (openingAt) => {
+    const response = { ...emptyEnvelope<unknown>(), availability: 'available' as const, data: [{ id: 'bad', project: {}, chain: {}, openingAt, verification: {} }] };
+    const result = await new ReadModelClient({ get: async () => response }).getCalendar();
+    expect(result.data).toBeNull();
+    expect(result.issues.at(-1)?.code).toBe('READ_MODEL_SCHEMA_MISMATCH');
+  });
+
+});
+
+
+describe('analytics read-model transport', () => {
+  it('uses only the allowlisted GET route and preserves unknown financial outcomes', async () => {
+    const get = async ({ method, path }: ReadModelGetRequest) => {
+      expect(method).toBe('GET'); expect(path).toBe('/api/v1/read-model/analytics');
+      return { ...emptyEnvelope<unknown>(), availability: 'partial', data: analytics() };
+    };
+    const result = await new ReadModelClient({ get }).getAnalytics();
+    expect(result.availability).toBe('partial');
+    expect(result.data?.totals.realizedPnlWei).toBeNull();
+    expect(result.data?.coverage.providerCoverageAsserted).toBe(false);
+  });
+
+  it.each(['live-mode', 'claimed-complete-provider', 'numeric-pnl', 'bad-count', 'too-many-groups', 'malformed-money', 'negative-cost'] as const)('rejects malformed or overclaiming analytics: %s', async change => {
+    const data: Record<string, unknown> = structuredClone(analytics()) as unknown as Record<string, unknown>;
+    if (change === 'live-mode') data.mode = 'live';
+    if (change === 'claimed-complete-provider') (data.coverage as Record<string, unknown>).providerCoverageAsserted = true;
+    if (change === 'negative-cost') (data.totals as Record<string, unknown>).recordedCanonicalCostWei = '-12';
+    if (change === 'numeric-pnl') (data.totals as Record<string, unknown>).realizedPnlWei = 12;
+    if (change === 'malformed-money') (data.totals as Record<string, unknown>).realizedPnlWei = '1.2 ETH';
+    if (change === 'bad-count') (data.coverage as Record<string, unknown>).canonicalExecutions = -1;
+    if (change === 'too-many-groups') data.groups = Array.from({ length: 21 }, () => ({}));
+    const result = await new ReadModelClient({ get: async () => ({ ...emptyEnvelope<unknown>(), availability: 'partial', data }) }).getAnalytics();
+    expect(result.data).toBeNull();
+    expect(result.issues.at(-1)?.code).toBe('READ_MODEL_SCHEMA_MISMATCH');
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DurableStore } from './store.js';
-import { EvidenceService, campaignInputDigest, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE as BASELINE } from './evidence.js';
+import { EvidenceService, campaignInputDigest, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE as BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE as SIGNED_BASELINE } from './evidence.js';
 import { ExecutionCoordinator } from './coordinator.js';
 import type { Campaign, ChainEvidenceRecord, EngineAdapter } from './types.js';
 
@@ -69,4 +69,38 @@ describe('explicit public/free-allowlist chain baseline', () => {
     await value.store.transaction(state => { state.chainEvidence[0]!.executionEnabled = false; });
     await expect(value.coordinator.arm(value.input(), 'live')).rejects.toThrow('CHAIN_VERIFICATION_NOT_ACCEPTED');
   });
+  it.each([1, 8453, 4663] as const)('requires a new signed baseline and current bound custody for free signed mints on chain %i', async chainId => {
+    const legacy = await setup(chainId);
+    legacy.campaign.strategy = 'seadrop-v1-signed';
+    await legacy.store.transaction(state => { state.campaigns[0]!.strategy = 'seadrop-v1-signed'; state.simulations[0]!.inputDigest = campaignInputDigest(legacy.campaign); });
+    await expect(legacy.coordinator.arm(legacy.input(), 'live')).rejects.toThrow('CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
+
+    const signed = await setup(chainId, SIGNED_BASELINE);
+    signed.campaign.strategy = 'seadrop-v1-signed';
+    await signed.store.transaction(state => { state.campaigns[0]!.strategy = 'seadrop-v1-signed'; state.simulations[0]!.inputDigest = campaignInputDigest(signed.campaign); });
+    expect((await signed.coordinator.arm(signed.input(), 'live')).state).toBe('Armed');
+    expect(signed.execute).not.toHaveBeenCalled();
+  });
+
+  it.each(['paid-value', 'paid-fee', 'missing-binding', 'record-drift', 'stale-custody', 'custody-expired', 'custody-future', 'custody-unhealthy', 'signer-unready', 'unknown-method', 'simulation-drift'] as const)('keeps signed baseline fail closed on %s', async change => {
+    const value = await setup(1, SIGNED_BASELINE);
+    value.campaign.strategy = 'seadrop-v1-signed';
+    if (change === 'paid-value') value.campaign.mintPriceWei = 1n;
+    if (change === 'paid-fee') value.campaign.feePolicy.kind = 'paid';
+    if (change === 'missing-binding') delete value.campaign.custodyPolicy;
+    if (change === 'unknown-method') value.campaign.strategy = 'seadrop-v2-signed';
+    await value.store.transaction(state => {
+      state.campaigns[0] = value.campaign;
+      state.simulations[0]!.inputDigest = change === 'simulation-drift' ? 'old-policy' : campaignInputDigest(value.campaign);
+      if (change === 'record-drift') state.runtime.operational!.custody!.recordDigest = `sha256:${'b'.repeat(64)}`;
+      if (change === 'stale-custody') state.runtime.operational!.expiresAt = at;
+      if (change === 'custody-expired') state.runtime.operational!.custody!.expiresAt = at;
+      if (change === 'custody-future') state.runtime.operational!.custody!.observedAt = until;
+      if (change === 'custody-unhealthy') state.runtime.operational!.custody!.healthStatus = 'unhealthy';
+      if (change === 'signer-unready') state.runtime.operational!.signerReady = false;
+    });
+    expect(() => value.service.assertLiveEvidence(value.input())).toThrow(change === 'simulation-drift' ? 'WALLET_SIMULATION_SNAPSHOT_MISMATCH' : 'CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
+    expect(value.execute).not.toHaveBeenCalled();
+  });
+
 });

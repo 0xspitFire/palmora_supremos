@@ -120,3 +120,36 @@ it.each(['2026-99-99', '2026-02-31'])('refuses invalid initial Base evidence dat
   expect(checked.evidence).toBeUndefined();
   expect(checked.problems.join(' ')).toContain('reviewedCode needs a YYYY-MM-DD date');
 });
+
+
+describe('explicit Base free signed scope', () => {
+  const signedFile = JSON.stringify({ ...JSON.parse(file), freeSignedRehearsal: { passed: true, checkedOn: '2026-10-23', reference: 'artifacts/base-free-signed-replay.json' } });
+  const signedDigest = createHash('sha256').update(signedFile).digest('hex');
+
+  it('requires a signed rehearsal and new exact phrase without changing previous grants', () => {
+    const s = store(current);
+    expect(run(s.store, { action: 'status', includeFreeSigned: true })).toMatchObject({ state: 'NotReady', installedStrategyVersion: 'seadrop-v1-public' });
+    expect(() => run(s.store, { includeFreeSigned: true })).toThrow('EVIDENCE_INCOMPLETE');
+    const preview = run(s.store, { action: 'status', evidenceText: signedFile, includeFreeSigned: true });
+    expect(preview).toMatchObject({ state: 'ReadyToRecord', requestedStrategyVersion: 'seadrop-v1-baseline-public-free-allowlist-free-signed@1' });
+    expect(String(preview.copyThisToRecord)).toContain('--include-free-signed');
+    expect(String(preview.copyThisToRecord)).toContain('CHAIN-8453 PUBLIC+FREE-ALLOWLIST+FREE-SIGNED-V1');
+    expect(() => run(s.store, { evidenceText: signedFile, includeFreeSigned: true, confirm: baseEnablePhrase(signedDigest, false, true) })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(s.writes).toEqual([]);
+    run(s.store, { evidenceText: signedFile, includeFreeSigned: true, confirm: baseEnablePhrase(signedDigest, false, false, true) });
+    expect(s.writes[0]).toMatchObject({ strategyVersion: 'seadrop-v1-baseline-public-free-allowlist-free-signed@1', evidenceDigest: signedDigest });
+    expect(s.writes[0]?.paidAllowed).toBeUndefined();
+    expect(Object.keys(s.writes[0]?.evidence as object)).toHaveLength(BASE_EVIDENCE_STEPS.length);
+    expect(current.strategyVersion).toBe('seadrop-v1-public');
+  });
+
+  it.each([
+    { passed: false, checkedOn: '2026-10-23', reference: 'artifacts/base-free-signed-replay.json' },
+    { passed: true, checkedOn: '2026-09-01', reference: 'artifacts/base-free-signed-replay.json' },
+    { passed: true, checkedOn: '2026-10-23', reference: 'https://credential.example/private' },
+  ])('refuses incomplete, stale or unsafe signed rehearsal %#', freeSignedRehearsal => {
+    const checked = checkBaseEvidenceFile(JSON.stringify({ ...JSON.parse(file), freeSignedRehearsal }), NOW, false, true);
+    expect(checked.evidence).toBeUndefined();
+    expect(checked.problems.join(' ')).toContain('freeSignedRehearsal');
+  });
+});

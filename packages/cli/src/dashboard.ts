@@ -10,8 +10,8 @@ export function createDashboard(store: BackendStore): { readModel: Phase2ReadOnl
     readModel,
     async render(url: URL): Promise<string> {
       const readinessId = url.searchParams.get('readiness');
-      const [home, calendar, alerts, health, readiness] = await Promise.all([client.getHome(), client.getCalendar(), client.getAlerts(), client.getHealth(), readinessId ? client.getReadiness(readinessId) : Promise.resolve(undefined)]);
-      return renderDocument({ home, calendar, alerts, health, ...(readiness ? { readiness } : {}) });
+      const [home, calendar, alerts, health, analytics, readiness] = await Promise.all([client.getHome(), client.getCalendar(), client.getAlerts(), client.getHealth(), client.getAnalytics(), readinessId ? client.getReadiness(readinessId) : Promise.resolve(undefined)]);
+      return renderDocument({ home, calendar, alerts, health, analytics, ...(readiness ? { readiness } : {}) });
     },
   };
 }

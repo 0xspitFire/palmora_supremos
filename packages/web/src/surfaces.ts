@@ -1,6 +1,7 @@
 import type {
   AlertReadModel,
   AlertsReadModel,
+  AnalyticsReadModel,
   AttentionItem,
   CalendarEntry,
   CalendarReadModel,
@@ -20,6 +21,8 @@ import type {
 import {
   escapeHtml,
   formatInteger,
+  formatSignedWei,
+  formatBasisPoints,
   formatQuantity,
   formatTime,
   renderAmount,
@@ -243,5 +246,18 @@ export function renderRun(envelope: ReadModelEnvelope<RunReadModel>): string {
     const outcome = data.run.outcome === 'dry_run_completed' ? 'Dry run completed' : data.run.outcome === 'not_started' ? 'Not started' : data.run.outcome === 'partial' ? 'Partial' : data.run.outcome === 'settled' ? 'Settled' : 'Unknown';
     const mode = data.run.mode === 'dry-run' ? 'Dry run' : data.run.mode === 'live' ? 'Live' : 'Unknown';
     return `<section class="card"><div class="section-heading"><h3>Run ${safeIdentifier(data.run.id)}</h3>${renderBadge(outcome, outcome)}</div><p>Mode: ${renderBadge(mode, mode)}; campaign ${safeIdentifier(data.run.campaignId)}; state ${renderBadge(data.run.state, data.run.state)}.</p><p>${mode === 'Dry run' ? 'No transaction is claimed from this preparation record.' : 'Live records remain subject to Backend reconciliation and finality.'}</p></section><section class="card"><h3>Wallet outcomes</h3>${data.walletResults.length > 0 ? `<div class="table-wrap"><table class="responsive-table"><caption>Per-wallet results</caption><thead><tr><th scope="col">Wallet</th><th scope="col">State</th><th scope="col">Finality</th><th scope="col">Reason</th><th scope="col">Retry policy</th></tr></thead><tbody>${data.walletResults.map(renderWalletResult).join('')}</tbody></table></div>` : emptyState('No wallet outcomes were supplied.')}</section><section class="card"><h3>Attempts</h3>${data.attempts.length > 0 ? `<ul class="attention-list">${data.attempts.map(renderAttempt).join('')}</ul>` : emptyState('No transaction attempt records were supplied.')}</section><section class="card"><h3>Receipts and finality</h3>${data.receipts.length > 0 ? `<ul class="attention-list">${data.receipts.map(renderReceipt).join('')}</ul>` : emptyState('No receipt records were supplied.')}</section><section class="card"><h3>Reconciliation</h3>${renderReconciliation(data)}</section><section class="timeline-section"><h3>Timeline</h3>${renderTimeline(data.events)}</section>`;
+  });
+}
+
+
+/** Historical accounting only. This surface has no mutation controls or execution transport. */
+export function renderAnalytics(envelope: ReadModelEnvelope<AnalyticsReadModel>): string {
+  return surface('analytics', 'Mint accounting and shadow evaluation', 'Recorded costs and FIFO outcomes from supplied confirmed facts. No live score or policy changes are made here.', envelope, data => {
+    const metric = (label: string, value: string): string => `<div class="metric"><span class="metric-label">${safeText(label)}</span><strong>${value}</strong></div>`;
+    const count = (value: number): string => Number.isSafeInteger(value) && value >= 0 ? value.toString() : 'Unknown';
+    const coverage = data.coverage;
+    const groups = data.groups.slice(0, 20);
+    const shadow = data.shadow.slice(0, 20);
+    return `<p><strong>Shadow only.</strong> External sale and transfer history is incomplete. Unknown basis, sale proceeds and floor estimates remain Unknown.</p><div class="metric-grid">${metric('Recorded canonical cost', formatSignedWei(data.totals.recordedCanonicalCostWei))}${metric('Realized PnL from supplied facts', formatSignedWei(data.totals.realizedPnlWei))}${metric('Realized ROI from known basis', formatBasisPoints(data.totals.realizedRoiBps))}${metric('Unrealized PnL from fresh floors', formatSignedWei(data.totals.unrealizedPnlWei))}${metric('Recorded activity transaction and marketplace fees', formatSignedWei(data.totals.transactionAndMarketplaceFeesWei))}</div><p>Canonical executions: ${count(coverage.canonicalExecutions)}; complete costs: ${count(coverage.completeCosts)}; incomplete costs: ${count(coverage.incompleteCosts)}. Confirmed acquisition/activity facts: ${count(coverage.confirmedActivities)}. Excluded pending: ${count(coverage.pendingExcluded)}; reorged: ${count(coverage.reorgedExcluded)}; unavailable observations: ${count(coverage.unavailableObservations)}.</p><p>Acquisition coverage: ${safeText(coverage.acquisitionHistory)}. Scope: canonical finalized mints only. Complete external provider coverage is not asserted.</p><h3>Attribution by chain and group</h3>${groups.length ? `<table class="responsive-table"><caption>At most twenty accounting groups; all costs and outcomes are limited to recorded facts.</caption><thead><tr><th>Dimension</th><th>Chain and group</th><th>Executions</th><th>Dispositions</th><th>Recorded cost</th><th>Realized PnL</th><th>Disposition quantity with unknown basis</th></tr></thead><tbody>${groups.map(row => `<tr><td>${safeText(row.dimension)}</td><td>${safeIdentifier(row.key)}</td><td>${count(row.executions)}</td><td>${count(row.dispositions)}</td><td>${formatSignedWei(row.recordedCostWei)}</td><td>${formatSignedWei(row.realizedPnlWei)}</td><td>${formatInteger(row.unknownBasisQuantity)}</td></tr>`).join('')}</tbody></table>` : emptyState('No canonical cost or disposition attribution samples are available.')}<p>${count(coverage.groupsOmitted)} additional groups omitted from this bounded summary.</p><h3>Offline shadow comparisons</h3>${shadow.length ? `<table class="responsive-table"><caption>Historical comparisons do not promote a live strategy.</caption><thead><tr><th>Policy</th><th>Selected</th><th>Measured</th><th>Unknown outcomes</th><th>Known realized PnL</th><th>Win rate on measured samples</th></tr></thead><tbody>${shadow.map(row => `<tr><td>${safeIdentifier(row.policyId)}</td><td>${count(row.selected)}</td><td>${count(row.measured)}</td><td>${count(row.unknownOutcomes)}</td><td>${formatSignedWei(row.knownRealizedPnlWei)}</td><td>${formatBasisPoints(row.winRateBps?.toString() ?? null)}</td></tr>`).join('')}</tbody></table>` : emptyState('No replay evaluation samples have been supplied. No strategy change is recommended.')}`;
   });
 }

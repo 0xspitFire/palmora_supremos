@@ -2,6 +2,7 @@ import {
   READ_MODEL_CONTRACT,
   READ_MODEL_VERSION,
   type AlertsReadModel,
+  type AnalyticsReadModel,
   type CalendarReadModel,
   type HomeReadModel,
   type OpportunityReadModel,
@@ -76,8 +77,31 @@ function isOpportunityList(value: unknown): value is ReadonlyArray<OpportunityRe
   return Array.isArray(value) && value.every((item) => isRecord(item) && hasString(item, 'id') && hasRecord(item, 'project') && hasRecord(item, 'chain') && hasRecord(item, 'gate'));
 }
 
+function isNullableIsoTimestamp(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
 function isCalendar(value: unknown): value is CalendarReadModel {
-  return Array.isArray(value) && value.every((item) => isRecord(item) && hasString(item, 'id') && hasRecord(item, 'project') && hasRecord(item, 'chain') && hasString(item, 'openingAt') && hasRecord(item, 'verification'));
+  return Array.isArray(value) && value.every((item) => isRecord(item) && hasString(item, 'id') && hasRecord(item, 'project') && hasRecord(item, 'chain') && isNullableIsoTimestamp(item.openingAt) && hasRecord(item, 'verification'));
+}
+
+function nonnegativeCount(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
+function nullableMoney(value: unknown): boolean { return value === null || typeof value === 'string' && value.length <= 81 && /^-?(0|[1-9][0-9]*)$/.test(value); }
+function nullableUnsignedMoney(value: unknown): boolean { return value === null || typeof value === 'string' && value.length <= 80 && /^(0|[1-9][0-9]*)$/.test(value); }
+function analyticsKey(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9_:.-]{1,200}$/.test(value); }
+
+function isAnalytics(value: unknown): value is AnalyticsReadModel {
+  if (!isRecord(value) || value.mode !== 'shadow-only' || value.currency !== 'ETH' || value.method !== 'FIFO' || !isRecord(value.coverage) || !isRecord(value.totals) || !Array.isArray(value.groups) || value.groups.length > 20 || !Array.isArray(value.shadow) || value.shadow.length > 20) return false;
+  const coverage = value.coverage;
+  if (coverage.scope !== 'canonical-finalized-mints-only' || coverage.externalTransfersAndSalesComplete !== false || coverage.providerCoverageAsserted !== false || !['partial', 'provided-input-only', 'no_samples'].includes(String(coverage.acquisitionHistory))) return false;
+  if (!['canonicalExecutions', 'completeCosts', 'incompleteCosts', 'confirmedActivities', 'pendingExcluded', 'reorgedExcluded', 'unavailableObservations', 'groupsOmitted'].every(key => nonnegativeCount(coverage[key]))) return false;
+  if (!['recordedCanonicalCostWei', 'realizedPnlWei', 'realizedRoiBps', 'unrealizedPnlWei', 'transactionAndMarketplaceFeesWei'].every(key => nullableMoney((value.totals as UnknownRecord)[key]))) return false;
+  if (!nullableUnsignedMoney(value.totals.recordedCanonicalCostWei) || !nullableUnsignedMoney(value.totals.transactionAndMarketplaceFeesWei)) return false;
+  return value.groups.every(row => isRecord(row) && ['wallet', 'campaign', 'signal_source', 'mint_type'].includes(String(row.dimension)) && analyticsKey(row.key) && nonnegativeCount(row.executions) && nonnegativeCount(row.dispositions) && nullableUnsignedMoney(row.recordedCostWei) && nullableMoney(row.realizedPnlWei) && typeof row.unknownBasisQuantity === 'string' && /^(0|[1-9][0-9]*)$/.test(row.unknownBasisQuantity) && row.unknownBasisQuantity.length <= 80)
+    && value.shadow.every(row => isRecord(row) && analyticsKey(row.policyId) && nonnegativeCount(row.selected) && nonnegativeCount(row.measured) && nonnegativeCount(row.unknownOutcomes) && nullableMoney(row.knownRealizedPnlWei) && (row.winRateBps === null || nonnegativeCount(row.winRateBps) && row.winRateBps <= 10_000));
 }
 
 function isReadiness(value: unknown): value is ReadinessReadModel {
@@ -156,7 +180,8 @@ function validateEnvelope<T>(payload: unknown, guard: DataGuard<T>): ReadModelEn
 }
 
 function isAllowedRoute(route: string): boolean {
-  return route === '/home'
+  return route === '/analytics'
+    || route === '/home'
     || route === '/opportunities'
     || route === '/calendar'
     || route === '/alerts'
@@ -173,6 +198,10 @@ export class ReadModelClient {
   public constructor(options: ReadModelClientOptions) {
     this.get = options.get;
     this.basePath = (options.basePath ?? '/api/v1/read-model').replace(/\/+$/, '') || '/api/v1/read-model';
+  }
+
+  public getAnalytics(): Promise<ReadModelEnvelope<AnalyticsReadModel>> {
+    return this.getRoute('/analytics', undefined, isAnalytics);
   }
 
   public getHome(): Promise<ReadModelEnvelope<HomeReadModel>> {
