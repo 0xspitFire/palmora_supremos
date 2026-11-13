@@ -40,7 +40,7 @@ export interface WatchRanking {
   ranked: RankedWallet[];
   /** Watched wallets with no activity in the data. */
   silent: WatchedWallet[];
-  meta: { watchedWallets: number; opportunitiesSeen: number; eventsRead: number; dataFrom: string | null; dataTo: string | null; days: number };
+  meta: { watchedWallets: number; opportunitiesSeen: number; eventsRead: number; chainId?: number; dataFrom: string | null; dataTo: string | null; days: number };
 }
 
 interface ContractFacts {
@@ -60,7 +60,9 @@ function isFree(value: unknown): boolean | null {
   return null;
 }
 
-export function rankWatchedWallets(input: { events: readonly RankingEvent[]; watched: readonly WatchedWallet[] }): WatchRanking {
+export function rankWatchedWallets(input: { events: readonly RankingEvent[]; watched: readonly WatchedWallet[]; chainId?: 1 | 8453 | 4663 }): WatchRanking {
+  const chainId = input.chainId ?? 1;
+  if (![1, 8453, 4663].includes(chainId)) throw new Error('WATCH_RANKING_CHAIN_UNSUPPORTED');
   const facts = new Map<string, ContractFacts>();
   const minted = new Map<string, Set<string>>();
   const received = new Map<string, Set<string>>();
@@ -72,8 +74,8 @@ export function rankWatchedWallets(input: { events: readonly RankingEvent[]; wat
   const watchedSet = new Set(input.watched.map((wallet) => wallet.address.toLowerCase()));
   for (const event of input.events) {
     if (event.type !== 'opportunity_scored' && event.type !== 'opportunity_notified') continue;
-    // The scan is Ethereum-only today; an event that names another chain is not part of this ranking.
-    if (event.data.chainId !== undefined && Number(event.data.chainId) !== 1) continue;
+    // Historical unlabelled trial events belong only to Ethereum.
+    if (event.data.chainId === undefined ? chainId !== 1 : Number(event.data.chainId) !== chainId) continue;
     const contract = typeof event.data.contract === 'string' && ADDRESS.test(event.data.contract) ? event.data.contract.toLowerCase() : undefined;
     if (!contract || !Number.isFinite(Date.parse(event.at))) continue;
     eventsRead += 1;
@@ -134,7 +136,7 @@ export function rankWatchedWallets(input: { events: readonly RankingEvent[]; wat
   return {
     ranked: rows.map((row, index) => ({ rank: index + 1, ...row })),
     silent,
-    meta: { watchedWallets: seen.size, opportunitiesSeen: facts.size, eventsRead, dataFrom, dataTo, days },
+    meta: { watchedWallets: seen.size, opportunitiesSeen: facts.size, eventsRead, chainId, dataFrom, dataTo, days },
   };
 }
 
@@ -165,7 +167,8 @@ export function renderWatchRanking(result: WatchRanking, top = 15): string {
 }
 
 /** Pulls the inputs out of the trial database. `db` is a read-only connection. */
-export function readRankingInputs(db: { prepare(sql: string): { all(...params: unknown[]): unknown[]; iterate(...params: unknown[]): Iterable<unknown> } }): { events: RankingEvent[]; watched: WatchedWallet[] } {
+export function readRankingInputs(db: { prepare(sql: string): { all(...params: unknown[]): unknown[]; iterate(...params: unknown[]): Iterable<unknown> } }, chainId: 1 | 8453 | 4663 = 1): { events: RankingEvent[]; watched: WatchedWallet[]; chainId: 1 | 8453 | 4663 } {
+  if (![1, 8453, 4663].includes(chainId)) throw new Error('WATCH_RANKING_CHAIN_UNSUPPORTED');
   // One row at a time, so a large database never has to be held in memory as raw text.
   const rows = db.prepare("SELECT new_state, occurred_at, policy_snapshot_json FROM audit_event WHERE new_state IN ('opportunity_scored', 'opportunity_notified') ORDER BY occurred_at").iterate() as Iterable<{ new_state: string; occurred_at: string; policy_snapshot_json: string | null }>;
   const events: RankingEvent[] = [];
@@ -176,6 +179,6 @@ export function readRankingInputs(db: { prepare(sql: string): { all(...params: u
       if (typeof parsed.eventData === 'object' && parsed.eventData !== null && !Array.isArray(parsed.eventData)) events.push({ type: row.new_state, at: row.occurred_at, data: parsed.eventData as Record<string, unknown> });
     } catch { /* one damaged row never stops the report */ }
   }
-  const watched = (db.prepare('SELECT address, label FROM observed_address WHERE chain_id = 1 AND enabled = 1 ORDER BY address').all() as Array<{ address: string; label: string | null }>).map((row) => ({ address: row.address, label: row.label }));
-  return { events, watched };
+  const watched = (db.prepare('SELECT address, label FROM observed_address WHERE chain_id = ? AND enabled = 1 ORDER BY address').all(chainId) as Array<{ address: string; label: string | null }>).map((row) => ({ address: row.address, label: row.label }));
+  return { events, watched, chainId };
 }

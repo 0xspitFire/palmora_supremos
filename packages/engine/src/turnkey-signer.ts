@@ -1,3 +1,6 @@
+import { resolveChainConfigFromSecrets } from './chains.js';
+import { independentPublicRpcEndpoints } from './turnkey-public-authority.js';
+import { verifyReviewedErc721Registry, verifyErc721WalletAuthority, verifyErc721RehearsalAuthority, assertErc721RehearsalIntent, assertErc721IntentAuthority, type VerifiedErc721RehearsalAuthority, type VerifiedReviewedErc721Registry, type VerifiedErc721Authority } from './verified-erc721-authority.js';
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -10,6 +13,7 @@ import {
   serializeTransaction,
   encodeFunctionData,
   parseAbi,
+  createPublicClient, http, type PublicClient,
   type Address,
   type Hex,
   type TransactionSerialized,
@@ -43,6 +47,7 @@ import { verifyTurnkeySignedAuthority } from './turnkey-signed-authority.js';
 import { verifyTurnkeyAllowlistAuthority } from './turnkey-allowlist-authority.js';
 import { verifyTurnkeyPublicAuthority } from './turnkey-public-authority.js';
 import { validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
+import { assertTurnkeyWalletAdminRecordCurrent, verifyTurnkeyWalletAdminPolicyRecord, type VerifiedTurnkeyWalletAdminPolicyRecord } from './turnkey-wallet-admin-policy.js';
 
 export interface TurnkeyWalletReference {
   index: number;
@@ -67,9 +72,38 @@ export interface TurnkeySecretConfig {
   policyApproverPublicKeyPath: string;
   policyCatalogPath?: string;
   policyBundlePath?: string;
+  /** Public, separately owner-signed non-signing role record; never an admin credential. */
+  walletAdminPolicyRecordPath?: string;
+  reviewedProtocolRegistryPath?: string;
   appName?: string;
   attestationPath?: string;
   attestationActivityId?: string;
+}
+
+export type TurnkeyFundingCredentials = Pick<TurnkeySecretConfig, 'organizationId' | 'environment' | 'apiPublicKey' | 'apiPrivateKey' | 'userId'>;
+
+/** Dedicated funding worker input. Never resolves the mint credential or any default path. */
+export async function readTurnkeyFundingCredentials(path: string): Promise<TurnkeyFundingCredentials> {
+  if (!isAbsolute(path) || resolve(path) !== path || basename(path) !== 'turnkey-funding.env') throw new Error('TURNKEY_FUNDING_CREDENTIAL_PATH_INVALID');
+  const text = await readOwnerOnlyFile(path, 'TURNKEY_FUNDING_CREDENTIAL_PERMISSIONS_REQUIRED');
+  return parseTurnkeyFundingCredentialText(text);
+}
+
+/** Pure decoder, kept separate so synthetic tests never need a real credential file. */
+export function parseTurnkeyFundingCredentialText(text: string): TurnkeyFundingCredentials {
+  const allowed = ['TURNKEY_ORGANIZATION_ID', 'TURNKEY_USER_ID', 'TURNKEY_API_PUBLIC_KEY', 'TURNKEY_API_PRIVATE_KEY', 'TURNKEY_ENVIRONMENT'];
+  const values = new Map<string, string>();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim(); if (!line || line.startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) throw new Error('TURNKEY_FUNDING_CREDENTIAL_INVALID');
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, '');
+    if (!allowed.includes(key) || values.has(key) || !value || value.length > 10_000 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('TURNKEY_FUNDING_CREDENTIAL_INVALID');
+    values.set(key, value);
+  }
+  if (values.size !== allowed.length || values.get('TURNKEY_ENVIRONMENT') !== 'production') throw new Error('TURNKEY_FUNDING_CREDENTIAL_INVALID');
+  return { organizationId: values.get('TURNKEY_ORGANIZATION_ID')!, userId: values.get('TURNKEY_USER_ID')!, apiPublicKey: values.get('TURNKEY_API_PUBLIC_KEY')!, apiPrivateKey: values.get('TURNKEY_API_PRIVATE_KEY')!, environment: 'production' };
 }
 
 export interface TurnkeySignerClient {
@@ -142,11 +176,14 @@ export interface TurnkeySignerOptions {
   wallets: readonly TurnkeyWalletReference[];
   policyRecord: TurnkeyCanonicalPolicyRecord;
   approvedPolicyRecords?: readonly TurnkeyCanonicalPolicyRecord[];
+  walletAdminPolicyRecords?: readonly VerifiedTurnkeyWalletAdminPolicyRecord[];
   client: TurnkeySignerClient;
   generateAppProofs?: boolean;
   verifyAllowlistAuthority?: (intent: TransactionIntent) => Promise<void>;
   verifyPublicAuthority?: (intent: TransactionIntent) => Promise<void>;
   verifySignedAuthority?: (intent: TransactionIntent) => Promise<void>;
+  verifyReviewedAuthority?: (intent: TransactionIntent) => Promise<VerifiedErc721Authority>;
+  verifyReviewedRehearsalAuthority?: (intent: TransactionIntent) => Promise<VerifiedErc721RehearsalAuthority>;
 }
 
 export interface TurnkeyHealthReport {
@@ -183,23 +220,42 @@ export function selectTurnkeyPolicyRecord(records: readonly TurnkeyCanonicalPoli
   return matches[0]!;
 }
 
-/** Reads the owner-approved catalog without constructing a signing client. */
-export async function readTurnkeyApprovedPolicyRecords(scope: SecretScope = 'mainnet', root = 'Rets'): Promise<readonly TurnkeyCanonicalPolicyRecord[]> {
+/** Loads only an optional public signed sidecar; never an admin credential or signing client. */
+export async function readTurnkeyWalletAdminPolicyRecords(config: Pick<TurnkeySecretConfig, 'organizationId' | 'userId' | 'environment' | 'policyApproverPublicKeyPath' | 'walletAdminPolicyRecordPath'>, options: { now?: Date; role?: 'mint-runtime' | 'wallet-admin'; pinnedPublicKey?: string | Buffer } = {}): Promise<readonly VerifiedTurnkeyWalletAdminPolicyRecord[]> {
+  if (!config.walletAdminPolicyRecordPath) return [];
+  let raw: unknown;
+  try { raw = JSON.parse(await readOwnerOnlyFile(config.walletAdminPolicyRecordPath, 'TURNKEY_WALLET_ADMIN_RECORD_PERMISSIONS_REQUIRED')); }
+  catch { throw new Error('TURNKEY_WALLET_ADMIN_RECORD_INVALID'); }
+  const publicKey = options.pinnedPublicKey ?? await readOwnerOnlyFile(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+  const record = verifyTurnkeyWalletAdminPolicyRecord(raw, publicKey, options.now);
+  const selectedUser = options.role === 'wallet-admin' ? record.adminUserId : record.mintRuntimeUserId;
+  if (record.organizationId !== config.organizationId || record.environment !== config.environment || selectedUser !== config.userId) throw new Error('TURNKEY_WALLET_ADMIN_BINDING_INVALID');
+  return [record];
+}
+
+/** Reads the owner-approved mint catalog without constructing a signing client. */
+export async function readTurnkeyApprovedPolicyRecords(scope: SecretScope = 'mainnet', root = 'Rets', options: { role?: 'mint-runtime' | 'wallet-admin' } = {}): Promise<readonly TurnkeyCanonicalPolicyRecord[]> {
   const config = await readTurnkeySecretConfig(root, scope);
   const publicKey = await readOwnerOnlyFile(config.policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+  const adminRecords = await readTurnkeyWalletAdminPolicyRecords(config, { pinnedPublicKey: publicKey, role: options.role });
+  const assertBindings = (records: readonly TurnkeyCanonicalPolicyRecord[]) => {
+    const mintUser = options.role === 'wallet-admin' ? adminRecords[0]?.mintRuntimeUserId : config.userId;
+    if (!mintUser || records.some(record => record.providerIdentity.organizationId !== config.organizationId || record.environment !== config.environment || record.providerIdentity.userId !== mintUser)) throw new Error('TURNKEY_PROVIDER_BINDING_REQUIRED');
+    return records;
+  };
   if (config.policyBundlePath) {
     let bundle: unknown;
     try { bundle = JSON.parse(await readOwnerOnlyFile(config.policyBundlePath, 'TURNKEY_POLICY_BUNDLE_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_BUNDLE_INVALID'); }
-    return verifyTurnkeySignedPolicyCatalog(validateTurnkeyPolicyBundle(bundle, publicKey).catalog, publicKey);
+    return assertBindings(verifyTurnkeySignedPolicyCatalog(validateTurnkeyPolicyBundle(bundle, publicKey).catalog, publicKey));
   }
   if (config.policyCatalogPath) {
     let catalog: unknown;
     try { catalog = JSON.parse(await readOwnerOnlyFile(config.policyCatalogPath, 'TURNKEY_POLICY_CATALOG_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_CATALOG_INVALID'); }
-    return verifyTurnkeySignedPolicyCatalog(catalog, publicKey);
+    return assertBindings(verifyTurnkeySignedPolicyCatalog(catalog, publicKey));
   }
   let signed: unknown;
   try { signed = JSON.parse(await readOwnerOnlyFile(config.policyRecordPath, 'TURNKEY_POLICY_RECORD_PERMISSIONS_REQUIRED')) as unknown; } catch { throw new Error('TURNKEY_POLICY_RECORD_INVALID'); }
-  return [verifyTurnkeySignedPolicyRecord(signed, publicKey)];
+  return assertBindings([verifyTurnkeySignedPolicyRecord(signed, publicKey)]);
 }
 
 export function createTurnkeyClient(
@@ -223,6 +279,24 @@ function expandPath(value: string): string {
 function pathWithin(root: string, candidate: string): boolean {
   const relativePath = relative(root, candidate);
   return relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
+}
+
+/** Protected public profile. Missing configuration never authorizes a generic destination. */
+export async function readTurnkeyReviewedRegistries(config: Pick<TurnkeySecretConfig,'reviewedProtocolRegistryPath'|'policyApproverPublicKeyPath'|'organizationId'|'userId'|'environment'>, now: Date = new Date()): Promise<readonly VerifiedReviewedErc721Registry[]> {
+ if(!config.reviewedProtocolRegistryPath)throw new Error('ERC721_OWNER_REGISTRY_REQUIRED');
+ let raw:unknown;try{raw=JSON.parse(await readOwnerOnlyFile(config.reviewedProtocolRegistryPath,'ERC721_REGISTRY_PERMISSIONS_REQUIRED'));}catch{throw new Error('ERC721_REGISTRY_UNVERIFIED');}
+ const publicKey=await readOwnerOnlyFile(config.policyApproverPublicKeyPath,'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
+ const catalog=raw as {version?:unknown;context?:unknown;records?:unknown};
+ let records:unknown[];
+ if(catalog?.context==='mintbot.reviewed-erc721-registries/v1'){
+  if(catalog.version!==1||Object.keys(catalog).sort().join(',')!=='context,records,version'||!Array.isArray(catalog.records)||catalog.records.length<1||catalog.records.length>3)throw new Error('ERC721_REGISTRY_UNVERIFIED');records=catalog.records;
+ }else records=[raw];
+ const registries=records.map(value=>verifyReviewedErc721Registry(value,publicKey,now));
+ if(new Set(registries.map(value=>value.chainId)).size!==registries.length || registries.some(registry=>registry.organizationId!==config.organizationId || registry.userId!==config.userId || registry.environment!==config.environment))throw new Error('ERC721_REGISTRY_BINDING_INVALID');return registries;
+}
+export async function readTurnkeyReviewedRegistry(config: Pick<TurnkeySecretConfig,'reviewedProtocolRegistryPath'|'policyApproverPublicKeyPath'|'organizationId'|'userId'|'environment'>, now: Date = new Date(), chainId?: number): Promise<VerifiedReviewedErc721Registry> {
+ const records=(await readTurnkeyReviewedRegistries(config,now)).filter(value=>chainId===undefined||value.chainId===chainId);
+ if(records.length!==1)throw new Error('ERC721_REGISTRY_BINDING_INVALID');return records[0]!;
 }
 
 async function readOwnerOnlyFile(path: string, errorCode: string): Promise<string> {
@@ -308,11 +382,15 @@ export async function readTurnkeySecretConfig(root = 'Rets', scope: SecretScope 
   const policyCatalogPath = policyCatalogReference ? expandPath(policyCatalogReference) : undefined;
   const policyBundleReference = values.get('TURNKEY_POLICY_BUNDLE_PATH');
   const policyBundlePath = policyBundleReference ? expandPath(policyBundleReference) : undefined;
+  const walletAdminReference = values.get('TURNKEY_WALLET_ADMIN_POLICY_RECORD_PATH');
+  const walletAdminPolicyRecordPath = walletAdminReference ? expandPath(walletAdminReference) : undefined;
+  const reviewedReference = values.get('TURNKEY_REVIEWED_PROTOCOL_REGISTRY_PATH');
+  const reviewedProtocolRegistryPath = reviewedReference ? expandPath(reviewedReference) : undefined;
   const attestationReference = values.get('TURNKEY_ATTESTATION_PATH');
   const attestationPath = attestationReference ? expandPath(attestationReference) : undefined;
   const attestationActivityId = values.get('TURNKEY_ATTESTATION_ACTIVITY_ID');
   if (!organizationId || !apiPublicKey || !apiPrivateKey || !userId || !walletMapPath) throw new Error('TURNKEY_SECRET_REQUIRED');
-  if (!pathWithin(secretRoot, walletMapPath) || !pathWithin(secretRoot, policyRecordPath) || !pathWithin(secretRoot, policyApproverPublicKeyPath) || (policyCatalogPath && !pathWithin(secretRoot, policyCatalogPath)) || (policyBundlePath && !pathWithin(secretRoot, policyBundlePath)) || (attestationPath && !pathWithin(secretRoot, attestationPath))) throw new Error('TURNKEY_SECRET_PATH_INVALID');
+  if (!pathWithin(secretRoot, walletMapPath) || !pathWithin(secretRoot, policyRecordPath) || !pathWithin(secretRoot, policyApproverPublicKeyPath) || (policyCatalogPath && !pathWithin(secretRoot, policyCatalogPath)) || (policyBundlePath && !pathWithin(secretRoot, policyBundlePath)) || (walletAdminPolicyRecordPath && !pathWithin(secretRoot, walletAdminPolicyRecordPath)) || (attestationPath && !pathWithin(secretRoot, attestationPath)) || (reviewedProtocolRegistryPath && !pathWithin(secretRoot, reviewedProtocolRegistryPath))) throw new Error('TURNKEY_SECRET_PATH_INVALID');
   return {
     organizationId,
     environment: scope === 'mainnet' ? 'production' : 'testnet',
@@ -324,6 +402,8 @@ export async function readTurnkeySecretConfig(root = 'Rets', scope: SecretScope 
     policyApproverPublicKeyPath,
     ...(policyCatalogPath ? { policyCatalogPath } : {}),
     ...(policyBundlePath ? { policyBundlePath } : {}),
+    ...(walletAdminPolicyRecordPath ? { walletAdminPolicyRecordPath } : {}),
+    ...(reviewedProtocolRegistryPath ? { reviewedProtocolRegistryPath } : {}),
     ...(values.get('TURNKEY_APP_NAME') ? { appName: values.get('TURNKEY_APP_NAME') } : {}),
     ...(attestationPath ? { attestationPath } : {}),
     ...(attestationActivityId ? { attestationActivityId } : {}),
@@ -400,6 +480,7 @@ export class TurnkeySigner implements Signer {
   private readonly policy: TurnkeyPolicyAst;
   private readonly policyRecord: TurnkeyCanonicalPolicyRecord;
   private readonly approvedPolicyRecords?: readonly TurnkeyCanonicalPolicyRecord[];
+  private readonly walletAdminPolicyRecords: readonly VerifiedTurnkeyWalletAdminPolicyRecord[];
   private readonly policyRecordDigest: `sha256:${string}`;
   private readonly policyNotBefore: number;
   private readonly policyExpiresAt: number;
@@ -408,6 +489,8 @@ export class TurnkeySigner implements Signer {
   private readonly verifyAllowlistAuthority?: (intent: TransactionIntent) => Promise<void>;
   private readonly verifyPublicAuthority?: (intent: TransactionIntent) => Promise<void>;
   private readonly verifySignedAuthority?: (intent: TransactionIntent) => Promise<void>;
+  private readonly verifyReviewedAuthority?: (intent: TransactionIntent) => Promise<VerifiedErc721Authority>;
+  private readonly verifyReviewedRehearsalAuthority?: (intent: TransactionIntent) => Promise<VerifiedErc721RehearsalAuthority>;
 
   public constructor(options: TurnkeySignerOptions) {
     if (!options.organizationId) throw new Error('TURNKEY_ORGANIZATION_REQUIRED');
@@ -432,6 +515,11 @@ export class TurnkeySigner implements Signer {
     this.policy = policy;
     this.policyRecord = record;
     this.approvedPolicyRecords = options.approvedPolicyRecords?.map(validateTurnkeyCanonicalPolicyRecord);
+    this.walletAdminPolicyRecords = [...(options.walletAdminPolicyRecords ?? [])];
+    for (const admin of this.walletAdminPolicyRecords) {
+      assertTurnkeyWalletAdminRecordCurrent(admin);
+      if (admin.organizationId !== options.organizationId || admin.mintRuntimeUserId !== options.userId || admin.environment !== options.environment) throw new Error('TURNKEY_WALLET_ADMIN_BINDING_INVALID');
+    }
     this.policyRecordDigest = turnkeyPolicyRecordDigest(record);
     this.policyNotBefore = Date.parse(record.issuedAt);
     this.policyExpiresAt = Date.parse(record.expiresAt);
@@ -441,11 +529,14 @@ export class TurnkeySigner implements Signer {
     this.verifyAllowlistAuthority = options.verifyAllowlistAuthority;
     this.verifyPublicAuthority = options.verifyPublicAuthority;
     this.verifySignedAuthority = options.verifySignedAuthority;
+    this.verifyReviewedAuthority = options.verifyReviewedAuthority;
+    this.verifyReviewedRehearsalAuthority = options.verifyReviewedRehearsalAuthority;
   }
 
   public static async fromSecrets(scope: SecretScope = 'mainnet', root = 'Rets', policyReference?: string, recordDigest?: string): Promise<TurnkeySigner> {
     if (policyReference && !recordDigest) throw new Error('TURNKEY_POLICY_RECORD_DIGEST_REQUIRED');
-    const { organizationId, apiPublicKey, apiPrivateKey, userId, environment, walletMapPath: mapPath, policyRecordPath, policyApproverPublicKeyPath, policyCatalogPath, policyBundlePath } = await readTurnkeySecretConfig(root, scope);
+    const config = await readTurnkeySecretConfig(root, scope);
+    const { organizationId, apiPublicKey, apiPrivateKey, userId, environment, walletMapPath: mapPath, policyRecordPath, policyApproverPublicKeyPath, policyCatalogPath, policyBundlePath } = config;
     let map = policyBundlePath ? undefined : await readTurnkeyWalletMap(mapPath);
     let signedRecord: unknown;
     let bundledCatalog: unknown;
@@ -462,6 +553,7 @@ export class TurnkeySigner implements Signer {
     }
     const approverPublicKey = await readOwnerOnlyFile(policyApproverPublicKeyPath, 'TURNKEY_POLICY_APPROVER_KEY_PERMISSIONS_REQUIRED');
     const activeRecord = verifyTurnkeySignedPolicyRecord(signedRecord, approverPublicKey);
+    const walletAdminPolicyRecords = await readTurnkeyWalletAdminPolicyRecords(config, { pinnedPublicKey: approverPublicKey });
     let record = activeRecord;
     let approvedPolicyRecords: readonly TurnkeyCanonicalPolicyRecord[] | undefined;
     if (bundledCatalog || policyCatalogPath) {
@@ -487,10 +579,30 @@ export class TurnkeySigner implements Signer {
       wallets: map.wallets,
       policyRecord: record,
       ...(approvedPolicyRecords ? { approvedPolicyRecords } : {}),
+      walletAdminPolicyRecords,
       client: createTurnkeyClient(organizationId, apiPublicKey, apiPrivateKey),
       verifyAllowlistAuthority: (intent) => verifyTurnkeyAllowlistAuthority(intent, scope, root),
       verifyPublicAuthority: (intent) => verifyTurnkeyPublicAuthority(intent, scope, root),
       verifySignedAuthority: (intent) => verifyTurnkeySignedAuthority(intent, scope, root),
+      verifyReviewedRehearsalAuthority: async intent => {
+        const currentConfig=await readTurnkeySecretConfig(root,scope),registry=await readTurnkeyReviewedRegistry(currentConfig,new Date(),intent.chainId),family=record.enforcementPolicy.family;
+        const descriptorDigest=intent.familyContext?.reviewedErc721RehearsalDescriptorDigest;
+        if(family?.kind!=='erc721-reviewed-public-v1'||registry.digest!==family.registryDigest||!descriptorDigest||!family.descriptorDigests.includes(descriptorDigest))throw new Error('ERC721_REHEARSAL_BINDING_INVALID');
+        const endpoints=independentPublicRpcEndpoints((await resolveChainConfigFromSecrets(intent.chainId,scope,root)).rpcEndpoints);
+        const clients=endpoints.map(endpoint=>createPublicClient({transport:http(endpoint,{timeout:10000,retryCount:0})})) as [PublicClient,PublicClient];
+        return verifyErc721RehearsalAuthority({registry,descriptorDigest,clients,contract:intent.to,wallet:intent.from});
+      },
+      verifyReviewedAuthority: async (intent) => {
+        const currentConfig = await readTurnkeySecretConfig(root,scope);
+        const registry = await readTurnkeyReviewedRegistry(currentConfig,new Date(),intent.chainId);
+        const family = record.enforcementPolicy.family;
+        if(family?.kind !== 'erc721-reviewed-public-v1' || registry.digest !== family.registryDigest || registry.chainId !== intent.chainId)throw new Error('ERC721_REGISTRY_BINDING_INVALID');
+        const digest = intent.familyContext?.reviewedErc721Authority?.descriptorDigest;
+        if(!digest || !family.descriptorDigests.includes(digest))throw new Error('ERC721_DESCRIPTOR_NOT_APPROVED');
+        const endpoints=independentPublicRpcEndpoints((await resolveChainConfigFromSecrets(intent.chainId,scope,root)).rpcEndpoints);
+        const clients=endpoints.map(endpoint=>createPublicClient({transport:http(endpoint,{timeout:10000,retryCount:0})})) as [PublicClient,PublicClient];
+        return verifyErc721WalletAuthority({registry,descriptorDigest:digest,clients,contract:intent.to,wallet:intent.from,quantity:intent.familyContext!.reviewedErc721Authority!.quantity});
+      },
     });
   }
 
@@ -547,7 +659,23 @@ export class TurnkeySigner implements Signer {
     return { signedTransactionHash: keccak256(result.signedTransaction), evidence: result.evidence };
   }
 
-  private async signWithEvidence(walletIndex: number, intent: TransactionIntent, rehearsal: boolean): Promise<{ signedTransaction: Hex; evidence: TurnkeySigningEvidence }> {
+  /** Distinct code-provenance rehearsal: closed stages are allowed, live eligibility is never waived. */
+  public async rehearseReviewedErc721(walletIndex:number,input:{contract:Address;descriptorDigest:string;assertStopped:()=>Promise<void>}):Promise<{signedTransactionHash:Hex;evidence:TurnkeySigningEvidence;authority:{registryDigest:string;descriptorDigest:string;chainId:number;contract:Address;blockNumber:string;blockHash:Hex}}> {
+    const family=this.policy.family;if(family?.kind!=='erc721-reviewed-public-v1'||!family.descriptorDigests.includes(input.descriptorDigest)||!this.verifyReviewedRehearsalAuthority)throw new Error('ERC721_REHEARSAL_POLICY_REQUIRED');
+    const wallet=this.wallets.find(value=>value.index===walletIndex);if(!wallet)throw new Error('TURNKEY_WALLET_NOT_FOUND');await input.assertStopped();
+    let intent:TransactionIntent={chainId:this.policy.transaction.chainId,from:wallet.address,to:input.contract,value:0n,data:('0xa0712d68'+'0'.repeat(63)+'1') as Hex,nonce:Number.MAX_SAFE_INTEGER,gasLimit:0n,maxFeePerGas:0n,maxPriorityFeePerGas:0n,accessList:[],policyRef:this.policyReference(),campaignId:'reviewed-rehearsal',runId:'reviewed-rehearsal',familyContext:{nftContract:input.contract,feeRecipient:zeroAddress,reviewedErc721RehearsalDescriptorDigest:input.descriptorDigest,assertReady:input.assertStopped}};
+    const authority=await this.verifyReviewedRehearsalAuthority(intent);intent={...intent,familyContext:{...intent.familyContext!,reviewedErc721RehearsalAuthority:authority}};
+    const result=await this.signWithEvidence(walletIndex,intent,true);
+    const finalAuthority=result.reviewedRehearsalAuthority;if(!finalAuthority)throw new Error('ERC721_INERT_REHEARSAL_REQUIRED');
+    await input.assertStopped();await this.probe();await input.assertStopped();this.assertPolicyCurrent();
+    assertErc721RehearsalIntent({...intent,familyContext:{...intent.familyContext!,reviewedErc721RehearsalAuthority:finalAuthority}},family.registryDigest,family.descriptorDigests);
+    return {signedTransactionHash:keccak256(result.signedTransaction),evidence:result.evidence,authority:{registryDigest:finalAuthority.registryDigest,descriptorDigest:finalAuthority.descriptorDigest,chainId:finalAuthority.chainId,contract:finalAuthority.contract,blockNumber:finalAuthority.blockNumber.toString(),blockHash:finalAuthority.blockHash}};
+  }
+
+  private async signWithEvidence(walletIndex: number, intent: TransactionIntent, rehearsal: boolean): Promise<{ signedTransaction: Hex; evidence: TurnkeySigningEvidence; reviewedRehearsalAuthority?: VerifiedErc721RehearsalAuthority }> {
+    this.assertPolicyCurrent();
+    // Optional admin authority is never a cached blanket exemption from strict live inventory.
+    if (this.walletAdminPolicyRecords.length) await this.probe();
     this.assertPolicyCurrent();
     const client = this.client;
     const wallet = this.wallets.find((candidate) => candidate.index === walletIndex);
@@ -557,7 +685,11 @@ export class TurnkeySigner implements Signer {
     const expectedPolicyRef = turnkeyPolicyRef(this.policyId, this.policyDigest);
     if (intent.policyRef !== expectedPolicyRef) throw new Error('TURNKEY_POLICY_REFERENCE_MISMATCH');
     const validateIntent = () => {
-      if (rehearsal && this.policy.family?.kind === 'seadrop-free-signed-v1') {
+      if(rehearsal && this.policy.family?.kind==='erc721-reviewed-public-v1'){
+        assertErc721RehearsalIntent(intent,this.policy.family.registryDigest,this.policy.family.descriptorDigests);
+        const {family:_family,...exact}=this.policy;
+        validateTransactionIntent(intent,{...exact,transaction:{...exact.transaction,to:intent.to,data:intent.data}},expectedPolicyRef);
+      } else if (rehearsal && this.policy.family?.kind === 'seadrop-free-signed-v1') {
         const { family: _family, ...exact } = this.policy;
         validateTransactionIntent(intent, { ...exact, transaction: { ...exact.transaction, data: signedRehearsalCalldata() } }, expectedPolicyRef);
       } else validateTransactionIntent(intent, this.policy, expectedPolicyRef);
@@ -601,6 +733,19 @@ export class TurnkeySigner implements Signer {
       validateIntent();
     }
 
+    if (this.policy.family?.kind === 'erc721-reviewed-public-v1') {
+      if(rehearsal){
+        if(!intent.familyContext?.assertReady||!this.verifyReviewedRehearsalAuthority)throw new Error('ERC721_INERT_REHEARSAL_REQUIRED');
+        const fresh=await this.verifyReviewedRehearsalAuthority(intent);intent={...intent,familyContext:{...intent.familyContext,reviewedErc721RehearsalAuthority:fresh}};
+        await this.probe();await intent.familyContext!.assertReady!();this.assertPolicyCurrent();
+        if(this.client!==client)throw new Error('TURNKEY_SIGNER_ZEROIZED');validateIntent();
+      }else{
+        if(!intent.familyContext?.assertReady || !this.verifyReviewedAuthority || intent.gasLimit<=0n || intent.maxFeePerGas<=0n)throw new Error('ERC721_VERIFIED_AUTHORITY_REQUIRED');
+        const fresh=await this.verifyReviewedAuthority(intent);intent={...intent,familyContext:{...intent.familyContext,reviewedErc721Authority:fresh}};
+        await intent.familyContext!.assertReady!();this.assertPolicyCurrent();
+        assertErc721IntentAuthority(intent,this.policy.family.registryDigest,this.policy.family.descriptorDigests);validateTransactionIntent(intent,this.policy,expectedPolicyRef);
+      }
+    }
     const unsignedTransaction = serializeTransaction({
       type: 'eip1559',
       chainId: intent.chainId,
@@ -686,6 +831,7 @@ export class TurnkeySigner implements Signer {
     ) throw new Error('TURNKEY_SIGNED_TRANSACTION_BOUNDARY_INVALID');
 
     return {
+      ...(rehearsal && intent.familyContext?.reviewedErc721RehearsalAuthority ? {reviewedRehearsalAuthority:intent.familyContext.reviewedErc721RehearsalAuthority} : {}),
       signedTransaction: signedTransaction as Hex,
       evidence: {
         activityId: response.activity.id,
@@ -705,7 +851,7 @@ export class TurnkeySigner implements Signer {
       client.getPolicies({ organizationId: this.organizationId }),
       client.getPrivateKeys({ organizationId: this.organizationId }),
     ]);
-    validateTurnkeyActualProviderState(this.policyRecord, { whoami, organization, policies: policies.policies, privateKeys: keyResponse.privateKeys }, this.approvedPolicyRecords);
+    validateTurnkeyActualProviderState(this.policyRecord, { whoami, organization, policies: policies.policies, privateKeys: keyResponse.privateKeys }, this.approvedPolicyRecords, this.walletAdminPolicyRecords);
     return {
       status: 'ok',
       provider: 'turnkey',
@@ -724,5 +870,6 @@ export class TurnkeySigner implements Signer {
 
   private assertPolicyCurrent(now = Date.now()): void {
     if (!Number.isFinite(now) || now < this.policyNotBefore || now >= this.policyExpiresAt) throw new Error('TURNKEY_POLICY_RECORD_NOT_CURRENT');
+    for (const admin of this.walletAdminPolicyRecords) assertTurnkeyWalletAdminRecordCurrent(admin, new Date(now));
   }
 }

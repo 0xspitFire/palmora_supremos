@@ -7,6 +7,7 @@ import {
 } from 'node:crypto';
 import type { Address } from 'viem';
 import { validateTurnkeyPolicyAst, type TurnkeyEnvironment, type TurnkeyPolicyAst } from './turnkey-policy.js';
+import { assertTurnkeyWalletAdminProviderState, type VerifiedTurnkeyWalletAdminPolicyRecord } from './turnkey-wallet-admin-policy.js';
 
 const RECORD_CONTEXT = 'mintbot.turnkey-policy-record/v1' as const;
 const SIGNATURE_CONTEXT = 'mintbot.turnkey-policy-record/signature/v1\0';
@@ -124,7 +125,8 @@ export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consen
   };
   const list = (values: readonly string[]): string => `[${[...values].sort().map(quote).join(', ')}]`;
   const tx = policy.transaction;
-  const dataCondition = policy.family !== undefined
+  const reviewed = policy.family?.kind === 'erc721-reviewed-public-v1';
+  const dataCondition = reviewed ? [`eth.tx.data[0..10] == ${quote(tx.data.toLowerCase())}`, `eth.tx.data in ${list(Array.from({length: policy.family!.maxQuantity},(_,index)=>tx.data.toLowerCase()+(index+1).toString(16).padStart(64,'0')))}`].join(' && ') : policy.family !== undefined
     ? [
       `eth.tx.data[0..10] == ${quote(tx.data.toLowerCase())}`,
       "eth.tx.data[138..202] == '0000000000000000000000000000000000000000000000000000000000000000'",
@@ -142,7 +144,7 @@ export function turnkeyProviderPolicyExpressions(policyValue: unknown): { consen
       `private_key.id in ${list(policy.scope.keyIds)}`,
       `eth.tx.chain_id == ${tx.chainId}`,
       `eth.tx.from in ${list(tx.from.map((address) => address.toLowerCase()))}`,
-      `eth.tx.to == ${quote(tx.to.toLowerCase())}`,
+      ...(reviewed ? ["eth.tx.to != '0x0000000000000000000000000000000000000000'"] : [`eth.tx.to == ${quote(tx.to.toLowerCase())}`]),
       `eth.tx.value == ${tx.valueWei}`,
       dataCondition,
       `eth.tx.gas <= ${tx.gasLimitMax}`,
@@ -377,12 +379,19 @@ function sameProviderPolicyBinding(actual: TurnkeyProviderPolicyProjection, expe
   return stableStringify(binding(actual)) === stableStringify(binding(expected));
 }
 
-export function validateTurnkeyActualProviderState(recordValue: unknown, state: TurnkeyActualProviderState, approvedRecords?: readonly unknown[]): void {
+export function validateTurnkeyActualProviderState(recordValue: unknown, state: TurnkeyActualProviderState, approvedRecords?: readonly unknown[], walletAdminRecords: readonly VerifiedTurnkeyWalletAdminPolicyRecord[] = [], now = new Date()): void {
   const record = validateTurnkeyCanonicalPolicyRecord(recordValue);
   if (stableStringify(projectTurnkeyProviderIdentity(state.whoami)) !== stableStringify(record.providerIdentity)) throw new Error('TURNKEY_PROVIDER_IDENTITY_DRIFT');
   const policies = state.policies.map(projectTurnkeyProviderPolicy);
   assertNonRootRuntimeUser(state.organization, record.providerIdentity);
-  const approved = approvedRecords?.map(validateTurnkeyCanonicalPolicyRecord);
+  if (walletAdminRecords.length > 25) throw new Error('TURNKEY_WALLET_ADMIN_RECORD_INVALID');
+  const adminPolicies = new Map<string, TurnkeyProviderPolicyProjection>();
+  for (const admin of walletAdminRecords) {
+    assertTurnkeyWalletAdminProviderState(admin, { organizationId: record.providerIdentity.organizationId, adminUserId: admin.adminUserId, mintRuntimeUserId: record.providerIdentity.userId, environment: record.environment, organization: state.organization, policies: state.policies }, now);
+    if (adminPolicies.has(admin.policyId)) throw new Error('TURNKEY_WALLET_ADMIN_BINDING_INVALID');
+    adminPolicies.set(admin.policyId, admin.providerPolicy);
+  }
+  const approved = approvedRecords?.map(validateTurnkeyCanonicalPolicyRecord) ?? (walletAdminRecords.length ? [record] : undefined);
   if (approved) {
     if (approved.length === 0 || !approved.some((candidate) => turnkeyPolicyRecordDigest(candidate) === turnkeyPolicyRecordDigest(record))) throw new Error('TURNKEY_PROVIDER_POLICY_CATALOG_ACTIVE_RECORD_MISSING');
     if (approved.some((candidate) => candidate.environment !== record.environment
@@ -390,9 +399,11 @@ export function validateTurnkeyActualProviderState(recordValue: unknown, state: 
       || stableStringify(candidate.wallets) !== stableStringify(record.wallets))) throw new Error('TURNKEY_POLICY_CATALOG_BINDING_INVALID');
     const approvedPolicies = new Map(approved.map((candidate) => [candidate.providerPolicy.policyId, candidate.providerPolicy]));
     if (approvedPolicies.size !== approved.length) throw new Error('TURNKEY_POLICY_CATALOG_BINDING_INVALID');
+    if ([...adminPolicies.keys()].some(id => approvedPolicies.has(id))) throw new Error('TURNKEY_WALLET_ADMIN_BINDING_INVALID');
     for (const policy of policies) {
       if (policy.effect !== 'EFFECT_ALLOW') continue;
       const expected = approvedPolicies.get(policy.policyId);
+      if (adminPolicies.has(policy.policyId)) continue; // exact independently signed admin record was checked above
       if (!expected || !sameProviderPolicyBinding(policy, expected)) throw new Error('TURNKEY_PROVIDER_POLICY_NOT_APPROVED');
     }
     for (const expected of approvedPolicies.values()) {

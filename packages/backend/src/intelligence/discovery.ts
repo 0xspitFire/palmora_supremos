@@ -1,3 +1,4 @@
+import type { AdvancedIntelligencePort, HistoricalQualityPort, AdaptiveModelPort } from './advanced-scoring.js';
 import { randomUUID } from 'node:crypto';
 import type { BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
@@ -32,6 +33,10 @@ export interface DiscoveryOptions {
   alerts?: IntelligenceAlertSink;
   /** Collection names read from the chain; one reader can be shared with the readiness sweep. */
   names?: CollectionNames;
+  /** Cache-only ports: external work is scheduled separately and never delays the scan. */
+  advanced?: AdvancedIntelligencePort;
+  history?: HistoricalQualityPort;
+  adaptive?: AdaptiveModelPort;
 }
 
 export interface DiscoveryTickResult {
@@ -85,6 +90,36 @@ const MAX_SEEN_LOGS = 100_000;
 const MAX_OPENING_ALERTS_PER_DAY = 20;
 
 export class DiscoveryService {
+  /** Generic, two-reader verified NFT facts are visible but have no supported mint strategy. */
+  public async observeVerifiedNFT(observation: import('./contract-monitor.js').ContractObservation): Promise<void> {
+    const { assertVerifiedContractObservation } = await import('./contract-monitor.js');
+    assertVerifiedContractObservation(observation);
+    if (observation.chainId !== this.port.chainId) throw new Error('CONTRACT_MONITOR_CHAIN_MISMATCH');
+    const id = `generic-nft:${observation.chainId}:${observation.identity}:${observation.blockHash}`;
+    const at = observation.blockTimestamp;
+    await this.store.transaction(state => {
+      if (state.events.some(event => event.id === id)) return;
+      state.events.push({ id, type: 'opportunity_observed', at, data: {
+        opportunityId: `generic-nft:${observation.chainId}:${observation.contract}`, chainId: observation.chainId,
+        contract: observation.contract, standard: observation.standard, strategy: 'unsupported', stage: 'unknown',
+        priceWei: null, score: 0, scoreVersion: 'generic-observation-v1', sampleSize: '0', denominator: '100',
+        confidence: 'low', band: 'log', blocked: true, disposition: 'observed', factors: [],
+        risks: [{ code: 'UNSUPPORTED_MINT_STRATEGY', severity: 'blocking', message: 'Observed NFT interface; price, stage and mint calldata are unknown.' }],
+        sourceBlock: observation.blockNumber, sourceBlockHash: observation.blockHash, transactionHash: observation.transactionHash,
+        firstSeenAt: at, lastActivityAt: at, expiresAt: new Date(Date.parse(at) + DISCOVERY_FRESHNESS_MS).toISOString(),
+        watchedMinters: observation.kind === 'mint' ? [observation.wallet] : [], watchedReceivers: [],
+        watchedMinterObservations: observation.kind === 'mint' ? [{ wallet: observation.wallet, at }] : [],
+        totalMinted: observation.quantity, factoryCoverage: observation.factoryCoverage, executionAuthorized: false,
+      } });
+      if (observation.kind === 'mint') state.events.push({ id: `${id}:mint`, type: 'watched_wallet_mint', at, data: {
+        chainId: observation.chainId, contract: observation.contract, wallet: observation.wallet,
+        transactionHash: observation.transactionHash, blockNumber: observation.blockNumber, blockHash: observation.blockHash,
+        quantity: observation.quantity, tokenIds: observation.tokenIds, standard: observation.standard,
+        source: 'generic-nft-observer-v1', strategy: 'unsupported', priceWei: null, stage: 'unknown',
+        replicable: false, executionAuthorized: false,
+      } });
+    });
+  }
   private readonly tracked = new Map<string, Tracked>();
   private readonly calendar = new Map<string, CalendarItem>();
   private readonly seenLogs = new Set<string>();
@@ -283,7 +318,12 @@ export class DiscoveryService {
   private score(item: Tracked, now: number, watchingConfigured: boolean): ScoreResult {
     const watchedMinters = [...item.watched.values()].filter((at) => now - at <= CONVERGENCE_WINDOW_MS).length;
     const mintsLastHour = item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0);
-    return scoreOpportunity({ watchedMinters, watchingConfigured, priceWei: item.priceWei, budgetPerNftWei: this.options.budgetPerNftWei, knownSeaDropPattern: item.drop !== null, hasCode: item.hasCode, mintsLastHour, discoveredAt: new Date(item.firstSeenAt), now: new Date(now) });
+    const context = { chainId: this.port.chainId, contract: item.contract, watchedWallets: [...item.watched.entries()].filter(([, at]) => now - at <= CONVERGENCE_WINDOW_MS).map(([wallet]) => wallet), now: new Date(now) };
+    let advanced; let history; let adaptiveModel;
+    try { this.options.advanced?.request?.(context); advanced = this.options.advanced?.snapshot(context); } catch { /* unavailable enrichment is not zero and cannot stop scanning */ }
+    try { history = this.options.history?.snapshot(context); } catch { /* missing history stays unknown */ }
+    try { adaptiveModel = this.options.adaptive?.active(this.port.chainId, context.now); } catch { /* static model remains the fallback */ }
+    return scoreOpportunity({ chainId: this.port.chainId, contract: item.contract, advanced, history, adaptiveModel, watchedMinters, watchingConfigured, priceWei: item.priceWei, budgetPerNftWei: this.options.budgetPerNftWei, knownSeaDropPattern: item.drop !== null, hasCode: item.hasCode, mintsLastHour, discoveredAt: new Date(item.firstSeenAt), now: new Date(now) });
   }
 
   private async emitOpportunities(result: DiscoveryTickResult, refreshAllowed: boolean, sourceBlock: bigint, labels: ReadonlyMap<string, string | null | undefined>): Promise<number> {
@@ -308,6 +348,7 @@ export class DiscoveryService {
       events.push({ id: `evt_${randomUUID()}`, type: `opportunity_${disposition}`, at: nowDate.toISOString(), data: {
         opportunityId: opportunityId(this.port.chainId, item.contract), chainId: this.port.chainId, contract: item.contract, disposition, ...(collectionName ? { collectionName } : {}),
         score: scored.score, scoreVersion: scored.modelVersion, sampleSize: Math.round(scored.confidence * 100).toString(), denominator: '100', confidence: scored.confidenceLabel, band: scored.band, blocked: scored.blocked,
+        ...(scored.modelEpochId ? { modelEpochId: scored.modelEpochId, staticScore: scored.baseScore } : {}),
         factors: scored.factors, risks: scored.risks, watchedMinters, watchedMinterObservations: watchedMinters.map(wallet => ({ wallet, at: new Date(item.watched.get(wallet)!).toISOString() })), mintActivity: compactMintActivity(item.mints, now), mintsLastHour: item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0), totalMinted: item.totalMinted,
         ...(item.priceWei === null ? {} : { priceWei: item.priceWei.toString() }), ...(item.hasCode === null ? {} : { hasCode: item.hasCode }),
         ...(item.drop && item.drop.startTime > 0 ? { openingAt: new Date(item.drop.startTime * 1000).toISOString() } : {}),

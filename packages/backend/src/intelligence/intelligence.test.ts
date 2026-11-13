@@ -973,3 +973,21 @@ describe('readiness advisory snapshot and chain isolation', () => {
     expect(reads).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('DiscoveryService advanced intelligence composition',()=>{
+ it('uses optional cached facts in real opportunity scoring and requests work without awaiting network',async()=>{
+ const t=setup();t.repo.watched=[WHALE];t.port.drops.set(NFT,drop());t.port.mints=[mint(900n,WHALE)];
+ let requested=0;
+ const discovery=new DiscoveryService(t.store,t.repo,t.port,{now:t.clock.now,budgetPerNftWei:LIMIT,alerts:t.alerts,adaptive:{active(chainId, now){return {version:'adaptive-model-v1',epochId:'epoch_test',policyDigest:`sha256:${'a'.repeat(64)}`,chainId,issuedAt:now.toISOString(),expiresAt:new Date(+now+60_000).toISOString(),maxScoreChange:10,weightsBps:{price:12000}};}},advanced:{request(){requested++;},snapshot(context){return {version:'advanced-facts-v1',chainId:context.chainId,contract:context.contract,sourceVerified:{chainId:context.chainId,contract:context.contract,observedAt:context.now.toISOString(),expiresAt:new Date(+context.now+60_000).toISOString(),sourceReference:'independent-source',value:true}};}}});
+ await discovery.tick();expect(requested).toBeGreaterThan(0);
+ const scored=[...events(t.store,'opportunity_scored'),...events(t.store,'opportunity_notified')];expect(scored).toHaveLength(1);
+ expect(String(scored[0]?.data.scoreVersion)).toContain('v2-rules-advanced');expect(scored[0]?.data.modelEpochId).toBe('epoch_test');expect(typeof scored[0]?.data.staticScore).toBe('number');
+ expect((scored[0]?.data.factors as Array<{code:string;status:string}>).find(f=>f.code==='verified_source')?.status).toBe('available');
+ });
+ it('continues discovery when optional enrichment fails and does not claim unavailable source data',async()=>{
+ const t=setup();t.repo.watched=[WHALE];t.port.drops.set(NFT,drop());t.port.mints=[mint(900n,WHALE)];
+ const discovery=new DiscoveryService(t.store,t.repo,t.port,{now:t.clock.now,budgetPerNftWei:LIMIT,advanced:{request(){throw new Error('unavailable');},snapshot(){throw new Error('unavailable');}}});
+ expect((await discovery.tick()).status).toBe('ok');
+ const scored=[...events(t.store,'opportunity_scored'),...events(t.store,'opportunity_notified')];expect((scored[0]?.data.factors as Array<{code:string;status:string}>).find(f=>f.code==='verified_source')?.status).toBe('unavailable');
+ });
+});

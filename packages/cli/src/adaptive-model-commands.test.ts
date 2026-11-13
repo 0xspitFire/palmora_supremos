@@ -1,0 +1,13 @@
+import { describe, expect, it } from 'vitest';
+import yargs from 'yargs/yargs';
+import { DurableStore, type AdaptiveGovernancePolicy } from '@mint-bot/backend';
+import { registerAdaptiveModelCommands } from './adaptive-model-commands.js';
+const now=new Date('2026-11-13T12:00:00Z');
+const policy:AdaptiveGovernancePolicy={version:'adaptive-governance-v1',decisionId:'D-093',policyId:'owner-governance',ownerApprovalDigest:`sha256:${'a'.repeat(64)}`,approvedAt:'2026-11-13T00:00:00Z',expiresAt:'2026-12-13T00:00:00Z',chainId:1,minimumOutcomes:50,minimumCollections:10,holdoutBps:2000,minimumHoldout:10,maximumWeightChangeBps:2000,maximumScoreChange:10,epochLifetimeDays:90};
+async function setup(){const store=new DurableStore();await store.open();let closed=0;const printed:string[]=[];const run=async(args:string[])=>{const cli=registerAdaptiveModelCommands(yargs(args).exitProcess(false).strict(),{runtimeRoot:'/unused',policies:async()=>[policy],runtime:async()=>({store,close:()=>{closed++;}}),now:()=>now,write:text=>printed.push(text)});await cli.parseAsync();return JSON.parse(printed.at(-1)!);};return {store,run,closed:()=>closed};}
+describe('adaptive model owner operations',()=>{
+ it('reports absent measured samples and static mode without activating a model',async()=>{const s=await setup();expect(await s.run(['adaptive-model','status','--chain','1'])).toMatchObject({active:null,measuredDecisionSamples:0,candidates:[]});expect(s.closed()).toBe(1);expect(s.store.snapshot().events).toEqual([]);});
+ it('previews proposals and refuses training without genuinely costed history',async()=>{const s=await setup();expect(await s.run(['adaptive-model','propose','--chain','1'])).toMatchObject({preview:true,samples:0});expect(await s.run(['adaptive-model','propose','--chain','1','--write'])).toMatchObject({state:'blocked',code:'ADAPTIVE_MEASURED_HISTORY_INSUFFICIENT'});expect(s.store.snapshot().events).toEqual([]);});
+ it('requires an explicit chain-specific confirmation before a rollback write',async()=>{const s=await setup();expect(await s.run(['adaptive-model','rollback','--chain','1','--write','--confirm','wrong'])).toMatchObject({preview:true,confirmation:'ROLLBACK-ADAPTIVE CHAIN-1'});expect(s.store.snapshot().events).toEqual([]);expect(await s.run(['adaptive-model','rollback','--chain','1','--write','--confirm','ROLLBACK-ADAPTIVE CHAIN-1'])).toMatchObject({rolledBack:true,active:null});expect(s.store.snapshot().events[0]?.type).toBe('adaptive_model_rolled_back');});
+ it('does not operate another chain under an Ethereum profile',async()=>{const s=await setup();expect(await s.run(['adaptive-model','status','--chain','8453'])).toMatchObject({state:'blocked',code:'ADAPTIVE_OWNER_POLICY_REQUIRED'});expect(s.closed()).toBe(0);});
+});

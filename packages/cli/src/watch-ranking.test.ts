@@ -205,3 +205,9 @@ describe('watch-ranking command wiring', () => {
   });
 });
 
+
+ it('keeps same-address collections and legacy events isolated per selected chain', () => {
+ const rows = [event('opportunity_scored','2026-11-13T10:00:00Z',NFT1,{chainId:1,watchedMinters:[A],score:90}), event('opportunity_scored','2026-11-13T10:00:00Z',NFT1,{chainId:8453,watchedMinters:[B],score:35}),event('opportunity_scored','2026-11-13T10:00:00Z',NFT2,{watchedMinters:[A],score:100})];
+ const result=rankWatchedWallets({events:rows,watched:WATCHED,chainId:8453});
+ expect(result.ranked).toHaveLength(1); expect(result.ranked[0]).toMatchObject({address:B,averageBestScore:35,collectionsMinted:1}); expect(result.meta.chainId).toBe(8453);
+ });

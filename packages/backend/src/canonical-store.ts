@@ -1,3 +1,5 @@
+import { fundingFeeForRunWallet, fundingExpenseSnapshot, fundingCostEvents } from './native-funding-analytics.js';
+import { chainEvidenceMatchesCampaign } from './evidence.js';
 import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI } from './policy.js';
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { assertBaseFirstRehearsal, assertBaseLiveAllowed } from './base-enablement.js';
@@ -15,8 +17,9 @@ import type {
   SettlementComponents,
   SqliteDatabase,
   TransactionIntentRecord,
+  NativeFundingRequest, NativeFundingPolicy, NativeFundingPreparation,
 } from '@mint-bot/database';
-import { FireScheduleRepository, GasAlertRepository, IntelligenceRepository, TelegramAccessRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
+import { NativeFundingRepository, FireScheduleRepository, GasAlertRepository, IntelligenceRepository, TelegramAccessRepository, SqliteBackendStore, assertAndAdvanceAdmissionClock, assertNoStalePendingReservations, rollingSpendCutoff } from '@mint-bot/database';
 import type {
   AttemptRecord,
   BackendState,
@@ -41,6 +44,7 @@ import type { BackendControlSnapshot, BackendStore } from './store.js';
 import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
+import { assertFundingQualification, assertNoStaleFundingHolds, fundingCampaignDigest, fundingHoldDigest, fundingHoldEncode, fundingHoldRows, hasFundingHolds, pendingFundingHoldExposure, readFundingHold, type FundingHoldInput, type FundingHoldQualification, type FundingPendingHold, type FundingHoldRow } from './funding-hold.js';
 
 /** Defense in depth: canonical evidence may contain only an opaque provider label, never a URL. */
 function safeAttemptEndpoint(value: string): string {
@@ -84,6 +88,14 @@ export interface CanonicalExecutionStore extends BackendStore {
   /** Key 2 for Robinhood (D-040): the owner's enablement record, or undefined when there is none. */
   robinhoodEnablement?(): unknown;
   baseEnablement?(): unknown;
+  createFundingHold?(input: FundingHoldInput, qualification: FundingHoldQualification): Promise<FundingPendingHold>;
+  fundingHold?(id: string): FundingPendingHold | undefined;
+  reservedFundingHoldForCampaign?(campaignId:string,wallets:readonly string[],existingRunId?:string):string|undefined;
+  armFundingHold?(id: string, run: RunRecord, intent: IntentRecord): Promise<RunRecord>;
+  releaseFundingHold?(id: string): Promise<void>;
+  unresolvedFundingHoldIds?(): string[];
+  nextFundingReconciliationIds?(limit?: number): Promise<string[]>;
+  expiredFundingHoldIds?(at:Date):string[];
 }
 
 interface DatabaseRunRow {
@@ -684,6 +696,181 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     this.databaseStore.recordReconciliation({ id: input.id, chainProfileId: identity.chainProfileId, transactionAttemptId: input.transactionAttemptId, txHash: input.txHash, fromAddress: input.fromAddress, nonce: input.nonce, state: input.state as DatabaseReconciliationRecord['state'], checkedAt: input.checkedAt, source: input.source, policyVersion: 'phase2-reconciliation-v1', details: input.details && Object.keys(input.details).length > 0 ? input.details : { sourceEvidence: input.source }, executionId: input.executionId });
   }
 
+  /** FundingPending is a cap reservation only. It creates no Armed run or signing intent. */
+  public async createFundingHold(input: FundingHoldInput, qualification: FundingHoldQualification): Promise<FundingPendingHold> {
+    this.ensureOpen();
+    if (!hasFundingHolds(this.db)) throw new Error('FUNDING_HOLD_SCHEMA_REQUIRED');
+    input = structuredClone(input); qualification = structuredClone(qualification);
+    const wallets = input.wallets.map(value => value.toLowerCase()).sort();
+    if (!/^[A-Za-z0-9_.:-]{1,180}$/.test(input.idempotencyKey) || !wallets.length || wallets.length > 100 || wallets.some(value => !/^0x[0-9a-f]{40}$/.test(value)) || new Set(wallets).size !== wallets.length) throw new Error('FUNDING_HOLD_INPUT_INVALID');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const campaign = this.snapshot().campaigns.find(value => value.id === input.campaignId);
+      if (!campaign || campaign.dryRun) throw new Error('LIVE_CAMPAIGN_REQUIRED');
+      const now = this.now();
+      assertFundingQualification(campaign, wallets, qualification, now);
+      const expires = Date.parse(input.expiresAt);
+      if (!Number.isFinite(expires) || expires <= now.getTime() || expires > Date.parse(qualification.expiresAt) || expires > now.getTime() + 15 * 60_000 || campaign.mintPriceWei === 0n && expires > Date.parse(qualification.sourceMintedAt!) + 15 * 60_000) throw new Error('FUNDING_HOLD_EXPIRY_INVALID');
+      if (this.databaseStore.isKillSwitchEngaged()) throw new Error('KILLED');
+      this.assertCanonicalChainProfile(campaign);
+      if (campaign.chainId === ROBINHOOD_CHAIN_ID) assertRobinhoodLiveAllowed(campaign.feePolicy.kind, this.robinhoodEnablement(), now);
+      if (campaign.chainId === BASE_CHAIN_ID) assertBaseLiveAllowed(campaign.feePolicy.kind, this.baseEnablement(), now);
+      assertAndAdvanceAdmissionClock(this.db, now); assertNoStalePendingReservations(this.db, now); assertNoStaleFundingHolds(this.db, now);
+      const mintClass = campaign.mintPriceWei === 0n ? 'free' : 'paid';
+      this.assertFleetCampaignLimits(campaign, wallets, true, mintClass);
+      this.assertCanonicalFeePolicy(campaign, campaign.feePolicy);
+      if (mintClass === 'paid') this.assertPaidWalletScope(campaign, wallets);
+      const id = `fundhold_${digest(input.idempotencyKey)}`;
+      const prior = readFundingHold(this.db, id);
+      if (prior) {
+        if (prior.campaignDigest !== fundingCampaignDigest(campaign) || prior.wallets.join(',') !== wallets.join(',') || prior.expiresAt !== input.expiresAt) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+        this.db.exec('COMMIT'); return prior;
+      }
+      const amount = this.exposure(campaign);
+      if (amount <= 0n) throw new Error('RESERVATION_EXPOSURE_MUST_BE_POSITIVE');
+      const holdBase = { id, state: 'FundingPending' as const, idempotencyKey: input.idempotencyKey, campaignDigest: fundingCampaignDigest(campaign), campaign, wallets, requiredPerWalletWei: amount, qualification, createdAt: now.toISOString(), expiresAt: input.expiresAt };
+      const hold: FundingPendingHold = { ...holdBase, digest: fundingHoldDigest(holdBase) };
+      let runExposure = 0n;
+      for (const wallet of wallets) {
+        const canonicalWallet = this.findWallet(campaign, wallet);
+        this.assertCaps(canonicalWallet.walletId, campaign, rollingSpendCutoff(now), amount, runExposure);
+        this.assertFleetDailyCap(campaign.chainId, mintClass, rollingSpendCutoff(now), amount);
+        this.db.prepare("INSERT INTO mint_funding_hold(id,hold_id,idempotency_key,campaign_id,chain_id,wallet_id,wallet_address,amount_wei,mint_class,campaign_digest,hold_digest,payload_json,state,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'reserved',?,?)").run(`${id}:${canonicalWallet.walletId}`, id, input.idempotencyKey, campaign.id, campaign.chainId, canonicalWallet.walletId, wallet, amount.toString(), mintClass, hold.campaignDigest, hold.digest, fundingHoldEncode(hold), now.toISOString(), input.expiresAt);
+        runExposure += amount;
+      }
+      this.db.exec('COMMIT'); return hold;
+    } catch (error) { if (this.db.inTransaction) this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  public fundingHold(id: string): FundingPendingHold | undefined {
+    this.ensureOpen(); if (!hasFundingHolds(this.db)) throw new Error('FUNDING_HOLD_SCHEMA_REQUIRED');
+    return readFundingHold(this.db, id);
+  }
+
+  public reservedFundingHoldForCampaign(campaignId:string,wallets:readonly string[],existingRunId?:string):string|undefined {
+    this.ensureOpen();if(!hasFundingHolds(this.db))return undefined;
+    const rows=this.db.prepare("SELECT DISTINCT hold_id FROM mint_funding_hold WHERE campaign_id=? AND state='reserved'").all(campaignId) as Array<{hold_id:string}>;
+    if(!rows.length)return undefined;if(rows.length!==1)throw new Error('FUNDING_HOLD_AMBIGUOUS');
+    const hold=readFundingHold(this.db,rows[0]!.hold_id);const campaign=this.snapshot().campaigns.find(value=>value.id===campaignId);const selected=[...wallets].map(value=>value.toLowerCase()).sort();
+    if(!hold||!campaign||hold.state!=='FundingPending'||hold.campaignDigest!==fundingCampaignDigest(campaign)||hold.wallets.join(',')!==selected.join(',')||new Set(selected).size!==selected.length||hold.boundRunId&&hold.boundRunId!==existingRunId||Date.parse(hold.expiresAt)<=this.now().getTime())throw new Error('FUNDING_HOLD_ARM_MISMATCH');
+    this.assertResolvedHoldFunding(hold.id);return hold.id;
+  }
+
+  public expiredFundingHoldIds(at:Date):string[] {
+    if(!hasFundingHolds(this.db))return [];return (this.db.prepare("SELECT DISTINCT hold_id FROM mint_funding_hold WHERE state='reserved' AND julianday(expires_at)<=julianday(?) LIMIT 20").all(at.toISOString()) as Array<{hold_id:string}>).map(row=>row.hold_id);
+  }
+
+  public fundingFeeForRunWallet(runId: string, wallet: string) { this.ensureOpen(); return fundingFeeForRunWallet(this.db, runId, wallet); }
+  public fundingExpenseSnapshot() { this.ensureOpen(); return fundingExpenseSnapshot(this.db); }
+
+  public unresolvedFundingHoldIds(): string[] {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_funding'").get()) return [];
+    return (this.db.prepare("SELECT DISTINCT parent_hold_id FROM native_funding WHERE state IN('signing','signed','unknown','submitted')").all() as Array<{ parent_hold_id: string }>).map(row => row.parent_hold_id);
+  }
+
+  /** Durable bounded rotation includes settled history after cold restart. */
+  public async nextFundingReconciliationIds(limit = 8): Promise<string[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 32) throw new Error('FUNDING_RECONCILIATION_LIMIT_INVALID');
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_funding'").get()) return [];
+    let selected: string[] = [];
+    await this.transaction(state => {
+      const cursor = { ...(state.events.filter(event => event.type === 'funding_reconciliation_cursor').at(-1)?.data ?? {}) };
+      const cutoff = new Date(this.now().getTime() - 86_400_000).toISOString();
+      const rotate = (scope: string, condition: string, count: number, parameters: unknown[] = []): string[] => {
+        const after = typeof cursor[scope] === 'string' ? cursor[scope] as string : '';
+        const read = (key: string, size: number) => (this.db.prepare(`SELECT id FROM native_funding WHERE ${condition} AND id>? ORDER BY id LIMIT ?`).all(...parameters, key, size) as {id:string}[]).map(row => row.id);
+        const rows = read(after, count); if (rows.length < count) rows.push(...read('', count - rows.length).filter(id => !rows.includes(id)));
+        if (rows.length) cursor[scope] = rows.at(-1); return rows;
+      };
+      if (limit < 3) selected = rotate('all', "state IN('signing','signed','unknown','submitted','settled')", limit);
+      else {
+        const pendingLimit = Math.max(1, Math.floor(limit / 2));
+        selected = rotate('pending', "state IN('signing','signed','unknown','submitted')", pendingLimit);
+        selected.push(...rotate('recent', "state='settled' AND settled_at>=?", limit - pendingLimit - 1, [cutoff]));
+        selected.push(...rotate('history', "state='settled' AND (settled_at<? OR settled_at IS NULL)", 1, [cutoff]));
+      }
+      if (selected.length) state.events.push({ id: `funding_cursor_${randomUUID()}`, type: 'funding_reconciliation_cursor', at: this.now().toISOString(), data: { ...cursor } });
+    });
+    return selected;
+  }
+
+  /** Shares the exact canonical SQLite transaction; a separate connection cannot attest a parent hold. */
+  public createNativeFundingRepository(currentPolicy: () => NativeFundingPolicy | undefined): NativeFundingRepository {
+    this.ensureOpen();
+    return new NativeFundingRepository(this.db, { assertCurrent: (request, admitted, preparation) => {
+      const current = currentPolicy();
+      const encode = (value: unknown) => JSON.stringify(value, (_key, item: unknown) => typeof item === 'bigint' ? `${item}n` : item !== null && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
+      if (!current || encode(current) !== encode(admitted)) throw new Error('FUNDING_CURRENT_PROFILE_MISMATCH');
+      this.assertFundingParent(request, admitted, preparation);
+    }, onReorg: record => {
+      const hold = readFundingHold(this.db, record.request.parentHoldId);
+      if (hold?.boundRunId) this.databaseStore.setKillSwitch(true, 'funding-reorg', this.now());
+      this.persistEvent({ id: `funding_reorg_${randomUUID()}`, type: 'funding_reorg_detected', at: this.now().toISOString(), ...(hold?.boundRunId ? { runId: hold.boundRunId } : {}), data: { operationId: record.request.id, holdId: record.request.parentHoldId, transactionHash: record.transactionHash, mintAuthorityBlocked: Boolean(hold?.boundRunId) } }, undefined);
+      const prior = this.snapshot().events;
+      for (const event of fundingCostEvents(prior, fundingExpenseSnapshot(this.db), this.now())) this.persistEvent(event, undefined);
+    } });
+  }
+
+  /** Native repository invokes this synchronously within its own admission/claim transaction. */
+  public assertFundingParent(request: NativeFundingRequest, policy: NativeFundingPolicy, preparation: NativeFundingPreparation): void {
+    if (!this.db.inTransaction) throw new Error('FUNDING_PARENT_TRANSACTION_REQUIRED');
+    const hold = readFundingHold(this.db, request.parentHoldId);
+    const row = fundingHoldRows(this.db, request.parentHoldId).find(value => value.wallet_address === request.recipient.toLowerCase());
+    const now = this.now();
+    if (!hold || !row || hold.state !== 'FundingPending' || row.state !== 'reserved' || hold.id !== request.parentRunId || hold.digest !== request.parentHoldDigest || hold.campaign.chainId !== request.chainId || request.chainId !== policy.chainId || hold.requiredPerWalletWei !== request.requiredBalanceWei || BigInt(row.amount_wei) !== request.requiredBalanceWei || preparation.valueWei !== request.requiredBalanceWei - preparation.recipientBalanceWei || Date.parse(hold.expiresAt) <= now.getTime()) throw new Error('FUNDING_PARENT_NOT_HELD');
+    const campaign = this.snapshot().campaigns.find(value => value.id === hold.campaign.id);
+    if (!campaign || fundingCampaignDigest(campaign) !== hold.campaignDigest) throw new Error('FUNDING_PARENT_CHANGED');
+    this.assertCanonicalChainProfile(campaign);
+    if (campaign.chainId === ROBINHOOD_CHAIN_ID) assertRobinhoodLiveAllowed(campaign.feePolicy.kind, this.robinhoodEnablement(), now);
+    if (campaign.chainId === BASE_CHAIN_ID) assertBaseLiveAllowed(campaign.feePolicy.kind, this.baseEnablement(), now);
+  }
+
+  /** Called only after the usual funded custody/simulation/arm gates have passed. */
+  public async armFundingHold(id: string, run: RunRecord, intent: IntentRecord): Promise<RunRecord> {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const hold = readFundingHold(this.db, id);
+      if (!hold || hold.state !== 'FundingPending' || hold.boundRunId && hold.boundRunId !== run.id || hold.campaignDigest !== fundingCampaignDigest(intent.campaignSnapshot) || hold.wallets.join(',') !== [...intent.wallets].map(value => value.toLowerCase()).sort().join(',') || Date.parse(hold.expiresAt) <= this.now().getTime() || run.mode !== 'live' || run.state !== 'Armed' || run.campaignId !== hold.campaign.id || intent.runId !== run.id || intent.id !== run.intentId) throw new Error('FUNDING_HOLD_ARM_MISMATCH');
+      if (this.databaseStore.isKillSwitchEngaged()) throw new Error('KILLED');
+      this.assertResolvedHoldFunding(id);
+      this.persistRun(run, undefined); this.persistIntent(intent, undefined);
+      this.db.prepare("UPDATE mint_funding_hold SET bound_run_id=? WHERE hold_id=? AND state='reserved'").run(run.id, id);
+      this.recordAudit({ id: `audit_${randomUUID()}`, entityType: 'execution_run', entityId: run.id, newState: 'prepared', actor: this.actor, reason: 'funded hold passed ordinary live arm gates', policySnapshot: { kind: 'event', eventType: 'run_armed', eventData: { fundingHoldId: id, mode: 'live', simulationIds: intent.simulationIds, intentId: intent.id } }, occurredAt: this.now().toISOString() });
+      this.db.exec('COMMIT'); return run;
+    } catch (error) { if (this.db.inTransaction) this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  public async releaseFundingHold(id: string): Promise<void> {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const hold = readFundingHold(this.db, id);
+      if (!hold || hold.state !== 'FundingPending') throw new Error('FUNDING_HOLD_NOT_RESERVED');
+      // A reserved funding row is positive canonical evidence that signing was
+      // never claimed. Release only rows with no signed/settlement facts, under
+      // this same write lock; a concurrent signing claim can no longer succeed.
+      this.db.prepare("UPDATE native_funding SET state='released',updated_at=? WHERE parent_hold_id=? AND state='reserved' AND transaction_hash IS NULL AND actual_principal_wei IS NULL AND actual_fee_wei IS NULL AND settled_at IS NULL AND receipt_json IS NULL").run(this.now().toISOString(),id);
+      this.assertResolvedHoldFunding(id);
+      if (hold.boundRunId && this.db.prepare('SELECT 1 FROM execution WHERE run_id=? LIMIT 1').get(hold.boundRunId)) throw new Error('FUNDING_HOLD_MINT_STARTED');
+      if (hold.boundRunId && this.db.prepare(`SELECT 1 FROM transaction_intent ti WHERE ti.run_id=? AND (
+        ti.nonce IS NOT NULL OR ti.calldata<>'0x'
+        OR EXISTS(SELECT 1 FROM transaction_attempt a WHERE a.transaction_intent_id=ti.id)
+        OR EXISTS(SELECT 1 FROM state_transition st WHERE st.entity_type='transaction_intent' AND st.entity_id=ti.id AND st.new_state<>'prepared')
+      ) LIMIT 1`).get(hold.boundRunId)) throw new Error('FUNDING_HOLD_MINT_STARTED');
+      this.db.prepare("UPDATE mint_funding_hold SET state='released' WHERE hold_id=? AND state='reserved'").run(id);
+      if (hold.boundRunId) {
+        const run = this.snapshot().runs.find(value => value.id === hold.boundRunId);
+        if (!run) throw new Error('RUN_NOT_FOUND');
+        this.updateRunState(hold.boundRunId, 'aborted', run);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { if (this.db.inTransaction) this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  private assertResolvedHoldFunding(id: string): void {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_funding'").get()) throw new Error('FUNDING_SCHEMA_REQUIRED');
+    if (this.db.prepare("SELECT 1 FROM native_funding WHERE parent_hold_id=? AND state NOT IN('settled','released') LIMIT 1").get(id)) throw new Error('FUNDING_OUTCOME_UNRESOLVED');
+  }
+
   public async admitExecution(input: CanonicalAdmissionInput): Promise<CanonicalAdmissionResult> {
     this.ensureOpen();
     const wallets = [...input.wallets];
@@ -712,7 +899,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       if (input.run.mode === 'live') {
         assertAndAdvanceAdmissionClock(this.db, admissionTime);
         assertNoStalePendingReservations(this.db, admissionTime);
+        assertNoStaleFundingHolds(this.db, admissionTime);
       }
+      const convertingHold = this.conversionFundingHold(input);
       if (input.campaign.chainId === BASE_CHAIN_ID && input.run.mode === 'live') {
         const completed = this.db.prepare(`SELECT 1 AS ok
           FROM transaction_receipt r
@@ -771,8 +960,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         }
         if (!existing) {
           this.assertCanonicalFeePolicy(input.campaign, input.campaign.feePolicy);
-          this.assertCaps(canonicalWallet.walletId, input.campaign, rollingCutoff, amount, totalRunExposure);
-          this.assertFleetDailyCap(input.campaign.chainId, mintClassForFleet, rollingCutoff, amount);
+          this.assertCaps(canonicalWallet.walletId, input.campaign, rollingCutoff, amount, totalRunExposure, convertingHold);
+          this.assertFleetDailyCap(input.campaign.chainId, mintClassForFleet, rollingCutoff, amount, convertingHold);
           const fee = input.campaign.feePolicy;
           const mintValueWei = input.campaign.mintPriceWei * BigInt(input.campaign.quantity);
           const l2ExecutionGasWei = fee.l2ExecutionGasBudgetWei ?? 0n;
@@ -792,6 +981,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
           }
           totalRunExposure += amount;
          }
+        if (convertingHold) this.db.prepare("UPDATE mint_funding_hold SET state='converted' WHERE hold_id=? AND wallet_id=? AND state='reserved' AND bound_run_id=?").run(convertingHold, canonicalWallet.walletId, input.run.id);
          const executionReservation = this.db.prepare('SELECT reservation_id FROM execution WHERE id = ?').get(executionId) as { reservation_id: string | null } | undefined;
          if (!executionReservation) throw new Error('EXECUTION_REQUIRED');
          if (executionReservation.reservation_id !== null && executionReservation.reservation_id !== reservationId) throw new Error('EXECUTION_RESERVATION_IDENTITY_MISMATCH');
@@ -911,14 +1101,20 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
   }
 
   private readCampaigns(): Campaign[] {
+    const chainEvidence=this.readChainEvidence();
     const rows = this.db.prepare(`SELECT c.id, c.state, c.policy_snapshot_json, c.created_at, d.strategy, d.mint_price_wei, ct.address, cp.id AS chain_profile_id, cp.chain_id, (SELECT cv.status FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS verification_status, (SELECT cv.checked_at FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS verification_checked_at, (SELECT cv.evidence_json FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS verification_evidence_json, (SELECT cv.sequencer_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS sequencer_endpoint_reference, (SELECT cv.archive_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS archive_endpoint_reference, (SELECT cv.feed_endpoint_reference FROM chain_verification cv WHERE cv.chain_profile_id = cp.id ORDER BY cv.checked_at DESC, cv.rowid DESC LIMIT 1) AS feed_endpoint_reference FROM campaign c JOIN "drop" d ON d.id = c.drop_id JOIN collection col ON col.id = d.collection_id JOIN contract ct ON ct.id = col.contract_id JOIN chain_profile cp ON cp.id = ct.chain_profile_id ORDER BY c.created_at, c.id`).all() as Array<{ id: string; state: string; policy_snapshot_json: string | null; created_at: string; strategy: string; mint_price_wei: string; address: string; chain_profile_id: string; chain_id: number; verification_status: string | null; verification_checked_at: string | null; verification_evidence_json: string | null; sequencer_endpoint_reference: string | null; archive_endpoint_reference: string | null; feed_endpoint_reference: string | null }>;
     return rows.map((row) => {
       const snapshot = decode<PolicySnapshot>(row.policy_snapshot_json);
       const source = snapshot?.campaignSnapshot ?? snapshot?.campaign;
       const mintPriceWei = BigInt(row.mint_price_wei);
-      const verification = mapChainVerification(row.verification_status ? { chain_id: row.chain_id, status: row.verification_status, checked_at: row.verification_checked_at ?? row.created_at, evidence_json: row.verification_evidence_json ?? '{}', sequencer_endpoint_reference: row.sequencer_endpoint_reference, archive_endpoint_reference: row.archive_endpoint_reference, feed_endpoint_reference: row.feed_endpoint_reference } : undefined, source?.chainVerification, this.now());
+      const bound=source?.chainVerification?.evidenceId?chainEvidence.find(record=>record.id===source.chainVerification.evidenceId && record.chainId===row.chain_id):undefined;
+      const legacy=chainEvidence.filter(record=>record.chainId===row.chain_id && record.strategyVersion!=='erc721-reviewed-public-v1-baseline@1' && !record.reviewedProtocol).at(-1);
+      const selected=source?.chainVerification?.evidenceId?bound:row.strategy==='erc721-reviewed-public-v1'?undefined:legacy;
+      const verification:ChainVerification=selected ? {chainId:row.chain_id as 1|8453|4663,status:selected.status==='accepted'&&selected.executionEnabled&&Number.isFinite(Date.parse(selected.expiresAt))&&Date.parse(selected.expiresAt)>this.now().getTime()?'verified':'blocked',seaDropCompatible:selected.seaDropCompatible,...(source?.chainVerification?.evidenceId?{evidenceId:source.chainVerification.evidenceId}:{}),checkedAt:selected.checkedAt,sourceBlock:selected.sourceBlock,endpointReference:source?.chainVerification?.endpointReference??selected.endpointIdentity} : {...mapChainVerification(undefined,source?.chainVerification,this.now()),chainId:row.chain_id as 1|8453|4663,status:'unverified'};
       const updated = this.db.prepare("SELECT MAX(occurred_at) AS at FROM state_transition WHERE entity_type = 'campaign' AND entity_id = ?").get(row.id) as { at: string | null };
-      return { id: row.id, state: backendCampaignState(row.state), chainId: row.chain_id as 1 | 8453 | 4663, contract: row.address, strategy: row.strategy, quantity: source?.quantity ?? 1, dryRun: source?.dryRun ?? true, spendPolicy: mapSpendPolicy(source?.spendPolicy), createdAt: row.created_at, updatedAt: updated.at ?? row.created_at, ...(source?.broadcastMode ? { broadcastMode: source.broadcastMode } : {}), ...(source?.openingAt ? { openingAt: source.openingAt } : {}), ...(source?.tMinusMs === undefined ? {} : { tMinusMs: source.tMinusMs }), ...(source?.custodyPolicy ? { custodyPolicy: source.custodyPolicy } : {}), chainVerification: verification, mintPriceWei, feePolicy: this.readFeePolicy(row.chain_profile_id, mintPriceWei, source?.feePolicy) };
+      const projected:Campaign = { id: row.id, state: backendCampaignState(row.state), chainId: row.chain_id as 1 | 8453 | 4663, contract: row.address, strategy: row.strategy, quantity: source?.quantity ?? 1, dryRun: source?.dryRun ?? true, spendPolicy: mapSpendPolicy(source?.spendPolicy), createdAt: row.created_at, updatedAt: updated.at ?? row.created_at, ...(source?.broadcastMode ? { broadcastMode: source.broadcastMode } : {}), ...(source?.openingAt ? { openingAt: source.openingAt } : {}), ...(source?.tMinusMs === undefined ? {} : { tMinusMs: source.tMinusMs }), ...(source?.custodyPolicy ? { custodyPolicy: source.custodyPolicy } : {}), chainVerification: verification, mintPriceWei, feePolicy: this.readFeePolicy(row.chain_profile_id, mintPriceWei, source?.feePolicy) };
+      if(selected && !chainEvidenceMatchesCampaign(selected,projected))projected.chainVerification.status='blocked';
+      return projected;
     });
   }
 
@@ -1066,7 +1262,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     const latestById = new Map<string, ChainEvidenceRecord>();
     const currentRobinhoodEnablementId = this.databaseStore.latestRobinhoodEnablement()?.id;
     const currentBaseEnablementId = this.databaseStore.latestBaseEnablement()?.id;
-    const ethereumDecision = [...rows].reverse().find(row => row.chain_id === ETHEREUM_CHAIN_ID && ['verified', 'execution_blocked'].includes(row.status));
+    const ethereumDecision = [...rows].reverse().find(row => row.chain_id === ETHEREUM_CHAIN_ID && decode<Record<string,unknown>>(row.evidence_json)?.strategyVersion!=='erc721-reviewed-public-v1-baseline@1' && ['verified', 'execution_blocked'].includes(row.status));
     const currentEthereumId = ethereumDecision ? String(decode<Record<string, unknown>>(ethereumDecision.evidence_json)?.backendEvidenceId ?? ethereumDecision.id) : undefined;
     for (const record of rows.map((row): ChainEvidenceRecord => {
       const evidence = decode<Record<string, unknown>>(row.evidence_json) ?? {};
@@ -1074,10 +1270,11 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const baseOwnerEvidence = row.chain_id === BASE_CHAIN_ID && typeof evidence.baseEnablementId === 'string';
       // D-065 (T-064): evidence written by a Robinhood enablement counts only while that enablement is the newest unrevoked one, so an
       // older record never becomes usable again after a revoke and a new record.
-      const supersededEthereumEvidence = row.chain_id === ETHEREUM_CHAIN_ID && String(evidence.backendEvidenceId ?? row.id) !== currentEthereumId;
+      const reviewedProtocolEvidence=evidence.strategyVersion==='erc721-reviewed-public-v1-baseline@1';
+      const supersededEthereumEvidence = !reviewedProtocolEvidence && row.chain_id === ETHEREUM_CHAIN_ID && String(evidence.backendEvidenceId ?? row.id) !== currentEthereumId;
       const supersededRobinhoodEvidence = row.chain_id === ROBINHOOD_CHAIN_ID && typeof evidence.robinhoodEnablementId === 'string' && evidence.robinhoodEnablementId !== currentRobinhoodEnablementId;
       const supersededBaseEvidence = row.chain_id === BASE_CHAIN_ID && typeof evidence.baseEnablementId === 'string' && evidence.baseEnablementId !== currentBaseEnablementId;
-      return { id: String(evidence.backendEvidenceId ?? row.id), chainId: row.chain_id as 1 | 8453 | 4663, status: row.status === 'verified' ? 'accepted' : row.status === 'execution_blocked' ? 'rejected' : 'pending', executionEnabled: row.execution_enabled === 1 && !supersededRobinhoodEvidence && !supersededEthereumEvidence && !supersededBaseEvidence, seaDropCompatible: Boolean(evidence.seaDropCompatible), positiveLivePath: Boolean(evidence.positiveLivePath) || baseOwnerEvidence, archiveForkPassed: Boolean(evidence.archiveForkPassed), negativeCases: (evidence.negativeCases ?? {}) as ChainEvidenceRecord['negativeCases'], reconciliationPassed: Boolean(evidence.reconciliationPassed), finalityPassed: Boolean(evidence.finalityPassed), endpointIdentity: String(evidence.endpointIdentity ?? row.feed_endpoint_reference ?? row.sequencer_endpoint_reference ?? ''), ...(evidence.archiveEndpointIdentity ? { archiveEndpointIdentity: String(evidence.archiveEndpointIdentity) } : {}), strategyVersion: String(evidence.strategyVersion ?? 'database'), checkedAt, expiresAt: String(evidence.expiresAt ?? checkedAt), sourceBlock: asBigInt(evidence.sourceBlock), sourceBlockHash: String(evidence.sourceBlockHash ?? ''), ...((evidence.acceptedAt || row.approved_at) ? { acceptedAt: String(evidence.acceptedAt ?? row.approved_at) } : {}), ...((evidence.acceptedBy || row.approved_by) ? { acceptedBy: String(evidence.acceptedBy ?? row.approved_by) } : {}), ...((evidence.approvalProof || evidence.evidenceDigest) ? { approvalProof: String(evidence.approvalProof ?? evidence.evidenceDigest) } : {}) };
+      return { id: String(evidence.backendEvidenceId ?? row.id), chainId: row.chain_id as 1 | 8453 | 4663, status: row.status === 'verified' ? 'accepted' : row.status === 'execution_blocked' ? 'rejected' : 'pending', ...(reviewedProtocolEvidence && evidence.reviewedProtocol ? {reviewedProtocol: evidence.reviewedProtocol as ChainEvidenceRecord['reviewedProtocol']} : {}), executionEnabled: row.execution_enabled === 1 && (!reviewedProtocolEvidence || evidence.executionEnabled===true) && !supersededRobinhoodEvidence && !supersededEthereumEvidence && !supersededBaseEvidence, seaDropCompatible: Boolean(evidence.seaDropCompatible), positiveLivePath: Boolean(evidence.positiveLivePath) || baseOwnerEvidence, archiveForkPassed: Boolean(evidence.archiveForkPassed), negativeCases: (evidence.negativeCases ?? {}) as ChainEvidenceRecord['negativeCases'], reconciliationPassed: Boolean(evidence.reconciliationPassed), finalityPassed: Boolean(evidence.finalityPassed), endpointIdentity: String(evidence.endpointIdentity ?? row.feed_endpoint_reference ?? row.sequencer_endpoint_reference ?? ''), ...(evidence.archiveEndpointIdentity ? { archiveEndpointIdentity: String(evidence.archiveEndpointIdentity) } : {}), strategyVersion: String(evidence.strategyVersion ?? 'database'), checkedAt, expiresAt: String(evidence.expiresAt ?? checkedAt), sourceBlock: asBigInt(evidence.sourceBlock), sourceBlockHash: String(evidence.sourceBlockHash ?? ''), ...((evidence.acceptedAt || row.approved_at) ? { acceptedAt: String(evidence.acceptedAt ?? row.approved_at) } : {}), ...((evidence.acceptedBy || row.approved_by) ? { acceptedBy: String(evidence.acceptedBy ?? row.approved_by) } : {}), ...((evidence.approvalProof || evidence.evidenceDigest) ? { approvalProof: String(evidence.approvalProof ?? evidence.evidenceDigest) } : {}) };
     })) latestById.set(record.id, record);
     return [...latestById.values()];
   }
@@ -1311,9 +1508,9 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (!profile) throw new Error('CANONICAL_CHAIN_PROFILE_REQUIRED');
     const status = evidence.status === 'accepted' ? 'verified' : evidence.status === 'rejected' ? 'execution_blocked' : 'characterization_pending';
     const existing = this.db.prepare('SELECT id, evidence_json FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, id DESC').all(profile.id) as Array<{ id: string; evidence_json: string }>;
-    if (existing.some((row) => decode<{ backendEvidenceId?: string; status?: string }>(row.evidence_json)?.backendEvidenceId === evidence.id && decode<{ backendEvidenceId?: string; status?: string }>(row.evidence_json)?.status === evidence.status)) return;
+    if (existing.some((row) => {const prior=decode<Record<string,unknown>>(row.evidence_json);return prior?.backendEvidenceId===evidence.id && prior?.status===evidence.status && (evidence.strategyVersion!=='erc721-reviewed-public-v1-baseline@1' || prior?.executionEnabled===evidence.executionEnabled);})) return;
     if (evidence.chainId === ROBINHOOD_CHAIN_ID && !evidence.archiveEndpointIdentity) throw new Error('ROBINHOOD_ARCHIVE_REFERENCE_REQUIRED');
-    this.databaseStore.recordChainVerification({ id: canonicalId('verification', `${evidence.id}:${evidence.status}:${evidence.checkedAt}`), chainProfileId: profile.id, chainId: evidence.chainId, sequencerEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.endpointIdentity : undefined, archiveEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.archiveEndpointIdentity : evidence.endpointIdentity, feedEndpointReference: evidence.chainId === ETHEREUM_CHAIN_ID ? evidence.endpointIdentity : undefined, status, evidence: { ...evidence, backendEvidenceId: evidence.id }, checkedAt: evidence.checkedAt, ...(evidence.chainId === ETHEREUM_CHAIN_ID ? { executionEnabled: evidence.status === 'accepted' && evidence.executionEnabled } : {}), ...(evidence.acceptedBy ? { approvedBy: evidence.acceptedBy } : {}), ...(evidence.acceptedAt ? { approvedAt: evidence.acceptedAt } : {}) });
+    this.databaseStore.recordChainVerification({ id: canonicalId('verification', `${evidence.id}:${evidence.status}:${evidence.checkedAt}${evidence.strategyVersion==='erc721-reviewed-public-v1-baseline@1'?`:${evidence.executionEnabled}`:''}`), chainProfileId: profile.id, chainId: evidence.chainId, sequencerEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.endpointIdentity : undefined, archiveEndpointReference: evidence.chainId === ROBINHOOD_CHAIN_ID ? evidence.archiveEndpointIdentity : evidence.endpointIdentity, feedEndpointReference: evidence.chainId === ETHEREUM_CHAIN_ID ? evidence.endpointIdentity : undefined, status, evidence: { ...evidence, backendEvidenceId: evidence.id }, checkedAt: evidence.checkedAt, ...(evidence.chainId === ETHEREUM_CHAIN_ID ? { executionEnabled: evidence.status === 'accepted' && evidence.executionEnabled } : {}), ...(evidence.acceptedBy ? { approvedBy: evidence.acceptedBy } : {}), ...(evidence.acceptedAt ? { approvedAt: evidence.acceptedAt } : {}) });
   }
 
   private persistSimulation(simulation: SimulationEvidenceRecord, prior: SimulationEvidenceRecord | undefined): void {
@@ -1547,7 +1744,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
    */
   public async releaseKillSwitch(actor: string, reason: string): Promise<{ released: boolean }> {
     const state = this.snapshot();
-    const unresolved = unresolvedRunIds(state);
+    const unresolved = [...unresolvedRunIds(state), ...this.unresolvedFundingHoldIds()];
     if (unresolved.length > 0) throw new Error(`KILL_RELEASE_BLOCKED_UNRESOLVED_RUNS: ${unresolved.length} run(s) are still in flight or unresolved`);
     const stored = this.databaseStore.killSwitchStatus();
     if (!stored.engaged && !state.killed) return { released: false };
@@ -1745,29 +1942,49 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (campaign.chainId === ROBINHOOD_CHAIN_ID) assertRobinhoodLiveAllowed('free', this.robinhoodEnablement(), this.now());
     if (campaign.chainId === BASE_CHAIN_ID) assertBaseLiveAllowed(campaign.feePolicy.kind, this.baseEnablement(), this.now());
     if (profile.execution_enabled !== 1) throw new Error('CHAIN_EXECUTION_DISABLED');
-    const verification = this.db.prepare('SELECT status, evidence_json FROM chain_verification WHERE chain_profile_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1').get(profile.id) as { status: string; evidence_json: string } | undefined;
-    const evidence = decodeRecord<{ expiresAt?: string }>(verification?.evidence_json);
-    if (verification?.status !== 'verified' || !evidence?.expiresAt || !Number.isFinite(Date.parse(evidence.expiresAt)) || Date.parse(evidence.expiresAt) <= this.now().getTime()) throw new Error('CHAIN_VERIFICATION_REQUIRED');
+    // Bind admission to the campaign's exact family-scoped decision. A later
+    // protocol decision must neither replace this evidence nor authorize it.
+    const evidence=this.readChainEvidence().find(record=>record.id===campaign.chainVerification.evidenceId && record.chainId===campaign.chainId);
+    if(!evidence || evidence.status!=='accepted' || !evidence.executionEnabled || !evidence.acceptedAt || !evidence.acceptedBy || !evidence.approvalProof || !Number.isFinite(Date.parse(evidence.expiresAt)) || Date.parse(evidence.expiresAt)<=this.now().getTime() || !chainEvidenceMatchesCampaign(evidence,campaign))throw new Error('CHAIN_VERIFICATION_REQUIRED');
   }
 
-  private assertCaps(walletId: string, campaign: Campaign, rollingCutoff: string, amount: bigint, priorRunExposure: bigint): void {
+  private assertCaps(walletId: string, campaign: Campaign, rollingCutoff: string, amount: bigint, priorRunExposure: bigint, excludeHoldId?: string): void {
     if (priorRunExposure + amount > campaign.spendPolicy.maxRunWei) throw new Error('SPEND_CAP_EXCEEDED');
     const dailyRows = this.db.prepare("SELECT COALESCE(reserved_amount_wei, amount_wei) AS amount FROM spend_reservation WHERE wallet_id = ? AND (status = 'reserved' OR (status = 'settled' AND (julianday(settled_at) IS NULL OR julianday(settled_at) >= julianday(?))))").all(walletId, rollingCutoff) as Array<{ amount: string }>;
-    if (dailyRows.reduce((total, row) => total + BigInt(row.amount), 0n) + amount > campaign.spendPolicy.dailyCapWei) throw new Error('DAILY_SPEND_CAP_EXCEEDED');
+    if (dailyRows.reduce((total, row) => total + BigInt(row.amount), 0n) + pendingFundingHoldExposure(this.db, { walletId, excludeHoldId }) + amount > campaign.spendPolicy.dailyCapWei) throw new Error('DAILY_SPEND_CAP_EXCEEDED');
+  }
+
+  private conversionFundingHold(input: CanonicalAdmissionInput): string | undefined {
+    if (!hasFundingHolds(this.db)) return undefined;
+    const selected = new Set(input.wallets.map(value => value.toLowerCase()));
+    const candidates = (this.db.prepare("SELECT * FROM mint_funding_hold WHERE campaign_id=? AND state='reserved'").all(input.campaign.id) as FundingHoldRow[]).filter(row => selected.has(row.wallet_address));
+    if (!candidates.length) return undefined;
+    const ids = new Set(candidates.map(row => row.hold_id));
+    if (ids.size !== 1 || candidates.some(row => row.bound_run_id !== input.run.id)) throw new Error('FUNDING_HOLD_REQUIRES_BOUND_RUN');
+    const id = candidates[0]!.hold_id;
+    const all = fundingHoldRows(this.db, id);
+    const hold = readFundingHold(this.db, id)!;
+    if (all.length !== selected.size || all.some(row => !selected.has(row.wallet_address) || row.state !== 'reserved') || hold.campaignDigest !== fundingCampaignDigest(input.campaign) || hold.requiredPerWalletWei !== this.exposure(input.campaign) || Date.parse(hold.expiresAt) <= this.now().getTime()) throw new Error('FUNDING_HOLD_CONVERSION_MISMATCH');
+    this.assertResolvedHoldFunding(id);
+    return id;
   }
 
   /** Run-level fleet checks that need no reservation rows; runs before any write. */
   private assertFleetRunLimits(input: CanonicalAdmissionInput, mintClass: 'free' | 'paid'): void {
-    const policy = this.fleetPolicyFor(input.campaign.chainId);
+    this.assertFleetCampaignLimits(input.campaign, [...input.intent.wallets, ...input.wallets], input.run.mode === 'live', mintClass);
+  }
+
+  private assertFleetCampaignLimits(campaign: Campaign, wallets: readonly string[], live: boolean, mintClass: 'free' | 'paid'): void {
+    const policy = this.fleetPolicyFor(campaign.chainId);
     if (!policy) {
-      if (input.run.mode === 'live') throw new Error('FLEET_SPEND_POLICY_REQUIRED');
+      if (live) throw new Error('FLEET_SPEND_POLICY_REQUIRED');
       return;
     }
-    if (!Number.isSafeInteger(input.campaign.quantity) || input.campaign.quantity < 1 || input.campaign.mintPriceWei < 0n) throw new Error('CAMPAIGN_AMOUNTS_INVALID');
-    const feeAllowance = this.exposure(input.campaign) - input.campaign.mintPriceWei * BigInt(input.campaign.quantity);
+    if (!Number.isSafeInteger(campaign.quantity) || campaign.quantity < 1 || campaign.mintPriceWei < 0n) throw new Error('CAMPAIGN_AMOUNTS_INVALID');
+    const feeAllowance = this.exposure(campaign) - campaign.mintPriceWei * BigInt(campaign.quantity);
     if (mintClass === 'paid') {
-      if (input.campaign.mintPriceWei > policy.paidMaxPricePerNftWei) throw new Error('PAID_PRICE_PER_NFT_EXCEEDED');
-      const runWallets = new Set([...input.intent.wallets, ...input.wallets].map((wallet) => wallet.toLowerCase()));
+      if (campaign.mintPriceWei > policy.paidMaxPricePerNftWei) throw new Error('PAID_PRICE_PER_NFT_EXCEEDED');
+      const runWallets = new Set(wallets.map((wallet) => wallet.toLowerCase()));
       if (runWallets.size > policy.paidMaxWalletsPerMint) throw new Error('PAID_WALLET_LIMIT_EXCEEDED');
       if (feeAllowance > policy.paidFeeAllowanceWei) throw new Error('FEE_ALLOWANCE_EXCEEDED');
     } else if (feeAllowance > policy.freeFeeAllowanceWei) throw new Error('FEE_ALLOWANCE_EXCEEDED');
@@ -1775,30 +1992,35 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   /** D-032: at most N wallets per paid mint, counting wallets already holding pending or settled exposure on this campaign. */
   private assertPaidWalletsPerMint(input: CanonicalAdmissionInput): void {
-    const policy = this.fleetPolicyFor(input.campaign.chainId);
+    this.assertPaidWalletScope(input.campaign, input.wallets);
+  }
+
+  private assertPaidWalletScope(campaign: Campaign, wallets: readonly string[]): void {
+    const policy = this.fleetPolicyFor(campaign.chainId);
     if (!policy) return;
-    const existing = this.db.prepare("SELECT DISTINCT wallet_id FROM spend_reservation WHERE campaign_id = ? AND status IN ('reserved', 'settled')").all(input.campaign.id) as Array<{ wallet_id: string }>;
+    const existing = this.db.prepare("SELECT DISTINCT wallet_id FROM spend_reservation WHERE campaign_id = ? AND status IN ('reserved', 'settled')").all(campaign.id) as Array<{ wallet_id: string }>;
     const walletIds = new Set(existing.map((row) => row.wallet_id));
-    for (const wallet of input.wallets) walletIds.add(this.findWallet(input.campaign, wallet).walletId);
+    if (hasFundingHolds(this.db)) for (const row of this.db.prepare("SELECT wallet_id FROM mint_funding_hold WHERE campaign_id=? AND state='reserved'").all(campaign.id) as Array<{ wallet_id: string }>) walletIds.add(row.wallet_id);
+    for (const wallet of wallets) walletIds.add(this.findWallet(campaign, wallet).walletId);
     if (walletIds.size > policy.paidMaxWalletsPerMint) throw new Error('PAID_WALLET_LIMIT_EXCEEDED');
   }
 
-  private assertFleetDailyCap(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string, amount: bigint): void {
+  private assertFleetDailyCap(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string, amount: bigint, excludeHoldId?: string): void {
     const policy = this.fleetPolicyFor(chainId);
     if (!policy) return;
     // D-066 (T-065): free Robinhood exposure across all campaigns is also bound by the D-041 active-period cap (0.002 ETH), so two
     // campaigns together can never reserve more than the smaller of that and the fleet free cap in a rolling day.
     const freeCap = chainId === ROBINHOOD_CHAIN_ID && policy.freeDailyCapWei > ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI ? ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI : policy.freeDailyCapWei;
     const cap = mintClass === 'free' ? freeCap : policy.paidDailyCapWei;
-    if (this.fleetDailyExposure(chainId, mintClass, rollingCutoff) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
+    if (this.fleetDailyExposure(chainId, mintClass, rollingCutoff, excludeHoldId) + amount > cap) throw new Error('FLEET_DAILY_CAP_EXCEEDED');
   }
 
   /** Pending plus recently settled exposure for the same chain. Unknown mint value counts toward both classes. */
-  private fleetDailyExposure(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string): bigint {
+  private fleetDailyExposure(chainId: 1 | 8453 | 4663, mintClass: 'free' | 'paid', rollingCutoff: string, excludeHoldId?: string): bigint {
     const rows = this.db.prepare("SELECT COALESCE(sr.reserved_amount_wei, sr.amount_wei) AS amount, sr.mint_value_wei FROM spend_reservation sr JOIN chain_profile cp ON cp.id = sr.chain_profile_id WHERE cp.chain_id = ? AND (sr.status = 'reserved' OR (sr.status = 'settled' AND (julianday(sr.settled_at) IS NULL OR julianday(sr.settled_at) >= julianday(?))))").all(chainId, rollingCutoff) as Array<{ amount: string; mint_value_wei: string | null }>;
     return rows
       .filter((row) => row.mint_value_wei === null || (mintClass === 'free' ? BigInt(row.mint_value_wei) === 0n : BigInt(row.mint_value_wei) > 0n))
-      .reduce((total, row) => total + BigInt(row.amount), 0n);
+      .reduce((total, row) => total + BigInt(row.amount), 0n) + pendingFundingHoldExposure(this.db, { chainId, mintClass, excludeHoldId });
   }
 
   private fleetPolicyFor(chainId: 1 | 8453 | 4663): FleetSpendPolicy | undefined {

@@ -69,7 +69,8 @@ export function campaignInput(chainId: typeof ETHEREUM | typeof BASE | typeof RO
 }
 
 export async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM | typeof BASE | typeof ROBINHOOD, paid = false): Promise<Campaign> {
-  const campaignValue = await fixtureValue.application.createCampaign(campaignInput(chainId, paid));
+  const input=campaignInput(chainId,paid);
+  const campaignValue = await fixtureValue.application.createCampaign(chainId===ROBINHOOD?withCurrentSeaDropEvidence(fixtureValue,input):input);
   for (const [index, address] of [WALLET_ONE, WALLET_TWO].entries()) {
     const existing = fixtureValue.db.prepare('SELECT id FROM wallet WHERE chain_profile_id = ? AND address = ?').get(`profile-${chainId}`, address) as { id: string } | undefined;
     const walletId = existing?.id ?? `wallet-${chainId}-${index}-${address.slice(-8)}`;
@@ -77,6 +78,13 @@ export async function campaign(fixtureValue: Fixture, chainId: typeof ETHEREUM |
     fixtureValue.db.prepare('INSERT OR IGNORE INTO campaign_wallet (campaign_id, wallet_id, enabled, selected_at) VALUES (?, ?, 1, ?)').run(campaignValue.id, walletId, NOW);
   }
   return campaignValue;
+}
+
+/** Test inputs must name the exact accepted decision, just as runtime plans do.
+ * An owner enablement replaces the original blocked Robinhood fixture row. */
+export function withCurrentSeaDropEvidence<T extends ReturnType<typeof campaignInput>>(fixtureValue:Fixture,input:T):T {
+  const evidence=fixtureValue.store.snapshot().chainEvidence.filter(row=>row.chainId===input.chainId&&row.status==='accepted'&&row.executionEnabled&&row.seaDropCompatible&&!row.reviewedProtocol).sort((a,b)=>b.checkedAt.localeCompare(a.checkedAt)||b.id.localeCompare(a.id))[0];
+  return evidence?{...input,chainVerification:{chainId:input.chainId,status:'verified',seaDropCompatible:true,evidenceId:evidence.id,checkedAt:evidence.checkedAt,sourceBlock:evidence.sourceBlock,endpointReference:evidence.endpointIdentity}}:input;
 }
 
 export async function armed(fixtureValue: Fixture, campaignValue: Campaign, wallets: readonly string[] = [WALLET_ONE], simulationIds: readonly string[] = [], runSuffix = '', idempotencyKey?: string): Promise<{ run: RunRecord; intent: IntentRecord; input: CanonicalAdmissionInput }> {

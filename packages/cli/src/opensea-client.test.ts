@@ -70,3 +70,7 @@ describe('OpenSea floors', () => {
     }
   });
 });
+
+it('retains original floor quote observation time across cached reads',async()=>{
+ const t=client([reply(200,{collection:'example'}),reply(200,stats(0.5))]);const first=await t.floors.quote!(1,A);t.advance(60000);const second=await t.floors.quote!(1,A);expect(second.observedAt).toBe(first.observedAt);expect(second.expiresAt).toBe(first.expiresAt);expect(t.calls).toHaveLength(2);expect(second).toMatchObject({chainId:1,contract:A,currency:'ETH',estimate:true});
+});

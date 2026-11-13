@@ -1,13 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, loadHostSecretStore, resolveWalletPath, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
+import { AlertManager, BackendApplication, CanonicalStoreBridge, ExecutionCoordinator, PERSONAL_LIVE_FLEET_POLICY, loadHostSecretStore, resolveWalletPath, type CoordinatorFundingWiring, type BackendStore, type EngineAdapter } from '@mint-bot/backend';
 import { openDatabase } from '@mint-bot/database';
-import { buildSeaDropPublicMintCalldata, getStrategy, readTurnkeyApprovedPolicyRecords, readTurnkeySecretConfig, resolveChainConfigFromSecrets, resolveSeaDropFeeRecipient, SEADROP_V1_ADDRESS, turnkeyPolicySelection, TurnkeySigner, type TurnkeyCanonicalPolicyRecord, type TurnkeyPolicySelection, type WalletInfo } from '@mint-bot/engine';
+import { buildSeaDropPublicMintCalldata, getStrategy, registerStrategy, readTurnkeyApprovedPolicyRecords, readTurnkeySecretConfig, resolveChainConfigFromSecrets, resolveSeaDropFeeRecipient, SEADROP_V1_ADDRESS, turnkeyPolicySelection, TurnkeySigner, type TurnkeyCanonicalPolicyRecord, type TurnkeyPolicySelection, type WalletInfo } from '@mint-bot/engine';
 import { createPublicClient, http, type Address, type Hex } from 'viem';
 import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngineAdapterOptions } from './engine-adapter.js';
 import type { CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
 import { configuredFireLanes } from './fire-lane-config.js';
 import { installAllowlistSources } from './allowlist-source-config.js';
+import { loadReviewedProtocolStrategies, composeReviewedProtocolStrategies, selectReviewedProtocolPolicy } from './reviewed-protocol-profile.js';
 import { installSignedMintSources } from './signed-mint-source-config.js';
 
 /** Where spend-limit alerts go. The default records a durable alert event; the service swaps in its Telegram-backed manager. */
@@ -130,9 +131,10 @@ export function selectTurnkeySignedFamilyPolicy(records: readonly TurnkeyCanonic
   return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
 }
 
-export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean; acceptPersonalLiveLocalCustody?: boolean; /** Host service only (D-058/D-059): builds the compensated-profile wiring once the store is open. The owner's CLI never passes it. */ coordinatorAssurance?: (store: CanonicalStoreBridge) => Promise<CoordinatorAssuranceWiring> } = {}): Promise<CliRuntime> {
+export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean; acceptPersonalLiveLocalCustody?: boolean; /** Host service only (D-058/D-059): builds the compensated-profile wiring once the store is open. The owner's CLI never passes it. */ coordinatorAssurance?: (store: CanonicalStoreBridge) => Promise<CoordinatorAssuranceWiring>; coordinatorFunding?: (store: CanonicalStoreBridge, assurance?: CoordinatorAssuranceWiring) => Promise<CoordinatorFundingWiring | undefined> } = {}): Promise<CliRuntime> {
   const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
   const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
+  try {
   await store.open();
   const lifecycleStore = createCanonicalLifecycleStore(store);
   const secretRoot = configuredSecretRoot(projectRoot);
@@ -161,9 +163,12 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
     passphraseProvider: async () => '',
     policyRef: turnkeyPolicyReference,
   } : {};
+  const reviewedProfiles=turnkeyConfig?await loadReviewedProtocolStrategies(secretRoot):[];
+  if(reviewedProfiles.length)registerStrategy(composeReviewedProtocolStrategies(reviewedProfiles));
   const custodyPolicyFor = turnkeyConfig ? async (input: import('@mint-bot/backend').CampaignInput) => {
     if (!/^0x[0-9a-fA-F]{40}$/.test(input.contract)) throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
     const records = await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot);
+    if(input.strategy==='erc721-reviewed-public-v1'){const profile=reviewedProfiles.find(value=>value.registry.chainId===input.chainId);if(!profile)throw new Error('ERC721_OWNER_REGISTRY_REQUIRED');const selected=selectReviewedProtocolPolicy(records,input,profile.registry);if(!selected)throw new Error('TURNKEY_REVIEWED_FAMILY_APPROVAL_REQUIRED');return selected;}
     if (input.strategy === 'seadrop-v1-signed') {
       const walletScope = input.walletScope ?? (await configuredWallets(projectRoot, configuredWalletPath(projectRoot))).map(wallet => wallet.address);
       const signedFamily = selectTurnkeySignedFamilyPolicy(records, { ...input, walletScope });
@@ -225,11 +230,16 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   let alertSink: SpendAlertSink = new AlertManager(store);
   // The owner's CLI may accept a recorded local key file for Personal Live (D-043); the service never passes this, so unattended runs still need Turnkey or a cloud key service.
   const assuranceWiring = runtimeOptions.coordinatorAssurance ? await runtimeOptions.coordinatorAssurance(store) : undefined;
-  const coordinator = new ExecutionCoordinator(store, actualEngine, { alerts: {
+  const funding = runtimeOptions.coordinatorFunding ? await runtimeOptions.coordinatorFunding(store, assuranceWiring) : undefined;
+  const coordinator = new ExecutionCoordinator(store, actualEngine, { ...(funding?{funding}:{}), alerts: {
     cap: (reason, runId) => alertSink.cap(reason, runId),
     confirmed: (runId, facts) => alertSink.confirmed?.(runId, facts) ?? Promise.resolve(),
     mintFailed: (runId, facts, reason) => alertSink.mintFailed?.(runId, facts, reason) ?? Promise.resolve(),
   }, ...(assuranceWiring ? { expectedCustodyPolicy: assuranceWiring.expectedCustodyPolicy, compensatingAssurance: assuranceWiring.compensatingAssurance, refreshReadiness: assuranceWiring.refreshReadiness, walletWatch: assuranceWiring.walletWatch } : {}), ...(personalLiveLocalCustodyAllowed(runtimeOptions.acceptPersonalLiveLocalCustody, useTurnkey) ? { acceptPersonalLiveLocalCustody: true } : {}) });
   if (runtimeOptions.startCoordinator !== false) await coordinator.start();
   return { store, coordinator, application: new BackendApplication(store, coordinator, { phase2ReadOnly: process.env.MINT_BOT_PHASE2_READ_ONLY === 'true', fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(custodyPolicyFor ? { custodyPolicyFor } : {}) }), ...(custodyPolicyFor ? { custodyPolicyFor } : {}), walletRoot: join(configuredSecretRoot(projectRoot), 'wallets'), setAlertSink: (sink) => { alertSink = sink; }, setFeeCeiling: (campaignId, gwei) => { if (gwei === undefined) feeCeilings.delete(campaignId); else feeCeilings.set(campaignId, gwei); } };
+  } catch(error) {
+    try { store.close(); } catch { /* Preserve the initialization error. */ }
+    throw error;
+  }
 }

@@ -12,11 +12,15 @@ export interface ReplicationAutomationDeps {
   wallets(): Promise<Address[]>;
   qualify(event: EventRecord, wallets: readonly Address[]): Promise<QualifiedSource>;
   prepare(source: QualifiedSource, wallets: readonly Address[]): Promise<{ campaign: Campaign; wallets: string[]; maxFeeGwei: number } | Array<{ campaign: Campaign; wallets: string[]; maxFeeGwei: number }>>;
+  autoFunding?: {ensure(source:QualifiedSource,wallets:readonly Address[],sourceEvent:EventRecord,score:EventRecord):Promise<Array<{campaign:Campaign;wallets:string[];maxFeeGwei:number}>|undefined>};
   /** Production checks current balances before consuming the one-shot claim. */
   fundedWallets?(source: QualifiedSource, wallets: readonly Address[]): Promise<Address[]>;
   fire: FireDeps;
   fireAutonomous(campaignId: string, wallets: readonly string[], maxFeeGwei: number, eventId: string): Promise<FireResult>;
   assertUnattendedReady(): Promise<void>;
+  /** Current signed protocol/source authority, rechecked after balances/funding awaits and before the one-shot claim. */
+  assertSourceAuthority?(source:QualifiedSource,wallets:readonly Address[]):Promise<void>;
+  assertScoringAuthority?(score: EventRecord): void | Promise<void>;
   notify(text: string, dedupe: string): Promise<void>;
   now?: () => Date;
   /** Read-only qualification can time out; no signing or claim starts in this timeout. */
@@ -27,6 +31,10 @@ export interface ReplicationAutomationDeps {
 export function createReplicationAutomation(deps: ReplicationAutomationDeps): { tick(): Promise<void>; assertReady(eventId: string, campaign: Campaign, wallets?: readonly string[], maxFeeGwei?: number): Promise<void> } {
   const now = deps.now ?? (() => new Date());
   let busy = false;
+  const assertScore = async(score:EventRecord):Promise<void> => {
+    if(score.data.modelEpochId&&!deps.assertScoringAuthority)throw new Error('ADAPTIVE_DECISION_AUTHORITY_REQUIRED');
+    await deps.assertScoringAuthority?.(score);
+  };
   const retryAfter = new Map<string, number>();
   const qualify = async (source: EventRecord, wallets: readonly Address[]): Promise<QualifiedSource> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -61,6 +69,7 @@ export function createReplicationAutomation(deps: ReplicationAutomationDeps): { 
     if (wallets && (!wallets.length || new Set(wallets.map((w) => w.toLowerCase())).size !== wallets.length || !Array.isArray(event.data.wallets) || wallets.some((wallet) => !(event.data.wallets as string[]).includes(wallet.toLowerCase()))) || maxFeeGwei !== undefined && (!Number.isFinite(maxFeeGwei) || maxFeeGwei > Number(event.data.maxFeeGwei))) throw new Error('AUTOMATION_REQUEST_SCOPE_INVALID');
     const score = [...state.events].reverse().find((e) => e.type.startsWith('opportunity_') && e.data.contract === campaign.contract.toLowerCase() && e.data.chainId === campaign.chainId);
     if (!score || !Number.isFinite(Number(score.data.score)) || Number(score.data.score) < 70 || Number(score.data.score) > 100 || score.data.blocked === true || Date.parse(String(score.data.expiresAt)) <= now().getTime() || !Number.isFinite(Date.parse(String(score.data.expiresAt)))) throw new Error('AUTOMATION_SIGNAL_STALE');
+    await assertScore(score);
     const sourceEvent = state.events.find((e) => e.id === event.data.sourceEventId && e.type === 'watched_wallet_mint');
     if (!sourceEvent) throw new Error('WATCHED_MINT_NOT_VERIFIED');
     const qualified = await qualify(sourceEvent, (event.data.wallets as string[]).map((wallet) => wallet as Address));
@@ -97,14 +106,21 @@ export function createReplicationAutomation(deps: ReplicationAutomationDeps): { 
               await explain(score, source, 'qualification', qualified.plan.reasons[0]?.code ?? 'REPLICATION_NOT_QUALIFIED', decisions);
               continue;
             }
-            const wallets = deps.fundedWallets ? await deps.fundedWallets(qualified, candidates) : candidates;
+            await assertScore(score);
+            const fundedPreparation=deps.autoFunding&&qualified.drop.mintPrice===0n?await deps.autoFunding.ensure(qualified,candidates,source,score):undefined;
+            if(deps.autoFunding&&qualified.drop.mintPrice===0n&&!fundedPreparation)throw new Error('FUNDING_PENDING');
+            // Funding may take minutes; re-read current source/own proof before consuming the claim.
+            if(fundedPreparation){const current=await qualify(source,candidates);if(current.plan.verdict!=='replicable'||current.drop.mintPrice!==0n||current.drop.strategyName!==qualified.drop.strategyName)throw new Error('REPLICATION_CHANGED');}
+            const wallets = fundedPreparation?[...new Set(fundedPreparation.flatMap(row=>row.wallets))] as Address[]:deps.fundedWallets ? await deps.fundedWallets(qualified, candidates) : candidates;
             if (!wallets.length) throw new Error('FUNDING_NOT_ARRIVED');
             if (wallets.some(wallet => !candidates.some(candidate => candidate.toLowerCase() === wallet.toLowerCase()))) throw new Error('REPLICATION_FUNDING_SCOPE_INVALID');
+            await deps.assertSourceAuthority?.(qualified,wallets);
+            await assertScore(score);
             // Persist before any campaign/request is created; crash recovery never repeats it.
             await deps.store.transaction((state) => { if (!state.events.some((e) => e.id === key)) { state.events.push({ id: key, type: 'replication_claim', at: now().toISOString(), data: { sourceEventId: source.id, scoreEventId: score.id, policyVersion: 'free-watched-v1' } }); claimed = true; } });
             if (!claimed) continue;
             claims.add(key);
-            const preparedResult = await deps.prepare(qualified, wallets);
+            const preparedResult = fundedPreparation??await deps.prepare(qualified, wallets);
             for (const prepared of Array.isArray(preparedResult) ? preparedResult : [preparedResult]) {
             const simulations = await deps.fire.recordSimulations(prepared.campaign, prepared.wallets);
             if (!simulations.recorded.length) throw new Error('SIMULATION_NOT_PASSED');

@@ -143,6 +143,9 @@ export interface MintStrategy {
     quantity: number,
   ): Promise<bigint>;
 
+  /** Optional closed-family authority; never supplied by untrusted source JSON. */
+  signingAuthority?(client: PublicClient, drop: DropConfig, wallet: Address, quantity: number): Promise<import('./verified-erc721-authority.js').VerifiedErc721Authority>;
+
   /** Validate that a drop is currently mintable (timing, supply, etc.). */
   validateDrop(drop: DropConfig, nowUnix?: number): DropValidation;
 }
@@ -233,7 +236,7 @@ export interface TransactionIntent {
    * checked against the encoded calldata before a provider signing request;
    * they are deliberately not part of the provider policy family itself.
    */
-  readonly familyContext?: { readonly nftContract: Address; readonly feeRecipient: Address; readonly allowlistProof?: import('./allowlist-authority.js').VerifiedWalletProof; readonly signedAuthorization?: import('./signed-mint-authority.js').VerifiedSignedWalletAuthorization; readonly assertReady?: () => void | Promise<void> };
+  readonly familyContext?: { readonly nftContract: Address; readonly feeRecipient: Address; readonly reviewedErc721RehearsalDescriptorDigest?: string; readonly reviewedErc721RehearsalAuthority?: import('./verified-erc721-authority.js').VerifiedErc721RehearsalAuthority; readonly reviewedErc721Authority?: import('./verified-erc721-authority.js').VerifiedErc721Authority; readonly allowlistProof?: import('./allowlist-authority.js').VerifiedWalletProof; readonly signedAuthorization?: import('./signed-mint-authority.js').VerifiedSignedWalletAuthorization; readonly assertReady?: () => void | Promise<void> };
 }
 
 export interface SpendReservation {
@@ -633,6 +636,8 @@ export interface MintJobConfig {
      */
     readonly robinhoodGrant?: RobinhoodEnablementGrant;
     readonly baseGrant?: BaseEnablementGrant;
+    /** Current separate protocol baseline, supplied by the canonical adapter. */
+    readonly assertReviewedProtocolReady?: () => void | Promise<void>;
   };
 readonly broadcast: {
     readonly mode: BroadcastMode;

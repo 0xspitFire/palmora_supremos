@@ -1,7 +1,9 @@
+import {prepareReviewedProtocolCampaign,type ReviewedProtocolPreparationPlan} from './reviewed-protocol-prepare.js';
+import type { PaidFundingService } from './paid-funding-service.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { createPublicClient, formatGwei, parseEther, http as httpTransport, parseAbi, type Address } from 'viem';
-import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, PERMANENT_ENABLEMENT_EXPIRY, ethereumChainEvidenceRevokePhrase, revokeEthereumChainEvidence, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
+import { REVIEWED_ERC721_PUBLIC_BASELINE, DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, validBaseEnablement, validRobinhoodEnablement, PERMANENT_ENABLEMENT_EXPIRY, ethereumChainEvidenceRevokePhrase, revokeEthereumChainEvidence, type BackendApplication, type BackendStore, type CanonicalStoreBridge, type ExecutionCoordinator } from '@mint-bot/backend';
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import type { FireScheduleRepository, GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
 import { cleanName, describeActivity, describeHistory, describeLimits } from './owner-reports.js';
@@ -29,6 +31,7 @@ import { usdText, type EthPriceProvider } from './price-provider.js';
 import type { OpenSeaFloors } from './opensea-client.js';
 import { scheduleConfirmationDigest, type FireWiring } from './fire-wiring.js';
 import { watchChainId } from './watch-import.js';
+import { createWalletAdministrationRuntime, runWalletAdministrationOperator, type WalletAdministrationOperatorAuthority, type WalletAdministrationRuntime } from './wallet-administration-runtime.js';
 
 /**
  * T-061 (D-063 item 9): the work behind each Telegram command, built on the same functions as the host commands. Replies are
@@ -54,6 +57,8 @@ const short = (address: string): string => `${address.slice(0, 6)}…${address.s
 const minutes = (iso: string): string => iso.slice(0, 16).replace('T', ' ');
 
 export interface TelegramActionDeps {
+  reviewedProtocolSimulation?(campaign:import('@mint-bot/backend').Campaign,wallets:readonly string[]):Promise<{recorded:string[];skipped:Array<{wallet:string;why:string}>}>;
+  reviewedProtocolPlan?(input:{chainId:1|8453|4663;contract:string;quantity?:number;wallets:readonly string[]}):Promise<ReviewedProtocolPreparationPlan|undefined>;
   mode: 'dry-run' | 'host';
   /** Who signs: from the service's custody setting, exactly as the host commands read it. */
   custody: 'local' | 'turnkey';
@@ -100,6 +105,10 @@ export interface TelegramActionDeps {
   robinhoodDryRun?: (contract: string, wallets: readonly string[], quantity: number | undefined, at: Date) => Promise<DryRunReport>;
   robinhoodLatestBlock?: () => Promise<{ number: bigint; hash: string }>;
   now?: () => Date;
+  paidFunding?:PaidFundingService;
+  walletAdministrationOwnerId?: string;
+  /** Public-mode factory only. Mint host never loads the isolated admin file. */
+  walletAdministrationRuntime?: (authority: WalletAdministrationOperatorAuthority) => Promise<WalletAdministrationRuntime>;
 }
 
 export function createTelegramActions(deps: TelegramActionDeps): TelegramActions {
@@ -159,6 +168,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   // T-073: the plan and the prepare, shared by the typed commands and the guided flows. `only` narrows the wallets (a campaign sized for
   // fewer wallets); it can only narrow: the wallets must still be ready, and a fire can never use more wallets than the campaign was sized for.
   type PlanFacts =
+    | {kind:'reviewed';plan:ReviewedProtocolPreparationPlan;quantity:number;maxQuantity:number}
     | { kind: 'robinhood'; plan: RobinhoodPlan; quantity: number; maxQuantity: number }
     | { kind: 'evm'; planned: LivePlanResult; quantity: number; maxQuantity: number };
   // Guided preparation asks for the same read-only plan at adjacent steps (contract, quantity,
@@ -177,6 +187,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   };
   const planFor = async (chainText: string, contract: string, quantityLimit: number | undefined, only?: readonly string[]): Promise<PlanFacts> => {
     if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
+    if(deps.mode==='host'&&deps.custody==='turnkey'&&deps.reviewedProtocolPlan){const plan=await deps.reviewedProtocolPlan({chainId:chainFrom(chainText),contract,quantity:quantityLimit,wallets:only??await deps.walletList()});if(plan)return {kind:'reviewed',plan,quantity:plan.quantity,maxQuantity:plan.maxQuantity};}
     if (chainFrom(chainText) === 4663) {
       // T-063: Robinhood has no fee planner; the quantity is the one the Turnkey policy pins (default 1).
       const candidates = only ? [...only] : await deps.walletList();
@@ -188,10 +199,11 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     const planned = await livePlanAction({ chainId, contract, wallets: only ? [...only] : await deps.walletList(), ...(quantityLimit === undefined ? {} : { quantityLimit }), port: await port(chainId), killFile: deps.killSwitchPath, custody: deps.custody });
     return { kind: 'evm', planned, quantity: planned.plan.quantity, maxQuantity: planned.report.drop?.maxPerWallet ?? planned.plan.quantity };
   };
-  const readyOf = (facts: PlanFacts): string[] => (facts.kind === 'robinhood' ? facts.plan.walletsReady : facts.planned.plan.walletsReady);
-  const phraseOf = (facts: PlanFacts, contract: string): string | undefined => (facts.kind === 'robinhood' ? (facts.plan.verdict === 'ready' ? robinhoodConfirmationPhrase(contract, facts.quantity, facts.plan.walletsReady.length, facts.plan.totalMaxExposureEth) : undefined) : facts.planned.phrase);
-  const isReady = (facts: PlanFacts): boolean => (facts.kind === 'robinhood' ? facts.plan.verdict === 'ready' : facts.planned.plan.verdict === 'ready');
+  const readyOf = (facts: PlanFacts): string[] => (facts.kind==='reviewed'?facts.plan.wallets:facts.kind === 'robinhood' ? facts.plan.walletsReady : facts.planned.plan.walletsReady);
+  const phraseOf = (facts: PlanFacts, contract: string): string | undefined => (facts.kind==='reviewed'?facts.plan.phrase:facts.kind === 'robinhood' ? (facts.plan.verdict === 'ready' ? robinhoodConfirmationPhrase(contract, facts.quantity, facts.plan.walletsReady.length, facts.plan.totalMaxExposureEth) : undefined) : facts.planned.phrase);
+  const isReady = (facts: PlanFacts): boolean => (facts.kind==='reviewed'?true:facts.kind === 'robinhood' ? facts.plan.verdict === 'ready' : facts.planned.plan.verdict === 'ready');
   const renderPlan = (facts: PlanFacts): string => {
+    if(facts.kind==='reviewed')return facts.plan.summary;
     if (facts.kind === 'robinhood') {
       const plan = facts.plan;
       return sections(
@@ -211,6 +223,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   };
   const prepareFor = async (chainText: string, contract: string, quantityLimit: number | undefined, phrase: string, only?: readonly string[]): Promise<string> => {
     if (!ADDRESS.test(contract)) throw new Error('CONTRACT_ADDRESS_INVALID');
+    if(deps.mode==='host'&&deps.custody==='turnkey'&&deps.reviewedProtocolPlan){const plan=await deps.reviewedProtocolPlan({chainId:chainFrom(chainText),contract,quantity:quantityLimit,wallets:only??await deps.walletList()});if(plan){const campaign=await prepareReviewedProtocolCampaign({plan,confirm:phrase,killSwitchPath:deps.killSwitchPath,createCampaign:input=>deps.application.createCampaign(input),now});return sections([`Campaign recorded: ${campaign.id}`],[`${plan.wallets.length} wallet(s), ${plan.quantity} NFT(s) each, most it can spend ${plan.maxExposureEth} ETH. Nothing was sent.`]);}}
     if (chainFrom(chainText) === 4663) {
       const candidates = only ? [...only] : await deps.walletList();
       const robinhoodPlan = buildRobinhoodPlan(await robinhoodDryRun(contract, candidates, quantityLimit, now()), { candidates, killSwitchPresent: existsSync(deps.killSwitchPath), quantity: quantityLimit ?? 1 });
@@ -229,7 +242,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
   };
   const revokeRun = async (chainId: ChainId, phrase: string | undefined): Promise<Record<string, unknown>> => {
     if (chainId === 1) {
-      const active = [...(deps.store.snapshot().chainEvidence ?? [])].reverse().find(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
+      const active = [...(deps.store.snapshot().chainEvidence ?? [])].reverse().find(item => item.chainId === 1 && !item.reviewedProtocol && item.strategyVersion !== REVIEWED_ERC721_PUBLIC_BASELINE && item.status === 'accepted' && item.executionEnabled);
       if (!active) throw new Error('NOTHING_TO_REVOKE: Ethereum has no active evidence');
       const expected = ethereumChainEvidenceRevokePhrase(active.id);
       if (phrase !== expected) return { state: 'ConfirmToRevoke', message: 'Revoke Ethereum strategy acceptance? New Ethereum execution will stop.', copyThisToRevoke: `chain-evidence revoke --confirm "${expected}"` };
@@ -356,6 +369,17 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       const priceNote = price ? [`Dollar values use the ${price.source === 'chainlink' ? 'Chainlink' : 'Coinbase'} ETH price of $${price.usd.toFixed(2)}${price.source === 'chainlink' ? ` (updated ${minutes(price.asOf.toISOString())} UTC)` : ''}.`] : [];
       return groups.length > 0 ? sections(head, ...groups, priceNote) : sections(head, ['No wallets are listed for the watcher.']);
     },
+    async paidFunding(action,args,owner){
+      const service=deps.paidFunding;if(!service)throw new Error('PAID_FUNDING_NOT_CONFIGURED');
+      if(action==='status')return JSON.stringify(service.status(),null,2);
+      if(action==='preview'){
+        if(args.length!==3)throw new Error('PAID_FUNDING_PREVIEW_ARGUMENTS_REQUIRED');
+        const result=await service.preview(args[0]!,await fireWiring().wallets(args[1]!),Number(args[2]),owner);
+        return [`FUNDING ONLY — no mint is authorized.`, `Campaign: ${result.plan.campaignId}`,`Ethereum collection: ${campaign(result.plan.campaignId).contract}`,`NFT quantity per wallet: ${result.plan.quantity}; price per NFT: ${formatEth(BigInt(result.plan.mintPriceWei))} ETH.`,`Mint fee ceiling bound to this preparation: ${result.plan.maxFeeGwei} gwei.`,...result.plan.shortfalls.map(row=>`${row.wallet}: up to ${formatEth(BigInt(row.maxTopupWei))} ETH top-up (required balance ${formatEth(BigInt(row.requiredWei))} ETH).`),`Funding gas is additional and bounded by the installed signed funding policy.`,`Expires: ${result.plan.expiresAt}`,`Confirm: /fundpaid confirm ${result.plan.id} ${result.confirmation}`,`After funding and fresh simulations, use /fire for final mint approval.`].join('\n');
+      }
+      if(action==='confirm'&&args.length>=2){const result=await service.confirm(args[0]!,args.slice(1).join(' '),owner);return `Funding-only request ${result.requestId} queued. No NFT mint was authorized. The host reconciles funding, tests the mint, and then asks you to use /fire.`;}
+      throw new Error('PAID_FUNDING_ARGUMENTS_INVALID');
+    },
     async funding(campaignId) {
       if (!campaignId) {
         const live = deps.store.snapshot().campaigns.filter((item) => !item.dryRun).slice(-5);
@@ -371,7 +395,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async enablement() {
       const at = now();
-      const ethereum = [...(deps.store.snapshot().chainEvidence ?? [])].reverse().find(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled && item.expiresAt > at.toISOString());
+      const ethereum = [...(deps.store.snapshot().chainEvidence ?? [])].reverse().find(item => item.chainId === 1 && !item.reviewedProtocol && item.strategyVersion !== REVIEWED_ERC721_PUBLIC_BASELINE && item.status === 'accepted' && item.executionEnabled && item.expiresAt > at.toISOString());
       const robinhood = validRobinhoodEnablement((deps.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), at);
       const base = validBaseEnablement((deps.store as { baseEnablement?: () => unknown }).baseEnablement?.(), at);
       return sections([
@@ -509,6 +533,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async simulate(campaignId) {
       const target = campaign(campaignId);
+      if(target.strategy==='erc721-reviewed-public-v1'){if(!deps.reviewedProtocolSimulation||!deps.reviewedProtocolPlan)throw new Error('REVIEWED_PROTOCOL_SIMULATION_REQUIRED');const plan=await deps.reviewedProtocolPlan({chainId:target.chainId,contract:target.contract,quantity:target.quantity,wallets:await deps.walletList()});if(!plan||plan.input.custodyPolicy?.recordDigest!==target.custodyPolicy?.recordDigest||plan.input.chainVerification.evidenceId!==target.chainVerification.evidenceId)throw new Error('REVIEWED_PROTOCOL_CAMPAIGN_CHANGED');const result=await deps.reviewedProtocolSimulation(target,plan.wallets.slice(0,sizedWalletCount(target)));return `${result.recorded.length} wallet(s) passed the test mint. The records bind the reviewed code and agreed chain block.`;}
       if (target.chainId === 4663) {
         const report = await robinhoodDryRun(target.contract, await deps.walletList(), target.quantity, now());
         const recorded = await recordRobinhoodSimulationsAction({ store: deps.store, campaign: target, report, latestBlock: robinhoodBlock });
@@ -574,7 +599,9 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       if (phrase !== wiring.schedulePhrase(target, wallets, maxFeeGwei, from, until)) throw new Error('CONFIRMATION_PHRASE_MISMATCH: the schedule changed since the preview. Send /schedule to start again');
       const conflict = wiring.conflict(campaignId);
       if (conflict) throw new Error(`FIRE_CONFLICT: ${conflict}`);
+      const stage = await wiring.prepareScheduleStage(target);
       const record = deps.fireSchedulesRepository!().create({ campaignId, campaignDigest: wiring.campaignDigest(target), wallets, maxFeeGwei: String(maxFeeGwei), windowFrom: from.toISOString(), windowUntil: until.toISOString(), confirmationDigest: scheduleConfirmationDigest(phrase, campaignId, wallets, from, until) });
+      try{await wiring.bindScheduleStage(record,stage);}catch(error){deps.fireSchedulesRepository!().claim(record.id,'cancelled');throw error;}
       return `Campaign: ${campaignId}\n\nScheduled mint ${record.id.slice(-6)} stored. It fires once, when the mint opens between ${minutes(record.windowFrom)} and ${minutes(record.windowUntil)} UTC. Cancel it any time with /cancel (it lists what can be cancelled as buttons). Keep the kill switch off until then.`;
     },
     async schedules() {
@@ -607,7 +634,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async revokeChoices() {
       const at = now();
-      const ethereum = (deps.store.snapshot().chainEvidence ?? []).some(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
+      const ethereum = (deps.store.snapshot().chainEvidence ?? []).some(item => item.chainId === 1 && !item.reviewedProtocol && item.strategyVersion !== REVIEWED_ERC721_PUBLIC_BASELINE && item.status === 'accepted' && item.executionEnabled);
       const robinhood = validRobinhoodEnablement((deps.store as { robinhoodEnablement?: () => unknown }).robinhoodEnablement?.(), at);
       const base = validBaseEnablement((deps.store as { baseEnablement?: () => unknown }).baseEnablement?.(), at);
       return [...(ethereum ? [{ key: 'ethereum' as const, name: 'Ethereum' }] : []), ...(base ? [{ key: 'base' as const, name: 'Base' }] : []), ...(robinhood ? [{ key: 'robinhood' as const, name: 'Robinhood' }] : [])];
@@ -796,6 +823,16 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async history() { const state = deps.store.snapshot(); return `${describeHistory(state)}\n\n${describeAutomation(state.events, now())}`; },
     async analytics() { return describeAnalytics(deps.store.snapshot(), now()); },
+    async walletAdmin(action, args, authority) {
+      if (deps.mode !== 'host' || deps.custody !== 'turnkey' || !deps.walletAdministrationOwnerId || authority.ownerId !== deps.walletAdministrationOwnerId) throw new Error('WALLET_ADMIN_COMPOSITION_REQUIRED');
+      await authority.assertCurrent();
+      const runtime = await (deps.walletAdministrationRuntime ? deps.walletAdministrationRuntime(authority) : createWalletAdministrationRuntime({ runtimeRoot: deps.projectRoot, ownerId: deps.walletAdministrationOwnerId, mode: 'public', store: deps.store, now }));
+      try {
+        if (runtime.mode !== 'public') throw new Error('WALLET_ADMIN_PROFILE_FORBIDDEN_IN_MINT_RUNTIME');
+        const result = await runWalletAdministrationOperator(runtime, { action, args, authority, now });
+        return `${JSON.stringify(result, null, 2)}\n\nPublic wallet administration only. New keys require the isolated owner worker and offline fleet enrollment; active signing maps and mint limits are unchanged.`;
+      } finally { await runtime.close(); }
+    },
     async activity() {
       const labels = new Map(deps.intelligence().observedAddresses(1).map((row) => [row.address.toLowerCase(), row.label] as const));
       return describeActivity(deps.store.snapshot().events, labels);

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { PERMANENT_ENABLEMENT_EXPIRY } from './robinhood-enablement.js';
 import { assertLiveOperationalReadiness, PERSONAL_LIVE_CUSTODY_MAX_MS, type PersonalLiveContext } from './custody.js';
-import { campaignInputDigest, EvidenceService, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE, validFreeSignedRehearsalReference, type EvidenceAuthority, type EvidenceApproval } from './evidence.js';
+import { campaignInputDigest, EvidenceService, REVIEWED_ERC721_PUBLIC_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE, validFreeSignedRehearsalReference, type EvidenceAuthority, type EvidenceApproval } from './evidence.js';
 import type { BackendStore } from './store.js';
 import type { Campaign, ChainEvidenceRecord, OperationalReadiness, SimulationEvidenceRecord } from './types.js';
 
@@ -171,7 +171,7 @@ export async function acceptEthereumChainEvidence(store: BackendStore, record: C
 export async function revokeEthereumChainEvidence(store: BackendStore, expectedId: string, phrase: string, now: () => Date = () => new Date()): Promise<void> {
   if (phrase !== ethereumChainEvidenceRevokePhrase(expectedId)) throw new Error('CONFIRMATION_PHRASE_MISMATCH');
   await store.transaction(state => {
-    const active = [...state.chainEvidence].reverse().find(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
+    const active = [...state.chainEvidence].reverse().find(item => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled && item.strategyVersion!==REVIEWED_ERC721_PUBLIC_BASELINE && !item.reviewedProtocol);
     if (!active || active.id !== expectedId) throw new Error('ETHEREUM_CHAIN_EVIDENCE_CHANGED');
     const at = now().toISOString();
     if (at < active.checkedAt) throw new Error('ETHEREUM_CHAIN_REVOCATION_CLOCK_INVALID');
@@ -191,7 +191,7 @@ export async function recordWalletSimulations(store: BackendStore, campaign: Cam
   const ids: string[] = [];
   for (const result of results) {
     const record: SimulationEvidenceRecord = {
-      id: `sim-${campaign.id}-${result.wallet.toLowerCase()}-${checkedAt.getTime()}`,
+      id: `sim-${campaign.id}-${result.wallet.toLowerCase()}-${checkedAt.getTime()}-${randomUUID()}`,
       campaignId: campaign.id,
       wallet: result.wallet.toLowerCase(),
       inputDigest: campaignInputDigest(campaign),

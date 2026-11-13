@@ -1011,3 +1011,18 @@ describe('guided flows through the router (D-069)', () => {
     expect(t.sent.at(-1)!.buttons!.flat().map((item) => item.callback_data)).toEqual(expect.arrayContaining(['/prepare', '/release', '/fire']));
   });
 });
+
+describe('paid funding-only command authority',()=>{
+ it('requires the private owner and a current unlocked session, and passes the pinned session to the funding action',async()=>{
+  const t=setup();const approvals:Array<{ownerId:string;sessionId:string;expiresAt:string}>=[];
+  t.actions.paidFunding=async(action,args,owner)=>{approvals.push(owner);return `${action}:${args.join('|')}:funding only`;};
+  await t.send(t.message(OWNER,'/fundpaid preview campaign all 0.2'));expect(approvals).toEqual([]);
+  await admitViewer(t);await t.send(t.message(VIEWER,'/fundpaid preview campaign all 0.2'));expect(approvals).toEqual([]);
+  await t.send(t.message(OWNER,'/fundpaid preview campaign all 0.2',{type:'group',chatId:-100}));expect(approvals).toEqual([]);
+  await t.send(t.message(OWNER,`/unlock ${t.code()}`));const session=t.access.openSession()!;
+  await t.send(t.message(OWNER,'/fundpaid preview campaign all 0.2'));
+  expect(approvals).toEqual([{ownerId:String(OWNER),sessionId:session.id,expiresAt:session.expiresAt}]);
+  expect(t.lastTo(OWNER)).toContain('funding only');
+  await t.send(t.message(OWNER,'/lock'));await t.send(t.message(OWNER,'/fundpaid confirm request FUND-PAID code FUNDING-ONLY'));expect(approvals).toHaveLength(1);
+ });
+});

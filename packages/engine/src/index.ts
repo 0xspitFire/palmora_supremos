@@ -258,3 +258,18 @@ export { SeaDropV1SignedStrategy } from './strategies/seadrop-v1-signed.js';
 export type { SignedWalletAuthorizationProvider } from './strategies/seadrop-v1-signed.js';
 
 export { assertIndependentSignedAuthority, verifyTurnkeySignedAuthority } from './turnkey-signed-authority.js';
+
+export * from './native-funding.js';
+export * from './turnkey-funding-policy.js';
+
+export * from './protocol-registry.js';
+export * from './strategies/erc721-public.js';
+
+export * from './turnkey-wallet-admin-policy.js';
+export { readTurnkeyWalletAdminPolicyRecords, readTurnkeyFundingCredentials } from './turnkey-signer.js';
+
+export * from './nft-discovery-observer.js';
+export * from './verified-erc721-authority.js';
+
+export { readTurnkeyReviewedRegistry, readTurnkeyReviewedRegistries } from './turnkey-signer.js';
+export { independentPublicRpcEndpoints } from './turnkey-public-authority.js';

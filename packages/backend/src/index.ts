@@ -119,3 +119,26 @@ export { buildAnalyticsReport, buildCanonicalAnalyticsReport, evaluateShadowPoli
 export type { AnalyticsActivity, AnalyticsFloorQuote, AnalyticsOptions, ReplayOpportunity, ShadowPolicy } from './analytics.js';
 
 export { ingestCanonicalAnalytics, readCanonicalAnalyticsActivities, type CanonicalAnalyticsPort, type AnalyticsChainLog, type AnalyticsChainReceipt, type AnalyticsChainTransaction } from './canonical-analytics-ingestion.js';
+
+export * from './external-analytics.js';
+
+export * from './intelligence/advanced-scoring.js';
+export * from './intelligence/adaptive-feedback.js';
+export * from './wallet-administration.js';
+export * from './native-funding.js';
+
+export * from './funding-hold.js';
+
+export * from './analytics-observations.js';
+export * from './mint-stage.js';
+
+export type { CoordinatorFundingWiring } from './coordinator.js';
+
+export * from './intelligence/contract-monitor.js';
+
+export * from './intelligence/feedback-observations.js';
+
+export { REVIEWED_ERC721_PUBLIC_BASELINE } from './evidence.js';
+export type { ReviewedProtocolEvidence } from './types.js';
+
+export * from './native-funding-analytics.js';

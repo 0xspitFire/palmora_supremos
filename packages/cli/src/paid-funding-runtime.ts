@@ -1,0 +1,13 @@
+import { createHash } from 'node:crypto';
+import type { BackendStore, CanonicalStoreBridge, ExecutionCoordinator, Campaign } from '@mint-bot/backend';
+import { createPaidFundingService, type PaidFundingOwner } from './paid-funding-service.js';
+import type { MintStageRuntime } from './mint-stage-runtime.js';
+export function createPaidFundingRuntime(options:{store:BackendStore;coordinator:Pick<ExecutionCoordinator,'prepareFunding'|'fundHold'|'reconcileFunding'|'releaseFundingHold'>;ownerId:string;stage:()=>MintStageRuntime|undefined;wallets:()=>Promise<readonly string[]>;balance:(wallet:string)=>Promise<bigint>;killSwitchOn:()=>boolean|Promise<boolean>;assertReady:(campaign:Campaign,wallets:readonly string[])=>Promise<void>;simulate:(campaign:Campaign,wallets:readonly string[])=>Promise<{recorded:string[]}>;notify:(text:string,dedupe:string)=>Promise<void>;now?:()=>Date}){
+ const now=options.now??(()=>new Date());
+ const assertOwner=async(owner:PaidFundingOwner)=>{const session=(options.store as CanonicalStoreBridge).telegramAccessRepository().openSession();if(!options.ownerId||owner.ownerId!==options.ownerId||!session||session.id!==owner.sessionId||session.expiresAt!==owner.expiresAt||Date.parse(session.expiresAt)<=+now())throw new Error('PAID_FUNDING_OWNER_SESSION_REQUIRED');};
+ return createPaidFundingService({store:options.store,coordinator:options.coordinator,now,assertOwner,
+  assertReady:async(campaign,wallets)=>{if(await options.killSwitchOn()||options.store.snapshot().runtime.startupState!=='Ready')throw new Error('PAID_FUNDING_HOST_NOT_READY');const fleet=await options.wallets();if(wallets.some(wallet=>!fleet.some(value=>value.toLowerCase()===wallet.toLowerCase())))throw new Error('PAID_FUNDING_WALLET_NOT_IN_FLEET');await options.assertReady(campaign,wallets);},
+  inspect:async(campaign,wallets)=>{const stage=options.stage();if(!stage)throw new Error('PAID_FUNDING_STAGE_REQUIRED');const candidate=await stage.prepare(campaign);const snapshot=candidate.snapshot;if(+now()<Date.parse(snapshot.startsAt)||+now()>=Date.parse(snapshot.endsAt))throw new Error('PAID_FUNDING_MINT_NOT_OPEN');const required=campaign.mintPriceWei*BigInt(campaign.quantity)+(campaign.feePolicy.totalFeeBudgetWei??0n);if(campaign.feePolicy.totalFeeBudgetWei===undefined||required<=0n)throw new Error('PAID_FUNDING_FEE_REQUIRED');return {stageDigest:`sha256:${createHash('sha256').update(JSON.stringify({economics:candidate.economicDigest,startsAt:snapshot.startsAt,endsAt:snapshot.endsAt})).digest('hex')}`,phaseEndsAt:snapshot.endsAt,wallets:await Promise.all(wallets.map(async wallet=>({wallet,requiredWei:required,balanceWei:await options.balance(wallet)})))};},
+  simulate:options.simulate,notify:options.notify,
+ });
+}

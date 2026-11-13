@@ -436,7 +436,7 @@ export interface AnalyticsReadModel {
   readonly method: 'FIFO';
   readonly currency: 'ETH';
   readonly coverage: {
-    readonly scope: 'canonical-finalized-mints-only';
+    readonly scope: 'canonical-finalized-mints-only' | 'verified-observed-transactions';
     readonly canonicalExecutions: number;
     readonly completeCosts: number;
     readonly incompleteCosts: number;
@@ -455,6 +455,12 @@ export interface AnalyticsReadModel {
     readonly realizedRoiBps: string | null;
     readonly unrealizedPnlWei: string | null;
     readonly transactionAndMarketplaceFeesWei: string | null;
+  };
+  readonly funding?: {
+    readonly principalWei: string; readonly gasExpenseWei: string;
+    readonly allocatedGasWei: string; readonly unallocatedGasWei: string;
+    readonly unknownOperations: number; readonly principalIsExpense: false;
+    readonly allocatedGasAlreadyInAcquisitionBasis: true;
   };
   readonly groups: readonly {
     readonly dimension: 'wallet' | 'campaign' | 'signal_source' | 'mint_type';

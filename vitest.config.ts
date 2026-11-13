@@ -7,5 +7,8 @@ export default defineConfig({
     passWithNoTests: true,
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    // Bound concurrent TypeScript/SQLite workers on the small development and
+    // CI hosts. Individual tests still exercise real process/IPC concurrency.
+    maxWorkers: 2,
   },
 });

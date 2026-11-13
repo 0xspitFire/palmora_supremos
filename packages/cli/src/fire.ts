@@ -79,6 +79,7 @@ export interface SchedulerDeps {
   killSwitchOn(): boolean;
   mintState(campaign: Campaign): Promise<MintState>;
   fire(schedule: FireScheduleRecord): Promise<void>;
+  stageDecision?(schedule:FireScheduleRecord,campaign:Campaign):Promise<{state:'ready'|'waiting'|'blocked';code?:string}>;
   /** A fixed code only, never provider text. */
   record(event: { scheduleId: string; state: 'fired' | 'failed' | 'expired' | 'waiting'; code?: string }): Promise<void>;
   alert(text: string, dedupe: string): Promise<void>;
@@ -110,9 +111,14 @@ export function createFireScheduler(deps: SchedulerDeps): { tick(): Promise<numb
         if (!campaign || deps.campaignDigest(campaign) !== schedule.campaignDigest) { await end('CAMPAIGN_CHANGED', `Scheduled mint ${label} was cancelled: its campaign changed or is gone since you scheduled it.`); continue; }
         // The kill switch is the owner's: a schedule only waits while it is on, and the owner is told once.
         if (deps.killSwitchOn()) { await tellOnce(`fire-schedule:${schedule.id}:kill`, `Scheduled mint ${label} is waiting: the kill switch is on. Release it (/unlock, then /release) before the mint opens.`); if (!waitingRecorded.has(schedule.id)) { waitingRecorded.add(schedule.id); await deps.record({ scheduleId: schedule.id, state: 'waiting', code: 'KILL_SWITCH_ON' }).catch(() => undefined); } continue; }
+        if(deps.stageDecision){const stage=await deps.stageDecision(schedule,campaign).catch(()=>({state:'waiting' as const,code:'MINT_STAGE_AUTHORITY_UNAVAILABLE'}));if(stage.state==='blocked'){await end(stage.code??'MINT_STAGE_REAPPROVAL_REQUIRED',`Scheduled mint ${label} stopped: ${stage.code??'mint stage changed'}. Prepare and approve a new schedule. Nothing was sent.`);continue;}if(stage.state==='waiting')continue;}
         const state = await deps.mintState(campaign).catch((): MintState => 'unknown');
         if (state === 'ended') { await end('MINT_ENDED', `Scheduled mint ${label} ended without firing: the mint is over.`); continue; }
         if (state !== 'open') continue;
+        // A read may outlive release/stop or the owner's window. Recheck after
+        // awaited stage/mint-state work, before consuming the durable claim.
+        if(deps.killSwitchOn())continue;
+        if(deps.now().getTime()>=Date.parse(schedule.windowUntil)){await end('SCHEDULE_WINDOW_ENDED',`Scheduled mint ${label} ended during validation. Nothing was sent.`);continue;}
         // Claimed before anything happens, so a restart or a second pass can never fire it twice.
         if (!deps.claim(schedule.id, 'started')) continue;
         try { await deps.fire(schedule); fired += 1; await deps.record({ scheduleId: schedule.id, state: 'fired' }); }
@@ -128,14 +134,15 @@ export function createFireScheduler(deps: SchedulerDeps): { tick(): Promise<numb
 }
 
 export function startFireScheduler(deps: SchedulerDeps, options: { intervalMs?: number; onError?: (error: unknown) => void } = {}): { stop(): void; tick(): Promise<number> } {
-  const scheduler = createFireScheduler(deps);
+  let stopped=false;
+  const scheduler = createFireScheduler({...deps,killSwitchOn:()=>stopped||deps.killSwitchOn(),claim:(id,outcome)=>!stopped&&deps.claim(id,outcome),fire:async schedule=>{if(stopped)throw new Error('FIRE_SCHEDULER_STOPPED');await deps.fire(schedule);}});
   let busy = false;
   const tick = async (): Promise<number> => {
-    if (busy) return 0;
+    if (stopped || busy) return 0;
     busy = true;
     try { return await scheduler.tick(); } catch (error) { options.onError?.(error); return 0; } finally { busy = false; }
   };
   const timer = setInterval(() => { void tick(); }, options.intervalMs ?? 2_000);
   timer.unref?.();
-  return { stop: () => clearInterval(timer), tick };
+  return { stop: () => {stopped=true;clearInterval(timer);}, tick };
 }

@@ -16,11 +16,12 @@ export async function assertNoSymlinkParents(path: string, errorCode: string): P
 }
 
 /**
- * Reads a secret-root file only when it is a regular file the runtime may read and nobody else can write. `allowRootGroupRead`
- * lets a root-owned, group-readable file be read by the service account (the production secret layout); otherwise the file must
- * be owner-only. The error is always the one code given, so a failure never reveals why.
+ * Reads a regular protected file. Root-owned/group-readable files can be allowed
+ * for the production secret layout; otherwise owner-only permissions are required.
+ * Optional maxBytes bounds the descriptor read before parsing (at most 1 MiB).
+ * Every failure uses the caller's fixed code, without filenames or contents.
  */
-export async function readProtectedText(path: string, errorCode: string, allowRootGroupRead: boolean): Promise<string> {
+export async function readProtectedText(path: string, errorCode: string, allowRootGroupRead: boolean, maxBytes?: number): Promise<string> {
   let handle;
   try {
     await assertNoSymlinkParents(path, errorCode);
@@ -31,7 +32,18 @@ export async function readProtectedText(path: string, errorCode: string, allowRo
     const secure = allowRootGroupRead && runtimeUid !== undefined
       ? isSecureTurnkeyFileAccess(file, runtimeUid, runtimeGroups)
       : (file.mode & 0o077) === 0;
-    if (!file.isFile() || !secure) throw new Error(errorCode);
+    if (!file.isFile() || !secure || maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_048_576 || file.size > maxBytes)) throw new Error(errorCode);
+    if (maxBytes !== undefined) {
+      const buffer = Buffer.alloc(maxBytes + 1);
+      let used = 0;
+      while (used < buffer.length) {
+        const chunk = await handle.read(buffer, used, buffer.length - used, null);
+        if (chunk.bytesRead === 0) break;
+        used += chunk.bytesRead;
+      }
+      if (used > maxBytes) throw new Error(errorCode);
+      return buffer.subarray(0, used).toString('utf8');
+    }
     return await handle.readFile('utf8');
   } catch (error) {
     if (error instanceof Error && error.message === errorCode) throw error;

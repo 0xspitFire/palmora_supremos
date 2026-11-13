@@ -1,12 +1,70 @@
-import { describe, expect, it } from 'vitest';
+import { generateKeyPairSync } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
 import { encodeFunctionData, parseTransaction, parseAbi, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { TurnkeySigner, isSecureTurnkeyFileAccess, validateTurnkeyWalletMap, type TurnkeySignerClient } from './turnkey-signer.js';
+import { TurnkeySigner, isSecureTurnkeyFileAccess, validateTurnkeyWalletMap, parseTurnkeyFundingCredentialText, readTurnkeyFundingCredentials, type TurnkeySignerClient } from './turnkey-signer.js';
 import { createTurnkeyPolicyRecord, turnkeyPolicyRecordDigest, turnkeyProviderPolicyExpressions } from './turnkey-policy-record.js';
 import { canonicalPolicyDigest, turnkeyPolicyRef, validateTurnkeyPolicyAst, type TurnkeyPolicyAst } from './turnkey-policy.js';
 import { OPENSEA_FEE_COLLECTOR, SEADROP_V1_ADDRESS } from './chains.js';
 import { allowlistLeaf } from './allowlist.js';
 import { buildAllowlistMint, type VerifiedWalletProof } from './allowlist-authority.js';
+import { createTurnkeyWalletAdminPolicyRecord, signTurnkeyWalletAdminPolicyRecord, verifyTurnkeyWalletAdminPolicyRecord, turnkeyWalletAdminPolicyExpressions } from './turnkey-wallet-admin-policy.js';
+
+describe('optional wallet admin records at the actual mint signing boundary', () => {
+  function setup() {
+    const owner = generateKeyPairSync('ed25519'); const now = new Date();
+    const expressions = turnkeyWalletAdminPolicyExpressions({ adminUserId: 'distinct-admin' });
+    let adminPolicy = { policyId: 'admin-only', policyName: 'create-import-only', createdAt: timestamp('1'), updatedAt: timestamp('2'), notes: '', ...expressions };
+    const adminRecord = createTurnkeyWalletAdminPolicyRecord({ environment: ENVIRONMENT, organizationId: ORG, adminUserId: 'distinct-admin', mintRuntimeUserId: USER, providerPolicy: adminPolicy, issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() });
+    const verified = verifyTurnkeyWalletAdminPolicyRecord(signTurnkeyWalletAdminPolicyRecord(adminRecord, owner.privateKey), owner.publicKey, now);
+    const client = clientFor({ getPolicies: async () => ({ policies: [providerPolicy(), adminPolicy] }) });
+    const signing = vi.spyOn(client, 'signTransaction');
+    const mintRecord = record();
+    const instance = new TurnkeySigner({ organizationId: ORG, environment: ENVIRONMENT, userId: USER, wallets: [{ index: 0, address: WALLET, signWith: KEY_ID }], policyRecord: mintRecord, approvedPolicyRecords: [mintRecord], walletAdminPolicyRecords: [verified], client });
+    return { instance, client, signing, now, adminRecord, verified, drift: () => { adminPolicy = { ...adminPolicy, condition: "activity.type == 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2'" }; } };
+  }
+
+  it('accepts only the separately verified non-signing policy and still signs the original exact mint intent', async () => {
+    const f = setup();
+    await expect(f.instance.probe()).resolves.toMatchObject({ status: 'ok', policyId: 'policy-test' });
+    await expect(f.instance.signTransaction(0, intent())).resolves.toMatch(/^0x/);
+    expect(f.signing).toHaveBeenCalledOnce();
+  });
+
+  it('rechecks actual admin DSL drift before every provider signature', async () => {
+    const f = setup(); await f.instance.probe(); f.drift();
+    await expect(f.instance.signTransaction(0, intent())).rejects.toThrow('PROVIDER_POLICY_DRIFT');
+    expect(f.signing).not.toHaveBeenCalled();
+  });
+
+  it('refuses unsigned records and expiry crossing during the awaited inventory query', async () => {
+    const f = setup();
+    expect(() => new TurnkeySigner({ organizationId: ORG, environment: ENVIRONMENT, userId: USER, wallets: [{ index: 0, address: WALLET, signWith: KEY_ID }], policyRecord: record(), walletAdminPolicyRecords: [f.adminRecord], client: f.client })).toThrow('SIGNATURE_VERIFICATION_REQUIRED');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(f.now);
+      const read = f.client.getPolicies.bind(f.client);
+      f.client.getPolicies = async input => { const response = await read(input); vi.setSystemTime(new Date(f.adminRecord.expiresAt)); return response; };
+      await expect(f.instance.signTransaction(0, intent())).rejects.toThrow('RECORD_NOT_CURRENT');
+      expect(f.signing).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('dedicated funding credentials decoder', () => {
+  const synthetic = () => ['TURNKEY_ORGANIZATION_ID=org-funding', 'TURNKEY_USER_ID=user-funding', 'TURNKEY_API_PUBLIC_KEY=synthetic', 'TURNKEY_API_PRIVATE_KEY=synthetic', 'TURNKEY_ENVIRONMENT=production'].join('\n');
+  it('decodes only funding fields without wallet maps, mint records or fallback configuration', () => {
+    expect(parseTurnkeyFundingCredentialText(synthetic())).toEqual({ organizationId: 'org-funding', userId: 'user-funding', apiPublicKey: 'synthetic', apiPrivateKey: 'synthetic', environment: 'production' });
+    expect(() => parseTurnkeyFundingCredentialText(`${synthetic()}\nTURNKEY_POLICY_RECORD_PATH=unused`)).toThrow('CREDENTIAL_INVALID');
+    expect(() => parseTurnkeyFundingCredentialText(`${synthetic()}\nTURNKEY_USER_ID=other`)).toThrow('CREDENTIAL_INVALID');
+    expect(() => parseTurnkeyFundingCredentialText(synthetic().replace('production', 'testnet'))).toThrow('CREDENTIAL_INVALID');
+  });
+  it('rejects mint/default/relative paths before any credential read', async () => {
+    await expect(readTurnkeyFundingCredentials('turnkey-funding.env')).rejects.toThrow('CREDENTIAL_PATH_INVALID');
+    await expect(readTurnkeyFundingCredentials('/tmp/turnkey.env')).rejects.toThrow('CREDENTIAL_PATH_INVALID');
+    await expect(readTurnkeyFundingCredentials('/tmp/turnkey-wallet-admin.env')).rejects.toThrow('CREDENTIAL_PATH_INVALID');
+  });
+});
 
 const PRIVATE_KEY = `0x${'11'.repeat(32)}` as Hex;
 const ACCOUNT = privateKeyToAccount(PRIVATE_KEY);

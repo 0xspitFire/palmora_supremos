@@ -225,3 +225,7 @@ describe('Robinhood is never enabled by Ethereum-style evidence', () => {
     } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });
+
+it('preserves distinct immutable simulation records when preparation and fire finish in the same millisecond',async()=>{
+ const value=await fixture(ETHEREUM);try{const selected=await campaign(value,ETHEREUM);const first=await recordWalletSimulations(value.store,selected,[{wallet:WALLET_ONE,success:true}],{blockNumber:1n,blockHash:'0xblock'},()=>NOW);const second=await recordWalletSimulations(value.store,selected,[{wallet:WALLET_ONE,success:true}],{blockNumber:1n,blockHash:'0xblock'},()=>NOW);expect(first[0]).not.toBe(second[0]);const records=value.store.snapshot().simulations.filter(row=>row.campaignId===selected.id);expect(records).toHaveLength(2);expect(records.every(row=>row.checkedAt===NOW.toISOString())).toBe(true);}finally{await close(value);}
+});
