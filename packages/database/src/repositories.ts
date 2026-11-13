@@ -519,7 +519,7 @@ export class DurableRepository {
    * and is valid at the approval time. Nothing here is reachable except from the owner-run command.
    */
   public enableRobinhood(record: RobinhoodEnablementInput, chain: { chainProfileId: string; verificationId: string; sequencerEndpointReference: string; archiveEndpointReference: string; paidFeePolicy?: { id: string; version: string; maxTotalFeeWei: bigint; freeCapWei: bigint } }): void {
-    if (record.strategyVersion !== undefined && record.strategyVersion !== 'seadrop-v1-baseline-public-free-allowlist@1') throw new Error('Robinhood strategy scope is not supported');
+    if (record.strategyVersion !== undefined && record.strategyVersion !== 'seadrop-v1-baseline-public-free-allowlist@1' && record.strategyVersion !== 'seadrop-v1-baseline-public-free-allowlist-free-signed@1') throw new Error('Robinhood strategy scope is not supported');
     if (!record.confirmationDigest || !/^[0-9a-f]{64}$/.test(record.confirmationDigest)) throw new Error('Robinhood enablement requires a confirmation digest');
     const steps = record.paidAllowed ? ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'paidRehearsal', 'paidPolicyApproved'] as const : ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7'] as const;
     if (Object.keys(record.evidence).length !== steps.length || steps.some((step) => record.evidence[step] !== true)) throw new Error('Robinhood enablement requires E1 to E7 all passed');

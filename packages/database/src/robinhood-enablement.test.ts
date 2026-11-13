@@ -232,3 +232,36 @@ it('persists explicit free-allowlist baseline scope in owner-linked verification
     expect(JSON.parse(legacy.evidence_json).strategyVersion).toBe('seadrop-v1-public@1');
   } finally { t.db.close(); }
 });
+
+
+it('persists the owner-approved free-signed scope atomically without promoting the old grant or enabling paid mints', () => {
+  const t = setup();
+  try {
+    t.enable('before-signed');
+    const strategyVersion = 'seadrop-v1-baseline-public-free-allowlist-free-signed@1';
+    t.repository.enableRobinhood({ id: 'signed-scope', approvedAt: T0, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false,
+      confirmationDigest: 'c'.repeat(64), strategyVersion },
+    { chainProfileId: 'rh', verificationId: 'signed-verification', sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH });
+    expect(t.profile()).toEqual({ enabled: 1, status: 'verified' });
+    expect(t.repository.latestRobinhoodEnablement()).toMatchObject({ id: 'signed-scope', paidAllowed: false });
+    const verification = t.db.prepare('SELECT evidence_json FROM chain_verification WHERE id = ?').get('signed-verification') as { evidence_json: string };
+    expect(JSON.parse(verification.evidence_json)).toMatchObject({ strategyVersion, evidenceDigest: 'c'.repeat(64), robinhoodEnablementId: 'signed-scope' });
+    const legacy = t.db.prepare('SELECT evidence_json FROM chain_verification WHERE id = ?').get('ver-before-signed') as { evidence_json: string };
+    expect(JSON.parse(legacy.evidence_json).strategyVersion).toBe('seadrop-v1-public@1');
+    t.repository.revokeEnablement(4663, { id: 'revoke-signed', revokedAt: day(0.1), confirmationDigest: DIGEST });
+    expect(t.profile().enabled).toBe(0);
+  } finally { t.db.close(); }
+});
+
+it.each(['seadrop-v1-baseline-public-free-allowlist-free-signed@2', 'arbitrary-signed-scope', ''])('refuses unknown Robinhood scope %j without changing the existing grant', (strategyVersion) => {
+  const t = setup();
+  try {
+    t.enable('retained-grant');
+    expect(() => t.repository.enableRobinhood({ id: 'rejected-scope', approvedAt: T0, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false,
+      confirmationDigest: DIGEST, strategyVersion },
+    { chainProfileId: 'rh', verificationId: 'rejected-verification', sequencerEndpointReference: SEQ, archiveEndpointReference: ARCH })).toThrow('Robinhood strategy scope is not supported');
+    expect(t.repository.latestRobinhoodEnablement()).toMatchObject({ id: 'retained-grant', paidAllowed: false });
+    expect(t.db.prepare('SELECT id FROM chain_verification WHERE id = ?').get('rejected-verification')).toBeUndefined();
+    expect(t.profile()).toEqual({ enabled: 1, status: 'verified' });
+  } finally { t.db.close(); }
+});
