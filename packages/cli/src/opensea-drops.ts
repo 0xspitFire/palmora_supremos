@@ -22,7 +22,10 @@ const object = (value: unknown): Record<string, unknown> => {
 };
 
 /** Official API only. Never follows metadata URLs or redirects; API responses never authorize signing. */
-export function createOpenSeaDrops(options: { apiKey: string; fetcher?: DropsFetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }): OpenSeaDrops {
+export interface OpenSeaDropOptions { apiKey: string; fetcher?: DropsFetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
+
+/** Fixed-endpoint, bounded official requests shared by Merkle and signed methods. */
+export function createOpenSeaDropRequester(options: OpenSeaDropOptions) {
   if (!options.apiKey || /[\r\n]/.test(options.apiKey)) throw new Error('OPENSEA_DROPS_KEY_REQUIRED');
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -93,6 +96,12 @@ export function createOpenSeaDrops(options: { apiKey: string; fetcher?: DropsFet
     void work.finally(() => pending.delete(key)).catch(() => undefined);
     return work;
   };
+  return request;
+}
+
+export function createOpenSeaDrops(options: OpenSeaDropOptions): OpenSeaDrops {
+  const request = createOpenSeaDropRequester(options);
+  const now = options.now ?? (() => new Date());
   return {
     async ownWalletProofs(input) {
       const chain = OPENSEA_CHAIN_SLUG[input.chainId];
@@ -106,10 +115,14 @@ export function createOpenSeaDrops(options: { apiKey: string; fetcher?: DropsFet
       let stage: bigint | undefined;
       for (const wallet of wallets) {
         let tx: Record<string, unknown>;
-        try { tx = await request(`/api/v2/drops/${slug}/mint`, { minter: wallet, quantity: 1 }); }
+        // This endpoint returns data only. MintBot independently checks balance,
+        // simulation and exposure before any request/signing; platform gas
+        // estimates must not require prefunding beyond the approved balance cap.
+        try { tx = await request(`/api/v2/drops/${slug}/mint`, { minter: wallet, quantity: 1, skip_balance_check: true }); }
         catch (error) { if (error instanceof Error && error.message === 'OPENSEA_WALLET_NOT_ELIGIBLE') continue; throw error; }
         if (tx['chain'] !== chain || typeof tx['to'] !== 'string' || tx['to'].toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || typeof tx['data'] !== 'string' || !/^0x(?:[a-fA-F0-9]{2})+$/.test(tx['data']) || tx['data'].length > 20_000 || typeof tx['value'] !== 'string' || !/^\d{1,78}$/.test(tx['value'])) throw new Error('OPENSEA_MINT_BINDING_INVALID');
         if (tx['data'].slice(0, 10).toLowerCase() === '0x161ac21f') throw new Error('OPENSEA_PUBLIC_STAGE_RESPONSE');
+        if (tx['data'].slice(0, 10).toLowerCase() === '0x4b61cd6f') throw new Error('OPENSEA_SIGNED_STAGE_RESPONSE');
         // Decode only the supported method. Never relay arbitrary API-provided calldata to the signer.
         let decoded: ReturnType<typeof decodeFunctionData<typeof ALLOWLIST_MINT_ABI>>;
         try { decoded = decodeFunctionData({ abi: ALLOWLIST_MINT_ABI, data: tx['data'] as Hex }); }

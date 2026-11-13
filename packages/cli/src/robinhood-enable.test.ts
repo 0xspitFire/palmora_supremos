@@ -235,3 +235,45 @@ it.each(['2026-99-99', '2026-02-31'])('refuses invalid initial Robinhood evidenc
     if (paid) expect(checked.problems.join(' ')).toContain('paidRehearsal needs a valid date');
   }
 });
+
+
+describe('explicit Robinhood free signed scope', () => {
+  const reference = 'artifacts/robinhood-free-signed-replay.json';
+  const signedFile = goodFile({ freeSignedRehearsal: { ...entry(), reference } });
+  const signedDigest = checkEvidenceFile(signedFile, NOW, false, true).fileDigest!;
+  const makeStore = () => {
+    const writes: Array<Record<string, unknown>> = [];
+    return { writes, store: { ethereumLiveMintProven: () => true, robinhoodEnablement: () => undefined, enableRobinhood: (record: Record<string, unknown>) => { writes.push(record); }, revokeRobinhood: () => ({ enablementId: 'unused' }) } };
+  };
+
+  it('requires separate signed rehearsal and a new exact phrase, retaining strict stored evidence keys', () => {
+    const s = makeStore();
+    const input = { action: 'status' as const, evidenceText: goodFile(), evidenceFile: 'rh.json', includeFreeSigned: true, confirm: undefined, now: NOW, store: s.store, newId: () => 'signed-rh' };
+    expect(runRobinhoodEnable(input).state).toBe('NotReady');
+    expect(() => runRobinhoodEnable({ ...input, action: 'record' })).toThrow('FREE_SIGNED_REHEARSAL_REQUIRED');
+    const preview = runRobinhoodEnable({ ...input, evidenceText: signedFile });
+    expect(preview).toMatchObject({ state: 'ReadyToRecord', requestedStrategyVersion: 'seadrop-v1-baseline-public-free-allowlist-free-signed@1' });
+    expect(String(preview.copyThisToRecord)).toContain('--include-free-signed');
+    expect(String(preview.copyThisToRecord)).toContain('CHAIN-4663 PUBLIC+FREE-ALLOWLIST+FREE-SIGNED-V1');
+    expect(() => runRobinhoodEnable({ ...input, action: 'record', evidenceText: signedFile, confirm: enablePhrase(signedDigest, false, true) })).toThrow('CONFIRMATION_PHRASE_MISMATCH');
+    expect(s.writes).toEqual([]);
+    runRobinhoodEnable({ ...input, action: 'record', evidenceText: signedFile, confirm: enablePhrase(signedDigest, false, false, true) });
+    expect(s.writes[0]).toMatchObject({ paidAllowed: false, strategyVersion: 'seadrop-v1-baseline-public-free-allowlist-free-signed@1' });
+    expect(Object.keys(s.writes[0]?.evidence as object)).toHaveLength(EVIDENCE_STEPS.length);
+  });
+
+  it('does not let callers reuse a legacy seven-step check for signed scope', () => {
+    const evidence = checkEvidenceFile(goodFile(), NOW);
+    expect(() => assertEnableAllowed({ evidence, ethereumLiveMintProven: true, paid: false, includeFreeSigned: true, confirm: enablePhrase(evidence.fileDigest!, false, false, true) })).toThrow('FREE_SIGNED_REHEARSAL_REQUIRED');
+  });
+
+  it.each([
+    { passed: false, checkedOn: '2026-10-18', reference },
+    { passed: true, checkedOn: '2026-08-18', reference },
+    { passed: true, checkedOn: '2026-10-18', reference: 'https://credential.example/private' },
+  ])('refuses incomplete, stale or unsafe signed rehearsal %#', freeSignedRehearsal => {
+    const checked = checkEvidenceFile(goodFile({ freeSignedRehearsal }), NOW, false, true);
+    expect(checked.evidence).toBeUndefined();
+    expect(checked.problems.join(' ')).toContain('freeSignedRehearsal');
+  });
+});

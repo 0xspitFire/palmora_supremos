@@ -8,6 +8,7 @@ import { createCanonicalLifecycleStore, createMintEngineAdapter, type MintEngine
 import type { CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
 import { configuredFireLanes } from './fire-lane-config.js';
 import { installAllowlistSources } from './allowlist-source-config.js';
+import { installSignedMintSources } from './signed-mint-source-config.js';
 
 /** Where spend-limit alerts go. The default records a durable alert event; the service swaps in its Telegram-backed manager. */
 export interface SpendAlertSink {
@@ -117,6 +118,18 @@ export function selectTurnkeyAllowlistFamilyPolicy(records: readonly TurnkeyCano
   return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
 }
 
+/** Signed selectors never inherit public or Merkle-family custody authority. */
+export function selectTurnkeySignedFamilyPolicy(records: readonly TurnkeyCanonicalPolicyRecord[], input: Pick<import('@mint-bot/backend').CampaignInput, 'chainId' | 'quantity' | 'mintPriceWei' | 'strategy' | 'walletScope'>): TurnkeyPolicySelection | undefined {
+  if (input.strategy !== 'seadrop-v1-signed' || ![1, 8453, 4663].includes(input.chainId) || input.mintPriceWei !== 0n || !Number.isSafeInteger(input.quantity) || input.quantity < 1 || input.quantity > (input.chainId === 8453 ? 4 : 10) || !input.walletScope?.length || input.walletScope.some(wallet => !/^0x[0-9a-fA-F]{40}$/.test(wallet)) || new Set(input.walletScope.map(wallet => wallet.toLowerCase())).size !== input.walletScope.length) return undefined;
+  const matches = records.filter(({ enforcementPolicy: policy }) => policy.family?.kind === 'seadrop-free-signed-v1'
+    && policy.family.maxQuantity >= input.quantity && policy.transaction.chainId === input.chainId
+    && policy.transaction.to.toLowerCase() === SEADROP_V1_ADDRESS.toLowerCase()
+    && policy.transaction.valueWei === '0' && policy.transaction.data === '0x4b61cd6f'
+    && input.walletScope!.every(wallet => policy.transaction.from.some(address => address.toLowerCase() === wallet.toLowerCase())));
+  if (matches.length > 1) throw new Error('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
+  return matches.length === 1 ? turnkeyPolicySelection(matches[0]!) : undefined;
+}
+
 export async function createCliRuntime(projectRoot: string, engine?: EngineAdapter, statePath = process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite', adapterOptions?: Partial<Omit<MintEngineAdapterOptions, 'getState'>>, runtimeOptions: { allowTurnkey?: boolean; startCoordinator?: boolean; acceptPersonalLiveLocalCustody?: boolean; /** Host service only (D-058/D-059): builds the compensated-profile wiring once the store is open. The owner's CLI never passes it. */ coordinatorAssurance?: (store: CanonicalStoreBridge) => Promise<CoordinatorAssuranceWiring> } = {}): Promise<CliRuntime> {
   const useTurnkey = runtimeOptions.allowTurnkey ?? turnkeyCustodyEnabled();
   const store = new CanonicalStoreBridge(openDatabase(resolve(projectRoot, statePath)), { durable: true, fleetPolicy: PERSONAL_LIVE_FLEET_POLICY, ...(useTurnkey ? { walletKeyReferencePrefix: 'turnkey-wallet-map' } : {}) });
@@ -129,6 +142,11 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
       credential: async (name) => process.env.SECRET_STORE_PATH ? (await loadHostSecretStore(process.env.SECRET_STORE_PATH)).get(name) : undefined,
     });
   }
+  await installSignedMintSources({ secretRoot,
+    wallets: async () => (await configuredWallets(projectRoot, configuredWalletPath(projectRoot))).map(wallet => wallet.address),
+    credential: async name => process.env.SECRET_STORE_PATH ? (await loadHostSecretStore(process.env.SECRET_STORE_PATH)).get(name) : undefined,
+    maxQuantity: Number(process.env.MINT_BOT_REPLICATION_MAX_QUANTITY ?? '1'),
+  });
   const turnkeyConfig = useTurnkey ? await readTurnkeySecretConfig(secretRoot) : undefined;
   let turnkeyPolicyReference: string | undefined;
   if (turnkeyConfig) {
@@ -146,6 +164,13 @@ export async function createCliRuntime(projectRoot: string, engine?: EngineAdapt
   const custodyPolicyFor = turnkeyConfig ? async (input: import('@mint-bot/backend').CampaignInput) => {
     if (!/^0x[0-9a-fA-F]{40}$/.test(input.contract)) throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
     const records = await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot);
+    if (input.strategy === 'seadrop-v1-signed') {
+      const walletScope = input.walletScope ?? (await configuredWallets(projectRoot, configuredWalletPath(projectRoot))).map(wallet => wallet.address);
+      const signedFamily = selectTurnkeySignedFamilyPolicy(records, { ...input, walletScope });
+      if (!signedFamily) throw new Error('TURNKEY_SIGNED_FAMILY_APPROVAL_REQUIRED');
+      return { provider: 'turnkey' as const, ...signedFamily };
+    }
+
     // The bounded family is the fast path: `/prepare` binds the campaign to
     // one already-approved record and the signer performs the exact contract
     // and fee-recipient checks from the live drop at signing time.

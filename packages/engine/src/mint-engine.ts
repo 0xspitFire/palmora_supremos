@@ -77,6 +77,8 @@ import { assertBaseProviderAgreement, type BaseAgreementClient } from './base-pr
 import { KillSwitch, SpendTracker } from './safety.js';
 import { failoverTransport } from './rpc-transport.js';
 import { createLogger, childLogger } from './logger.js';
+import { redactEngineText } from './log-redaction.js';
+import { prepareWalletSimulations } from './wallet-preflight.js';
 import { safeEndpointReference } from './endpoint-reference.js';
 import {
   assertDirectChainExecutionPolicy,
@@ -111,11 +113,7 @@ class AdmissionGate {
 }
 
 function redactProviderError(message: string): string {
-  return message
-    .replace(/https?:\/\/\S+/gi, '[endpoint]')
-    .replace(/0x[0-9a-f]{40,}/gi, '[hex]')
-    .replace(/(?:private[_-]?key|mnemonic|seed|passphrase|password)\s*[:=]\s*\S+/gi, '[redacted]')
-    .slice(0, 240);
+  return redactEngineText(message).slice(0, 240);
 }
 
 function lifecycleErrorType(code: string): MintErrorType {
@@ -423,24 +421,23 @@ export class MintEngine {
           throw new MintError(MintErrorType.INVALID_CONFIG, 'Paid run mint-value cap must be greater than zero');
         }
       }
-      const gasLimits = new Map<number, bigint>();
-      const simulations = new Map<number, SimulationEvidence>();
-      for (const wallet of wallets) {
-        this.checkKill();
-        const estimate = await strategy.estimateGas(publicClient, drop, wallet.address, this.config.target.quantity);
-        const padded = BigInt(Math.ceil(Number(estimate) * this.config.fees.gasLimitPadding));
-        gasLimits.set(wallet.index, padded);
-        const simulation = await simulateMint(
-          publicClient, strategy, drop, wallet.address,
-          this.config.target.quantity, mintCostPerWallet, wallet.index, this.now(),
-        );
-        this.checkKill();
-        simulations.set(wallet.index, { ...simulation, gasEstimate: estimate });
-        if (!this.config.safety.dryRun && !simulation.success) {
-          engineLog.warn({ event: 'wallet_simulation_failed', walletIndex: wallet.index, error: simulation.error }, 'Wallet simulation failed — skipping');
-        }
+      const { gasLimits, simulations } = await prepareWalletSimulations({
+        wallets, publicClient, strategy, drop, quantity: this.config.target.quantity,
+        value: mintCostPerWallet, padding: this.config.fees.gasLimitPadding,
+        checkKill: () => this.checkKill(), now: this.now,
+      });
+      if (gasLimits.size === 0 || (!this.config.safety.dryRun && ![...simulations.values()].some((simulation) => simulation.success))) {
+        // Proven pre-broadcast failures have no exposure. Return truthful wallet
+        // outcomes so the coordinator can release only never-broadcast admissions.
+        return {
+          jobId, nftContract: this.config.target.contract, chainId,
+          strategy: this.config.target.strategy, startedAt, completedAt: new Date(),
+          dryRun: this.config.safety.dryRun,
+          walletResults: wallets.map((wallet) => ({ notStarted: 'engine-preflight-v1', walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: simulations.get(wallet.index)?.error ?? 'WALLET_ESTIMATE_FAILED', simulation: simulations.get(wallet.index), durationMs: 0 })),
+          totalGasSpentWei: 0n, totalMintCostWei: 0n, successCount: 0, failCount: 0,
+        };
       }
-      const gasLimitEstimate = gasLimits.get(wallets[0]?.index ?? -1) ?? 0n;
+      const gasLimitEstimate = [...gasLimits.values()].reduce((max, gas) => gas > max ? gas : max, 0n);
       const paddedGasLimit = gasLimitEstimate;
       const maxGasCostPerWallet = paddedGasLimit * parseGwei(this.config.fees.maxFeePerGasGwei.toString());
       const totalCostPerWallet = mintCostPerWallet + maxGasCostPerWallet;
@@ -516,8 +513,8 @@ export class MintEngine {
         }
       }
       for (const wallet of wallets) {
-        if (!this.config.safety.dryRun && !simulations.get(wallet.index)?.success) {
-          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: simulations.get(wallet.index)?.error ?? 'Simulation unavailable', simulation: simulations.get(wallet.index), durationMs: 0 });
+        if (!gasLimits.has(wallet.index) || (!this.config.safety.dryRun && !simulations.get(wallet.index)?.success)) {
+          preflightResults.push({ notStarted: 'engine-preflight-v1', walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: simulations.get(wallet.index)?.error ?? 'Simulation unavailable', simulation: simulations.get(wallet.index), durationMs: 0 });
           continue;
         }
         const walletGasLimit = gasLimits.get(wallet.index) ?? paddedGasLimit;
@@ -525,13 +522,13 @@ export class MintEngine {
         const balance = await publicClient.getBalance({ address: wallet.address });
         const freeReserve = freeReserveByWallet.get(wallet.index) ?? 0n;
         if (freeReserveErrorByWallet.has(wallet.index)) {
-          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: freeReserveErrorByWallet.get(wallet.index), simulation: simulations.get(wallet.index), durationMs: 0 });
+          preflightResults.push({ notStarted: 'engine-preflight-v1', walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: freeReserveErrorByWallet.get(wallet.index), simulation: simulations.get(wallet.index), durationMs: 0 });
         } else if (mintCostPerWallet === 0n && exceedsRunReserveCap(admittedFreeReserveWei, freeReserve, freeReserveCaps)) {
-          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `FREE-mint active-period reserve cap (${formatEther(freeReserveCaps.activePeriodCapWei)} ETH) reached; wallet capacity is not transferable`, simulation: simulations.get(wallet.index), durationMs: 0 });
+          preflightResults.push({ notStarted: 'engine-preflight-v1', walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `FREE-mint active-period reserve cap (${formatEther(freeReserveCaps.activePeriodCapWei)} ETH) reached; wallet capacity is not transferable`, simulation: simulations.get(wallet.index), durationMs: 0 });
         } else if (balance < walletMaxCost) {
-          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `Insufficient funds: required ${formatEther(walletMaxCost)} ETH`, simulation: simulations.get(wallet.index), durationMs: 0 });
+          preflightResults.push({ notStarted: 'engine-preflight-v1', walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `Insufficient funds: required ${formatEther(walletMaxCost)} ETH`, simulation: simulations.get(wallet.index), durationMs: 0 });
         } else if (mintCostPerWallet > 0n && admittedMintValueWei + mintCostPerWallet > runMintValueCapWei) {
-          preflightResults.push({ walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `Run mint-value cap reached (${formatEther(runMintValueCapWei)} ETH); wallet capacity is not transferable`, simulation: simulations.get(wallet.index), durationMs: 0 });
+          preflightResults.push({ notStarted: 'engine-preflight-v1', walletIndex: wallet.index, address: wallet.address, status: 'skipped', error: `Run mint-value cap reached (${formatEther(runMintValueCapWei)} ETH); wallet capacity is not transferable`, simulation: simulations.get(wallet.index), durationMs: 0 });
         } else {
           fundedWallets.push(wallet);
           admittedMintValueWei += mintCostPerWallet;
@@ -646,9 +643,11 @@ export class MintEngine {
       return result;
 
     } catch (err) {
-      engineLog.error({ event: 'job_error', error: err instanceof Error ? err.message : String(err) },
+      engineLog.error({ event: 'job_error', error: '[ENGINE_JOB_FAILED]' },
         'Mint job failed');
-      throw err;
+      if (err instanceof MintError) throw new MintError(err.type, redactProviderError(err.message), err.walletIndex);
+      if (err instanceof LifecycleGateError) throw new LifecycleGateError(err.code, err.gate, redactProviderError(err.message));
+      throw new MintError(MintErrorType.PROVIDER_UNAVAILABLE, 'ENGINE_JOB_FAILED');
     } finally {
       // ── 9. Zeroize keys ─────────────────────────────────────
       if (signer) {
@@ -831,7 +830,7 @@ export class MintEngine {
           campaignId: this.config.target.campaignId,
           runId,
           policyRef: this.config.target.policyRef ?? 'phase-1',
-          ...(['seadrop-v1-public', 'seadrop-v1-allowlist'].includes(drop.strategyName) ? { familyContext: { nftContract: drop.nftContract, feeRecipient: drop.feePayer } } : {}),
+          ...(['seadrop-v1-public', 'seadrop-v1-allowlist', 'seadrop-v1-signed'].includes(drop.strategyName) ? { familyContext: { nftContract: drop.nftContract, feeRecipient: drop.feePayer } } : {}),
         };
         if (!this.config.safety.dryRun) {
           assertSimulationFresh(
@@ -892,14 +891,17 @@ export class MintEngine {
           request: reserveRequest,
           reserve: () => reservationProvider.reserve(reserveRequest),
           sign: () => {
-            if (!['seadrop-v1-public', 'seadrop-v1-allowlist'].includes(drop.strategyName)) return signer.signTransaction(walletIndex, intent);
+            if (!['seadrop-v1-public', 'seadrop-v1-allowlist', 'seadrop-v1-signed'].includes(drop.strategyName)) return signer.signTransaction(walletIndex, intent);
             const proofs = drop.extra?.['walletProofs'] as readonly import('./allowlist-authority.js').VerifiedWalletProof[] | undefined;
             const proof = proofs?.find((entry) => entry.wallet.toLowerCase() === walletAddress.toLowerCase());
             if (drop.strategyName === 'seadrop-v1-allowlist' && !proof) throw new Error('ALLOWLIST_OWN_WALLET_PROOF_REQUIRED');
+            const signedAuthorizations = drop.extra?.['signedWalletAuthorizations'] as readonly import('./signed-mint-authority.js').VerifiedSignedWalletAuthorization[] | undefined;
+            const signedAuthorization = signedAuthorizations?.find((entry) => entry.wallet.toLowerCase() === walletAddress.toLowerCase());
+            if (drop.strategyName === 'seadrop-v1-signed' && !signedAuthorization) throw new Error('SIGNED_MINT_OWN_WALLET_AUTHORIZATION_REQUIRED');
             familySigningContext = {
-              nftContract: drop.nftContract, feeRecipient: drop.feePayer, ...(proof ? { allowlistProof: proof } : {}),
+              nftContract: drop.nftContract, feeRecipient: drop.feePayer, ...(proof ? { allowlistProof: proof } : {}), ...(signedAuthorization ? { signedAuthorization } : {}),
               assertReady: async () => {
-                if (!reservationProvider.reconfirm) throw new Error(drop.strategyName === 'seadrop-v1-allowlist' ? 'TURNKEY_ALLOWLIST_RESERVATION_RECHECK_REQUIRED' : 'TURNKEY_PUBLIC_RESERVATION_RECHECK_REQUIRED');
+                if (!reservationProvider.reconfirm) throw new Error(drop.strategyName === 'seadrop-v1-allowlist' ? 'TURNKEY_ALLOWLIST_RESERVATION_RECHECK_REQUIRED' : drop.strategyName === 'seadrop-v1-signed' ? 'TURNKEY_SIGNED_RESERVATION_RECHECK_REQUIRED' : 'TURNKEY_PUBLIC_RESERVATION_RECHECK_REQUIRED');
                 await reservationProvider.reconfirm(reserveRequest);
                 this.checkKill();
                 assertSimulationFresh(simulation, this.now(), this.config.timing.simulationFreshnessMs ?? 120_000);
@@ -1274,7 +1276,7 @@ export class MintEngine {
         // error. Keep its reservation for reconciliation; release only work
         // that never crossed the broadcast boundary.
         if (!submittedHash) await reservation?.release();
-        const error = err instanceof MintError ? err : err instanceof ReceiptReorgedError
+        const error = err instanceof MintError ? new MintError(err.type, redactProviderError(err.message), walletIndex) : err instanceof ReceiptReorgedError
           ? new MintError(MintErrorType.REORGED_TRANSACTION, err.message, walletIndex)
           : err instanceof ReceiptTimeoutError
             ? new MintError(MintErrorType.TIMEOUT, err.message, walletIndex)
@@ -1282,7 +1284,7 @@ export class MintEngine {
             ? new MintError(lifecycleErrorType(err.code), err.message, walletIndex)
             : new MintError(
               MintErrorType.UNKNOWN,
-              err instanceof Error ? err.message : String(err),
+              'ENGINE_WALLET_FAILED',
               walletIndex,
             );
         let recoveryState: WalletMintResult['reconciliationState'];
@@ -1374,7 +1376,7 @@ export class MintEngine {
         walletIndex: walletIndices[index]!,
         address: '0x' as Address,
         status: 'failed' as const,
-        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        error: 'ENGINE_WALLET_FAILED',
         durationMs: 0,
       };
     });

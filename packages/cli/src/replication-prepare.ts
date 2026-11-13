@@ -4,6 +4,30 @@ import { liveFreeCampaignFields } from './live-plan.js';
 import { robinhoodFreeCampaignFields } from './robinhood-live.js';
 import type { QualifiedSource } from './replication-source.js';
 
+/** The same conservative fee envelope preparation uses; this is not admission. */
+export function replicationFundingRequirement(source: QualifiedSource, maxQuantity: number): bigint {
+  const { drop, plan } = source;
+  const quantity = Math.min(maxQuantity, plan.observed.quantity ?? 0, drop.maxTotalMintableByWallet, drop.chainId === 8453 ? 4 : 15);
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || drop.mintPrice < 0n) throw new Error('REPLICATION_PLAN_INVALID');
+  const policy = drop.chainId === 8453 ? BASE_PERSONAL_LIVE_FLEET_POLICY : PERSONAL_LIVE_FLEET_POLICY;
+  const fee = drop.mintPrice > 0n ? policy.paidFeeAllowanceWei : drop.chainId === 4663 ? 200_000_000_000_000n : policy.freeFeeAllowanceWei;
+  return drop.mintPrice * BigInt(quantity) + fee;
+}
+
+/** Unknown balances exclude that wallet. No wallet is admitted or funded here. */
+export async function fundedReplicationWallets(source: QualifiedSource, wallets: readonly Address[], maxQuantity: number, balance: (wallet: Address) => Promise<bigint>): Promise<Address[]> {
+  const required = replicationFundingRequirement(source, maxQuantity);
+  const targets = new Set(source.plan.targets.map(target => target.wallet.toLowerCase()));
+  let unavailable = 0;
+  let answered = 0;
+  const rows = await Promise.all(wallets.filter(wallet => targets.has(wallet.toLowerCase())).map(async wallet => {
+    try { const value = await balance(wallet); if (typeof value !== 'bigint' || value < 0n) throw new Error('INVALID_BALANCE'); answered += 1; return value >= required ? wallet : undefined; }
+    catch { unavailable += 1; return undefined; }
+  }));
+  if (unavailable > 0 && answered === 0) throw new Error('REPLICATION_BALANCE_UNAVAILABLE');
+  return rows.filter((wallet): wallet is Address => wallet !== undefined);
+}
+
 /** Conservative preflight only; SQLite admission remains the atomic cap authority. */
 export function replicationWithinCaps(store: BackendStore, campaign: Campaign, wallets: readonly string[], now: Date): boolean {
   const state = store.snapshot();
@@ -49,7 +73,7 @@ export async function prepareReplication(input: {
   if (paid && drop.mintPrice > policy.paidMaxPricePerNftWei) throw new Error('PAID_PRICE_PER_NFT_EXCEEDED');
   const fee = paid ? policy.paidFeeAllowanceWei : chainId === 4663 ? 200_000_000_000_000n : policy.freeFeeAllowanceWei;
   const cap = paid ? policy.paidDailyCapWei : chainId === 4663 ? 2_000_000_000_000_000n : policy.freeDailyCapWei;
-  const perWallet = drop.mintPrice * BigInt(quantity) + fee;
+  const perWallet = replicationFundingRequirement(input.source, input.maxQuantity);
   const maxWallets = Math.min(paid ? policy.paidMaxWalletsPerMint : 10, Number(cap / perWallet));
   const targets = new Set(plan.targets.map((target) => target.wallet.toLowerCase()));
   const wallets = [...new Set(input.wallets.map((wallet) => wallet.toLowerCase()))].filter((wallet) => targets.has(wallet)).slice(0, maxWallets);

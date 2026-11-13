@@ -68,6 +68,22 @@ function formatWei(value: string): string | null {
   return fraction.length === 0 ? `${whole} ETH` : `${whole}.${fraction} ETH`;
 }
 
+/** Signed ETH amounts and basis-point percentages keep integer precision. Unknown is never zero. */
+export function formatSignedWei(value: string | null | undefined): string {
+  if (typeof value !== 'string' || value.length > 81 || !/^-?(0|[1-9][0-9]*)$/.test(value)) return 'Unknown';
+  const negative = value.startsWith('-');
+  const result = formatWei(negative ? value.slice(1) : value);
+  return result === null ? 'Unknown' : escapeHtml(`${negative ? '-' : ''}${result}`);
+}
+
+export function formatBasisPoints(value: string | null | undefined): string {
+  if (typeof value !== 'string' || value.length > 81 || !/^-?(0|[1-9][0-9]*)$/.test(value)) return 'Unknown';
+  const negative = value.startsWith('-');
+  const magnitude = BigInt(negative ? value.slice(1) : value);
+  const fraction = (magnitude % 100n).toString().padStart(2, '0');
+  return `${negative ? '-' : ''}${magnitude / 100n}.${fraction}%`;
+}
+
 export function formatAmount(amount: SourcedAmount | null | undefined): string {
   if (!amount?.amount) return 'Unknown';
   const item = amount.amount;

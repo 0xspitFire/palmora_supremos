@@ -1,16 +1,20 @@
 /**
  * T-068: the owner's full NFT list per wallet from Blockscout's PRO API (read-only, off the mint path; D-068 pending).
  * Free key (dev.blockscout.com): 5 requests a second, 100,000 credits a day, 20 credits a call. Covers Ethereum and Robinhood; Base needs a paid plan
- * (HTTP 402 on the free plan), so Base is reported as not covered and `/holdings` (exact chain reads) stays the source for MintBot's own mints.
+ * (HTTP 402 on the free plan), so this adapter refuses Base before making a call.
+ * The optional composite provider supplies Base's indexer view through the
+ * existing OpenSea integration; `/holdings` remains direct MintBot mint reads.
  */
-export type PortfolioChain = 1 | 4663;
-export const PORTFOLIO_CHAINS: readonly PortfolioChain[] = [1, 4663];
+export type PortfolioChain = 1 | 8453 | 4663;
+export const PORTFOLIO_CHAINS: readonly PortfolioChain[] = [1, 8453, 4663];
 
 export interface PortfolioItem { contract: string | undefined; name: string | undefined; tokenId: string | undefined; type: string; amount: bigint }
 export interface PortfolioFetchResponse { ok: boolean; status: number; text(): Promise<string> }
 export type PortfolioFetch = (url: string, init: { signal: AbortSignal; redirect: 'error' }) => Promise<PortfolioFetchResponse>;
 
 export interface PortfolioProvider {
+  /** Declared indexer coverage; absence does not establish coverage for any chain. */
+  readonly supportedChains?: readonly PortfolioChain[];
   /** All NFTs a wallet holds on one chain (at most 5 pages). Throws a fixed code when the provider cannot answer. */
   list(chainId: PortfolioChain, wallet: string): Promise<{ items: PortfolioItem[]; truncated: boolean; asOf: Date; cached: boolean }>;
 }
@@ -73,7 +77,11 @@ export function createBlockscoutPortfolio(options: { apiKey: string; fetcher?: P
     } finally { clearTimeout(timer); }
   };
   return {
+    supportedChains: [1, 4663],
     async list(chainId, wallet) {
+      // Base requires a paid Blockscout plan. This adapter must never attempt
+      // that call merely because the public result interface now includes Base.
+      if (chainId !== 1 && chainId !== 4663) throw new Error('PORTFOLIO_CHAIN_NOT_COVERED');
       if (!/^0x[0-9a-fA-F]{40}$/.test(wallet)) throw new Error('PORTFOLIO_WALLET_INVALID');
       const key = `${chainId}:${wallet.toLowerCase()}`;
       const hit = cache.get(key);

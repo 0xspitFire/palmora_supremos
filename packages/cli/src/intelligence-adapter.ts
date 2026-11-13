@@ -100,7 +100,8 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
     const drop = await this.drop(nftContract);
     if (!drop) return null;
     const extra = drop.extra ?? {};
-    return { nftContract: nftContract.toLowerCase(), priceWei: drop.mintPrice, startTime: drop.startTime, endTime: drop.endTime, maxPerWallet: drop.maxTotalMintableByWallet, maxSupply: extra.maxSupplyKnown === false ? null : drop.maxTokenSupply, totalMinted: extra.totalSupplyKnown === false ? null : drop.totalMinted, strategyName: drop.strategyName, ...(Array.isArray(extra.walletProofs) ? { eligibleWallets: (extra.walletProofs as Array<{ wallet: string }>).map((proof) => proof.wallet) } : {}) };
+    const proofs = extra.walletProofs ?? extra.signedWalletAuthorizations;
+    return { nftContract: nftContract.toLowerCase(), priceWei: drop.mintPrice, startTime: drop.startTime, endTime: drop.endTime, maxPerWallet: drop.maxTotalMintableByWallet, maxSupply: extra.maxSupplyKnown === false ? null : drop.maxTokenSupply, totalMinted: extra.totalSupplyKnown === false ? null : drop.totalMinted, strategyName: drop.strategyName, ...(Array.isArray(proofs) ? { eligibleWallets: (proofs as Array<{ wallet: string }>).map((proof) => proof.wallet) } : {}) };
   }
 
   public async hasCode(address: string): Promise<boolean | null> {
@@ -172,7 +173,10 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
       try { if (!this.publicOnly) allowlist = getStrategy('seadrop-v1-allowlist'); } catch { /* no configured proof provider */ }
       if (allowlist) {
         try { return await allowlist.readDrop(this.client, nftContract as Address, this.chainId); }
-        catch (error) { if (!(error instanceof Error) || error.message !== 'ALLOWLIST_FIRST_PARTY_SOURCE_REQUIRED') return null; }
+        catch (error) {
+          if (error instanceof Error && error.message === 'OPENSEA_SIGNED_STAGE_RESPONSE') return await getStrategy('seadrop-v1-signed').readDrop(this.client, nftContract as Address, this.chainId);
+          if (!(error instanceof Error) || error.message !== 'ALLOWLIST_FIRST_PARTY_SOURCE_REQUIRED') return null;
+        }
       }
       return await this.strategy.readDrop(this.client, nftContract as Address, this.chainId);
     } catch { return null; }

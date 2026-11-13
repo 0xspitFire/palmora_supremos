@@ -250,3 +250,11 @@ export { chainRpcSecretNames } from './chains.js';
 
 export { planFireLanes } from './fire-lanes.js';
 export type { FireLane, FireLaneAssignment } from './fire-lanes.js';
+
+// Server-signed free SeaDrop authorizations; registration/custody enablement is explicit.
+export { SIGNED_MINT_TYPES, SIGNED_MINT_ABI, signedMintTypedData, verifySignedWalletAuthorization, buildSignedMint } from './signed-mint-authority.js';
+export type { SignedMintSource, SignedWalletAuthorization, SignedMintAuthorityClient, VerifiedSignedWalletAuthorization } from './signed-mint-authority.js';
+export { SeaDropV1SignedStrategy } from './strategies/seadrop-v1-signed.js';
+export type { SignedWalletAuthorizationProvider } from './strategies/seadrop-v1-signed.js';
+
+export { assertIndependentSignedAuthority, verifyTurnkeySignedAuthority } from './turnkey-signed-authority.js';

@@ -21,7 +21,7 @@ import {
   summarizeServiceConfig,
   TelegramNotifier,
 } from '@mint-bot/backend';
-import { createCliRuntime, configuredSecretRoot, configuredWalletPath, configuredWallets, turnkeyCustodyEnabled, selectTurnkeyAllowlistFamilyPolicy } from './runtime.js';
+import { createCliRuntime, configuredSecretRoot, configuredWalletPath, configuredWallets, turnkeyCustodyEnabled, selectTurnkeyAllowlistFamilyPolicy, selectTurnkeySignedFamilyPolicy } from './runtime.js';
 import type { TelegramAccessRepository } from '@mint-bot/database';
 import { createTelegramBotApi, type TelegramBotApi } from './telegram-api.js';
 import { TelegramCommandRouter } from './telegram-commands.js';
@@ -40,22 +40,26 @@ import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnk
 import { assertOpsEvidenceAccepted, evaluateOpsEvidence } from '../../../scripts/ops-evidence-runtime.mjs';
 import { chainRpcSecretNames, failoverTransport, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import { startDependencyFlags } from './dependency-flags.js';
-import { createPublicClient, formatGwei } from 'viem';
+import { createPublicClient, formatGwei, http as httpTransport } from 'viem';
 import { startGasAlerts } from './gas-alert-service.js';
+import { canonicalAnalyticsPort, startAnalyticsIngestion } from './analytics-ingestion-service.js';
+import { signedMintAuthorityEndpoints } from './signed-mint-source-config.js';
 import { liveRequestFollowUp, sentTransactionsForRun, startLiveRequestPoller } from './live-request.js';
 import { createFireWiring, type FireWiring } from './fire-wiring.js';
 import { dryRunDrop } from './robinhood-readonly.js';
 import { createBlockscoutPortfolio, type PortfolioProvider } from './portfolio-provider.js';
+import { combinePortfolioProviders, createOpenSeaPortfolio } from './opensea-portfolio.js';
 import { CHAINLINK_ABI, CHAINLINK_ETH_USD_FEED, createEthPriceProvider } from './price-provider.js';
 import { createOpenSeaFloors, type OpenSeaFloors } from './opensea-client.js';
 import { startFireScheduler } from './fire.js';
 import { createReplicationAutomation } from './replication-automation.js';
 import { readReplicationSource } from './replication-source.js';
-import { allowlistPreparationGroups, prepareReplication } from './replication-prepare.js';
+import { allowlistPreparationGroups, fundedReplicationWallets, prepareReplication } from './replication-prepare.js';
 import { simulateAllowlistCampaign } from './allowlist-execution.js';
 import { getStrategy, readTurnkeyApprovedPolicyRecords } from '@mint-bot/engine';
 import { startOpsEvidenceReminders } from './ops-evidence-reminders.js';
 import { startChainDiscovery } from './chain-discovery-service.js';
+import { startChainReadiness } from './chain-readiness-service.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -202,7 +206,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   await orchestrator.start();
   let replicationAutomation: ReturnType<typeof createReplicationAutomation> | undefined;
   let replicationTimer: ReturnType<typeof setInterval> | undefined;
-  const replicationDiscoveryTimers: Array<{ stop(): void }> = [];
+  const secondaryDiscoveryTimers: Array<{ stop(): void }> = [];
+  const secondaryReadinessTimers: Array<{ stop(): Promise<void> }> = [];
   let intelligence: { stop(): void } | undefined;
   if (config.intelligenceEnabled && config.secretStorePath) {
     const secrets = await loadHostSecretStore(config.secretStorePath);
@@ -214,8 +219,32 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const monitorUrl = validMonitorUrl(secrets.get('HEALTHCHECK_PING_URL'));
     if (secrets.get('HEALTHCHECK_PING_URL') && !monitorUrl) logger.warn({ event: 'monitor_url_invalid' }, 'outside monitor address is not a valid https address; no signal will be sent');
     if (monitorUrl) logger.registerSecret(monitorUrl);
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts: intelligenceAlerts, wallets: config.readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
-    logger.info({ event: 'intelligence_started', readinessWallets: config.readinessWallets.length }, 'phase 2 intelligence started (read-only)');
+    const readinessWallets = config.mode === 'host'
+      ? async () => (await configuredWallets(config.projectRoot, configuredWalletPath(config.projectRoot))).map(wallet => wallet.address.toLowerCase())
+      : async () => config.readinessWallets;
+    const initialWallets = await readinessWallets();
+    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts: intelligenceAlerts, wallets: initialWallets, walletProvider: readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    logger.info({ event: 'intelligence_started', readinessWallets: initialWallets.length }, 'phase 2 intelligence started (read-only)');
+    // Secondary discovery/readiness is useful even when automatic execution is off.
+    // Each chain owns its completion-driven timers, and readiness never waits in a scan tick.
+    const bridge = runtime.store as CanonicalStoreBridge;
+    for (const chainId of [8453, 4663] as const) {
+      const enabled = () => runtime.store.snapshot().chainEvidence.some(e => e.chainId === chainId && e.status === 'accepted' && e.executionEnabled && Date.parse(e.expiresAt) > Date.now());
+      if (!enabled()) continue;
+      const endpoints = [...(await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints];
+      for (const endpoint of endpoints) logger.registerSecret(endpoint);
+      const port = EngineIntelligencePort.fromRpcUrls(endpoints, chainId);
+      const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), port, { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts });
+      secondaryDiscoveryTimers.push(startChainDiscovery({
+        chainId, intervalMs: config.discoveryIntervalMs, tick: () => discovery.tick(), logger,
+        notify: (text, dedupe) => intelligenceAlerts.intelligence({ kind: 'status', text, dedupe, priority: 'immediate' }),
+      }));
+      secondaryReadinessTimers.push(startChainReadiness({
+        store: runtime.store, port, wallets: readinessWallets, enabled,
+        intervalMs: config.readinessIntervalMs, alerts: intelligenceAlerts, logger,
+      }));
+    }
+
   }
   // D-059: the independent on-chain wallet watcher, only when the owner enables it. Fails the start on a bad setting.
   let fleetWatcher: { stop(): void } | undefined;
@@ -326,6 +355,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       // T-072: OpenSea floor prices for /portfolio, when the owner has stored OPENSEA_API.
       const openSeaKey = keys.get('OPENSEA_API');
       if (openSeaKey) { logger.registerSecret(openSeaKey); floorPrices = createOpenSeaFloors({ apiKey: openSeaKey }); }
+      portfolioProvider = combinePortfolioProviders({ blockscout: portfolioProvider, ...(openSeaKey ? { openSea: createOpenSeaPortfolio({ apiKey: openSeaKey }) } : {}) });
     }
     // T-072: the ETH price in dollars (display only): Chainlink through the Ethereum RPC, Coinbase as a fallback.
     let ethClient: ReturnType<typeof createPublicClient> | undefined;
@@ -363,7 +393,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       evmLatestBlock: latestBlock,
       allowlistSimulation: async (campaign, wallets) => simulateAllowlistCampaign({ campaign, wallets, client: await reader(campaign.chainId as 1 | 8453 | 4663), store: runtime.store, secretRoot }),
       allowlistMintState: async (campaign) => {
-        const drop = await getStrategy('seadrop-v1-allowlist').readDrop(await reader(campaign.chainId as 1 | 8453 | 4663), campaign.contract as `0x${string}`, campaign.chainId as 1 | 8453 | 4663);
+        const drop = await getStrategy(campaign.strategy).readDrop(await reader(campaign.chainId as 1 | 8453 | 4663), campaign.contract as `0x${string}`, campaign.chainId as 1 | 8453 | 4663);
         const now = Date.now() / 1000;
         return now < drop.startTime ? 'upcoming' : now > drop.endTime ? 'ended' : 'open';
       },
@@ -407,10 +437,21 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       replicationAutomation = createReplicationAutomation({
         store: runtime.store, watchedWallets,
         wallets: async () => (await walletAddresses()) as `0x${string}`[],
+        fundedWallets: async (source, wallets) => {
+          const client = await reader(source.drop.chainId);
+          return fundedReplicationWallets(source, wallets, maxQuantity, wallet => client.getBalance({ address: wallet }));
+        },
         qualify: async (event, wallets) => {
           const chainId = Number(event.data.chainId);
           if (![1, 8453, 4663].includes(chainId) || !/^0x[0-9a-fA-F]{40}$/.test(String(event.data.contract)) || !/^0x[0-9a-fA-F]{64}$/.test(String(event.data.txHash))) throw new Error('REPLICATION_SOURCE_INVALID');
-          return readReplicationSource({ client: await reader(chainId as 1 | 8453 | 4663), chainId: chainId as 1 | 8453 | 4663, contract: event.data.contract as `0x${string}`, hash: event.data.txHash as `0x${string}`, watchedWallets: watchedWallets(chainId), targetWallets: wallets });
+          const source = await readReplicationSource({ client: await reader(chainId as 1 | 8453 | 4663), chainId: chainId as 1 | 8453 | 4663, contract: event.data.contract as `0x${string}`, hash: event.data.txHash as `0x${string}`, watchedWallets: watchedWallets(chainId), targetWallets: wallets });
+          if (source.drop.strategyName === 'seadrop-v1-signed') {
+            const quantity = Math.min(maxQuantity, source.plan.observed.quantity ?? 0, source.drop.maxTotalMintableByWallet, chainId === 8453 ? 4 : 10);
+            const walletScope = source.plan.targets.map(target => target.wallet);
+            if (!selectTurnkeySignedFamilyPolicy(await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot), { chainId: source.drop.chainId, strategy: source.drop.strategyName, quantity, mintPriceWei: source.drop.mintPrice, walletScope })) throw new Error('TURNKEY_SIGNED_FAMILY_APPROVAL_REQUIRED');
+            if (!runtime.store.snapshot().chainEvidence.some(evidence => evidence.chainId === chainId && evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now() && evidence.strategyVersion === 'seadrop-v1-baseline-public-free-allowlist-free-signed@1')) throw new Error('SIGNED_MINT_CHAIN_REHEARSAL_ACCEPTANCE_REQUIRED');
+          }
+          return source;
         },
         prepare: async (source, wallets) => {
           const status = bridge.ethereumFeePolicyStatus();
@@ -431,14 +472,6 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         assertUnattendedReady: () => fire.assertUnattendedReady(),
         notify: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },
       });
-      for (const chainId of [8453, 4663] as const) {
-        if (!runtime.store.snapshot().chainEvidence.some((e) => e.chainId === chainId && e.status === 'accepted' && e.executionEnabled)) continue;
-        const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints], chainId), { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts });
-        replicationDiscoveryTimers.push(startChainDiscovery({
-          chainId, intervalMs: config.discoveryIntervalMs, tick: () => discovery.tick(), logger,
-          notify: (text, dedupe) => intelligenceAlerts.intelligence({ kind: 'status', text, dedupe, priority: 'immediate' }),
-        }));
-      }
       replicationTimer = setInterval(() => { void replicationAutomation?.tick().catch(() => logger.warn({ event: 'replication_tick_failed' }, 'replication pass failed')); }, 2_000);
       replicationTimer.unref();
     }
@@ -528,6 +561,15 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     } else logger.info({ event: 'backup_scheduler_off' }, 'scheduled backups off: no backup key in the secret store');
   } else if (backupScheduler === 'systemd') logger.info({ event: 'backup_scheduler_external' }, 'scheduled backups owned by systemd timer');
   const dashboard = createDashboard(runtime.store);
+  const analyticsIngestion = config.mode === 'host' ? startAnalyticsIngestion({
+    store: runtime.store,
+    port: async chainId => {
+      const endpoints = signedMintAuthorityEndpoints((await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints);
+      const readers = endpoints.map(endpoint => createPublicClient({ transport: httpTransport(endpoint, { timeout: 5_000, retryCount: 0 }) }));
+      return canonicalAnalyticsPort(chainId, readers);
+    },
+    record: code => logger.warn({ event: 'analytics_ingestion_unavailable', code }, 'shadow analytics ingestion unavailable'),
+  }) : undefined;
   const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics, readModel: dashboard.readModel, dashboard: (url) => dashboard.render(url) });
   await http.start();
   // Outside monitor when no chain scanning runs: a liveness signal every minute ("ok" while the service can read its own database).
@@ -559,11 +601,13 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     dependencyFlags?.stop();
     fireScheduler?.stop();
     if (replicationTimer) clearInterval(replicationTimer);
-    for (const timer of replicationDiscoveryTimers) timer.stop();
+    for (const timer of secondaryDiscoveryTimers) timer.stop();
+    await Promise.all(secondaryReadinessTimers.map(timer => timer.stop()));
     telegramCommands?.stop();
     gasAlertChecker?.stop();
     opsEvidenceReminders?.stop();
     backups?.stop();
+    await analyticsIngestion?.stop();
     await orchestrator.stop();
     await http.stop();
     (runtime.store as CanonicalStoreBridge).close();

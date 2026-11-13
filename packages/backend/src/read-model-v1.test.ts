@@ -180,4 +180,95 @@ describe('Phase 2 read-model projection', () => {
     expect(serializedHealth).not.toContain('/sensitive/store.sqlite');
     expect(readiness.data).toEqual([]);
   });
+  it.each([[1, 'Ethereum'], [8453, 'Base'], [4663, 'Robinhood']] as const)('preserves chain %s in opportunity, event calendar and campaign projections', (chainId, name) => {
+    const state = emptyState();
+    const evidenceId = `evidence-${chainId}`;
+    state.chainEvidence.push(evidence({ id: evidenceId, chainId, executionEnabled: true }));
+    state.campaigns.push(campaign({ id: `campaign-${chainId}`, chainId, chainVerification: { chainId, status: 'verified', seaDropCompatible: true, evidenceId, checkedAt: NOW.toISOString(), sourceBlock: 100n, endpointReference: 'RPC_REFERENCE' } }));
+    state.events.push(
+      { id: 'opportunity', type: 'opportunity_scored', at: NOW.toISOString(), data: { opportunityId: 'opportunity', chainId, contract: CONTRACT, evidenceId, score: 75, expiresAt: '2026-09-18T00:05:00.000Z' } },
+      { id: 'calendar', type: 'calendar_entry', at: NOW.toISOString(), data: { id: 'calendar', chainId, contract: CONTRACT, evidenceId, openingAt: NOW.toISOString(), expiresAt: '2026-09-18T00:05:00.000Z' } },
+    );
+    const service = new Phase2ReadModelService(() => NOW);
+    const opportunity = service.opportunities(state).data?.[0];
+    expect(opportunity?.chain).toMatchObject({ id: chainId.toString(), name });
+    expect(opportunity?.chain.verification.decision).toBe('permitted');
+    const calendar = service.calendar(state).data;
+    expect(calendar).toHaveLength(2);
+    for (const entry of calendar ?? []) {
+      expect(entry.chain).toEqual({ id: chainId.toString(), name });
+      expect(entry.verification.decision).toBe('permitted');
+    }
+  });
+
+  it.each([undefined, null, 'not-a-chain', -1, 10, 1.5])('never treats invalid or unsupported chain %s as Ethereum', (chainId) => {
+    const state = emptyState();
+    state.chainEvidence.push(evidence({ chainId: 1, executionEnabled: true }));
+    state.events.push(
+      { id: 'opportunity', type: 'opportunity_scored', at: NOW.toISOString(), data: { chainId, evidenceId: 'evidence-1' } },
+      { id: 'calendar', type: 'calendar_entry', at: NOW.toISOString(), data: { chainId, evidenceId: 'evidence-1', openingAt: NOW.toISOString() } },
+    );
+    const service = new Phase2ReadModelService(() => NOW);
+    expect(service.opportunities(state).data?.[0]?.chain.name).toBe('Unknown');
+    expect(service.opportunities(state).data?.[0]?.gate.decision).toBe('blocked');
+    expect(service.calendar(state).data?.[0]?.chain.name).toBe('Unknown');
+    expect(service.calendar(state).data?.[0]?.verification.decision).toBe('blocked');
+  });
+
+  it('blocks cross-chain evidence references even when the other chain evidence is accepted', () => {
+    const state = emptyState();
+    state.chainEvidence.push(evidence({ id: 'ethereum-evidence', chainId: 1, executionEnabled: true }));
+    state.events.push(
+      { id: 'opportunity', type: 'opportunity_scored', at: NOW.toISOString(), data: { chainId: 8453, evidenceId: 'ethereum-evidence' } },
+      { id: 'calendar', type: 'calendar_entry', at: NOW.toISOString(), data: { chainId: 8453, evidenceId: 'ethereum-evidence', openingAt: NOW.toISOString() } },
+    );
+    const service = new Phase2ReadModelService(() => NOW);
+    expect(service.opportunities(state).data?.[0]?.gate.blockers[0]?.code).toBe('CHAIN_EVIDENCE_MISMATCH');
+    expect(service.calendar(state).data?.[0]?.verification.blockers[0]?.code).toBe('CHAIN_EVIDENCE_MISMATCH');
+  });
+
+  it.each([1, 8453, 4663] as const)('never projects disabled chain %s as permitted', (chainId) => {
+    const state = emptyState();
+    state.chainEvidence.push(evidence({ chainId, executionEnabled: false }));
+    state.events.push({ id: 'calendar', type: 'calendar_entry', at: NOW.toISOString(), data: { chainId, openingAt: NOW.toISOString() } });
+    const entry = new Phase2ReadModelService(() => NOW).calendar(state).data?.[0];
+    expect(entry?.verification.decision).toBe('blocked');
+  });
+
+});
+
+describe('bounded read-only analytics projection', () => {
+  it('keeps absent sale, basis and floor coverage unknown instead of zero or a recommendation', () => {
+    const state = emptyState();
+    const before = structuredClone(state);
+    const result = new Phase2ReadModelService(() => NOW).analytics(state);
+    expect(result.availability).toBe('partial');
+    expect(result.data).toMatchObject({ mode: 'shadow-only', method: 'FIFO', currency: 'ETH', coverage: { canonicalExecutions: 0, confirmedActivities: 0, acquisitionHistory: 'no_samples', providerCoverageAsserted: false, externalTransfersAndSalesComplete: false }, totals: { recordedCanonicalCostWei: null, realizedPnlWei: null, realizedRoiBps: null, unrealizedPnlWei: null, transactionAndMarketplaceFeesWei: null }, groups: [], shadow: [] });
+    expect(result.issues.map(issue => issue.code)).toContain('ANALYTICS_COVERAGE_LIMITED');
+    expect(state).toEqual(before);
+  });
+
+  it('reports settled canonical costs without inventing sales, limits attribution and keeps raw facts out of the wire response', () => {
+    const state = emptyState();
+    const current = campaign({ id: 'accounting-campaign', chainId: 1 });
+    state.campaigns.push(current);
+    state.runs.push({ id: 'accounting-run', intentId: 'accounting-intent', campaignId: current.id, mode: 'live', requestDigest: 'digest', state: 'Completed', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+    state.intents.push({ id: 'accounting-intent', runId: 'accounting-run', campaignId: current.id, campaignSnapshot: current, wallets: [], policy: current.spendPolicy, feePolicy: current.feePolicy, chainVerification: current.chainVerification, simulationIds: [], evidenceAt: NOW.toISOString(), createdAt: NOW.toISOString() });
+    for (let index = 0; index < 25; index += 1) {
+      const wallet = `0x${index.toString(16).padStart(40, '0')}`;
+      const executionId = `execution-${index}`;
+      const attemptId = `attempt-${index}`;
+      state.attempts.push({ id: attemptId, executionId, runId: 'accounting-run', wallet, hash: `0x${'a'.repeat(64)}`, state: 'Confirmed', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+      state.receipts.push({ id: `receipt-${index}`, executionId, runId: 'accounting-run', transactionAttemptId: attemptId, state: 'Confirmed', actualSpendWei: 16n, observedAt: NOW.toISOString() });
+      state.reservations.push({ id: `reservation-${index}`, runId: 'accounting-run', campaignId: current.id, chainId: 1, wallet, amountWei: 100n, actualAmountWei: 16n, status: 'settled', accountingDate: '2026-09-18', createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+    }
+    const result = new Phase2ReadModelService(() => NOW).analytics(state);
+    expect(result.data?.totals.recordedCanonicalCostWei).toBe('400');
+    expect(result.data?.totals.realizedPnlWei).toBeNull();
+    expect(result.data?.coverage).toMatchObject({ canonicalExecutions: 25, completeCosts: 25, groupsOmitted: 7 });
+    expect(result.data?.groups).toHaveLength(20);
+    expect(result.data?.groups.every(group => group.realizedPnlWei === null)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('a'.repeat(64));
+    expect(result.issues.some(issue => issue.code === 'ANALYTICS_GROUP_LIMIT')).toBe(true);
+  });
 });

@@ -37,7 +37,7 @@ function setup(start = '2026-10-24T10:00:00.000Z') {
     limits: ok('limits'), history: ok('history'), eligible: ok('eligible'), activity: ok('activity'), holdings: ok('holdings'), gasAlerts: ok('gasAlerts'), gasAlertSet: ok('gasAlertSet'), gasAlertRemove: ok('gasAlertRemove'),
     prepare: async (...args: unknown[]) => { calls.push(`prepare(${args.filter((arg) => arg !== undefined).join('|')})`); return 'Campaign recorded: cmp_11111111-1111-1111-1111-111111111111'; }, simulate: ok('simulate'), cancel: ok('cancel'), kill: ok('kill'), revoke: ok('revoke'), release: ok('release'), watchAccept: ok('watchAccept'),
     firePreview: async (campaignId, wallets, gwei) => { calls.push(`firePreview(${campaignId}|${wallets}|${gwei})`); return { text: 'fire preview', wallets: ['0x1111111111111111111111111111111111111111'] }; },
-    fireNow: ok('fireNow'), portfolio: ok('portfolio'),
+    fireNow: ok('fireNow'), portfolio: ok('portfolio'), analytics: ok('analytics'),
     guidedChains: async () => [{ key: 'ethereum', name: 'Ethereum' }, { key: 'robinhood', name: 'Robinhood' }],
     guidedPlan: async (chain, contract, quantity, count) => { calls.push(`guidedPlan(${chain}|${contract}|${quantity ?? ''}|${count ?? ''})`); const ready = ['0x1111111111111111111111111111111111111111', '0x2222222222222222222222222222222222222222', '0x3333333333333333333333333333333333333333'].slice(0, count ?? 3); return { text: 'plan text', ok: true, ready, quantity: quantity ?? 1, maxQuantity: 3 }; },
     guidedPrepare: async (chain, contract, quantity, wallets) => { calls.push(`guidedPrepare(${chain}|${contract}|${quantity}|${wallets.length})`); return { text: 'Campaign recorded: cmp_11111111-1111-1111-1111-111111111111', campaignId: 'cmp_11111111-1111-1111-1111-111111111111' }; },
@@ -213,6 +213,16 @@ describe('viewers (D-063 item 8)', () => {
 });
 
 describe('more owner commands and the Telegram menu (T-066)', () => {
+  it('provides shadow analytics to the owner without a spending session and refuses viewers', async () => {
+    const t = setup();
+    await admitViewer(t);
+    t.calls.length = 0;
+    await t.send(t.message(OWNER, '/analytics'));
+    expect(t.calls).toEqual(['analytics()']);
+    await t.send(t.message(VIEWER, '/analytics'));
+    expect(t.calls).toEqual(['analytics()']);
+    expect(t.lastTo(VIEWER)).toContain('not available');
+  });
   it('the owner can read limits, history, eligibility, activity and holdings, and set or remove a fee alert', async () => {
     const t = setup();
     for (const name of ['limits', 'history', 'eligible', 'activity', 'holdings', 'gasalerts']) await t.send(t.message(OWNER, `/${name}`));

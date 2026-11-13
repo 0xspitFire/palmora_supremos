@@ -36,7 +36,17 @@ export const D033_READINESS_LIMITS: Readonly<ReadinessLimits> = Object.freeze({
   freeMinWallets: 4,
 });
 
-export interface ReadinessOptions { now?: () => Date; limits: ReadinessLimits; alerts?: IntelligenceAlertSink; /** Collection names read from the chain; one reader can be shared with discovery. */ names?: CollectionNames; }
+export interface ReadinessOptions {
+  now?: () => Date;
+  limits: ReadinessLimits;
+  alerts?: IntelligenceAlertSink;
+  /** Advice only: every actual run is checked against current reservations at admission. */
+  freeActivePeriodCapWei?: bigint;
+  freeMaxQuantity?: number;
+  paidAllowed?: boolean;
+  /** Collection names read from the chain; one reader can be shared with discovery. */
+  names?: CollectionNames;
+}
 
 export type WalletReadinessState = 'ready' | 'funded' | 'unfunded' | 'blocked' | 'skipped' | 'unknown';
 export interface WalletReadiness { wallet: string; state: WalletReadinessState; reason: string; balanceWei: string | null; requiredWei: string; topUpWei: string | null; }
@@ -63,6 +73,8 @@ export class ReadinessSweep {
   private readonly names: CollectionNames;
 
   public constructor(private readonly store: BackendStore, private readonly port: IntelligenceChainPort, private readonly wallets: () => Promise<readonly string[]>, private readonly options: ReadinessOptions) {
+    if ((options.freeActivePeriodCapWei !== undefined && (typeof options.freeActivePeriodCapWei !== 'bigint' || options.freeActivePeriodCapWei < 0n))
+      || (options.freeMaxQuantity !== undefined && (!Number.isSafeInteger(options.freeMaxQuantity) || options.freeMaxQuantity < 1 || options.freeMaxQuantity > 15))) throw new Error('READINESS_ADVISORY_LIMIT_INVALID');
     this.now = options.now ?? (() => new Date());
     this.names = options.names ?? new CollectionNames(port);
   }
@@ -79,10 +91,16 @@ export class ReadinessSweep {
     const events: EventRecord[] = [];
     let alertsRaised = 0;
     for (const drop of drops) {
-      const plan = await this.plan(drop, view, wallets[0]);
+      const boundedDrop = this.options.freeMaxQuantity === undefined || drop.priceWei !== 0n ? drop : { ...drop, maxPerWallet: Math.min(drop.maxPerWallet, this.options.freeMaxQuantity) };
+      const plan = await this.plan(boundedDrop, view, wallets[0]);
       const rows: WalletReadiness[] = [];
       for (const wallet of wallets) rows.push(await this.check(wallet, drop, plan, now));
-      if (plan.kind === 'paid') this.limitPaidWallets(rows);
+      if (plan.kind === 'paid') this.limitWallets(rows, this.options.limits.paidMaxWalletsPerMint, 'PAID_WALLET_LIMIT');
+      else if (this.options.freeActivePeriodCapWei !== undefined && plan.requiredWei > 0n) {
+        const capacity = this.options.freeActivePeriodCapWei / plan.requiredWei;
+        const maxWallets = capacity > BigInt(rows.length) ? rows.length : Number(capacity);
+        this.limitWallets(rows, maxWallets, 'FREE_FLEET_LIMIT');
+      }
       const signature = rows.map((row) => `${row.wallet}:${row.state}:${row.reason}`).join('|');
       const last = this.lastEmit.get(this.cacheKey(drop.id)) ?? this.restoreLast(drop.id, view);
       const hot = drop.startMs <= now || drop.startMs - now <= HOT_WINDOW_MS;
@@ -145,6 +163,7 @@ export class ReadinessSweep {
       if (quantityPlan?.reason === 'cannot_fit_one') return { kind: 'free', quantity: 0, requiredWei: limits.freeFeeAllowanceWei, blockReason: 'FEES_TOO_HIGH', quantityPlan };
       return { kind: 'free', quantity: quantityPlan?.planned ?? drop.maxPerWallet, requiredWei: limits.freeFeeAllowanceWei, ...(quantityPlan ? { quantityPlan } : {}) };
     }
+    if (this.options.paidAllowed === false) return { kind: 'paid', quantity: 0, requiredWei: 0n, blockReason: 'PAID_CHAIN_NOT_ENABLED' };
     if (drop.priceWei > limits.paidMaxPricePerNftWei) return { kind: 'paid', quantity: 0, requiredWei: 0n, blockReason: 'PRICE_ABOVE_LIMIT' };
     const score = this.latestScore(drop.contract, view);
     const byScore = paidQuantityForScore(score);
@@ -155,7 +174,7 @@ export class ReadinessSweep {
 
   private async check(wallet: string, drop: CalendarView, plan: Awaited<ReturnType<ReadinessSweep['plan']>>, now: number): Promise<WalletReadiness> {
     const base = { wallet, requiredWei: plan.requiredWei.toString(), topUpWei: null };
-    if (plan.blockReason) return { ...base, state: plan.blockReason === 'NO_MINT_ALLOWANCE' || plan.blockReason === 'PRICE_ABOVE_LIMIT' ? 'blocked' : 'skipped', reason: plan.blockReason, balanceWei: null };
+    if (plan.blockReason) return { ...base, state: plan.blockReason === 'NO_MINT_ALLOWANCE' || plan.blockReason === 'PRICE_ABOVE_LIMIT' || plan.blockReason === 'PAID_CHAIN_NOT_ENABLED' ? 'blocked' : 'skipped', reason: plan.blockReason, balanceWei: null };
     const balance = await this.port.balance(wallet);
     if (balance === null) return { ...base, state: 'unknown', reason: 'BALANCE_UNAVAILABLE', balanceWei: null };
     if (balance < plan.requiredWei) return { ...base, state: 'unfunded', reason: 'NEEDS_TOP_UP', balanceWei: balance.toString(), topUpWei: (plan.requiredWei - balance).toString() };
@@ -166,8 +185,8 @@ export class ReadinessSweep {
     return { ...base, state: 'funded', reason: 'SIMULATION_UNAVAILABLE', balanceWei: balance.toString() };
   }
 
-  /** D-032: at most N wallets per paid mint. The best-funded eligible wallets keep their plan; the rest are skipped. */
-  private limitPaidWallets(rows: WalletReadiness[]): void {
+  /** Keep every advisory row; only the best-funded wallets inside this plan's bound remain eligible. */
+  private limitWallets(rows: WalletReadiness[], maxWallets: number, reason: 'PAID_WALLET_LIMIT' | 'FREE_FLEET_LIMIT'): void {
     const byBalance = (left: WalletReadiness, right: WalletReadiness): number => {
       const a = BigInt(left.balanceWei ?? '0');
       const b = BigInt(right.balanceWei ?? '0');
@@ -175,9 +194,9 @@ export class ReadinessSweep {
     };
     const funded = rows.filter((row) => row.state === 'ready' || row.state === 'funded').sort(byBalance);
     const unfunded = rows.filter((row) => row.state === 'unfunded').sort(byBalance);
-    const keep = new Set([...funded, ...unfunded].slice(0, this.options.limits.paidMaxWalletsPerMint).map((row) => row.wallet));
+    const keep = new Set([...funded, ...unfunded].slice(0, maxWallets).map((row) => row.wallet));
     for (const row of rows) {
-      if ((row.state === 'ready' || row.state === 'funded' || row.state === 'unfunded') && !keep.has(row.wallet)) { row.state = 'skipped'; row.reason = 'PAID_WALLET_LIMIT'; row.topUpWei = null; }
+      if ((row.state === 'ready' || row.state === 'funded' || row.state === 'unfunded') && !keep.has(row.wallet)) { row.state = 'skipped'; row.reason = reason; row.topUpWei = null; }
     }
   }
 
@@ -207,7 +226,7 @@ export class ReadinessSweep {
     if (ready > 0 && this.alertAllowed(now)) {
       const preference = plan.kind === 'free' && ready < this.options.limits.freeMinWallets ? ` You asked for at least ${this.options.limits.freeMinWallets} wallets on free mints.` : '';
       const planText = plan.kind === 'free' ? `free, ${plan.quantity} each${plan.quantityPlan?.reduced ? ` instead of ${plan.quantityPlan.desired} because of network fees` : ''}` : `${plan.quantity} each at ${formatEth(drop.priceWei)} ETH`;
-      const card = eligibleReadyCard({ ...base, ready, total: rows.length, plan: planText, note: `Minting still needs your approval.${preference}` });
+      const card = eligibleReadyCard({ ...base, ready, total: rows.length, plan: planText, note: `${plan.kind === 'paid' ? 'Paid minting requires your final fire approval.' : 'Readiness is advice; automatic free minting still requires a qualifying watched mint and every execution check.'}${preference}` });
       if (await safe(sink, { kind: 'eligible_ready', dedupe: `ready:${drop.id}:${ready}`, priority: soon ? 'immediate' : 'grouped', text: plainAlertText(card), card })) raised += 1;
     }
     return raised;

@@ -29,6 +29,7 @@ import type {
   Campaign,
   EngineAdapter,
   ExecutionResult,
+  NeverStartedWalletEvidence,
   ReceiptRecord,
   ReconciliationUpdate,
   RunRecord,
@@ -238,16 +239,21 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
   const executionIds: string[] = [];
   const attempts: AttemptRecord[] = [];
   const receipts: ReceiptRecord[] = [];
+  const neverStartedWallets: NeverStartedWalletEvidence[] = [];
   let hasPending = false;
   let hasFailed = false;
 
   for (const wallet of result.walletResults) {
     const executionId = wallet.executionId;
     const transactionIntentId = wallet.transactionIntentId;
+    if (!result.dryRun && wallet.notStarted !== undefined) {
+      if (wallet.notStarted !== 'engine-preflight-v1' || wallet.status !== 'skipped' || executionId !== undefined || transactionIntentId !== undefined || wallet.txHash !== undefined || wallet.nonce !== undefined || wallet.reservationId !== undefined || (wallet.attemptIds?.length ?? 0) !== 0 || wallet.submittedAttemptId !== undefined || wallet.blockNumber !== undefined || wallet.blockHash !== undefined || wallet.totalCostWei !== undefined || wallet.totalFeeWei !== undefined || wallet.attemptHashes !== undefined || wallet.attemptReplacements !== undefined || wallet.replacedAttemptIds !== undefined || wallet.lifecycleState !== undefined || wallet.reconciliationState !== undefined || result.jobId !== runId || result.chainId !== campaign.chainId || result.nftContract.toLowerCase() !== campaign.contract.toLowerCase() || !/^0x[0-9a-f]{40}$/i.test(wallet.address) || neverStartedWallets.some((item) => item.wallet.toLowerCase() === wallet.address.toLowerCase())) throw new Error('ENGINE_NOT_STARTED_EVIDENCE_INVALID');
+      neverStartedWallets.push({ runId, wallet: wallet.address, proof: 'engine-preflight-v1' });
+    }
     if (!executionId || !transactionIntentId) {
       if (result.dryRun) continue;
       // A wallet stopped before anything was prepared (for example CAMPAIGN_CHANGED_MID_RUN, D-081) has no execution, attempt or
-      // reservation. It must not make the wallets that WERE sent unmappable. Anything that may have been signed or sent still throws.
+      // engine-side reservation. Canonical admission reservations exist and require explicit notStarted evidence plus a guarded store check to release. It must not make the wallets that WERE sent unmappable. Anything that may have been signed or sent still throws.
       if ((wallet.status === 'skipped' || wallet.status === 'killed') && wallet.txHash === undefined && (wallet.attemptIds?.length ?? 0) === 0 && wallet.reservationId === undefined) { hasFailed = true; continue; }
       throw new Error('ENGINE_IDENTITY_REQUIRED');
     }
@@ -300,6 +306,7 @@ export function mapResult(result: MintJobResult, runId: string, campaign: Campai
     executionIds,
     attempts,
     receipts,
+    ...(neverStartedWallets.length > 0 ? { neverStartedWallets } : {}),
     state: result.dryRun ? 'Prepared' : hasPending ? 'Pending' : hasFailed ? 'Failed' : 'Confirmed',
   };
 }

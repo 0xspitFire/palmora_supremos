@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, PERMANENT_ENABLEMENT_EXPIRY, validRobinhoodEnablement } from '@mint-bot/backend';
+import { SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE, validFreeSignedRehearsalReference, PERMANENT_ENABLEMENT_EXPIRY, validRobinhoodEnablement } from '@mint-bot/backend';
 
 /**
  * Owner command rules for switching Robinhood on (T-032 part B, D-040, D-050, D-051). Pure: it reads nothing and writes nothing.
@@ -27,6 +27,8 @@ export const STEP_MEANING: Readonly<Record<EvidenceStep, string>> = {
 };
 
 export interface EvidenceCheck {
+  /** Ephemeral validator result; never inferred from the old seven-step evidence. */
+  freeSignedRehearsalChecked?: boolean;
   /** Steps that are present, passed and recent. */
   ok: EvidenceStep[];
   /** Plain-language problems, one per step or for the file as a whole. */
@@ -44,7 +46,7 @@ function validEvidenceDate(value: unknown): value is string {
 }
 
 
-export function checkEvidenceFile(text: string, now: Date, paid = false): EvidenceCheck {
+export function checkEvidenceFile(text: string, now: Date, paid = false, includeFreeSigned = false): EvidenceCheck {
   const fileDigest = createHash('sha256').update(text, 'utf8').digest('hex');
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return { ok: [], problems: ['The evidence file is not valid JSON.'] }; }
@@ -52,7 +54,8 @@ export function checkEvidenceFile(text: string, now: Date, paid = false): Eviden
   const record = parsed as Record<string, unknown>;
   const problems: string[] = [];
   const ok: EvidenceStep[] = [];
-  const required: readonly string[] = paid ? [...EVIDENCE_STEPS, ...PAID_EVIDENCE_STEPS] : EVIDENCE_STEPS;
+  const storedSteps: readonly string[] = paid ? [...EVIDENCE_STEPS, ...PAID_EVIDENCE_STEPS] : EVIDENCE_STEPS;
+  const required = [...storedSteps, ...(includeFreeSigned ? ['freeSignedRehearsal'] : [])];
   const extra = Object.keys(record).filter((key) => !required.includes(key));
   if (extra.length > 0) problems.push(`Unknown entries in the evidence file: ${extra.slice(0, 5).join(', ')}.`);
   for (const step of EVIDENCE_STEPS) {
@@ -80,13 +83,24 @@ export function checkEvidenceFile(text: string, now: Date, paid = false): Eviden
     if (ageDays < -1 || ageDays > MAX_EVIDENCE_AGE_DAYS) { problems.push(`${step} must be dated within the last ${MAX_EVIDENCE_AGE_DAYS} days.`); continue; }
     if (typeof item.reference !== 'string' || item.reference.trim().length < 5 || item.reference.length > 300) problems.push(`${step} needs a short reference.`);
   }
-  if (ok.length === EVIDENCE_STEPS.length && problems.length === 0) return { ok, problems, fileDigest, evidence: Object.fromEntries(required.map((step) => [step, true])) as Record<EvidenceStep, true> & Partial<Record<PaidEvidenceStep, true>> };
+  if (includeFreeSigned) {
+    const entry = record.freeSignedRehearsal;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) problems.push('freeSignedRehearsal is missing.');
+    else {
+      const rehearsal = entry as Record<string, unknown>;
+      const ageDays = typeof rehearsal.checkedOn === 'string' ? (now.getTime() - Date.parse(`${rehearsal.checkedOn}T00:00:00.000Z`)) / 86_400_000 : Number.NaN;
+      if (rehearsal.passed !== true) problems.push('freeSignedRehearsal is not marked passed.');
+      if (!validEvidenceDate(rehearsal.checkedOn) || !Number.isFinite(ageDays) || ageDays < -1 || ageDays > MAX_EVIDENCE_AGE_DAYS) problems.push('freeSignedRehearsal needs a valid date within the last 30 days.');
+      if (!validFreeSignedRehearsalReference(rehearsal.reference)) problems.push('freeSignedRehearsal needs a safe artifact reference, not credentials or an endpoint URL.');
+    }
+  }
+  if (ok.length === EVIDENCE_STEPS.length && problems.length === 0) return { ok, problems, fileDigest, ...(includeFreeSigned ? { freeSignedRehearsalChecked: true } : {}), evidence: Object.fromEntries(storedSteps.map((step) => [step, true])) as Record<EvidenceStep, true> & Partial<Record<PaidEvidenceStep, true>> };
   return { ok, problems, fileDigest };
 }
 
 /** The phrase names the evidence file (first 8 characters of its digest) and that the enablement is permanent until revoked (D-062). */
-export function enablePhrase(fileDigest: string, paid = false, includeFreeAllowlist = false): string {
-  return `ENABLE-ROBINHOOD-${paid ? 'PAID' : 'FREE'} PERMANENT ${fileDigest.slice(0, 8)}${includeFreeAllowlist ? ' CHAIN-4663 PUBLIC+FREE-ALLOWLIST-V1' : ''}`;
+export function enablePhrase(fileDigest: string, paid = false, includeFreeAllowlist = false, includeFreeSigned = false): string {
+  return `ENABLE-ROBINHOOD-${paid ? 'PAID' : 'FREE'} PERMANENT ${fileDigest.slice(0, 8)}${includeFreeSigned ? ' CHAIN-4663 PUBLIC+FREE-ALLOWLIST+FREE-SIGNED-V1' : includeFreeAllowlist ? ' CHAIN-4663 PUBLIC+FREE-ALLOWLIST-V1' : ''}`;
 }
 
 /** The phrase that revokes the current enablement; it names that record, so a copied phrase cannot revoke a later one. */
@@ -104,15 +118,16 @@ export interface EnableFacts {
   ethereumLiveMintProven: boolean;
   confirm: string | undefined;
   paid: boolean;
-  includeFreeAllowlist?: boolean;
+  includeFreeAllowlist?: boolean; includeFreeSigned?: boolean;
 }
 
 /** Throws a plain error unless every condition holds. Nothing is written before this returns. */
 export function assertEnableAllowed(facts: EnableFacts): { phrase: string; digest: string; evidence: Record<EvidenceStep, true> & Partial<Record<PaidEvidenceStep, true>> } {
   if (!facts.ethereumLiveMintProven) throw new Error('ETHEREUM_LIVE_MINT_REQUIRED: one live Ethereum mint must have worked and been confirmed before Robinhood can be switched on');
   const { evidence, fileDigest } = facts.evidence;
+  if (facts.includeFreeSigned && facts.evidence.freeSignedRehearsalChecked !== true) throw new Error('FREE_SIGNED_REHEARSAL_REQUIRED');
   if (!evidence || !fileDigest || facts.evidence.problems.length > 0) throw new Error(`EVIDENCE_INCOMPLETE: ${facts.evidence.problems.join(' ') || 'the evidence file is not usable'}`);
-  const phrase = enablePhrase(fileDigest, facts.paid, facts.includeFreeAllowlist);
+  const phrase = enablePhrase(fileDigest, facts.paid, facts.includeFreeAllowlist, facts.includeFreeSigned);
   if (typeof facts.confirm !== 'string' || facts.confirm !== phrase) throw new Error('CONFIRMATION_PHRASE_MISMATCH: run robinhood-enable status and copy the phrase it prints exactly');
   return { phrase, digest: confirmationDigest(phrase, fileDigest), evidence };
 }
@@ -129,7 +144,7 @@ export interface EnableStore {
  * The whole `robinhood-enable` command after the evidence file has been read. `status` only reads. `record` writes exactly once,
  * and only after `assertEnableAllowed` has returned. Returns what the command prints.
  */
-export function runRobinhoodEnable(input: { action: 'status' | 'record' | 'revoke'; evidenceText?: string; evidenceFile?: string; paid?: boolean; includeFreeAllowlist?: boolean; currentStrategyVersion?: string; confirm: string | undefined; now: Date; store: EnableStore; newId: () => string }): Record<string, unknown> {
+export function runRobinhoodEnable(input: { action: 'status' | 'record' | 'revoke'; evidenceText?: string; evidenceFile?: string; paid?: boolean; includeFreeAllowlist?: boolean; includeFreeSigned?: boolean; currentStrategyVersion?: string; confirm: string | undefined; now: Date; store: EnableStore; newId: () => string }): Record<string, unknown> {
   const { store, now } = input;
   const current = validRobinhoodEnablement(store.robinhoodEnablement(), now);
   if (input.action === 'revoke') {
@@ -141,15 +156,15 @@ export function runRobinhoodEnable(input: { action: 'status' | 'record' | 'revok
   }
   if (input.evidenceText === undefined || input.evidenceFile === undefined) throw new Error('EVIDENCE_FILE_REQUIRED: pass --evidence-file');
   const paid = input.paid === true;
-  const evidence = checkEvidenceFile(input.evidenceText, now, paid);
+  const evidence = checkEvidenceFile(input.evidenceText, now, paid, input.includeFreeSigned);
   const proven = store.ethereumLiveMintProven();
   const enabledNow = current ? { since: current.approvedAt, until: current.expiresAt === PERMANENT_ENABLEMENT_EXPIRY ? 'you revoke it' : current.expiresAt, paidAllowed: current.paidAllowed } : null;
   if (input.action === 'status') {
     const ready = proven && evidence.problems.length === 0 && evidence.fileDigest !== undefined;
     return {
       state: ready ? 'ReadyToRecord' : 'NotReady',
-      strategyScope: input.includeFreeAllowlist ? 'public and free allowlist v1' : 'public only',
-      installedStrategyVersion: current ? input.currentStrategyVersion ?? null : null, requestedStrategyVersion: input.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : 'seadrop-v1-public@1',
+      strategyScope: input.includeFreeSigned ? 'public, free allowlist and free signed v1' : input.includeFreeAllowlist ? 'public and free allowlist v1' : 'public only',
+      installedStrategyVersion: current ? input.currentStrategyVersion ?? null : null, requestedStrategyVersion: input.includeFreeSigned ? SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE : input.includeFreeAllowlist ? SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE : 'seadrop-v1-public@1',
       message: ready ? `Everything checks out. Recording switches Robinhood ${paid ? 'paid and free' : 'free'} execution on until you revoke it (D-062).` : 'Not ready yet. Fix the items below.',
       ethereumLiveMintConfirmed: proven,
       steps: [
@@ -158,11 +173,11 @@ export function runRobinhoodEnable(input: { action: 'status' | 'record' | 'revok
       ],
       problems: [...(proven ? [] : ['No confirmed live Ethereum mint yet (D-040 item 6).']), ...evidence.problems],
       enabledNow,
-      ...(ready && evidence.fileDigest ? { copyThisToRecord: `robinhood-enable record --evidence-file ${input.evidenceFile}${paid ? ' --paid' : ''}${input.includeFreeAllowlist ? ' --include-free-allowlist' : ''} --confirm "${enablePhrase(evidence.fileDigest, paid, input.includeFreeAllowlist)}"` } : {}),
+      ...(ready && evidence.fileDigest ? { copyThisToRecord: `robinhood-enable record --evidence-file ${input.evidenceFile}${paid ? ' --paid' : ''}${input.includeFreeSigned ? ' --include-free-signed' : input.includeFreeAllowlist ? ' --include-free-allowlist' : ''} --confirm "${enablePhrase(evidence.fileDigest, paid, input.includeFreeAllowlist, input.includeFreeSigned)}"` } : {}),
       ...(current ? { toRevoke: 'robinhood-enable revoke (prints the phrase to type)' } : {}),
     };
   }
-  const allowed = assertEnableAllowed({ evidence, ethereumLiveMintProven: proven, confirm: input.confirm, paid, includeFreeAllowlist: input.includeFreeAllowlist });
-  store.enableRobinhood({ id: input.newId(), approvedAt: now.toISOString(), expiresAt: PERMANENT_ENABLEMENT_EXPIRY, evidence: allowed.evidence, paidAllowed: paid, confirmationDigest: allowed.digest, ...(input.includeFreeAllowlist ? { strategyVersion: SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE } : {}) });
+  const allowed = assertEnableAllowed({ evidence, ethereumLiveMintProven: proven, confirm: input.confirm, paid, includeFreeAllowlist: input.includeFreeAllowlist, includeFreeSigned: input.includeFreeSigned });
+  store.enableRobinhood({ id: input.newId(), approvedAt: now.toISOString(), expiresAt: PERMANENT_ENABLEMENT_EXPIRY, evidence: allowed.evidence, paidAllowed: paid, confirmationDigest: allowed.digest, ...(input.includeFreeSigned ? { strategyVersion: SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE } : input.includeFreeAllowlist ? { strategyVersion: SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE } : {}) });
   return { state: 'Enabled', message: `Robinhood ${paid ? 'paid and free' : 'free'} execution is on until you revoke it (robinhood-enable revoke).${paid ? '' : ' Paid mints stay blocked.'} The kill switch still stops everything at once.`, paidAllowed: paid };
 }

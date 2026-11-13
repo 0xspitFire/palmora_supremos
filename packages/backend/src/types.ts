@@ -102,6 +102,7 @@ export interface BackendState { schemaVersion: 1; campaigns: Campaign[]; runs: R
 export interface ValidatedCampaign { campaign: Campaign; simulationIds?: readonly string[]; wallets?: readonly string[]; evidenceAt: string; }
 export interface StoreCapabilities { durable: boolean; atomicAcrossProcesses: boolean; }
 export interface EngineAdapter { prepare(intent: { runId: string; intentId: string; campaign: Campaign; wallets: readonly string[] }): Promise<ExecutionResult>; execute(intent: { runId: string; intentId: string; campaign: Campaign; wallets: readonly string[]; reservationIds: string[] }): Promise<ExecutionResult>; reconcile(run: RunRecord): Promise<ReconciliationUpdate>; }
-export interface ExecutionResult { executionIds: string[]; attempts: AttemptRecord[]; receipts: ReceiptRecord[]; state: ExecutionState; }
+export interface NeverStartedWalletEvidence { readonly runId: string; readonly wallet: string; readonly proof: 'engine-preflight-v1'; }
+export interface ExecutionResult { executionIds: string[]; attempts: AttemptRecord[]; receipts: ReceiptRecord[]; state: ExecutionState; readonly neverStartedWallets?: readonly NeverStartedWalletEvidence[]; }
 export interface ReconciliationUpdate { result: ReconciliationResult; attempts: AttemptRecord[]; receipts: ReceiptRecord[]; reason?: string; }
 export type ReconciliationResult = 'confirmed' | 'failed' | 'unknown' | 'reorged' | 'soft' | 'posted' | 'final';

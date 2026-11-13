@@ -21,6 +21,7 @@ export class Phase2ReadOnlyApi {
     const cursor = this.numberParam(parsed.searchParams.get('cursor'), 0);
     const limit = this.numberParam(parsed.searchParams.get('limit'), 1);
     const projection = { requestId, ...(cursor === undefined ? {} : { cursor }), ...(limit === undefined ? {} : { limit }) };
+    if (path === '/api/v1/read-model/analytics') return this.ok(this.readModels.analytics(state, projection));
     if (path === '/api/v1/read-model/home') return this.ok(this.readModels.home(state, projection));
     if (path === '/api/v1/read-model/health') return this.ok(this.readModels.health(state, projection));
     if (path === '/api/v1/read-model/alerts') return this.ok(this.readModels.alerts(state, projection));

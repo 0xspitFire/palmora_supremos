@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { fixture, close, ETHEREUM, NOW } from './canonical-fixtures.js';
 import { DurableStore } from './store.js';
-import { EvidenceService } from './evidence.js';
+import { EvidenceService, SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE, validFreeSignedRehearsalReference } from './evidence.js';
 import { PERMANENT_ENABLEMENT_EXPIRY } from './robinhood-enablement.js';
 import { acceptEthereumChainEvidence, buildEthereumChainEvidence, ethereumChainEvidencePhrase, ethereumChainEvidenceRevokePhrase, revokeEthereumChainEvidence } from './personal-live-readiness.js';
 
@@ -70,4 +70,32 @@ it('requires a distinct owner phrase to add free allowlist baseline scope and le
   await acceptEthereumChainEvidence(store, scoped, ethereumChainEvidencePhrase('permanent', true), () => new Date(NOW));
   expect(store.snapshot().chainEvidence.find(item => item.id === legacy.id)?.strategyVersion).toBe('seadrop-v1-public-1');
   expect(store.snapshot().chainEvidence.find(item => item.id === scoped.id)?.strategyVersion).toBe('seadrop-v1-baseline-public-free-allowlist@1');
+});
+
+
+describe('explicit owner review of the free signed Ethereum baseline', () => {
+  const reference = 'artifacts/ethereum-free-signed-replay-2026-11-07.json';
+  const signedBuild = () => buildEthereumChainEvidence({ now: new Date(NOW), sourceBlock: 123n, sourceBlockHash: 'anchor', strategy: 'seadrop-v1-public', includeFreeSigned: true, freeSignedRehearsalReference: reference });
+
+  it('requires a distinct scope, exact phrase and explicit rehearsal reference before accepting', async () => {
+    const store = new DurableStore();
+    const legacy = build();
+    await acceptEthereumChainEvidence(store, legacy, ethereumChainEvidencePhrase(), () => new Date(NOW));
+    const signed = signedBuild();
+    expect(signed.strategyVersion).toBe(SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE);
+    const phrase = ethereumChainEvidencePhrase('permanent', false, true);
+    expect(phrase).toContain('CHAIN-1 PUBLIC+FREE-ALLOWLIST+FREE-SIGNED-V1');
+    await expect(acceptEthereumChainEvidence(store, signed, phrase, () => new Date(NOW))).rejects.toThrow('FREE_SIGNED_REHEARSAL_REFERENCE_REQUIRED');
+    await expect(acceptEthereumChainEvidence(store, signed, ethereumChainEvidencePhrase('permanent', true), () => new Date(NOW), reference)).rejects.toThrow('ETHEREUM_CHAIN_APPROVAL_SCOPE_INVALID');
+    expect(store.snapshot().chainEvidence.find(item => item.id === legacy.id)?.executionEnabled).toBe(true);
+    await acceptEthereumChainEvidence(store, signed, phrase, () => new Date(NOW), reference);
+    expect(store.snapshot().chainEvidence.find(item => item.id === legacy.id)?.executionEnabled).toBe(false);
+    expect(store.snapshot().chainEvidence.find(item => item.id === signed.id)).toMatchObject({ executionEnabled: true, strategyVersion: SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE });
+    expect(store.snapshot().events.find(event => event.type === 'chain_signed_rehearsal_review')?.data).toMatchObject({ chainId: 1, evidenceId: signed.id, reference });
+  });
+
+  it.each([undefined, '', 'https://rpc.example/private', 'credentials.env', 'private-key-file', 'bad\nreference'])('rejects unsafe or absent signed rehearsal reference %s', reference => {
+    expect(validFreeSignedRehearsalReference(reference)).toBe(false);
+    expect(() => buildEthereumChainEvidence({ now: new Date(NOW), sourceBlock: 123n, sourceBlockHash: 'anchor', strategy: 'seadrop-v1-public', includeFreeSigned: true, freeSignedRehearsalReference: reference })).toThrow('FREE_SIGNED_REHEARSAL_REFERENCE_REQUIRED');
+  });
 });

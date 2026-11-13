@@ -74,7 +74,7 @@ export interface ReplicationChecklist {
 export interface ReplicationPlan {
   readonly version: 'replication-plan-v1';
   readonly verdict: 'replicable' | 'not_replicable';
-  readonly strategy: 'seadrop-v1-public' | 'seadrop-v1-allowlist';
+  readonly strategy: 'seadrop-v1-public' | 'seadrop-v1-allowlist' | 'seadrop-v1-signed';
   readonly source: ReplicationSource;
   readonly observed: {
     readonly nftContract?: Address;

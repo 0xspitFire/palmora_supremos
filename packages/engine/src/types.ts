@@ -233,7 +233,7 @@ export interface TransactionIntent {
    * checked against the encoded calldata before a provider signing request;
    * they are deliberately not part of the provider policy family itself.
    */
-  readonly familyContext?: { readonly nftContract: Address; readonly feeRecipient: Address; readonly allowlistProof?: import('./allowlist-authority.js').VerifiedWalletProof; readonly assertReady?: () => void | Promise<void> };
+  readonly familyContext?: { readonly nftContract: Address; readonly feeRecipient: Address; readonly allowlistProof?: import('./allowlist-authority.js').VerifiedWalletProof; readonly signedAuthorization?: import('./signed-mint-authority.js').VerifiedSignedWalletAuthorization; readonly assertReady?: () => void | Promise<void> };
 }
 
 export interface SpendReservation {
@@ -497,6 +497,8 @@ export interface WalletMintResult {
   readonly walletIndex: number;
   readonly address: Address;
   readonly status: 'success' | 'prepared' | 'failed' | 'timeout' | 'skipped' | 'killed';
+  /** Positive engine evidence: this wallet stopped in preprocessing before nonce, intent, signing or broadcast. */
+  readonly notStarted?: 'engine-preflight-v1';
   readonly txHash?: Hash;
   readonly nonce?: number;
   readonly blockNumber?: bigint;

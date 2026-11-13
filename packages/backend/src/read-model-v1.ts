@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { buildCanonicalAnalyticsReport } from './analytics.js';
+import { readCanonicalAnalyticsActivities } from './canonical-analytics-ingestion.js';
 import { assessLiveRuntimeProbe, liveReadinessHealth, requiresLiveRuntimeProbe, serviceHealthBlockingReasons, type LiveReadinessHealth } from './health.js';
 import { formatEth } from './intelligence/scoring.js';
 import type {
@@ -368,6 +370,50 @@ export interface HomeReadModel {
   readonly system: SystemHealthReadModel;
 }
 
+export interface AnalyticsReadModel {
+  readonly mode: 'shadow-only';
+  readonly method: 'FIFO';
+  readonly currency: 'ETH';
+  readonly coverage: {
+    readonly scope: 'canonical-finalized-mints-only';
+    readonly canonicalExecutions: number;
+    readonly completeCosts: number;
+    readonly incompleteCosts: number;
+    readonly confirmedActivities: number;
+    readonly pendingExcluded: number;
+    readonly reorgedExcluded: number;
+    readonly unavailableObservations: number;
+    readonly acquisitionHistory: 'partial' | 'provided-input-only' | 'no_samples';
+    readonly externalTransfersAndSalesComplete: false;
+    readonly providerCoverageAsserted: false;
+    readonly groupsOmitted: number;
+  };
+  readonly totals: {
+    readonly recordedCanonicalCostWei: string | null;
+    readonly realizedPnlWei: string | null;
+    readonly realizedRoiBps: string | null;
+    readonly unrealizedPnlWei: string | null;
+    readonly transactionAndMarketplaceFeesWei: string | null;
+  };
+  readonly groups: readonly {
+    readonly dimension: 'wallet' | 'campaign' | 'signal_source' | 'mint_type';
+    readonly key: string;
+    readonly executions: number;
+    readonly dispositions: number;
+    readonly recordedCostWei: string | null;
+    readonly realizedPnlWei: string | null;
+    readonly unknownBasisQuantity: string;
+  }[];
+  readonly shadow: readonly {
+    readonly policyId: string;
+    readonly selected: number;
+    readonly measured: number;
+    readonly unknownOutcomes: number;
+    readonly knownRealizedPnlWei: string | null;
+    readonly winRateBps: number | null;
+  }[];
+}
+
 export interface ProjectionRequest {
   readonly requestId?: string;
   readonly snapshotId?: string;
@@ -465,6 +511,59 @@ export class Phase2ReadModelService {
     return this.envelope(context, result.data, result.issues, result.data.freshness);
   }
 
+  /** Bounded accounting projection; historical records never become execution authority. */
+  public analytics(state: BackendState, request: ProjectionRequest = {}): ReadModelEnvelope<AnalyticsReadModel> {
+    const context = this.context(state, request);
+    const ingested = readCanonicalAnalyticsActivities(state.events);
+    const report = buildCanonicalAnalyticsReport(state, { activities: ingested.activities, now: context.now });
+    type Group = AnalyticsReadModel['groups'][number];
+    const groups = new Map<string, Group>();
+    const keyAllowed = (value: string): boolean => /^[A-Za-z0-9_:.-]{1,200}$/.test(value) && safeReadModelText(value) === value;
+    for (const [dimension, rows] of [
+      ['wallet', report.canonical.performance.wallets],
+      ['campaign', report.canonical.performance.campaigns],
+      ['signal_source', report.canonical.performance.signalSources],
+    ] as const) for (const row of rows) {
+      if (!keyAllowed(row.key)) continue;
+      groups.set(`${dimension}:${row.key}`, { dimension, key: row.key, executions: row.executions, dispositions: 0, recordedCostWei: row.executions > row.unknownCosts ? row.totalCostWei : null, realizedPnlWei: null, unknownBasisQuantity: '0' });
+    }
+    for (const [dimension, rows] of [
+      ['wallet', report.attribution.wallets],
+      ['campaign', report.attribution.campaigns],
+      ['signal_source', report.attribution.signalSources],
+      ['mint_type', report.attribution.mintTypes],
+    ] as const) for (const row of rows) {
+      if (!keyAllowed(row.key)) continue;
+      const identity = `${dimension}:${row.key}`;
+      const prior = groups.get(identity);
+      groups.set(identity, { dimension, key: row.key, executions: prior?.executions ?? 0, dispositions: row.dispositions, recordedCostWei: prior?.recordedCostWei ?? null, realizedPnlWei: row.unknownBasisQuantity === '0' ? row.knownPnlWei : null, unknownBasisQuantity: row.unknownBasisQuantity });
+    }
+    const summary: AnalyticsReadModel = {
+      mode: 'shadow-only', method: 'FIFO', currency: 'ETH',
+      coverage: {
+        scope: 'canonical-finalized-mints-only', canonicalExecutions: report.canonical.executionsSeen,
+        completeCosts: report.canonical.completeCosts, incompleteCosts: report.canonical.incompleteCosts,
+        confirmedActivities: report.coverage.confirmedActivities, pendingExcluded: report.coverage.pendingExcluded,
+        reorgedExcluded: report.coverage.reorgedExcluded, unavailableObservations: ingested.coverage.unavailable,
+        acquisitionHistory: report.coverage.acquisitionCoverage as AnalyticsReadModel['coverage']['acquisitionHistory'],
+        externalTransfersAndSalesComplete: false, providerCoverageAsserted: false, groupsOmitted: Math.max(0, groups.size - 20),
+      },
+      totals: {
+        recordedCanonicalCostWei: report.canonical.completeCosts > 0 ? report.canonical.recordedTotalCostWei : null,
+        realizedPnlWei: report.totals.realizedPnlWei, realizedRoiBps: report.totals.realizedRoiBps,
+        unrealizedPnlWei: report.totals.unrealizedPnlWei,
+        transactionAndMarketplaceFeesWei: report.coverage.confirmedActivities > 0 ? report.totals.transactionAndMarketplaceFeesWei : null,
+      },
+      groups: [...groups.values()].slice(0, 20),
+      shadow: report.replay.slice(0, 20).filter(row => keyAllowed(row.policyId)).map(row => ({ policyId: row.policyId, selected: row.selected, measured: row.measured, unknownOutcomes: row.unknownOutcomes, knownRealizedPnlWei: row.measured > 0 ? row.knownRealizedPnlWei : null, winRateBps: row.winRateBps })),
+    };
+    const issues = [issue('ANALYTICS_COVERAGE_LIMITED', 'Accounting covers supplied confirmed records only. Complete external sale and transfer history is not asserted; unknown proceeds, cost basis and floor estimates remain unknown.', 'warning', 'Inspect'), issue('ANALYTICS_SHADOW_ONLY', 'Historical analytics does not change live scores, limits, policies or execution authority.', 'info', 'Inspect')];
+    if (report.issues.length > 0 || report.canonical.incompleteCosts > 0 || ingested.coverage.unavailable > 0) issues.push(issue('ANALYTICS_INPUT_INCOMPLETE', 'Some records have incomplete or excluded accounting facts. Inspect retained evidence before interpreting results.', 'warning', 'Inspect'));
+    if (summary.coverage.groupsOmitted > 0) issues.push(issue('ANALYTICS_GROUP_LIMIT', 'This summary displays at most twenty attribution groups.', 'info', 'Inspect'));
+    const freshness = classifyFreshness(context.generatedAt, new Date(context.now.getTime() + 10 * 60_000).toISOString(), context.now, context.freshnessPolicyVersion);
+    return this.envelope(context, summary, issues, freshness);
+  }
+
   private context(state: BackendState, request: ProjectionRequest): ProjectionContext {
     const now = this.now();
     if (Number.isNaN(now.getTime())) throw new Error('INVALID_READ_MODEL_TIME');
@@ -503,7 +602,7 @@ export class Phase2ReadModelService {
   }
 
   private opportunityFromEvent(context: ProjectionContext, event: EventRecord): OpportunityReadModel {
-    const chainId = integerValue(event.data.chainId) === 4663 ? 4663 : 1;
+    const chainId = integerValue(event.data.chainId);
     const contract = addressValue(event.data.contract);
     const observedAt = validIso(event.at) ?? context.generatedAt;
     const provenance = [storeProvenance(`event:${event.id}`, observedAt)];
@@ -533,7 +632,7 @@ export class Phase2ReadModelService {
     return {
       id: stringValue(event.data.opportunityId) ?? event.id,
       project: { name: stringValue(event.data.projectName) ?? null, contract },
-      chain: { id: chainId.toString(), name: chainId === 4663 ? 'Robinhood' : 'Ethereum', verification: chainGate },
+      chain: { id: chainId?.toString() ?? 'unknown', name: chainName(chainId), verification: chainGate },
       disposition,
       openingAt: validIso(stringValue(event.data.openingAt)),
       price: event.data.priceWei === undefined ? null : sourcedAmount(bigintValue(event.data.priceWei), 'estimated', scoreFreshness, provenance),
@@ -572,7 +671,7 @@ export class Phase2ReadModelService {
     return {
       id: campaign.id,
       project: { name: null, contract: campaign.contract },
-      chain: { id: campaign.chainId.toString(), name: campaign.chainId === 4663 ? 'Robinhood' : 'Ethereum' },
+      chain: { id: campaign.chainId.toString(), name: chainName(campaign.chainId) },
       openingAt: null,
       closingAt: null,
       phase: null,
@@ -592,7 +691,7 @@ export class Phase2ReadModelService {
   }
 
   private calendarFromEvent(context: ProjectionContext, event: EventRecord): CalendarEntry {
-    const chainId = integerValue(event.data.chainId) === 4663 ? 4663 : 1;
+    const chainId = integerValue(event.data.chainId);
     const observedAt = validIso(event.at) ?? context.generatedAt;
     const provenance = [storeProvenance(`calendar:${event.id}`, observedAt)];
     const freshness = classifyFreshness(observedAt, stringValue(event.data.expiresAt), context.now, context.freshnessPolicyVersion);
@@ -602,7 +701,7 @@ export class Phase2ReadModelService {
     return {
       id: entryId,
       project: { name: stringValue(event.data.projectName) ?? null, contract: addressValue(event.data.contract) },
-      chain: { id: chainId.toString(), name: chainId === 4663 ? 'Robinhood' : 'Ethereum' },
+      chain: { id: chainId?.toString() ?? 'unknown', name: chainName(chainId) },
       openingAt: validIso(stringValue(event.data.openingAt)),
       closingAt: validIso(stringValue(event.data.closingAt)),
       phase: stringValue(event.data.phase) ?? null,
@@ -702,15 +801,24 @@ export class Phase2ReadModelService {
     const verification = campaign.chainVerification;
     const freshness = evidence ? evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion) : UNKNOWN_FRESHNESS;
     const provenance = evidence ? evidenceProvenance(evidence) : undefined;
-    if (campaign.chainId === 4663) return gateCheck('chain_verified', 'fail', true, 'Robinhood execution remains blocked; characterization is inspection evidence only.', verification.checkedAt ?? null, evidence?.expiresAt ?? null, provenance, freshness);
+    if (verification.chainId !== campaign.chainId || (evidence && (evidence.status !== 'accepted' || !evidence.executionEnabled || !evidence.seaDropCompatible))) return gateCheck('chain_verified', 'fail', true, 'Chain execution is not enabled by matching accepted evidence.', verification.checkedAt ?? null, evidence?.expiresAt ?? null, provenance, freshness);
     if (verification.status !== 'verified') return gateCheck('chain_verified', 'fail', true, 'Chain verification is not accepted for this campaign.', verification.checkedAt ?? null, evidence?.expiresAt ?? null, provenance, freshness);
     if (freshness.status === 'stale') return gateCheck('chain_verified', 'stale', true, 'Chain verification evidence is stale.', verification.checkedAt ?? null, evidence?.expiresAt ?? null, provenance, freshness);
     if (freshness.status === 'unknown') return gateCheck('chain_verified', 'unknown', true, 'Chain verification freshness is unknown.', verification.checkedAt ?? null, evidence?.expiresAt ?? null, provenance, freshness);
     return gateCheck('chain_verified', 'pass', true, 'Chain verification is current.', verification.checkedAt ?? null, evidence?.expiresAt ?? null, provenance, freshness);
   }
 
-  private chainGate(context: ProjectionContext, chainId: 1 | 8453 | 4663, evidenceId?: string): GateSummary {
-    const evidence = context.state.chainEvidence.find(item => item.id === evidenceId) ?? context.state.chainEvidence.filter(item => item.chainId === chainId).sort((left, right) => right.checkedAt.localeCompare(left.checkedAt))[0];
+  private chainGate(context: ProjectionContext, chainId: number | null, evidenceId?: string): GateSummary {
+    if (chainId !== 1 && chainId !== 8453 && chainId !== 4663) {
+      const blocker = issue('CHAIN_UNSUPPORTED', 'The observation does not identify a supported chain.', 'blocking', 'No safe action');
+      return { decision: 'blocked', checks: [gateCheck('chain_verified', 'fail', true, blocker.message, null, null, undefined, UNKNOWN_FRESHNESS)], blockers: [blocker], nextAction: 'No safe action' };
+    }
+    const namedEvidence = context.state.chainEvidence.find(item => item.id === evidenceId);
+    if (namedEvidence && namedEvidence.chainId !== chainId) {
+      const blocker = issue('CHAIN_EVIDENCE_MISMATCH', 'The observation references verification evidence for a different chain.', 'blocking', 'No safe action');
+      return { decision: 'blocked', checks: [gateCheck('chain_verified', 'fail', true, blocker.message, null, null, undefined, UNKNOWN_FRESHNESS)], blockers: [blocker], nextAction: 'No safe action' };
+    }
+    const evidence = namedEvidence ?? context.state.chainEvidence.filter(item => item.chainId === chainId).sort((left, right) => right.checkedAt.localeCompare(left.checkedAt))[0];
     const verification = evidence ? this.chainEvidenceCheck(context, chainId, evidence) : gateCheck('chain_verified', 'unknown', true, 'No chain verification evidence is available.', null, null, undefined, UNKNOWN_FRESHNESS);
     const evidenceCurrent = evidence ? gateCheck('evidence_current', evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion).status === 'fresh' ? 'pass' : evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion).status === 'stale' ? 'stale' : 'unknown', true, evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion).status === 'fresh' ? 'Evidence is within its freshness window.' : 'Evidence freshness is not current.', evidence.checkedAt, evidence.expiresAt, evidenceProvenance(evidence), evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion)) : gateCheck('evidence_current', 'unknown', true, 'No chain evidence freshness is available.', null, null, undefined, UNKNOWN_FRESHNESS);
     const checks = [verification, evidenceCurrent];
@@ -722,7 +830,8 @@ export class Phase2ReadModelService {
   private chainEvidenceCheck(context: ProjectionContext, chainId: 1 | 8453 | 4663, evidence: BackendState['chainEvidence'][number]): GateCheck {
     const freshness = evidenceFreshness(evidence, context.now, context.freshnessPolicyVersion);
     const provenance = evidenceProvenance(evidence);
-    if (chainId === 4663) return gateCheck('chain_verified', 'fail', true, 'Robinhood is characterized but execution remains blocked.', evidence.checkedAt, evidence.expiresAt, provenance, freshness);
+    if (evidence.chainId !== chainId) return gateCheck('chain_verified', 'fail', true, 'Chain verification evidence belongs to a different chain.', evidence.checkedAt, evidence.expiresAt, provenance, freshness);
+    if (!evidence.executionEnabled) return gateCheck('chain_verified', 'fail', true, 'Chain execution is not enabled by its accepted evidence.', evidence.checkedAt, evidence.expiresAt, provenance, freshness);
     if (evidence.status !== 'accepted' || !evidence.seaDropCompatible) return gateCheck('chain_verified', 'fail', true, 'Chain evidence is not accepted or SeaDrop compatibility is unknown.', evidence.checkedAt, evidence.expiresAt, provenance, freshness);
     if (freshness.status === 'stale') return gateCheck('chain_verified', 'stale', true, 'Chain evidence is stale.', evidence.checkedAt, evidence.expiresAt, provenance, freshness);
     if (freshness.status === 'unknown') return gateCheck('chain_verified', 'unknown', true, 'Chain evidence freshness is unknown.', evidence.checkedAt, evidence.expiresAt, provenance, freshness);
@@ -730,7 +839,7 @@ export class Phase2ReadModelService {
   }
 
   private chainEvidence(state: BackendState, campaign: Campaign): BackendState['chainEvidence'][number] | undefined {
-    return state.chainEvidence.find(item => item.id === campaign.chainVerification.evidenceId) ?? state.chainEvidence.filter(item => item.chainId === campaign.chainId).sort((left, right) => right.checkedAt.localeCompare(left.checkedAt))[0];
+    return state.chainEvidence.find(item => item.id === campaign.chainVerification.evidenceId && item.chainId === campaign.chainId) ?? state.chainEvidence.filter(item => item.chainId === campaign.chainId).sort((left, right) => right.checkedAt.localeCompare(left.checkedAt))[0];
   }
 
   /** Wallet rows from the latest Phase 2 readiness sweep for a calendar entry, or null when none exists. */
@@ -1043,3 +1152,5 @@ function trialMessage(code: string): string {
   return `Live minting is off during the read-only trial: ${safeHealthMessage(code).replace(/\.$/, '')}.`;
 }
 function safeHealthMessage(code: string): string { const messages: Record<string, string> = { RECONCILIATION_REQUIRED: 'Reconcile in-flight chain observations before admitting new work.', DURABLE_STORE_REQUIRED: 'A durable store is required.', ATOMIC_STORE_REQUIRED: 'Cross-process atomic storage is required.', CHAIN_NOT_READY: 'Chain observation is not ready.', ENGINE_NOT_READY: 'Engine dependency is not ready.', BACKUP_NOT_READY: 'Backup verification is not ready.', NOTIFICATIONS_NOT_READY: 'Notification dependency is not ready.', KILLED: 'The kill switch is engaged.', UNRESOLVED_EXECUTIONS: 'One or more execution outcomes remain unresolved.' }; return messages[code] ?? 'A runtime dependency is not ready.'; }
+
+function chainName(chainId: number | null): string { return chainId === 1 ? 'Ethereum' : chainId === 8453 ? 'Base' : chainId === 4663 ? 'Robinhood' : 'Unknown'; }

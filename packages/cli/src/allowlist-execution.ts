@@ -4,7 +4,7 @@ import type { Address, PublicClient } from 'viem';
 
 export async function simulateAllowlistCampaign(input: { campaign: Campaign; wallets: readonly string[]; client: PublicClient; store: BackendStore; secretRoot: string }): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }> {
   const c = input.campaign;
-  if (c.strategy !== 'seadrop-v1-allowlist' || ![1, 8453, 4663].includes(c.chainId)) throw new Error('ALLOWLIST_CAMPAIGN_REQUIRED');
+  if (!['seadrop-v1-allowlist', 'seadrop-v1-signed'].includes(c.strategy) || ![1, 8453, 4663].includes(c.chainId)) throw new Error('ALLOWLIST_CAMPAIGN_REQUIRED');
   const strategy = getStrategy(c.strategy);
   if (!c.custodyPolicy) throw new Error('ALLOWLIST_SIGNED_POLICY_REQUIRED');
   const policies = (await readTurnkeyApprovedPolicyRecords('mainnet', input.secretRoot)).filter((record) => {
@@ -21,7 +21,8 @@ export async function simulateAllowlistCampaign(input: { campaign: Campaign; wal
     try {
       const data = strategy.buildCalldata(drop, wallet as Address, c.quantity);
       const policy = policies[0]!.enforcementPolicy;
-      const family = policy.family?.kind === 'seadrop-free-allowlist-v1' && policy.transaction.chainId === c.chainId && policy.transaction.valueWei === '0' && c.mintPriceWei === 0n && c.quantity <= policy.family.maxQuantity && policy.transaction.from.some((address) => address.toLowerCase() === wallet.toLowerCase());
+      const expectedFamily = c.strategy === 'seadrop-v1-signed' ? 'seadrop-free-signed-v1' : 'seadrop-free-allowlist-v1';
+      const family = policy.family?.kind === expectedFamily && policy.transaction.chainId === c.chainId && policy.transaction.valueWei === '0' && c.mintPriceWei === 0n && c.quantity <= policy.family.maxQuantity && policy.transaction.from.some((address) => address.toLowerCase() === wallet.toLowerCase());
       if (!family && data !== policy.transaction.data) throw new Error('ALLOWLIST_SIGNED_WALLET_CALL_REQUIRED');
       await input.client.call({ account: wallet as Address, to: drop.extra?.['seaDropAddress'] as Address, data, value: c.mintPriceWei * BigInt(c.quantity), blockNumber: block.number });
       recorded.push(wallet.toLowerCase());

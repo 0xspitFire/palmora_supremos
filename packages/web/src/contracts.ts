@@ -431,7 +431,52 @@ export interface RunReadModel {
   provenance: readonly Provenance[];
 }
 
+export interface AnalyticsReadModel {
+  readonly mode: 'shadow-only';
+  readonly method: 'FIFO';
+  readonly currency: 'ETH';
+  readonly coverage: {
+    readonly scope: 'canonical-finalized-mints-only';
+    readonly canonicalExecutions: number;
+    readonly completeCosts: number;
+    readonly incompleteCosts: number;
+    readonly confirmedActivities: number;
+    readonly pendingExcluded: number;
+    readonly reorgedExcluded: number;
+    readonly unavailableObservations: number;
+    readonly acquisitionHistory: 'partial' | 'provided-input-only' | 'no_samples';
+    readonly externalTransfersAndSalesComplete: false;
+    readonly providerCoverageAsserted: false;
+    readonly groupsOmitted: number;
+  };
+  readonly totals: {
+    readonly recordedCanonicalCostWei: string | null;
+    readonly realizedPnlWei: string | null;
+    readonly realizedRoiBps: string | null;
+    readonly unrealizedPnlWei: string | null;
+    readonly transactionAndMarketplaceFeesWei: string | null;
+  };
+  readonly groups: readonly {
+    readonly dimension: 'wallet' | 'campaign' | 'signal_source' | 'mint_type';
+    readonly key: string;
+    readonly executions: number;
+    readonly dispositions: number;
+    readonly recordedCostWei: string | null;
+    readonly realizedPnlWei: string | null;
+    readonly unknownBasisQuantity: string;
+  }[];
+  readonly shadow: readonly {
+    readonly policyId: string;
+    readonly selected: number;
+    readonly measured: number;
+    readonly unknownOutcomes: number;
+    readonly knownRealizedPnlWei: string | null;
+    readonly winRateBps: number | null;
+  }[];
+}
+
 export interface ReadOnlySnapshot {
+  analytics?: ReadModelEnvelope<AnalyticsReadModel>;
   home?: ReadModelEnvelope<HomeReadModel>;
   readiness?: ReadModelEnvelope<ReadinessReadModel>;
   calendar?: ReadModelEnvelope<CalendarReadModel>;

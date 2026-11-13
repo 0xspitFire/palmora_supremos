@@ -5,11 +5,15 @@ import type { DropConfig, DropValidation } from './types.js';
  * simulated against. If anything that decides whether the mint can succeed or what it costs has changed, no further wallet is
  * sent. Transactions already sent are never touched. `totalMinted` is deliberately ignored: it moves with every mint.
  *
- * The check only ever STOPS a send. If the re-read itself fails or times out it reports "unknown" and the run continues exactly
- * as before this check existed (simulation, the signed provider policy and the contract still gate every send).
+ * The check only ever STOPS a send. An unavailable public read reports "unknown" under the existing best-effort rule.
+ * Wallet-specific allowlist and signed authority instead latch a refusal; current eligibility is mandatory for those routes.
  */
 export const CAMPAIGN_CHANGED_MID_RUN = 'CAMPAIGN_CHANGED_MID_RUN';
 export const DROP_RECHECK_TIMEOUT_MS = 2_000;
+// Own-wallet server authorizations require first-party API and two-provider
+// verification for a fleet. Keep that bounded without applying the public
+// read's two-second budget to a different, substantially larger operation.
+export const SIGNED_DROP_RECHECK_TIMEOUT_MS = 20_000;
 export const DROP_RECHECK_REUSE_MS = 1_500;
 
 const plain = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) => {
@@ -58,6 +62,8 @@ export interface DropRecheckOptions {
 export function createDropRecheck(options: DropRecheckOptions): () => Promise<string | undefined | 'unknown'> {
   const now = options.now ?? (() => Date.now());
   const reuseMs = options.reuseMs ?? DROP_RECHECK_REUSE_MS;
+  const timeoutMs = options.timeoutMs ?? (options.initial.strategyName === 'seadrop-v1-signed' ? SIGNED_DROP_RECHECK_TIMEOUT_MS : DROP_RECHECK_TIMEOUT_MS);
+  let inFlight = false;
   let cached: { at: number; result: Promise<string | undefined | 'unknown'> } | undefined;
   // Once a change is seen the run stays stopped: a later read that happens to match the original (a flaky or lagging node) must not un-stop it.
   let latched: string | undefined;
@@ -67,12 +73,12 @@ export function createDropRecheck(options: DropRecheckOptions): () => Promise<st
     try {
       const read = await Promise.race([
         options.read(),
-        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('DROP_RECHECK_TIMEOUT')), options.timeoutMs ?? DROP_RECHECK_TIMEOUT_MS); }),
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('DROP_RECHECK_TIMEOUT')), timeoutMs); }),
       ]);
       // A partly failed reading (an optional supply read worked before but not now, or the reverse) is "unknown", never a change.
       if (isPartialReading(options.initial, read.drop)) {
         options.onUnavailable?.();
-        if (options.initial.strategyName === 'seadrop-v1-allowlist') { latched = 'ALLOWLIST_AUTHORITY_UNAVAILABLE'; return latched; }
+        if (['seadrop-v1-allowlist', 'seadrop-v1-signed'].includes(options.initial.strategyName)) { latched = options.initial.strategyName === 'seadrop-v1-signed' ? 'SIGNED_MINT_AUTHORITY_UNAVAILABLE' : 'ALLOWLIST_AUTHORITY_UNAVAILABLE'; return latched; }
         return 'unknown';
       }
       const change = describeDropChange(options.initial, read.drop, read.validation);
@@ -82,8 +88,8 @@ export function createDropRecheck(options: DropRecheckOptions): () => Promise<st
       options.onUnavailable?.();
       // A wallet-specific proof cannot use the public strategy's best-effort
       // reread rule: unknown current authority must stop this run before signing.
-      if (options.initial.strategyName === 'seadrop-v1-allowlist') {
-        latched = 'ALLOWLIST_AUTHORITY_UNAVAILABLE';
+      if (['seadrop-v1-allowlist', 'seadrop-v1-signed'].includes(options.initial.strategyName)) {
+        latched = options.initial.strategyName === 'seadrop-v1-signed' ? 'SIGNED_MINT_AUTHORITY_UNAVAILABLE' : 'ALLOWLIST_AUTHORITY_UNAVAILABLE';
         return latched;
       }
       return 'unknown';
@@ -92,7 +98,14 @@ export function createDropRecheck(options: DropRecheckOptions): () => Promise<st
     }
   };
   return () => {
-    if (!cached || now() - cached.at > reuseMs) cached = { at: now(), result: run() };
+    if (!cached || (!inFlight && now() - cached.at > reuseMs)) {
+      inFlight = true;
+      const result = run().finally(() => {
+        inFlight = false;
+        if (cached) cached.at = now();
+      });
+      cached = { at: now(), result };
+    }
     return cached.result;
   };
 }

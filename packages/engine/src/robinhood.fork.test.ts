@@ -1,5 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { decodeFunctionData, type Hex } from 'viem';
+import { createPublicClient, decodeFunctionData, encodeFunctionData, http, parseAbi, zeroAddress, type Address, type Hex } from 'viem';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { buildSignedMint, signedMintTypedData, verifySignedWalletAuthorization, type SignedMintAuthorityClient, type SignedWalletAuthorization } from './signed-mint-authority.js';
 import { ROBINHOOD_SEADROP_POSITIVE_FIXTURE } from './robinhood-evidence.js';
 import { getChainConfig } from './chains.js';
 
@@ -155,6 +157,83 @@ describe.skipIf(!replayEnabled || !forkBlockText || !nft || !feeRecipient || !mi
       value: tx.value,
     }, 'latest'])).rejects.toThrow();
   });
+
+  it('verifies and consumes a fresh own-wallet server authorization on the real SeaDrop fork', async () => {
+    requireSetup();
+    // All mutations below are sent only through the beforeAll-checked loopback
+    // Anvil. Impersonation and the ephemeral issuer never touch production.
+    const snapshot = await fork('evm_snapshot');
+    const nftAddress = nft as Address;
+    const seaDrop = ROBINHOOD_SEADROP_POSITIVE_FIXTURE.seaDropAddress as Address;
+    const recipient = feeRecipient as Address;
+    const ownerAbi = parseAbi([
+      'function owner() view returns (address)',
+      'function getMintStats(address minter) view returns (uint256 minterNumMinted,uint256 currentTotalSupply,uint256 maxSupply)',
+      'function updateSignedMintValidationParams(address seaDropImpl,address signer,(uint80 minMintPrice,uint24 maxMaxTotalMintableByWallet,uint40 minStartTime,uint40 maxEndTime,uint40 maxMaxTokenSupplyForStage,uint16 minFeeBps,uint16 maxFeeBps) signedMintValidationParams)',
+      'function updateAllowedFeeRecipient(address seaDropImpl,address feeRecipient,bool allowed)',
+      'function getFeeRecipientIsAllowed(address nftContract,address feeRecipient) view returns (bool)',
+    ]);
+    const publicClient = () => createPublicClient({ transport: http(rpcUrl, { retryCount: 0, timeout: 10_000 }), cacheTime: 0 });
+    const first = publicClient(); const second = publicClient();
+    let owner: Address | undefined;
+    try {
+      // The archived L2 fork header omits Ethereum blob fields. Mine local
+      // headers before executing calls in Anvil's EVM; no chain state is patched.
+      await fork('anvil_mine', ['0x2']);
+      owner = await first.readContract({ address: nftAddress, abi: ownerAbi, functionName: 'owner' });
+      if (owner.toLowerCase() === zeroAddress) throw new Error('SIGNED_FORK_FIXTURE_OWNER_RENOUNCED');
+      const accounts = await localEoaAccounts();
+      expect(accounts.length).toBeGreaterThan(0);
+      const minter = accounts[0] as Address;
+      const stats = await first.readContract({ address: nftAddress, abi: ownerAbi, functionName: 'getMintStats', args: [minter] });
+      expect(stats[1] + 1n).toBeLessThanOrEqual(stats[2]);
+      const issuer = privateKeyToAccount(generatePrivateKey());
+      const latest = await first.getBlock();
+      const startTime = latest.timestamp - 1n;
+      const endTime = latest.timestamp + 3600n;
+      const stageSupply = stats[2];
+      if (stageSupply >= 2n ** 40n) throw new Error('SIGNED_FORK_FIXTURE_SUPPLY_EXCEEDS_SIGNER_BOUND');
+      await fork('anvil_impersonateAccount', [owner]);
+      await fork('anvil_setBalance', [owner, '0x56bc75e2d63100000']);
+      const gasPrice = await fork('eth_gasPrice');
+      const configure = async (data: Hex): Promise<void> => {
+        const tx = await fork('eth_sendTransaction', [{ from: owner, to: nftAddress, value: '0x0', gas: '0xf4240', gasPrice, data }]);
+        await fork('evm_mine');
+        const receipt = await fork('eth_getTransactionReceipt', [tx]);
+        expect(receipt?.status).toBe('0x1');
+      };
+      // Exact owner forwarders from ProjectOpenSea/seadrop ERC721SeaDrop.sol,
+      // not storage edits or a mocked signature-verification contract.
+      await configure(encodeFunctionData({ abi: ownerAbi, functionName: 'updateSignedMintValidationParams', args: [seaDrop, issuer.address, { minMintPrice: 0n, maxMaxTotalMintableByWallet: 10, minStartTime: Number(startTime), maxEndTime: Number(endTime), maxMaxTokenSupplyForStage: Number(stageSupply), minFeeBps: 0, maxFeeBps: 1000 }] }));
+      const feeAlreadyAllowed = await first.readContract({ address: seaDrop, abi: ownerAbi, functionName: 'getFeeRecipientIsAllowed', args: [nftAddress, recipient] });
+      if (!feeAlreadyAllowed) await configure(encodeFunctionData({ abi: ownerAbi, functionName: 'updateAllowedFeeRecipient', args: [seaDrop, recipient, true] }));
+      // Both authority readers select min(head)-2, so include both updates in it.
+      await fork('anvil_mine', ['0x2']);
+      const current = await first.getBlock();
+      const now = new Date(Number(current.timestamp) * 1000);
+      const raw: SignedWalletAuthorization = { chainId: 4663, nftContract: nftAddress, wallet: minter, feeRecipient: recipient, mintParams: { mintPrice: 0n, maxTotalMintableByWallet: 10n, startTime, endTime, dropStageIndex: 1n, maxTokenSupplyForStage: stageSupply, feeBps: 250n, restrictFeeRecipients: true }, salt: 115n, signature: '0x', source: { chainId: 4663, nftContract: nftAddress, wallet: minter, stageIndex: '1', sourceId: 'loopback-fork-platform-fixture', contentDigest: `sha256:${'0'.repeat(64)}` } };
+      raw.signature = await issuer.signTypedData(signedMintTypedData(raw));
+      const clients = [first, second] as unknown as SignedMintAuthorityClient[];
+      const proof = await verifySignedWalletAuthorization(raw, clients, 1, now);
+      expect(proof.signer).toBe(issuer.address);
+      const ownMint = buildSignedMint(proof, minter, 1, now);
+      expect(ownMint.data.slice(0, 10)).toBe('0x4b61cd6f');
+      await expect(fork('eth_call', [{ from: minter, to: ownMint.to, data: ownMint.data, value: '0x0' }, 'latest'])).resolves.toBe('0x');
+      const txHash = await fork('eth_sendTransaction', [{ from: minter, to: ownMint.to, data: ownMint.data, value: '0x0', gas: '0x7a120', gasPrice }]);
+      await fork('evm_mine');
+      const receipt = await fork('eth_getTransactionReceipt', [txHash]);
+      expect(receipt?.status).toBe('0x1');
+      const after = await first.readContract({ address: nftAddress, abi: ownerAbi, functionName: 'getMintStats', args: [minter] });
+      expect(after[0]).toBe(stats[0] + 1n);
+      expect(after[1]).toBe(stats[1] + 1n);
+      // This rejects through the real contract's consumed-digest check even
+      // while the common-block snapshot still precedes the local mint.
+      await expect(verifySignedWalletAuthorization(raw, clients, 1, now)).rejects.toThrow('SIGNED_MINT_AUTHORITY_UNAVAILABLE');
+    } finally {
+      if (owner && owner.toLowerCase() !== zeroAddress) await fork('anvil_stopImpersonatingAccount', [owner]);
+      expect(await fork('evm_revert', [snapshot])).toBe(true);
+    }
+  }, 120_000);
 
   it('records a replacement outcome using local Anvil accounts only', async () => {
     requireSetup();

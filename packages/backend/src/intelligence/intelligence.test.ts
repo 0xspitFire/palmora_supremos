@@ -22,7 +22,7 @@ const LIMIT = 3_700_000_000_000_000n;
 const LIMITS = { freeFeeAllowanceWei: 400_000_000_000_000n, paidFeeAllowanceWei: 370_000_000_000_000n, paidMaxPricePerNftWei: LIMIT, paidMaxWalletsPerMint: 2, freeMinWallets: 4 };
 
 class FakePort implements IntelligenceChainPort {
-  public readonly chainId = 1 as const;
+  public constructor(public readonly chainId: 1 | 8453 | 4663 = 1) {}
   public head: bigint | null = 1_000n;
   public mints: ObservedMint[] = [];
   public dropUpdates: ObservedDropUpdate[] = [];
@@ -179,6 +179,114 @@ describe('DiscoveryService', () => {
       store.close();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('discovery chain identities and durable opportunity recovery', () => {
+  const busyMints = () => [mint(900n, WHALE), ...Array.from({ length: 60 }, () => mint(950n, W1))];
+  it('keeps opportunity, price and opening dedupe independent on every supported chain', async () => {
+    const store = new DurableStore();
+    const clock = new Clock(START);
+    const alerts = new AlertManager(store, undefined, undefined, { now: clock.now });
+    const services: DiscoveryService[] = [];
+    for (const chainId of [1, 8453, 4663] as const) {
+      const port = new FakePort(chainId);
+      const repo = new MemoryRepo(); repo.watched = [WHALE];
+      port.mints = busyMints(); port.drops.set(NFT, drop());
+      port.dropUpdates = [
+        { nftContract: W2, mintPriceWei: 0n, startTime: seconds(START) + 20 * 60, endTime: 0, maxPerWallet: 3, blockNumber: 950n },
+        { nftContract: PAID_NFT, mintPriceWei: LIMIT + 1n, startTime: seconds(START) + 3600, endTime: 0, maxPerWallet: 2, blockNumber: 951n },
+      ];
+      const service = new DiscoveryService(store, repo, port, { now: clock.now, budgetPerNftWei: LIMIT, alerts });
+      services.push(service); await service.tick();
+    }
+    for (const kind of ['opportunity', 'opening_soon', 'price_above_limit']) {
+      expect(events(store, `alert_${kind}`)).toHaveLength(3);
+      expect(events(store, `alert_${kind}`).map(event => parseAlertCard(event.data.card)?.chainId)).toEqual([1, 8453, 4663]);
+    }
+    for (const service of services) await service.tick();
+    for (const kind of ['opportunity', 'opening_soon', 'price_above_limit']) expect(events(store, `alert_${kind}`)).toHaveLength(3);
+  });
+
+  it('does not replay acknowledged legacy alerts on their own chain or suppress another chain', async () => {
+    const t = setup(); t.repo.watched = [WHALE]; t.port.mints = busyMints(); t.port.drops.set(NFT, drop());
+    t.port.dropUpdates = [
+      { nftContract: W2, mintPriceWei: 0n, startTime: seconds(START) + 20 * 60, endTime: 0, maxPerWallet: 3, blockNumber: 950n },
+      { nftContract: PAID_NFT, mintPriceWei: LIMIT + 1n, startTime: seconds(START) + 3600, endTime: 0, maxPerWallet: 2, blockNumber: 951n },
+    ];
+    await t.discovery.tick();
+    await t.store.transaction(state => { for (const event of state.events) if (event.type.startsWith('alert_') && typeof event.data.dedupe === 'string') event.data.dedupe = event.data.dedupe.replace(':1:', ':'); });
+    t.clock.advance(13);
+    await new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT, alerts: t.alerts }).tick();
+    for (const kind of ['opportunity', 'opening_soon', 'price_above_limit']) expect(events(t.store, `alert_${kind}`)).toHaveLength(1);
+    const base = new FakePort(8453); base.mints = busyMints(); base.drops = t.port.drops; base.dropUpdates = t.port.dropUpdates;
+    await new DiscoveryService(t.store, new MemoryRepo(), base, { now: t.clock.now, budgetPerNftWei: LIMIT, alerts: t.alerts }).tick();
+    expect(events(t.store, 'alert_opening_soon')).toHaveLength(2);
+    expect(events(t.store, 'alert_price_above_limit')).toHaveLength(2);
+  });
+
+  it('restores high-band notified state, activity and drop context without duplicate notices', async () => {
+    const t = setup(); t.repo.watched = [WHALE]; t.port.mints = busyMints(); t.port.drops.set(NFT, drop());
+    await t.discovery.tick();
+    const original = events(t.store, 'opportunity_notified').at(-1)!;
+    expect(original.data.score).toBeGreaterThanOrEqual(70);
+    t.clock.advance(13);
+    await new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT, alerts: t.alerts }).tick();
+    const refreshed = events(t.store, 'opportunity_notified').at(-1)!;
+    expect(refreshed.id).not.toBe(original.id);
+    expect(refreshed.data.watchedMinters).toEqual([WHALE]);
+    expect(refreshed.data.mintsLastHour).toBe(61);
+    expect(refreshed.data.score).toBeGreaterThanOrEqual(70);
+    expect(events(t.store, 'alert_opportunity')).toHaveLength(1);
+  });
+
+  it('restores the newest disposition, not an older scored snapshot', async () => {
+    const t = setup(); t.repo.watched = [WHALE]; t.port.drops.set(NFT, drop());
+    t.port.mints = [mint(900n, W1)]; await t.discovery.tick();
+    t.clock.advance(1); t.port.head = 1010n; t.port.mints = busyMints().map(log => ({ ...log, blockNumber: 1005n })); await t.discovery.tick();
+    const newest = [...t.store.snapshot().events].reverse().find(event => event.type.startsWith('opportunity_'))!;
+    expect(newest.type).toBe('opportunity_notified');
+    t.clock.advance(1);
+    const result = await new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT }).tick();
+    expect(result.opportunitiesWritten).toBe(0);
+  });
+
+  it('does not extend a minter window when unrelated collection activity is newer', async () => {
+    const t = setup(); t.repo.watched = [WHALE]; t.port.drops.set(NFT, drop()); t.port.mints = [mint(900n, WHALE)];
+    await t.discovery.tick();
+    t.clock.advance(350); t.port.head = 1010n; t.port.mints = [mint(1005n, W1)]; await t.discovery.tick();
+    t.clock.advance(20);
+    await new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT }).tick();
+    const newest = [...t.store.snapshot().events].reverse().find(event => event.type.startsWith('opportunity_'))!;
+    expect(newest.data.watchedMinters).toEqual([]);
+  });
+
+  it('restores legacy minters only from their own same-chain durable self-mint times', async () => {
+    const t = setup(); t.repo.watched = [WHALE]; t.port.drops.set(NFT, drop()); t.port.mints = [mint(900n, WHALE)];
+    await t.discovery.tick();
+    await t.store.transaction(state => { for (const event of state.events) if (event.type.startsWith('opportunity_')) delete event.data.watchedMinterObservations; });
+    t.clock.advance(13);
+    await new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT }).tick();
+    const newest = [...t.store.snapshot().events].reverse().find(event => event.type.startsWith('opportunity_'))!;
+    expect(newest.data.watchedMinters).toEqual([WHALE]);
+    const missing = setup(); missing.repo.watched = [WHALE];
+    await missing.store.transaction(state => state.events.push({ id: 'legacy-no-proof', type: 'opportunity_notified', at: new Date(START - 13 * 60_000).toISOString(), data: { chainId: 1, contract: NFT, watchedMinters: [WHALE], priceWei: '0', score: 80, band: 'proposal' } }));
+    await missing.discovery.tick();
+    expect([...missing.store.snapshot().events].reverse().find(event => event.type.startsWith('opportunity_'))?.data.watchedMinters).toEqual([]);
+  });
+
+  it.each(['future-event', 'future-activity', 'old-activity', 'other-chain', 'invalid-first-seen'])('refuses invalid restored authority: %s', async scenario => {
+    const t = setup();
+    const data: Record<string, unknown> = { chainId: 1, contract: NFT, lastActivityAt: new Date(START).toISOString(), firstSeenAt: new Date(START).toISOString(), watchedMinters: [WHALE], priceWei: '0', score: 80, band: 'proposal' };
+    let at = new Date(START - 13 * 60_000).toISOString();
+    data.lastActivityAt = at; data.firstSeenAt = at;
+    if (scenario === 'future-event') at = new Date(START + 60_000).toISOString();
+    if (scenario === 'future-activity') data.lastActivityAt = new Date(START + 60_000).toISOString();
+    if (scenario === 'old-activity') { data.lastActivityAt = new Date(START - 7 * 3600_000).toISOString(); data.firstSeenAt = data.lastActivityAt; }
+    if (scenario === 'other-chain') data.chainId = 8453;
+    if (scenario === 'invalid-first-seen') data.firstSeenAt = 'invalid';
+    await t.store.transaction(state => state.events.push({ id: 'bad', type: 'opportunity_notified', at, data }));
+    expect((await t.discovery.tick()).opportunitiesWritten).toBe(0);
   });
 });
 
@@ -595,7 +703,7 @@ describe('collection alerts as cards (T-029)', () => {
     expect(over).toMatchObject({ title: 'OVER YOUR PRICE LIMIT', collectionName: null, mint: 'paid' });
   });
 
-  it('builds the readiness cards: wallets that need ETH carry the full wallet address, ready wallets say approval is still needed', async () => {
+  it('builds readiness cards with full top-up addresses and the current free-automation qualification boundary', async () => {
     const t = setup();
     t.port.names.set(NFT, { status: 'name', name: 'Ready Club' });
     t.port.drops.set(NFT, drop());
@@ -609,7 +717,7 @@ describe('collection alerts as cards (T-029)', () => {
     expect(underfunded.fields.some((field) => field.label === 'Top up' && field.value.includes(W2))).toBe(true);
     const ready = parseAlertCard(events(t.store, 'alert_eligible_ready')[0]?.data.card)!;
     expect(ready.title).toBe('WALLETS READY');
-    expect(ready.notes[0]?.value).toContain('Minting still needs your approval.');
+    expect(ready.notes[0]?.value).toContain('automatic free minting still requires a qualifying watched mint and every execution check.');
   });
 });
 

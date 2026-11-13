@@ -5,6 +5,8 @@ import { DEFAULT_IDLE_BALANCE_CEILINGS, Phase2ReadModelService, formatEth, valid
 import { failoverTransport, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import type { FireScheduleRepository, GasAlertRepository, IntelligenceRepository } from '@mint-bot/database';
 import { cleanName, describeActivity, describeHistory, describeLimits } from './owner-reports.js';
+import { describeAutomation } from './automation-status.js';
+import { describeAnalytics } from './analytics-report.js';
 import { gasAlertSentence } from './gas-alert-service.js';
 import type { TelegramActions, TelegramRole } from './telegram-commands.js';
 import type { LivePlanResult } from './owner-actions.js';
@@ -792,7 +794,8 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     async limits() {
       return describeLimits(deps.store.snapshot(), now(), existsSync(deps.killSwitchPath));
     },
-    async history() { return describeHistory(deps.store.snapshot()); },
+    async history() { const state = deps.store.snapshot(); return `${describeHistory(state)}\n\n${describeAutomation(state.events, now())}`; },
+    async analytics() { return describeAnalytics(deps.store.snapshot(), now()); },
     async activity() {
       const labels = new Map(deps.intelligence().observedAddresses(1).map((row) => [row.address.toLowerCase(), row.label] as const));
       return describeActivity(deps.store.snapshot().events, labels);
@@ -812,16 +815,16 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
       return blocks.length === 0 ? 'No drop on the calendar is on a chain MintBot can check.' : ['Upcoming drops against your wallets:', ...blocks].join('\n\n');
     },
     async portfolio() {
-      if (!deps.portfolio) throw new Error('PORTFOLIO_NOT_SET_UP: no Blockscout key is stored on the host, so /portfolio is off. /holdings still shows MintBot\'s own mints');
+      if (!deps.portfolio) throw new Error('PORTFOLIO_NOT_SET_UP: no supported portfolio provider is configured. /holdings still shows MintBot\'s own collections');
       const provider = deps.portfolio;
       const wallets = (await deps.walletList()).slice(0, 10);
       if (wallets.length === 0) return 'No wallets are set up, so there is nothing to show.';
       const price = await deps.prices?.price().catch(() => undefined);
       const money = (eth: number): string => `${shortEth(parseEther(eth.toFixed(18)))} ETH${price ? ` (${usdText(eth, price)})` : ''}`;
-      const groups: string[][] = [[`Everything your ${wallets.length} signing wallet(s) hold (the wallets in your Turnkey wallet map; /wallets also lists watched wallets), from Blockscout. It can lag the chain by a minute or two; /holdings reads MintBot's own mints straight from the chain.`]];
+      const groups: string[][] = [[`Indexed NFTs for your ${wallets.length} signing wallet(s) from the configured portfolio providers. Results can lag or omit assets; /holdings reads MintBot's own collections straight from the chain.`]];
       let asOf: Date | undefined;
       let anyFloor = false;
-      for (const chainId of PORTFOLIO_CHAINS) {
+      for (const chainId of provider.supportedChains ?? PORTFOLIO_CHAINS) {
         const rows = await Promise.all(wallets.map(async (wallet) => { try { return { wallet, ...(await provider.list(chainId, wallet)) }; } catch (error) { return { wallet, failed: (error instanceof Error ? error.message : '').split(':')[0] ?? 'PORTFOLIO_UNAVAILABLE' }; } }));
         const total = rows.reduce((sum, row) => sum + ('items' in row ? row.items.reduce((count, item) => count + item.amount, 0n) : 0n), 0n);
         const lines = [`${chainName(chainId)}: ${total} NFT(s)`];
@@ -829,7 +832,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         for (const row of rows) {
           if ('failed' in row) { lines.push(`• ${short(row.wallet)} could not be read (${row.failed})`); continue; }
           asOf = asOf && asOf > row.asOf ? asOf : row.asOf;
-          if (row.truncated) lines.push(`• ${short(row.wallet)}: only the first pages were read, so its list is partial`);
+          if (row.truncated) lines.push(`• ${short(row.wallet)}: the provider result is partial or contains records that could not be validated`);
           for (const item of row.items) {
             const key = item.contract ?? 'unknown';
             const entry = grouped.get(key) ?? { name: cleanName(item.name) ?? (item.contract ? short(item.contract) : 'unknown collection'), count: 0n, contract: item.contract };
@@ -850,7 +853,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         if (floorTotal > 0) lines.push(`Estimated Floor Value: ${money(floorTotal)}`);
         groups.push(lines);
       }
-      const notes = ['Base is not covered by the free Blockscout plan; /holdings shows MintBot\'s Base mints from the chain.'];
+      const notes = ['Indexed holdings may omit assets hidden or excluded by the provider. /holdings independently reads MintBot collections from the chain.', provider.supportedChains?.includes(8453) ? 'Base uses the configured OpenSea adapter, not a paid Blockscout request.' : 'Base is not covered by the configured portfolio provider.'];
       if (anyFloor) notes.push('Floor values are OpenSea listing prices, an estimate and not what a sale would fetch; collections without a known floor are not counted.');
       if (price) notes.push(`Dollar values use the ${price.source === 'chainlink' ? 'Chainlink' : 'Coinbase'} ETH price of $${price.usd.toFixed(2)}${price.source === 'chainlink' ? ` (updated ${minutes(price.asOf.toISOString())} UTC)` : ''}.`);
       if (asOf) notes.push(`As of ${minutes(asOf.toISOString())} UTC (results are kept 5 minutes).`);

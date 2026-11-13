@@ -292,7 +292,10 @@ export async function dryRunDrop(client: PublicClient, contract: string, wallets
     try { if (!options.publicOnly) allowlist = getStrategy('seadrop-v1-allowlist'); } catch { /* no proof provider installed */ }
     if (allowlist) {
       try { drop = await allowlist.readDrop(client, contract as Address, 4663); strategy = allowlist; }
-      catch (error) { if (!(error instanceof Error) || error.message !== 'ALLOWLIST_FIRST_PARTY_SOURCE_REQUIRED') throw error; }
+      catch (error) {
+        if (error instanceof Error && error.message === 'OPENSEA_SIGNED_STAGE_RESPONSE') { strategy = getStrategy('seadrop-v1-signed'); drop = await strategy.readDrop(client, contract as Address, 4663); }
+        else if (!(error instanceof Error) || error.message !== 'ALLOWLIST_FIRST_PARTY_SOURCE_REQUIRED') throw error;
+      }
     }
     drop ??= await strategy.readDrop(client, contract as Address, 4663);
   } catch (error) { return { contract, verdict: 'blocked', summary: `No readable SeaDrop public drop here: ${providerErrorDetail(error)}`, drop: null, quantity: 0, wallets: [] }; }
@@ -301,7 +304,8 @@ export async function dryRunDrop(client: PublicClient, contract: string, wallets
   const endMs = drop.endTime === 0 ? Number.POSITIVE_INFINITY : drop.endTime * 1_000;
   const status = nowMs < startMs ? 'upcoming' : nowMs >= endMs ? 'ended' : 'open';
   const quantity = Math.max(1, Math.min(options.quantity ?? 1, drop.maxTotalMintableByWallet || 1));
-  const dropView = { ...(drop.strategyName === 'seadrop-v1-allowlist' ? { strategyName: drop.strategyName, eligibleWallets: (drop.extra?.walletProofs as Array<{ wallet: string }>).map((proof) => proof.wallet) } : {}), priceEth: ethString(drop.mintPrice), opensAt: startMs > 0 ? new Date(startMs).toISOString() : null, closesAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null, maxPerWallet: drop.maxTotalMintableByWallet, status } as const;
+  const ownAuthorizations = drop.extra?.walletProofs ?? drop.extra?.signedWalletAuthorizations;
+  const dropView = { ...(['seadrop-v1-allowlist', 'seadrop-v1-signed'].includes(drop.strategyName) && Array.isArray(ownAuthorizations) ? { strategyName: drop.strategyName, eligibleWallets: (ownAuthorizations as Array<{ wallet: string }>).map((proof) => proof.wallet) } : {}), priceEth: ethString(drop.mintPrice), opensAt: startMs > 0 ? new Date(startMs).toISOString() : null, closesAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null, maxPerWallet: drop.maxTotalMintableByWallet, status } as const;
   if (drop.mintPrice > 0n) return { contract, verdict: 'blocked', summary: 'This drop is paid. Paid Robinhood mints are blocked (D-038), so it is not simulated.', drop: dropView, quantity, wallets: [] };
   if (status !== 'open') return { contract, verdict: 'blocked', summary: `This mint is ${status}, so a simulation would not be meaningful.`, drop: dropView, quantity, wallets: [] };
   const supply = await readSupply(client, contract);

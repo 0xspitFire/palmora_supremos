@@ -107,6 +107,6 @@ export async function simulateMint(
     if (/insufficient|fund/i.test(message)) revertType = 'insufficient-funds';
     else if (/sold|supply/i.test(message)) revertType = 'supply';
     else if (/price|value/i.test(message)) revertType = 'price';
-    return { walletIndex, address: minter, sourceBlock, checkedAt, success: false, revertType, error: `Simulation reverted: ${message}` };
+    return { walletIndex, address: minter, sourceBlock, checkedAt, success: false, revertType, error: `SIMULATION_FAILED:${revertType ?? 'unknown'}` };
   }
 }

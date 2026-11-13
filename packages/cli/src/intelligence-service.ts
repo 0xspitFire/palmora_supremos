@@ -11,6 +11,8 @@ export interface IntelligenceServiceOptions {
   port: IntelligenceChainPort;
   alerts: AlertManager;
   wallets: readonly string[];
+  /** Refreshed production custody addresses per sweep; the fixed list remains a test/local fallback. */
+  walletProvider?: () => Promise<readonly string[]>;
   logger?: RedactedLogger;
   discoveryIntervalMs: number;
   /** Jump the scan ahead when it is more than this many blocks behind (default 1200). */
@@ -44,7 +46,7 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   // One reader for collection names, so a contract's name is read from the chain once for both services.
   const names = new CollectionNames(options.port);
   const discovery = new DiscoveryService(options.store, options.repo, options.port, { budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts, names, ...(options.discoveryMaxLagBlocks === undefined ? {} : { maxLagBlocks: BigInt(options.discoveryMaxLagBlocks) }) });
-  const readiness = new ReadinessSweep(options.store, options.port, async () => options.wallets, { limits: D033_READINESS_LIMITS, alerts: options.alerts, names });
+  const readiness = new ReadinessSweep(options.store, options.port, options.walletProvider ?? (async () => options.wallets), { limits: D033_READINESS_LIMITS, alerts: options.alerts, names, now: options.now });
   const busy = { discovery: false, readiness: false, digest: false, retry: false, health: false };
   const guarded = (name: keyof typeof busy, work: () => Promise<unknown>) => async (): Promise<void> => {
     if (busy[name]) return;
