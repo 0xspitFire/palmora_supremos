@@ -15,6 +15,8 @@ interface ActivityBase {
   blockNumber: string;
   transactionIndex: number;
   logIndex: number;
+  /** ERC1155 batch item position; omitted legacy records mean0. */
+  subIndex?: number;
   at: string;
   campaignId?: string;
   sourceWallet?: string;
@@ -28,9 +30,9 @@ export type AnalyticsActivity = ActivityBase & (
 export interface AnalyticsFloorQuote { chainId: ExecutionChainId; collection: string; floorWei: string; observedAt: string; expiresAt: string; sourceReference: string; }
 export interface ReplayOpportunity { id: string; at: string; score: number; watchedMintVerified: boolean; free: boolean; guardsPassed: boolean; realizedPnlWei: string | null; }
 export interface ShadowPolicy { id: string; minimumScore: number; requireWatchedMint: boolean; freeOnly: boolean; }
-export interface AnalyticsOptions { activities?: readonly AnalyticsActivity[]; floorQuotes?: readonly AnalyticsFloorQuote[]; replay?: { opportunities: readonly ReplayOpportunity[]; policies: readonly ShadowPolicy[] }; now?: Date; }
+export interface AnalyticsOptions { ownedWallets?: readonly { chainId: number; address: string }[]; activities?: readonly AnalyticsActivity[]; floorQuotes?: readonly AnalyticsFloorQuote[]; replay?: { opportunities: readonly ReplayOpportunity[]; policies: readonly ShadowPolicy[] }; now?: Date; }
 interface BasisLot { fifoOrder: number; chainId: ExecutionChainId; collection: string; tokenId: string; wallet: string; quantity: bigint; basis: bigint | null; acquiredAt: string; activityId: string; campaignId: string | null; sourceWallet: string | null; mintType: string | null; }
-interface Disposition { activityId: string; chainId: ExecutionChainId; wallet: string; campaignId: string | null; sourceWallet: string | null; mintType: string | null; quantity: string; proceedsWei: string; basisWei: string | null; realizedPnlWei: string | null; }
+interface Disposition { acquisitionActivityId: string; acquiredAt: string; collection: string; tokenId: string; grossProceedsWei: string; dispositionFeesWei: string; activityId: string; chainId: ExecutionChainId; wallet: string; campaignId: string | null; sourceWallet: string | null; mintType: string | null; quantity: string; proceedsWei: string; basisWei: string | null; realizedPnlWei: string | null; }
 interface Issue { code: string; activityId?: string; }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -47,7 +49,7 @@ const address = (value: unknown): value is string => typeof value === 'string' &
 const assetKey = (chainId: number, collection: string, tokenId: string) => `${chainId}:${collection.toLowerCase()}:${tokenId}`;
 
 function validActivity(row: AnalyticsActivity, now: number): boolean {
-  if (!row || !opaque(row.id) || !opaque(row.sourceReference) || !chains.has(row.chainId) || !address(row.collection) || !address(row.wallet) || !uint(row.tokenId) || !uint(row.quantity) || BigInt(row.quantity) <= 0n || !HASH.test(row.transactionHash ?? '') || !HASH.test(row.blockHash ?? '') || !uint(row.blockNumber) || !Number.isSafeInteger(row.transactionIndex) || row.transactionIndex < 0 || !Number.isSafeInteger(row.logIndex) || row.logIndex < 0 || !timestamp(row.at) || Date.parse(row.at) > now || !['confirmed', 'pending', 'reorged'].includes(row.status)) return false;
+  if (!row || !opaque(row.id) || !opaque(row.sourceReference) || !chains.has(row.chainId) || !address(row.collection) || !address(row.wallet) || !uint(row.tokenId) || !uint(row.quantity) || BigInt(row.quantity) <= 0n || !HASH.test(row.transactionHash ?? '') || !HASH.test(row.blockHash ?? '') || !uint(row.blockNumber) || !Number.isSafeInteger(row.transactionIndex) || row.transactionIndex < 0 || !Number.isSafeInteger(row.logIndex) || row.logIndex < 0 || row.subIndex !== undefined && (!Number.isSafeInteger(row.subIndex) || row.subIndex < 0 || row.subIndex > 999) || !timestamp(row.at) || Date.parse(row.at) > now || !['confirmed', 'pending', 'reorged'].includes(row.status)) return false;
   if (row.campaignId !== undefined && !opaque(row.campaignId) || row.sourceWallet !== undefined && !address(row.sourceWallet) || row.mintType !== undefined && !['public', 'allowlist', 'other'].includes(row.mintType) || !uint(row.gasWei)) return false;
   if (row.kind === 'acquisition') return row.costWei === null || uint(row.costWei);
   if (row.kind === 'sale') return uint(row.grossProceedsWei) && uint(row.marketplaceFeesWei);
@@ -58,7 +60,7 @@ function compareActivities(a: AnalyticsActivity, b: AnalyticsActivity): number {
   if (a.chainId !== b.chainId) return a.chainId - b.chainId;
   const block = BigInt(a.blockNumber) - BigInt(b.blockNumber);
   if (block !== 0n) return block < 0n ? -1 : 1;
-  return a.transactionIndex - b.transactionIndex || a.logIndex - b.logIndex || a.id.localeCompare(b.id);
+  return a.transactionIndex - b.transactionIndex || a.logIndex - b.logIndex || (a.subIndex ?? 0) - (b.subIndex ?? 0) || a.id.localeCompare(b.id);
 }
 
 /** Inputs are explicit confirmed transaction facts. Missing provider coverage remains missing. */
@@ -77,10 +79,10 @@ export function buildAnalyticsReport(options: AnalyticsOptions = {}) {
   // was encountered first. Conflicting copies are never selected arbitrarily.
   for (const row of rows) {
     if (!validActivity(row, now.getTime())) { issues.push({ code: 'ACTIVITY_INVALID', ...(opaque(row?.id) ? { activityId: row.id } : {}) }); continue; }
-    const key = `${row.chainId}:${row.transactionHash.toLowerCase()}:${row.logIndex}`;
+    const key = `${row.chainId}:${row.transactionHash.toLowerCase()}:${row.logIndex}:${row.subIndex ?? 0}`;
     const prior = identities.get(key);
     if (!prior) { identities.set(key, row); continue; }
-    const fingerprint = (activity: AnalyticsActivity): string => JSON.stringify(Object.fromEntries(Object.entries(activity).filter(([field]) => !['id', 'sourceReference', 'status'].includes(field)).sort(([a], [b]) => a.localeCompare(b))));
+    const fingerprint = (activity: AnalyticsActivity): string => JSON.stringify(Object.fromEntries(Object.entries({ ...activity, subIndex: activity.subIndex ?? 0 }).filter(([field]) => !['id', 'sourceReference', 'status'].includes(field)).sort(([a], [b]) => a.localeCompare(b))));
     if (prior.status === 'reorged' || row.status === 'reorged') { identities.set(key, { ...row, status: 'reorged' }); duplicates += 1; }
     else if (fingerprint(prior) === fingerprint(row)) { duplicates += 1; if (row.status === 'confirmed') identities.set(key, row); }
     else { conflicting.add(key); issues.push({ code: 'ACTIVITY_CONFLICT', activityId: row.id }); }
@@ -134,13 +136,15 @@ export function buildAnalyticsReport(options: AnalyticsOptions = {}) {
       for (const part of take(row)) put({ ...part, wallet: row.toWallet.toLowerCase() });
     } else {
       fees += BigInt(row.marketplaceFeesWei);
-      const net = BigInt(row.grossProceedsWei) - BigInt(row.marketplaceFeesWei) - BigInt(row.gasWei);
-      let remainingProceeds = net;
+      let remainingGross = BigInt(row.grossProceedsWei);
+      let remainingFees = BigInt(row.marketplaceFeesWei) + BigInt(row.gasWei);
       let remainingQuantity = BigInt(row.quantity);
       for (const part of take(row)) {
-        const proceeds = part.quantity === remainingQuantity ? remainingProceeds : net * part.quantity / BigInt(row.quantity);
-        remainingProceeds -= proceeds; remainingQuantity -= part.quantity;
-        dispositions.push({ activityId: row.id, chainId: row.chainId, wallet: row.wallet.toLowerCase(), campaignId: part.campaignId, sourceWallet: part.sourceWallet, mintType: part.mintType, quantity: part.quantity.toString(), proceedsWei: proceeds.toString(), basisWei: part.basis?.toString() ?? null, realizedPnlWei: part.basis === null ? null : (proceeds - part.basis).toString() });
+        const gross = part.quantity === remainingQuantity ? remainingGross : BigInt(row.grossProceedsWei) * part.quantity / BigInt(row.quantity);
+        const partFees = part.quantity === remainingQuantity ? remainingFees : (BigInt(row.marketplaceFeesWei) + BigInt(row.gasWei)) * part.quantity / BigInt(row.quantity);
+        const proceeds = gross - partFees;
+        remainingGross -= gross; remainingFees -= partFees; remainingQuantity -= part.quantity;
+        dispositions.push({ acquisitionActivityId: part.activityId, acquiredAt: part.acquiredAt, collection: row.collection.toLowerCase(), tokenId: row.tokenId, grossProceedsWei: gross.toString(), dispositionFeesWei: partFees.toString(), activityId: row.id, chainId: row.chainId, wallet: row.wallet.toLowerCase(), campaignId: part.campaignId, sourceWallet: part.sourceWallet, mintType: part.mintType, quantity: part.quantity.toString(), proceedsWei: proceeds.toString(), basisWei: part.basis?.toString() ?? null, realizedPnlWei: part.basis === null ? null : (proceeds - part.basis).toString() });
       }
     }
   }
@@ -155,7 +159,7 @@ export function buildAnalyticsReport(options: AnalyticsOptions = {}) {
     quotes.set(key, list);
   }
   for (const list of quotes.values()) list.sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt) || a.sourceReference.localeCompare(b.sourceReference));
-  const holdings = [...inventory.values()].flat().filter(lot => lot.quantity > 0n).map(lot => {
+  const holdings = [...inventory.values()].flat().filter(lot => lot.quantity > 0n && (options.ownedWallets === undefined || options.ownedWallets.some(wallet => wallet.chainId === lot.chainId && wallet.address.toLowerCase() === lot.wallet))).map(lot => {
     const quote = quotes.get(`${lot.chainId}:${lot.collection}`)?.[0];
     const conflict = quote && quoteConflicts.has(`${lot.chainId}:${lot.collection}:${Date.parse(quote.observedAt)}`);
     const fresh = quote && !conflict && Date.parse(quote.expiresAt) > now.getTime();

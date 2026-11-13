@@ -23,3 +23,9 @@ export { GasAlertRepository } from './gas-alert.js';
 export type { GasAlertChain, GasAlertDirection, GasAlertRow } from './gas-alert.js';
 export { FireScheduleRepository } from './fire-schedule.js';
 export type { FireScheduleOutcome, FireScheduleRecord, FireScheduleView } from './fire-schedule.js';
+
+export * from './native-funding.js';
+
+export * from './funding-hold.js';
+
+export * from './funding-worker-journal.js';

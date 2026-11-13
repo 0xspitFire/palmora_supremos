@@ -3,6 +3,7 @@ import type { BackendStore } from './store.js';
 import type { Campaign, ChainEvidenceRecord, RobinhoodNegativeCase, SimulationEvidenceRecord, ValidatedCampaign } from './types.js';
 
 /** New owner-reviewed baseline only; legacy public evidence never acquires allowlist scope implicitly. */
+export const REVIEWED_ERC721_PUBLIC_BASELINE = 'erc721-reviewed-public-v1-baseline@1';
 export const SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE = 'seadrop-v1-baseline-public-free-allowlist@1';
 /** Separate owner-reviewed extension; existing public/allowlist approvals never authorize signed mints. */
 export const SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE = 'seadrop-v1-baseline-public-free-allowlist-free-signed@1';
@@ -13,7 +14,27 @@ export function validFreeSignedRehearsalReference(value: unknown): value is stri
     && !/https?:|wss?:|bearer|authorization|password|private[ _-]?key|\.env\b|:\/\//i.test(value);
 }
 
+/** Family scope is independent from the chain-wide operational enablement. */
+export function chainEvidenceMatchesCampaign(evidence:ChainEvidenceRecord,campaign:Campaign):boolean {
+ if(evidence.chainId!==campaign.chainId)return false;
+ if(campaign.strategy==='erc721-reviewed-public-v1'){
+  const approved=evidence.reviewedProtocol,selected=campaign.custodyPolicy?.reviewedProtocol;
+  return evidence.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE && !evidence.seaDropCompatible && !campaign.chainVerification.seaDropCompatible && approved?.family==='erc721-reviewed-public-v1' && selected?.family===approved.family && /^sha256:[0-9a-f]{64}$/.test(selected.registryDigest) && /^sha256:[0-9a-f]{64}$/.test(selected.descriptorDigest) && approved.registryDigest===selected.registryDigest && Array.isArray(approved.descriptorDigests) && approved.descriptorDigests.includes(selected.descriptorDigest) && campaign.custodyPolicy?.provider==='turnkey' && /^sha256:[0-9a-f]{64}$/.test(campaign.custodyPolicy.recordDigest) && campaign.mintPriceWei===0n && campaign.feePolicy.kind==='free' && Number.isSafeInteger(campaign.quantity) && campaign.quantity>=1 && campaign.quantity<=(campaign.chainId===8453?4:10);
+ }
+ if(evidence.reviewedProtocol || evidence.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE || !evidence.seaDropCompatible)return false;
+ const signed=evidence.strategyVersion===SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE;
+ const allowlist=signed||evidence.strategyVersion===SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE;
+ if(campaign.strategy==='seadrop-v1-public')return allowlist||['seadrop-v1-public','seadrop-v1-public@1','seadrop-v1-public-1'].includes(evidence.strategyVersion);
+ return allowlist && (campaign.strategy==='seadrop-v1-allowlist'||signed&&campaign.strategy==='seadrop-v1-signed') && campaign.mintPriceWei===0n && campaign.feePolicy.kind==='free';
+}
+
 function strategyCompatible(evidence: ChainEvidenceRecord, campaign: Campaign, state: ReturnType<BackendStore['snapshot']>, now: Date): boolean {
+  if(!chainEvidenceMatchesCampaign(evidence,campaign))return false;
+  if(evidence.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE){
+    const approved=evidence.reviewedProtocol;const selected=campaign.custodyPolicy?.reviewedProtocol;
+    if(!approved || !selected || campaign.strategy!=='erc721-reviewed-public-v1' || approved.family!==selected.family || approved.registryDigest!==selected.registryDigest || !approved.descriptorDigests.includes(selected.descriptorDigest) || campaign.quantity>(campaign.chainId===8453?4:10) || campaign.mintPriceWei!==0n || campaign.feePolicy.kind!=='free')return false;
+    return currentCustody(campaign,state,now);
+  }
   const signedScope = evidence.strategyVersion === SEADROP_PUBLIC_FREE_ALLOWLIST_SIGNED_BASELINE;
   if (evidence.strategyVersion !== SEADROP_PUBLIC_FREE_ALLOWLIST_BASELINE && !signedScope) {
     return ['seadrop-v1-public', 'seadrop-v1-public@1', 'seadrop-v1-public-1'].includes(evidence.strategyVersion) && campaign.strategy === 'seadrop-v1-public';
@@ -23,6 +44,9 @@ function strategyCompatible(evidence: ChainEvidenceRecord, campaign: Campaign, s
   // Chain compatibility does not supply custody authority. The actual owner-signed
   // record is selected/verified by preparation and freshly checked before arm/run;
   // own-wallet simulation digests below bind this exact policy selection.
+  return currentCustody(campaign,state,now);
+}
+function currentCustody(campaign:Campaign,state:ReturnType<BackendStore['snapshot']>,now:Date):boolean {
   const binding = campaign.custodyPolicy;
   const operational = state.runtime.operational;
   const custody = operational?.custody;
@@ -42,6 +66,9 @@ export class EvidenceService {
   constructor(private readonly store: BackendStore, private readonly now: () => Date = () => new Date(), private readonly authority?: EvidenceAuthority) {}
   async recordChainEvidence(record: ChainEvidenceRecord): Promise<void> {
     if (!Number.isFinite(Date.parse(record.checkedAt)) || !Number.isFinite(Date.parse(record.expiresAt)) || record.expiresAt <= record.checkedAt || record.sourceBlock < 0n || !record.sourceBlockHash || !record.endpointIdentity || !record.strategyVersion) throw new Error('INVALID_CHAIN_EVIDENCE');
+    if(record.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE && (Object.keys(record).some(key=>!['id','chainId','status','executionEnabled','seaDropCompatible','positiveLivePath','archiveForkPassed','negativeCases','reconciliationPassed','finalityPassed','endpointIdentity','archiveEndpointIdentity','strategyVersion','checkedAt','expiresAt','sourceBlock','sourceBlockHash','reviewedProtocol'].includes(key)) || Object.keys(record.reviewedProtocol??{}).sort().join(',')!=='descriptorDigests,family,registryDigest'))throw new Error('REVIEWED_PROTOCOL_EVIDENCE_INCOMPLETE');
+    if(record.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE && (!record.reviewedProtocol || record.reviewedProtocol.family!=='erc721-reviewed-public-v1' || !/^sha256:[0-9a-f]{64}$/.test(record.reviewedProtocol.registryDigest) || !Array.isArray(record.reviewedProtocol.descriptorDigests) || !record.reviewedProtocol.descriptorDigests.length || record.reviewedProtocol.descriptorDigests.length>100 || record.reviewedProtocol.descriptorDigests.some(digest=>!/^sha256:[0-9a-f]{64}$/.test(digest)) || record.seaDropCompatible || !record.archiveForkPassed || !record.reconciliationPassed || !record.finalityPassed || ROBINHOOD_CASES.some(name=>!record.negativeCases[name])))throw new Error('REVIEWED_PROTOCOL_EVIDENCE_INCOMPLETE');
+    if(record.strategyVersion!==REVIEWED_ERC721_PUBLIC_BASELINE && record.reviewedProtocol)throw new Error('REVIEWED_PROTOCOL_EVIDENCE_MISLABELED');
     if (record.status !== 'pending' || record.executionEnabled || record.acceptedAt || record.acceptedBy || record.approvalProof) throw new Error('EVIDENCE_MUST_BE_SUBMITTED_PENDING');
     await this.store.transaction(state => {
       if (state.chainEvidence.some(item => item.id === record.id)) throw new Error('CHAIN_EVIDENCE_ALREADY_EXISTS');
@@ -54,7 +81,7 @@ export class EvidenceService {
       const record = state.chainEvidence.find(item => item.id === id); if (!record) throw new Error('CHAIN_EVIDENCE_NOT_FOUND');
       if (record.status !== 'pending') throw new Error('CHAIN_EVIDENCE_ALREADY_DECIDED');
       if (!this.authority!.verify(structuredClone(record), approval)) throw new Error('EVIDENCE_APPROVAL_REJECTED');
-      if (record.chainId === 1) for (const previous of state.chainEvidence) if (previous.chainId === 1 && previous.id !== id) previous.executionEnabled = false;
+      if (record.chainId === 1) for (const previous of state.chainEvidence) if (previous.chainId === 1 && previous.id !== id && (previous.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE)===(record.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE)) previous.executionEnabled = false;
       record.status = 'accepted'; record.executionEnabled = true; record.acceptedAt = approval.acceptedAt; record.acceptedBy = approval.verifierId; record.approvalProof = approval.proof;
     });
   }
@@ -73,7 +100,8 @@ export class EvidenceService {
     if (evidence.expiresAt <= this.now().toISOString()) throw new Error('CHAIN_VERIFICATION_EVIDENCE_STALE');
     if (!evidence.endpointIdentity || !evidence.strategyVersion || !evidence.sourceBlockHash || evidence.endpointIdentity !== verification.endpointReference || !strategyCompatible(evidence, input.campaign, state, this.now())) throw new Error('CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
     if (verification.sourceBlock !== evidence.sourceBlock || verification.checkedAt !== evidence.checkedAt) throw new Error('CHAIN_VERIFICATION_SNAPSHOT_MISMATCH');
-    if (!evidence.seaDropCompatible || !evidence.positiveLivePath) throw new Error('SEADROP_EVIDENCE_REQUIRED');
+    if(evidence.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE && (!evidence.archiveForkPassed || !evidence.reconciliationPassed || !evidence.finalityPassed || ROBINHOOD_CASES.some(name=>!evidence.negativeCases[name])))throw new Error('REVIEWED_PROTOCOL_EVIDENCE_INCOMPLETE');
+    if ((!evidence.seaDropCompatible && evidence.strategyVersion!==REVIEWED_ERC721_PUBLIC_BASELINE) || !evidence.positiveLivePath) throw new Error('SEADROP_EVIDENCE_REQUIRED');
     if (input.campaign.chainId === 4663) {
       if (!evidence.archiveForkPassed || !evidence.reconciliationPassed || !evidence.finalityPassed) throw new Error('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
       if (ROBINHOOD_CASES.some(name => !evidence.negativeCases[name])) throw new Error('ROBINHOOD_NEGATIVE_EVIDENCE_INCOMPLETE');

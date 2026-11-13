@@ -10,12 +10,12 @@ import { liveRequestDigest } from './evidence.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, type FleetSpendPolicy } from './fleet-policy.js';
 
 export interface CommandResponse<T> { id: string; state: string; nextAction: string; createdAt: string; retryable: boolean; blockingReason?: string; data?: T; }
-export interface CampaignInput { walletScope?: readonly string[]; chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; custodyPolicy?: Campaign['custodyPolicy']; }
+export interface CampaignInput { reviewedProtocol?: { family: 'erc721-reviewed-public-v1'; registryDigest: string; descriptorDigest: string }; walletScope?: readonly string[]; chainId: number; contract: string; strategy: string; quantity: number; dryRun?: boolean; maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; broadcastMode?: 'flashbots' | 'public' | 'sequencer'; chainVerification: ChainVerification; mintPriceWei?: bigint; feePolicy: FeePolicy; openingAt?: string; tMinusMs?: number; custodyPolicy?: Campaign['custodyPolicy']; }
 export interface ApprovalCommandInput { validated: ValidatedCampaign; idempotencyKey?: string; }
-export interface ArmCommandInput { validated: ValidatedCampaign; mode: 'dry-run' | 'live'; idempotencyKey?: string; approvalId?: string; }
+export interface ArmCommandInput { validated: ValidatedCampaign; mode: 'dry-run' | 'live'; idempotencyKey?: string; approvalId?: string; fundingHoldId?: string; }
 export interface RunCommandInput { runId: string; wallets: string[]; idempotencyKey?: string; }
 export interface SummaryCommandInput { runId?: string; }
-export interface FundCommandInput { runId?: string; wallets?: string[]; }
+export interface FundCommandInput { runId?: string; wallets?: string[]; action?: 'prepare' | 'execute' | 'reconcile' | 'cancel'; holdId?: string; campaignId?: string; idempotencyKey?: string; expiresAt?: string; }
 export type TypedCommandInput = ApprovalCommandInput | ArmCommandInput | RunCommandInput | SummaryCommandInput | FundCommandInput | { reason?: string; idempotencyKey?: string };
 /** Highest per-gas tip a free Ethereum campaign may carry under the per-wallet fee budget shape: 2 gwei (D-042). */
 export const MAX_FREE_TIP_WEI = 2_000_000_000n;
@@ -58,7 +58,7 @@ export class BackendApplication {
         if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
         if (!approved) throw new Error('APPROVAL_REQUIRED');
       }
-      const run = await this.coordinator.arm(validated, mode, typeof input.idempotencyKey === 'string' ? input.idempotencyKey : undefined);
+      const run = await this.coordinator.arm(validated, mode, typeof input.idempotencyKey === 'string' ? input.idempotencyKey : undefined, typeof input.fundingHoldId === 'string' ? input.fundingHoldId : undefined);
       return { id: run.id, state: run.state, nextAction: 'Execute run', createdAt: run.createdAt, retryable: false, data: run as unknown as T };
     }
     if (name === 'dry-run') {
@@ -107,13 +107,28 @@ export class BackendApplication {
       return { id: runId ?? 'summary', state: 'Summarized', nextAction: 'Inspect canonical run facts', createdAt: now, retryable: false, data: runs.map(run => ({ run, campaign: state.campaigns.find(campaign => campaign.id === run.campaignId), attempts: state.attempts.filter(attempt => attempt.runId === run.id), receipts: state.receipts.filter(receipt => receipt.runId === run.id), reconciliations: state.reconciliations.filter(item => item.runId === run.id), reservations: state.reservations.filter(item => item.runId === run.id), ...quantityPlanFor(state.events, run.id) })) as T };
     }
     if (name === 'fund') {
+      if (input.action !== undefined && !['prepare', 'execute', 'reconcile', 'cancel'].includes(String(input.action))) throw new Error('FUNDING_ACTION_UNSUPPORTED');
+      if (input.action === 'prepare') {
+        if (typeof input.campaignId !== 'string' || !Array.isArray(input.wallets) || input.wallets.some(value => typeof value !== 'string') || typeof input.idempotencyKey !== 'string' || typeof input.expiresAt !== 'string') throw new Error('FUNDING_HOLD_INPUT_REQUIRED');
+        const hold = await this.coordinator.prepareFunding({ campaignId: input.campaignId, wallets: input.wallets as string[], idempotencyKey: input.idempotencyKey, expiresAt: input.expiresAt });
+        return { id: hold.id, state: hold.state, nextAction: 'Execute bounded funding, reconcile arrival, then pass normal mint arm checks', createdAt: hold.createdAt, retryable: false, data: hold as T };
+      }
+      if (input.action === 'execute' || input.action === 'reconcile' || input.action === 'cancel') {
+        if (typeof input.holdId !== 'string') throw new Error('FUNDING_HOLD_ID_REQUIRED');
+        if (input.action === 'cancel') {
+          await this.coordinator.releaseFundingHold(input.holdId);
+          return { id: input.holdId, state: 'Released', nextAction: 'Inspect resolved funding and retained balances', createdAt: now, retryable: false };
+        }
+        const result = input.action === 'execute' ? await this.coordinator.fundHold(input.holdId) : await this.coordinator.reconcileFunding(input.holdId);
+        return { id: input.holdId, state: input.action === 'execute' ? 'FundingPending' : 'FundingReconciled', nextAction: 'Inspect final funding facts and pass normal mint arm checks', createdAt: now, retryable: false, data: result as T };
+      }
       const state = this.store.snapshot();
       const run = typeof input.runId === 'string' ? state.runs.find(item => item.id === input.runId) : undefined;
       if (input.runId !== undefined && !run) throw new Error('RUN_NOT_FOUND');
       const intent = run ? state.intents.find(item => item.id === run.intentId) : undefined;
       const wallets = Array.isArray(input.wallets) ? input.wallets.filter((wallet): wallet is string => typeof wallet === 'string') : intent?.wallets ?? [];
       if (wallets.length === 0) throw new Error('FUNDING_WALLETS_REQUIRED');
-      return { id: typeof input.runId === 'string' ? input.runId : 'fund', state: 'FundingReport', nextAction: 'Fund through the approved operator flow, then rerun health', createdAt: now, retryable: false, data: { wallets, autoFund: false, canonicalSource: 'wallet_balance', note: 'Backend never handles private keys or performs unattended funding' } as T };
+      return { id: typeof input.runId === 'string' ? input.runId : 'fund', state: 'FundingReport', nextAction: 'Fund through the approved operator flow, then rerun health', createdAt: now, retryable: false, data: { wallets, autoFund: false, canonicalSource: 'wallet_balance', note: 'This report transfers nothing. Automatic funding requires a canonical FundingPending parent and separately approved hub custody and budgets.' } as T };
     }
     throw new Error(`${String(name).toUpperCase()}_UNSUPPORTED`);
   }

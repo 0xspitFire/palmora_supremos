@@ -2,12 +2,23 @@ import { randomUUID } from 'node:crypto';
 import type { BackendStore } from './store.js';
 import type { AttemptRecord, BackendState, Campaign, CampaignState, EngineAdapter, EventRecord, ExecutionResult, IntentRecord, ReceiptRecord, Reservation, RunRecord, ValidatedCampaign } from './types.js';
 import { SpendLedger } from './spend-ledger.js';
-import { EvidenceService, liveRequestDigest } from './evidence.js';
+import { EvidenceService, liveRequestDigest, REVIEWED_ERC721_PUBLIC_BASELINE } from './evidence.js';
 import { rebindExecutionResult, type CanonicalExecutionStore } from './canonical-store.js';
 import { assertRobinhoodLiveAllowed } from './robinhood-enablement.js';
 import { assertBaseLiveAllowed } from './base-enablement.js';
 import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
 import type { CompensatingAssuranceConfig } from './compensating-controls.js';
+import type { FundingCoordinatorService } from './native-funding.js';
+import { assertFundingQualification, type FundingHoldInput, type FundingHoldQualification, type FundingPendingHold } from './funding-hold.js';
+import type { NativeFundingRecord } from '@mint-bot/database';
+
+export interface CoordinatorFundingWiring {
+  service: Pick<FundingCoordinatorService, 'execute' | 'reconcile'>;
+  /** Verifies real current watched source/score or the exact paid owner intent for the stored campaign and selected fleet. */
+  qualify(campaign: Campaign, wallets: readonly string[]): Promise<FundingHoldQualification>;
+  /** Current selected-wallet, chain and custody readiness for funding; does not waive normal funded mint arm checks. */
+  assertReady(campaign: Campaign, wallets: readonly string[]): Promise<void>;
+}
 
 const resolveAssurance = (option: CoordinatorAssuranceOption, run: AssuranceRun): CompensatingAssuranceConfig | undefined => (option === undefined ? undefined : typeof option === 'function' ? option(run) : option);
 /** What the arm gate knows about the run being armed or executed. The campaign is the stored one, never the caller's copy. */
@@ -33,7 +44,7 @@ export class ExecutionCoordinator {
   constructor(
     private readonly store: BackendStore,
     private readonly engine: EngineAdapter,
-    private readonly options: { expectedCustodyPolicy?: CustodyPolicyBinding | ((run: AssuranceRun) => CustodyPolicyBinding); /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: AssuranceRun) => CompensatingAssuranceConfig); /** T-042 requirement 2: awaited before every live arm and execute so readiness is observed in-process just now, never read from an earlier observation. A failure refuses the run (fail closed). */ refreshReadiness?: (run: AssuranceRun) => Promise<void>; /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void>; failed?(reason: string, runId?: string): Promise<void>; confirmed?(runId: string, facts: { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string; feePaid?: string }): Promise<void>; mintFailed?(runId: string, facts: { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string; feePaid?: string }, reason?: string): Promise<void> } } = {},
+    private readonly options: { funding?: CoordinatorFundingWiring; expectedCustodyPolicy?: CustodyPolicyBinding | ((run: AssuranceRun) => CustodyPolicyBinding); /** Set only by the owner's CLI (D-043); the service never sets it, so unattended runs still need Turnkey or a cloud key service. */ acceptPersonalLiveLocalCustody?: boolean; /** D-058/D-059: set by the service configuration to accept `turnkey-compensating-controls` evidence; absent means that evidence kind is refused. */ compensatingAssurance?: CompensatingAssuranceConfig | ((run: AssuranceRun) => CompensatingAssuranceConfig); /** T-042 requirement 2: awaited before every live arm and execute so readiness is observed in-process just now, never read from an earlier observation. A failure refuses the run (fail closed). */ refreshReadiness?: (run: AssuranceRun) => Promise<void>; /** D-059: when set, a live run cannot arm or execute unless the independent wallet watcher covers every armed wallet and is alive. */ walletWatch?: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean }; alerts?: { cap(reason: string, runId?: string): Promise<void>; failed?(reason: string, runId?: string): Promise<void>; confirmed?(runId: string, facts: { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string; feePaid?: string }): Promise<void>; mintFailed?(runId: string, facts: { chainId: number; collection: string; wallet?: string; quantity?: number; hash: string; feePaid?: string }, reason?: string): Promise<void> } } = {},
   ) {
     // T-044 security re-review (D1): the compensated profile counts on the watcher to see what the other checks cannot, so
     // configuring one without the other is a start-up error, not a silently weaker arm gate.
@@ -97,17 +108,93 @@ export class ExecutionCoordinator {
           const terminal = result === 'failed' || result === 'final' || (result === 'confirmed' && chainId === 1);
           return !terminal;
         });
-      state.runtime = unresolved.length === 0
+      const fundingUnresolved = this.canonicalStore()?.unresolvedFundingHoldIds?.() ?? [];
+      state.runtime = unresolved.length === 0 && fundingUnresolved.length === 0
         ? { ...state.runtime, startupState: 'Ready', reconciliationCompletedAt: new Date().toISOString(), blockingReasons: [] }
         : { ...state.runtime, startupState: 'Blocked', reconciliationCompletedAt: new Date().toISOString(), blockingReasons: ['UNRESOLVED_EXECUTIONS'] };
     });
   }
 
-  async arm(input: ValidatedCampaign, mode: 'dry-run' | 'live', idempotencyKey?: string): Promise<RunRecord> {
+  /** Authoritative pre-arm operation. Underfunded wallets receive FundingPending, never Armed. */
+  async prepareFunding(input: FundingHoldInput): Promise<FundingPendingHold> {
+    const wiring = this.options.funding;
+    const canonical = this.canonicalStore();
+    if (!wiring || !canonical?.createFundingHold) throw new Error('NATIVE_FUNDING_NOT_CONFIGURED');
+    this.assertLiveStoreReady();
+    const state = this.store.snapshot();
+    if (state.killed) throw new Error('KILLED');
+    if (state.runtime.startupState !== 'Ready' || !state.runtime.dependencies.engine || !state.runtime.dependencies.chain || !state.runtime.dependencies.backup) throw new Error('DEPLOYMENT_DEPENDENCIES_NOT_READY');
+    const campaign = state.campaigns.find(value => value.id === input.campaignId);
+    if (!campaign || campaign.dryRun) throw new Error('LIVE_CAMPAIGN_REQUIRED');
+    const wallets = [...input.wallets].map(value => value.toLowerCase()).sort();
+    this.assertWalletWatch(campaign.chainId, wallets);
+    const qualification = await this.qualifyFunding(campaign, wallets);
+    if (this.store.snapshot().killed) throw new Error('KILLED');
+    return canonical.createFundingHold({ ...input, wallets }, qualification);
+  }
+
+  async fundHold(id: string): Promise<Array<NativeFundingRecord | { state: 'AlreadyFunded'; wallet: string }>> {
+    const wiring = this.options.funding;
+    const hold = this.canonicalStore()?.fundingHold?.(id);
+    if (!wiring || !hold || hold.state !== 'FundingPending' || hold.boundRunId) throw new Error('FUNDING_HOLD_NOT_RESERVED');
+    if (this.store.snapshot().killed) throw new Error('KILLED');
+    await this.qualifyFunding(hold.campaign, hold.wallets);
+    const results: Array<NativeFundingRecord | { state: 'AlreadyFunded'; wallet: string }> = [];
+    for (const wallet of hold.wallets) {
+      if (this.store.snapshot().killed) throw new Error('KILLED');
+      const operationId = this.fundingOperationId(hold.id, wallet);
+      try {
+        results.push(await wiring.service.execute({ id: operationId, idempotencyKey: operationId, parentRunId: hold.id, parentHoldId: hold.id, parentHoldDigest: hold.digest, chainId: hold.campaign.chainId, recipient: wallet, requiredBalanceWei: hold.requiredPerWalletWei, expiresAt: hold.expiresAt }));
+      } catch (error) {
+        if (error instanceof Error && error.message === 'NATIVE_FUNDING_ALREADY_FUNDED') results.push({ state: 'AlreadyFunded', wallet });
+        else throw error;
+      }
+    }
+    return results;
+  }
+
+  async reconcileFunding(id: string): Promise<NativeFundingRecord[]> {
+    const hold = this.canonicalStore()?.fundingHold?.(id);
+    if (!this.options.funding || !hold) throw new Error('NATIVE_FUNDING_NOT_CONFIGURED');
+    const results: NativeFundingRecord[] = [];
+    for (const wallet of hold.wallets) {
+      try { results.push(await this.options.funding.service.reconcile(this.fundingOperationId(hold.id, wallet))); }
+      catch (error) { if (!(error instanceof Error) || error.message !== 'NATIVE_FUNDING_NOT_FOUND') throw error; }
+    }
+    return results;
+  }
+
+  async releaseFundingHold(id: string): Promise<void> {
+    const canonical = this.canonicalStore();
+    if (!canonical?.releaseFundingHold) throw new Error('NATIVE_FUNDING_NOT_CONFIGURED');
+    await canonical.releaseFundingHold(id);
+  }
+
+  private fundingOperationId(id: string, wallet: string): string { return `${id}:${wallet.toLowerCase()}`; }
+
+  private async qualifyFunding(campaign: Campaign, wallets: readonly string[]): Promise<FundingHoldQualification> {
+    try {
+      if (!this.options.funding) throw new Error('NATIVE_FUNDING_NOT_CONFIGURED');
+      await this.options.funding.assertReady(structuredClone(campaign), [...wallets]);
+      const proof = await this.options.funding.qualify(structuredClone(campaign), [...wallets]);
+      assertFundingQualification(campaign, wallets, proof, new Date());
+      return proof;
+    } catch (error) {
+      throw new Error(error instanceof Error && /^(?:NATIVE_)?FUNDING_[A-Z_]{1,80}$/.test(error.message) ? error.message : 'FUNDING_AUTHORITY_UNAVAILABLE');
+    }
+  }
+
+  async arm(input: ValidatedCampaign, mode: 'dry-run' | 'live', idempotencyKey?: string, fundingHoldId?: string): Promise<RunRecord> {
     const initial = this.store.snapshot();
     const campaign = initial.campaigns.find(item => item.id === input.campaign.id);
     if (!campaign) throw new Error('CAMPAIGN_NOT_FOUND');
     const canonicalInput: ValidatedCampaign = { ...input, campaign };
+    if(mode==='live'&&this.options.funding&&!fundingHoldId)fundingHoldId=this.canonicalStore()?.reservedFundingHoldForCampaign?.(campaign.id,input.wallets??[],idempotencyKey?initial.runs.find(run=>run.idempotencyKey===idempotencyKey)?.id:undefined);
+    if (fundingHoldId) {
+      const hold = this.canonicalStore()?.fundingHold?.(fundingHoldId);
+      if (mode !== 'live' || !this.options.funding || !hold || hold.state !== 'FundingPending') throw new Error('FUNDING_HOLD_ARM_MISMATCH');
+      await this.qualifyFunding(campaign, input.wallets ?? []);
+    }
     if (mode === 'live' && campaign.dryRun) throw new Error('LIVE_REQUIRES_NON_DRY_CAMPAIGN');
     // Campaign history is immutable. A Turnkey campaign created before exact
     // signed-record binding existed must be recreated; a policy reference alone
@@ -125,7 +212,12 @@ export class ExecutionCoordinator {
       assertLiveOperationalReadiness(readiness.runtime.operational, new Date(), this.expectedCustodyPolicy(campaign, input.wallets ?? []), this.options.acceptPersonalLiveLocalCustody ? { chainId: campaign.chainId, wallets: input.wallets ?? [] } : undefined, this.assuranceContext(campaign, input.wallets ?? []));
       this.assertWalletWatch(campaign.chainId, input.wallets ?? []);
       simulationIds = this.evidence.assertLiveEvidence(canonicalInput);
-      if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible) throw new Error('CHAIN_VERIFICATION_REQUIRED');
+      // EvidenceService above has already checked current signed custody and
+      // registry/descriptor scope; only that explicit baseline may be non-SeaDrop.
+      const reviewed=campaign.custodyPolicy?.reviewedProtocol;
+      const protocolEvidence=readiness.chainEvidence.find(row=>row.id===campaign.chainVerification.evidenceId);
+      const reviewedReady=campaign.strategy==='erc721-reviewed-public-v1'&&reviewed?.family==='erc721-reviewed-public-v1'&&protocolEvidence?.strategyVersion===REVIEWED_ERC721_PUBLIC_BASELINE&&protocolEvidence.reviewedProtocol?.registryDigest===reviewed.registryDigest&&protocolEvidence.reviewedProtocol.descriptorDigests.includes(reviewed.descriptorDigest);
+      if (campaign.chainVerification.status !== 'verified' || !campaign.chainVerification.seaDropCompatible&&!reviewedReady) throw new Error('CHAIN_VERIFICATION_REQUIRED');
       if (!campaign.chainVerification.evidenceId || !campaign.chainVerification.checkedAt || campaign.chainVerification.sourceBlock === undefined) throw new Error('CHAIN_VERIFICATION_EVIDENCE_REQUIRED');
       if (campaign.chainId === 4663 && campaign.broadcastMode !== 'sequencer') throw new Error('ROBINHOOD_SEQUENCER_REQUIRED');
       if (campaign.chainId === 4663 && campaign.feePolicy.kind === 'paid') assertRobinhoodLiveAllowed('paid', this.robinhoodEnablement(), new Date());
@@ -145,10 +237,18 @@ export class ExecutionCoordinator {
     }
     const requestDigest = liveRequestDigest(campaign, mode, input.wallets ?? [], simulationIds);
     const existing = idempotencyKey && initial.runs.find(run => run.idempotencyKey === idempotencyKey);
-    if (existing) { if (existing.requestDigest !== requestDigest) throw new Error('IDEMPOTENCY_KEY_CONFLICT'); return existing; }
+    if (existing) {
+      if (existing.requestDigest !== requestDigest || fundingHoldId && this.canonicalStore()?.fundingHold?.(fundingHoldId)?.boundRunId !== existing.id) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
+      return existing;
+    }
     const now = new Date().toISOString();
     const run: RunRecord = { id: `run_${randomUUID()}`, intentId: `intent_${randomUUID()}`, campaignId: campaign.id, mode, requestDigest, state: 'Armed', ...(idempotencyKey ? { idempotencyKey } : {}), createdAt: now, updatedAt: now };
     const intent: IntentRecord = { id: run.intentId, runId: run.id, campaignId: campaign.id, campaignSnapshot: structuredClone(campaign), wallets: [...(input.wallets ?? [])], policy: structuredClone(campaign.spendPolicy), feePolicy: structuredClone(campaign.feePolicy), chainVerification: structuredClone(campaign.chainVerification), simulationIds: [...simulationIds], evidenceAt: input.evidenceAt, createdAt: now };
+    if (fundingHoldId) {
+      const canonical = this.canonicalStore();
+      if (!canonical?.armFundingHold) throw new Error('NATIVE_FUNDING_NOT_CONFIGURED');
+      return canonical.armFundingHold(fundingHoldId, run, intent);
+    }
     return this.store.transaction(state => {
       const duplicate = idempotencyKey && state.runs.find(item => item.idempotencyKey === idempotencyKey);
       if (duplicate) { if (duplicate.requestDigest !== requestDigest) throw new Error('IDEMPOTENCY_KEY_CONFLICT'); return duplicate; }
@@ -329,6 +429,10 @@ export class ExecutionCoordinator {
   }
 
   private async reconcileOnce(): Promise<void> {
+    const canonical = this.canonicalStore();
+    if (this.options.funding && canonical?.nextFundingReconciliationIds) { for (const id of await canonical.nextFundingReconciliationIds(8)) await this.options.funding.service.reconcile(id); }
+    else for (const id of canonical?.unresolvedFundingHoldIds?.() ?? []) await this.reconcileFunding(id);
+    if(this.options.funding)for(const id of this.canonicalStore()?.expiredFundingHoldIds?.(new Date())??[]){try{await this.canonicalStore()?.releaseFundingHold?.(id);}catch(error){if(!(error instanceof Error)||!['FUNDING_OUTCOME_UNRESOLVED','FUNDING_HOLD_MINT_STARTED'].includes(error.message))throw error;}}
     const snapshot = this.store.snapshot();
     // D-072: a completed run whose latest reconciliation is already final cannot change any more, so it is not read again every pass.
     const settledFinal = (runId: string): boolean => snapshot.reconciliations.filter(item => item.runId === runId).at(-1)?.result === 'final';

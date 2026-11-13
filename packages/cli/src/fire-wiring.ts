@@ -1,3 +1,4 @@
+import type { MintStageRuntime, ScheduleStageCandidate, ScheduleStageDecision } from './mint-stage-runtime.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { formatEth, campaignInputDigest, type BackendStore, type Campaign, type IntelligenceChainPort } from '@mint-bot/backend';
@@ -16,6 +17,7 @@ import type { DryRunReport } from './robinhood-readonly.js';
  * schedule store; the scheduler uses `mintState` and `fireSchedule`. Both end in `runFire`, so they cannot drift apart.
  */
 export interface FireWiringDeps {
+  stage?: MintStageRuntime;
   mode: 'dry-run' | 'host';
   store: BackendStore;
   /** The service's own application: `approve` records the owner's approval exactly as `live-request create` does. */
@@ -42,11 +44,16 @@ export interface FireWiringDeps {
   now?: () => Date;
   /** D-017: accepted host evidence, checked when a schedule is created and again before it fires. */
   assertUnattendedReady?: () => Promise<void>;
+  reviewedProtocolSimulation?(campaign: Campaign, wallets: readonly string[]): Promise<{recorded:string[];skipped:Array<{wallet:string;why:string}>}>;
+  reviewedProtocolMintState?(campaign:Campaign):Promise<MintState>;
   allowlistSimulation?(campaign: Campaign, wallets: readonly string[]): Promise<{ recorded: string[]; skipped: Array<{ wallet: string; why: string }> }>;
   allowlistMintState?(campaign: Campaign): Promise<MintState>;
 }
 
 export interface FireWiring {
+  prepareScheduleStage(campaign:Campaign):Promise<ScheduleStageCandidate|undefined>;
+  bindScheduleStage(record:FireScheduleRecord,candidate:ScheduleStageCandidate|undefined):Promise<void>;
+  inspectScheduleStage(record:FireScheduleRecord,campaign:Campaign):Promise<ScheduleStageDecision>;
   fireDeps: FireDeps;
   mintState(campaign: Campaign): Promise<MintState>;
   /** The wallets the owner typed (`all` = the whole fleet), each once. */
@@ -73,6 +80,7 @@ const compact = (date: Date): string => date.toISOString().replace(/[-:]/g, '').
 export function createFireWiring(deps: FireWiringDeps): FireWiring {
   const now = deps.now ?? (() => new Date());
   const inFlight = new Set<string>();
+  const stageSchedules=new Map<string,FireScheduleRecord>();
   /** A read from a chain provider is given 20 seconds; after that the step fails by name and nothing is sent (so a slow provider never leaves a fire hanging). */
   const read = <T,>(work: () => Promise<T>): Promise<T> => {
     let timer: NodeJS.Timeout | undefined;
@@ -103,7 +111,8 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
 
   const mintState = async (campaign: Campaign): Promise<MintState> => {
     try {
-      if (campaign.strategy === 'seadrop-v1-allowlist' || campaign.strategy === 'seadrop-v1-signed') return deps.allowlistMintState ? await deps.allowlistMintState(campaign) : 'unknown';
+      if(campaign.strategy==='erc721-reviewed-public-v1')return deps.reviewedProtocolMintState?await read(()=>deps.reviewedProtocolMintState!(campaign)):'unknown';
+    if (campaign.strategy === 'seadrop-v1-allowlist' || campaign.strategy === 'seadrop-v1-signed') return deps.allowlistMintState ? await deps.allowlistMintState(campaign) : 'unknown';
       if (campaign.chainId === 4663) {
         const wallet = (await deps.walletList())[0];
         if (!wallet) return 'unknown';
@@ -144,6 +153,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   };
 
   const recordSimulations: FireDeps['recordSimulations'] = async (campaign, wallets) => {
+      if(campaign.strategy==='erc721-reviewed-public-v1'){if(!deps.reviewedProtocolSimulation)throw new Error('REVIEWED_PROTOCOL_SIMULATION_REQUIRED');return withFunding(campaign,await read(()=>deps.reviewedProtocolSimulation!(campaign,wallets)));}
     if (campaign.strategy === 'seadrop-v1-allowlist' || campaign.strategy === 'seadrop-v1-signed') {
       if (!deps.allowlistSimulation) throw new Error('WALLET_BOUND_MINT_SOURCE_REQUIRED');
       return withFunding(campaign, await deps.allowlistSimulation(campaign, wallets));
@@ -176,6 +186,7 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
     conflict: persistentConflict,
     recordSimulations,
     createRequest: async (campaign, wallets, maxFeeGwei, provenance) => {
+      if(deps.stage&&provenance?.kind==='schedule'){const schedule=stageSchedules.get(provenance.scheduleId)??deps.fireSchedules().get(provenance.scheduleId);if(!schedule)throw new Error('MINT_STAGE_APPROVAL_REQUIRED');await deps.stage.claim(schedule,campaign);}
       // A campaign sized for N wallets covers at most N: the others that passed are left out and said so, never refused as an error.
       const sized = Math.max(1, sizedWalletCount(campaign));
       const used = wallets.slice(0, sized);
@@ -195,6 +206,9 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
   };
 
   return {
+    prepareScheduleStage:campaign=>deps.stage?deps.stage.prepare(campaign):Promise.resolve(undefined),
+    bindScheduleStage:async(record,candidate)=>{if(deps.stage){if(!candidate)throw new Error('MINT_STAGE_APPROVAL_REQUIRED');await deps.stage.bind(record,candidate);}},
+    inspectScheduleStage:(record,campaign)=>deps.stage?deps.stage.inspect(record,campaign):Promise.resolve({state:'ready'}),
     fireDeps,
     mintState,
     fundingSplit,
@@ -219,6 +233,8 @@ export function createFireWiring(deps: FireWiringDeps): FireWiring {
       return run({ campaignId, wallets, maxFeeGwei, automationEventId: eventId });
     },
     fireSchedule: async (schedule) => {
+      stageSchedules.set(schedule.id,schedule);if(stageSchedules.size>100)stageSchedules.delete(stageSchedules.keys().next().value!);
+      if(deps.stage){const campaign=findCampaign(schedule.campaignId);if(!campaign)throw new Error('CAMPAIGN_NOT_FOUND');const state=await deps.stage.inspect(schedule,campaign);if(state.state!=='ready')throw new Error(state.code??'MINT_STAGE_NOT_READY');}
       if ((findCampaign(schedule.campaignId)?.mintPriceWei ?? 0n) > 0n) throw new Error('PAID_FINAL_FIRE_REQUIRED');
       if (!deps.assertUnattendedReady) throw new Error('OPS_EVIDENCE_CHECK_REQUIRED');
       await deps.assertUnattendedReady();

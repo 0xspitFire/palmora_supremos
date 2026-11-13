@@ -5,7 +5,7 @@ import { BackendApplication } from './application.js';
 import { OrchestratorService } from './service-orchestrator.js';
 import { EvidenceService } from './evidence.js';
 import { recordWalletSimulations } from './personal-live-readiness.js';
-import { ETHEREUM, NOW, OPEN_FLEET_POLICY, ROBINHOOD, WALLET_ONE, WALLET_TWO, armed, campaign, campaignInput, close, fixture } from './canonical-fixtures.js';
+import { ETHEREUM, NOW, OPEN_FLEET_POLICY, ROBINHOOD, WALLET_ONE, WALLET_TWO, armed, campaign, campaignInput, close, fixture, withCurrentSeaDropEvidence } from './canonical-fixtures.js';
 import { PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
 
 // The database compares expiry with its own clock, so the enablement times are relative to now (the fixture's NOW is in the past).
@@ -108,7 +108,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       expect(value.db.prepare("SELECT COUNT(*) AS n FROM spend_reservation WHERE campaign_id = ? AND mint_class = 'paid' AND CAST(mint_value_wei AS INTEGER) = 100").get(paidCampaign.id)).toEqual({ n: 2 });
 
       const tooExpensive = { ...campaignInput(ROBINHOOD, true), mintPriceWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei + 1n, maxRunWei: 10n ** 18n, dailyCapWei: 10n ** 18n };
-      const expensiveCampaign = await paidFixture.application.createCampaign(tooExpensive);
+      const expensiveCampaign = await paidFixture.application.createCampaign(withCurrentSeaDropEvidence(paidFixture,tooExpensive));
       const expensive = await armed(paidFixture, expensiveCampaign, [WALLET_ONE], [], '-expensive');
       await expect(proven.admitExecution(expensive.input)).rejects.toThrow('PAID_PRICE_PER_NFT_EXCEEDED');
       const another = await campaign(paidFixture, ROBINHOOD, true);
@@ -164,7 +164,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       try {
         const check = (changed: Partial<typeof evidence> | { negativeCases: Record<string, boolean> }) => new EvidenceService({ ...proven, snapshot: () => ({ ...proven.snapshot(), chainEvidence: [{ ...evidence, ...changed }] }) } as never, () => new Date(REAL)).assertLiveEvidence({ campaign: created, wallets: [WALLET_ONE], simulationIds: ids, evidenceAt: REAL });
         expect(() => check({})).not.toThrow();
-        expect(() => check({ seaDropCompatible: false })).toThrow('SEADROP_EVIDENCE_REQUIRED');
+        expect(() => check({ seaDropCompatible: false })).toThrow('CHAIN_VERIFICATION_PROVENANCE_REQUIRED');
         expect(() => check({ positiveLivePath: false })).toThrow('SEADROP_EVIDENCE_REQUIRED');
         expect(() => check({ archiveForkPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
         expect(() => check({ reconciliationPassed: false })).toThrow('ROBINHOOD_SAFETY_EVIDENCE_INCOMPLETE');
@@ -197,7 +197,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
         value.db.prepare('UPDATE fee_policy SET active = 0 WHERE chain_profile_id = ?').run('profile-4663');
         proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
         const application = new BackendApplication(proven, {} as never, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
-        const created = await application.createCampaign(real());
+        const created = await application.createCampaign(withCurrentSeaDropEvidence(value,real()));
         const prepared = await armed({ ...value, store: proven, application }, created, [WALLET_ONE, WALLET_TWO]);
         const admission = await proven.admitExecution(prepared.input);
         expect(admission.reservations.map((item) => item.amountWei)).toEqual([ALLOWANCE, ALLOWANCE]);
@@ -216,12 +216,12 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
         const wallets = (count: number, from: number) => Array.from({ length: count }, (_, index) => `0x${(from + index + 1).toString(16).padStart(40, '0')}`);
         const sized = (count: number) => real({ maxRunWei: ALLOWANCE * BigInt(count) });
         // Six wallets (0.0012 ETH), then four more in another campaign (0.0008 ETH): exactly 0.002 ETH in all, which is allowed.
-        const first = await application.createCampaign(sized(6));
+        const first = await application.createCampaign(withCurrentSeaDropEvidence(value,sized(6)));
         await expect(proven.admitExecution((await armed(fixtureValue, first, wallets(6, 0), [], '-a')).input)).resolves.toBeDefined();
-        const second = await application.createCampaign(sized(4));
+        const second = await application.createCampaign(withCurrentSeaDropEvidence(value,sized(4)));
         await expect(proven.admitExecution((await armed(fixtureValue, second, wallets(4, 100), [], '-b')).input)).resolves.toBeDefined();
         // One more wallet in a third campaign would make 0.0022 ETH: above the Robinhood cap, though below the fleet's 0.0024 ETH.
-        const third = await application.createCampaign(sized(1));
+        const third = await application.createCampaign(withCurrentSeaDropEvidence(value,sized(1)));
         await expect(proven.admitExecution((await armed(fixtureValue, third, wallets(1, 200), [], '-c')).input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
       } finally { proven.close(); await close(value); }
     });
@@ -237,9 +237,9 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
         const application = new BackendApplication(proven, {} as never, { fleetPolicy: small });
         const fixtureValue = { ...value, store: proven, application };
         const wallets = (count: number, from: number) => Array.from({ length: count }, (_, index) => `0x${(from + index + 1).toString(16).padStart(40, '0')}`);
-        const first = await application.createCampaign(real({ maxRunWei: ALLOWANCE * 5n }));
+        const first = await application.createCampaign(withCurrentSeaDropEvidence(value,real({ maxRunWei: ALLOWANCE * 5n })));
         await expect(proven.admitExecution((await armed(fixtureValue, first, wallets(5, 0), [], '-a')).input)).resolves.toBeDefined();
-        const second = await application.createCampaign(real({ maxRunWei: ALLOWANCE }));
+        const second = await application.createCampaign(withCurrentSeaDropEvidence(value,real({ maxRunWei: ALLOWANCE })));
         await expect(proven.admitExecution((await armed(fixtureValue, second, wallets(1, 100), [], '-b')).input)).rejects.toThrow('FLEET_DAILY_CAP_EXCEEDED');
       } finally { proven.close(); await close(value); }
     });
@@ -274,7 +274,7 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
         proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
         const application = new BackendApplication(proven, {} as never, { fleetPolicy: PERSONAL_LIVE_FLEET_POLICY });
         // A run limit for two wallets cannot admit three.
-        const created = await application.createCampaign(real());
+        const created = await application.createCampaign(withCurrentSeaDropEvidence(value,real()));
         const third = '0x3333333333333333333333333333333333333333';
         const prepared = await armed({ ...value, store: proven, application }, created, [WALLET_ONE, WALLET_TWO, third]);
         await expect(proven.admitExecution(prepared.input)).rejects.toThrow('SPEND_CAP_EXCEEDED');
@@ -293,7 +293,10 @@ describe('Robinhood enablement through the canonical store (T-032 part B2)', () 
       proven.enableRobinhood({ id: 'rh-1', approvedAt: REAL, expiresAt: PERM, evidence: { ...EVIDENCE }, paidAllowed: false, confirmationDigest: DIGEST });
       const now = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
       await now.open();
-      await expect(now.admitExecution(prepared.input)).resolves.toBeDefined();
+      await expect(now.admitExecution(prepared.input)).rejects.toThrow('CHAIN_VERIFICATION_REQUIRED');
+      // A campaign prepared before enablement cannot inherit a different approval. Reprepare with the exact new decision.
+      const rebound=await armed(value,await campaign(value,ROBINHOOD),[WALLET_ONE],[],'-enabled');
+      await expect(now.admitExecution(rebound.input)).resolves.toBeDefined();
       // (That it stays allowed with time is shown at the policy above; a second admission here would meet D-056's stale-reservation rule.)
       const later = new CanonicalStoreBridge(value.db, { now: () => new Date(REAL), fleetPolicy: OPEN_FLEET_POLICY });
       await later.open();

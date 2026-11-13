@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+import { registerPaidFundingCommands } from './paid-funding-commands.js';
+import { createPaidFundingOwnerRuntime } from './paid-funding-owner-runtime.js';
+import { registerReviewedProtocolRehearsalCommands } from './reviewed-protocol-rehearsal-commands.js';
+import { registerReviewedProtocolCustodyCommands } from './reviewed-protocol-custody-commands.js';
+import { registerReviewedProtocolCommands } from './reviewed-protocol-commands.js';
+import { registerNativeFundingCommands } from './native-funding-commands.js';
+import { registerAdaptiveModelCommands } from './adaptive-model-commands.js';
+import { registerWalletAdministrationCommands } from './wallet-administration-commands.js';
 import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -6,12 +14,12 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { type Address, type Hex, encodeFunctionData, keccak256, parseAbi, parseEther, parseGwei, zeroAddress } from 'viem';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, installTurnkeyPolicyBundleAtomic, pruneTurnkeySignedPolicyCatalog, readTurnkeySecretConfig, resolveSeaDropFeeRecipient, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyPolicySelection, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyPolicyBundle, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyCatalog, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
+import { LocalEncryptedSigner, TurnkeySigner, canonicalPolicyDigest, createTurnkeyClient, createTurnkeyPolicyRecord, generateAndEncryptWallets, importAndEncryptWallets, installTurnkeyPolicyBundleAtomic, pruneTurnkeySignedPolicyCatalog, readTurnkeySecretConfig, readTurnkeyApprovedPolicyRecords, readTurnkeyWalletAdminPolicyRecords, resolveSeaDropFeeRecipient, signTurnkeyPolicyRecord, turnkeyPolicyApproverKeyId, turnkeyPolicyRecordDigest, turnkeyPolicySelection, turnkeyProviderPolicyExpressions, validateTurnkeyActualProviderState, validateTurnkeyCanonicalPolicyRecord, validateTurnkeyPolicyAst, validateTurnkeyPolicyBundle, validateTurnkeyWalletMap, verifyTurnkeySignedPolicyCatalog, verifyTurnkeySignedPolicyRecord } from '@mint-bot/engine';
 import type { WalletImportRecord } from '@mint-bot/engine';
 import type { Signer, SignerFactory, TurnkeyPolicyBundle, TurnkeySecretConfig, TurnkeySignedPolicyRecord, TurnkeyWalletReference } from '@mint-bot/engine';
 import { assertNoSymlinkParents, readProtectedText } from './turnkey-files.js';
 import { configuredSecretRoot, configuredWalletPath, configuredWallets, createCliRuntime, turnkeyCustodyEnabled } from './runtime.js';
-import { DEFAULT_IDLE_BALANCE_CEILINGS, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
+import { REVIEWED_ERC721_PUBLIC_BASELINE, DEFAULT_IDLE_BALANCE_CEILINGS, ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from '@mint-bot/backend';
 import type { Campaign, ValidatedCampaign } from '@mint-bot/backend';
 import { withHiddenPassphrase } from './secure-prompt.js';
 import { IntelligenceRepository, openDatabase, openDatabaseReadOnly } from '@mint-bot/database';
@@ -28,7 +36,7 @@ import { probeRpc } from './rpc-probe.js';
 import { checkChainRpc, renderRpcHealth, viemReader, type ChainHealth } from './rpc-health.js';
 import { inventoryFleet, renderFleetInventory } from './turnkey-fleet-inventory.js';
 import { automationStatus } from './automation-status.js';
-import { buildCanonicalAnalyticsReport, readCanonicalAnalyticsActivities, CanonicalStoreBridge, type AnalyticsActivity, type AnalyticsFloorQuote } from '@mint-bot/backend';
+import { fundingCostSummary, readCanonicalAnalyticsActivities, buildCanonicalAnalyticsReport, readPersonalAnalyticsObservations, readAnalyticsFloorQuotes, CanonicalStoreBridge, type AnalyticsActivity, type AnalyticsFloorQuote } from '@mint-bot/backend';
 import { assertFleetChanged, chooseWalletSource, diffWallets, type WalletChange } from './turnkey-fleet-change.js';
 import { buildRotationReport } from './turnkey-rotation-report.js';
 import { PUBLIC_ROBINHOOD_RPC, checkFees, dryRunDrop, observeFinality } from './robinhood-readonly.js';
@@ -464,7 +472,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           ? verifyTurnkeySignedPolicyCatalog(JSON.parse(await readTurnkeyRuntimeText(config.policyCatalogPath, 'TURNKEY_POLICY_CATALOG_PERMISSIONS_REQUIRED')) as unknown, publicKey)
           : [activeRecord];
         const approvedForValidation = [...existingApproved.filter((candidate) => candidate.providerPolicy.policyId !== record.providerPolicy.policyId), record];
-        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys }, approvedForValidation);
+        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys }, approvedForValidation, await readTurnkeyWalletAdminPolicyRecords(config, { pinnedPublicKey: publicKey }));
         const proposalOutput = turnkeySecretPath(args.proposalOutput, 'turnkey-policy-proposal.json');
         const digest = turnkeyPolicyRecordDigest(record);
         const keyId = turnkeyPolicyApproverKeyId(publicKey);
@@ -514,7 +522,13 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           issuedAt: issuedAt.toISOString(),
           expiresAt: expiresAt.toISOString(),
         });
-        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys });
+        const approvedPath = config.policyBundlePath ?? config.policyCatalogPath ?? config.policyRecordPath;
+        const hasApproved = await lstat(approvedPath).then(() => true).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error; });
+        const approved = hasApproved ? await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot) : [];
+        // Only the explicitly proposed ID may be renewed; every other live ALLOW
+        // must still match its independently owner-signed catalog record.
+        const proposedCatalog = [...approved.filter(item => item.providerPolicy.policyId !== record.providerPolicy.policyId), record];
+        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys }, proposedCatalog, await readTurnkeyWalletAdminPolicyRecords(config));
         const output = turnkeySecretPath(args.output, 'turnkey-policy-proposal.json');
         await writeTurnkeyJson(output, record);
         process.stdout.write(`${JSON.stringify({ ok: true, output, recordDigest: turnkeyPolicyRecordDigest(record), policyId: record.providerPolicy.policyId, walletCount: record.wallets.length, issuedAt: record.issuedAt, expiresAt: record.expiresAt })}\n`);
@@ -682,7 +696,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
           : config.policyCatalogPath
           ? verifyTurnkeySignedPolicyCatalog(JSON.parse(await readTurnkeyRuntimeText(config.policyCatalogPath, 'TURNKEY_POLICY_CATALOG_PERMISSIONS_REQUIRED')) as unknown, publicKey)
           : undefined;
-        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys }, approvedRecords);
+        validateTurnkeyActualProviderState(record, { whoami, organization, policies: policies.policies, privateKeys: keys.privateKeys }, approvedRecords, await readTurnkeyWalletAdminPolicyRecords(config, { pinnedPublicKey: publicKey }));
         const walletMap = { version: 2 as const, policyRecordDigest: turnkeyPolicyRecordDigest(record), wallets: record.wallets.map(({ index, address, signWith }) => ({ index, address, signWith })) };
         if (installedBundle && config.policyBundlePath) {
           const bundleRoot = resolve(config.policyBundlePath, '..');
@@ -769,6 +783,10 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const matching = args.policyId ? catalog.filter((candidate) => candidate.providerPolicy.policyId === args.policyId) : [activeRecord];
         if (matching.length !== 1) throw new Error('TURNKEY_POLICY_SELECTION_NOT_FOUND');
         const record = matching[0]!;
+        if (record.enforcementPolicy.family?.kind === 'erc721-reviewed-public-v1') {
+          process.stdout.write(`${JSON.stringify({ state: 'Blocked', blockingReason: 'TURNKEY_REVIEWED_PROTOCOL_REHEARSAL_COMMAND_REQUIRED', next: `reviewed-protocol-rehearsal --policy-id ${record.providerPolicy.policyId} --contract <existing-reviewed-deployment> --preview` })}\n`);
+          return;
+        }
         const digest = turnkeyPolicyRecordDigest(record);
         const confirmation = `REHEARSE-TURNKEY-SIGNING ${digest.slice(-8)} NO-BROADCAST`;
         const output = turnkeySecretPath(args.evidenceOutput, rehearsalFileName(digest));
@@ -1180,7 +1198,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const floorQuotes = await readPublicInput(args.floorFile);
         database = openDatabaseReadOnly(resolve(runtimeRoot, args.db ?? process.env.MINT_BOT_STATE_PATH ?? './Rets/state/backend.sqlite'));
         const store = new CanonicalStoreBridge(database); await store.open();
-        process.stdout.write(`${json(buildCanonicalAnalyticsReport(store.snapshot(), { ...(activities ? { activities: activities as unknown as AnalyticsActivity[] } : { activities: readCanonicalAnalyticsActivities(store.eventSnapshot()).activities }), ...(floorQuotes ? { floorQuotes: floorQuotes as unknown as AnalyticsFloorQuote[] } : {}) }))}\n`);
+        process.stdout.write(`${json({ ...buildCanonicalAnalyticsReport(store.snapshot(), { ...(activities ? { activities: activities as unknown as AnalyticsActivity[] } : readPersonalAnalyticsObservations(store.eventSnapshot())), ...(floorQuotes ? { floorQuotes: floorQuotes as unknown as AnalyticsFloorQuote[] } : { floorQuotes: readAnalyticsFloorQuotes(store.eventSnapshot()) }) }), fundingCosts: fundingCostSummary(store.eventSnapshot(), readCanonicalAnalyticsActivities(store.eventSnapshot()).fundingAllocations) })}\n`);
       } catch { process.stdout.write(`${blocked(new Error('ANALYTICS_INPUT_OR_DATABASE_INVALID'))}\n`); }
       finally { database?.close(); }
     })
@@ -1301,7 +1319,7 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
         const runtime = await createCliRuntime(runtimeRoot, undefined, undefined, undefined, { startCoordinator: false });
         const now = new Date();
         const validity = args.validity === '7-days' ? '7-days' : 'permanent';
-        const active = [...runtime.store.snapshot().chainEvidence].reverse().find((item) => item.chainId === 1 && item.status === 'accepted' && item.executionEnabled);
+        const active = [...runtime.store.snapshot().chainEvidence].reverse().find((item) => item.chainId === 1 && !item.reviewedProtocol && item.strategyVersion !== REVIEWED_ERC721_PUBLIC_BASELINE && item.status === 'accepted' && item.executionEnabled);
         const existing = active && active.expiresAt > now.toISOString() ? active : undefined;
         if (args.action === 'revoke') {
           if (!active) throw new Error('NOTHING_TO_REVOKE: no active Ethereum evidence');
@@ -1691,5 +1709,13 @@ const cli = yargs(normalizeWalletCommandArgs(hideBin(process.argv)))
     console.error(error?.message ?? message);
     process.exitCode = 1;
   });
+
+registerWalletAdministrationCommands(cli, { runtimeRoot });
+registerAdaptiveModelCommands(cli, { runtimeRoot });
+registerNativeFundingCommands(cli);
+registerReviewedProtocolCommands(cli, { runtimeRoot });
+registerReviewedProtocolCustodyCommands(cli);
+registerReviewedProtocolRehearsalCommands(cli, { runtimeRoot });
+registerPaidFundingCommands(cli, { runtime: (ownerId, sessionId) => createPaidFundingOwnerRuntime({ projectRoot: runtimeRoot, ownerId, sessionId }) });
 
 void cli.parseAsync();

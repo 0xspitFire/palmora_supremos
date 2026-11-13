@@ -143,7 +143,7 @@ export interface LiveRequestProcessorDeps {
   assertUnattendedReady?(): Promise<void>;
   /** Host journal only (never Telegram or the stored result): what an uncoded failure looked like, cleaned by `describeFailure`. */
   assertAutomationReady?(eventId: string, campaign: Campaign, wallets: readonly string[], maxFeeGwei: number): Promise<void>;
-  assertScheduledCampaignReady?(campaign: Campaign): Promise<void>;
+  assertScheduledCampaignReady?(campaign: Campaign,scheduleId?:string,wallets?:readonly string[]): Promise<void>;
   failed?(requestId: string, detail: FailureDetail): void | Promise<void>;
   now(): Date;
 }
@@ -246,7 +246,7 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
         if (!deps.assertAutomationReady) throw new Error('AUTOMATION_AUTHORITY_REQUIRED');
         await deps.assertAutomationReady(request.provenance.eventId, campaign, request.wallets, maxFeeGwei);
       }
-      if (request.provenance?.kind === 'schedule') await deps.assertScheduledCampaignReady?.(campaign);
+      if (request.provenance?.kind === 'schedule') await deps.assertScheduledCampaignReady?.(campaign,request.provenance.scheduleId,request.wallets);
       const validated: ValidatedCampaign = { campaign, wallets: request.wallets, simulationIds: request.simulationIds, evidenceAt: request.evidenceAt };
       const armed = await deps.command('arm', { validated, mode: 'live', approvalId: request.approvalId, idempotencyKey: `live-request:${request.id}` });
       runId = armed.id;
@@ -255,7 +255,7 @@ export async function processLiveRunRequests(deps: LiveRequestProcessorDeps): Pr
       try {
         if ((request.provenance?.kind === 'schedule' || request.provenance?.kind === 'automation')) await deps.assertUnattendedReady!();
         if (request.provenance?.kind === 'automation') await deps.assertAutomationReady!(request.provenance.eventId, campaign, request.wallets, maxFeeGwei);
-        if (request.provenance?.kind === 'schedule') await deps.assertScheduledCampaignReady?.(campaign);
+        if (request.provenance?.kind === 'schedule') await deps.assertScheduledCampaignReady?.(campaign,request.provenance.scheduleId,request.wallets);
         ran = await deps.command('run', { runId, wallets: request.wallets, idempotencyKey: `live-request-run:${request.id}` });
       } finally { deps.setFeeCeiling(request.campaignId, undefined); }
       // A completed run is finished. A run still Active was sent and is waiting for the chain to settle it (Robinhood: until Ethereum finality):

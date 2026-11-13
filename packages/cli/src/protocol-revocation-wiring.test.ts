@@ -1,0 +1,10 @@
+import { describe, expect, it } from 'vitest';
+import { DurableStore, REVIEWED_ERC721_PUBLIC_BASELINE, buildEthereumChainEvidence, ethereumChainEvidenceRevokePhrase, type ChainEvidenceRecord } from '@mint-bot/backend';
+import { createTelegramActions, type TelegramActionDeps } from './telegram-actions.js';
+const now=new Date('2026-11-13T12:00:00Z');
+async function setup(){const store=new DurableStore();await store.open();const legacy:ChainEvidenceRecord={...buildEthereumChainEvidence({now,sourceBlock:100n,sourceBlockHash:`0x${'a'.repeat(64)}`,strategy:'seadrop-v1-public'}),id:'legacy-ethereum-scope',status:'accepted',executionEnabled:true};const generic:ChainEvidenceRecord={...legacy,id:'reviewed-ethereum-scope',seaDropCompatible:false,strategyVersion:REVIEWED_ERC721_PUBLIC_BASELINE,reviewedProtocol:{family:'erc721-reviewed-public-v1',registryDigest:`sha256:${'b'.repeat(64)}`,descriptorDigests:[`sha256:${'c'.repeat(64)}`]}};await store.transaction(state=>{state.chainEvidence.push(legacy,generic);});const actions=createTelegramActions({store,now:()=>now} as unknown as TelegramActionDeps);return {store,actions,legacy,generic};}
+describe('owner Ethereum chain revoke with multiple protocols',()=>{
+ it('uses the owner chain-grant phrase rather than a newer per-protocol baseline',async()=>{const s=await setup();const result=await s.actions.revokeStatus!('ethereum');expect(result.phrase).toBe(ethereumChainEvidenceRevokePhrase(s.legacy.id));});
+ it('revokes the whole Ethereum chain even when a newer reviewed baseline exists',async()=>{const s=await setup();await s.actions.revokeNow!('ethereum',ethereumChainEvidenceRevokePhrase(s.legacy.id));expect(s.store.snapshot().chainEvidence.filter(row=>row.chainId===1).every(row=>!row.executionEnabled)).toBe(true);});
+ it('rejects a stale button naming the protocol baseline as chain authority',async()=>{const s=await setup();await expect(s.actions.revokeNow!('ethereum',ethereumChainEvidenceRevokePhrase(s.generic.id))).rejects.toThrow('ENABLEMENT_CHANGED');expect(s.store.snapshot().chainEvidence.every(row=>row.executionEnabled)).toBe(true);});
+});

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configuredWalletPath, createCliRuntime, personalLiveLocalCustodyAllowed, selectTurnkeyRobinhoodFamilyPolicy, selectTurnkeyAllowlistFamilyPolicy, selectTurnkeyPublicFamilyPolicy, selectTurnkeySignedFamilyPolicy, type SpendAlertSink } from './runtime.js';
@@ -166,4 +166,15 @@ describe('explicit signed family custody selection', () => {
     expect(selectTurnkeySignedFamilyPolicy([familyRecord(), familyRecord(4, 'allowlist', true), familyRecord(10, 'public', false, 4663)], input)).toBeUndefined();
     expect(() => selectTurnkeySignedFamilyPolicy([record(4663), record(4663, 'duplicate')], input)).toThrow('TURNKEY_POLICY_FAMILY_AMBIGUOUS');
   });
+});
+
+
+it('closes the actual SQLite connection when asynchronous CLI runtime initialization fails',async()=>{
+ const root=await mkdtemp('/tmp/mint-runtime-init-failure-');const path=join(root,'state.sqlite');let captured:import('@mint-bot/backend').CanonicalStoreBridge|undefined;
+ try{
+  vi.stubEnv('MINT_BOT_SECRET_ROOT',root);vi.stubEnv('SECRET_STORE_PATH','');vi.stubEnv('MINT_BOT_ALLOWLIST_SOURCES_PATH','');vi.stubEnv('MINT_BOT_FIRE_LANES','');
+  await expect(createCliRuntime(root,{} as EngineAdapter,path,{}, {allowTurnkey:false,startCoordinator:false,coordinatorAssurance:async store=>{captured=store;expect((Reflect.get(store,'db') as import('@mint-bot/database').SqliteDatabase).open).toBe(true);throw new Error('SYNTHETIC_RUNTIME_INIT_FAILED');}})).rejects.toThrow('SYNTHETIC_RUNTIME_INIT_FAILED');
+  expect(captured).toBeDefined();const database=Reflect.get(captured!,'db') as import('@mint-bot/database').SqliteDatabase;expect(database.open).toBe(false);expect(()=>database.prepare('SELECT 1')).toThrow();
+  const {openDatabase}=await import('@mint-bot/database');const reopened=openDatabase(path);try{reopened.exec('BEGIN EXCLUSIVE');reopened.exec('COMMIT');}finally{reopened.close();}
+ }finally{vi.unstubAllEnvs();await rm(root,{recursive:true,force:true});}
 });

@@ -34,7 +34,7 @@ import type {
   ReconciliationUpdate,
   RunRecord,
 } from '@mint-bot/backend';
-import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY, validBaseEnablement, validRobinhoodEnablement } from '@mint-bot/backend';
+import { REVIEWED_ERC721_PUBLIC_BASELINE, BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY, validBaseEnablement, validRobinhoodEnablement } from '@mint-bot/backend';
 import { promptHiddenPassphrase } from './secure-prompt.js';
 import { createNitroFinalitySources } from './robinhood-readonly.js';
 import { parseGasUsedForL1, reconcileRobinhood, uniqueSubmittedAttempts } from './robinhood-reconcile.js';
@@ -184,6 +184,14 @@ export function baseGrantFrom(record: unknown, now: Date): BaseEnablementGrant |
   return valid ? Object.freeze({ expiresAt: valid.expiresAt, freeAllowed: true as const, paidAllowed: valid.paidAllowed }) : undefined;
 }
 
+/** Re-read the distinct protocol grant at setup and each final signing boundary. */
+export function assertReviewedProtocolCampaignReady(campaign: Pick<Campaign,'id'|'chainId'|'strategy'|'custodyPolicy'|'chainVerification'>, state: Pick<BackendState,'chainEvidence'|'campaigns'>, now = new Date()): void {
+  const scope=campaign.custodyPolicy?.reviewedProtocol;
+  const current=state.campaigns.find(value=>value.id===campaign.id);
+  const evidence=state.chainEvidence.find(value=>value.id===campaign.chainVerification.evidenceId);
+  if(campaign.strategy!=='erc721-reviewed-public-v1'||!scope||scope.family!=='erc721-reviewed-public-v1'||campaign.chainVerification.seaDropCompatible||!current||current.custodyPolicy?.recordDigest!==campaign.custodyPolicy?.recordDigest||JSON.stringify(current.custodyPolicy?.reviewedProtocol)!==JSON.stringify(scope)||!Number.isFinite(now.getTime())||!evidence||evidence.chainId!==campaign.chainId||evidence.status!=='accepted'||!evidence.executionEnabled||evidence.seaDropCompatible||evidence.strategyVersion!==REVIEWED_ERC721_PUBLIC_BASELINE||!Number.isFinite(Date.parse(evidence.expiresAt))||Date.parse(evidence.expiresAt)<=now.getTime()||evidence.reviewedProtocol?.family!==scope.family||evidence.reviewedProtocol.registryDigest!==scope.registryDigest||!evidence.reviewedProtocol.descriptorDigests.includes(scope.descriptorDigest))throw new Error('REVIEWED_PROTOCOL_BASELINE_REQUIRED');
+}
+
 export function engineConfigFromCampaign(campaign: Campaign, options: MintEngineAdapterOptions, dryRun: boolean, maxWallets: number, selection?: KeyListSelection): MintJobConfig {
   const chain = chainName(campaign.chainId);
   const robinhoodGrant = campaign.chainId === 4663 ? robinhoodGrantFrom(options.robinhoodEnablement?.(), new Date()) : undefined;
@@ -202,6 +210,7 @@ export function engineConfigFromCampaign(campaign: Campaign, options: MintEngine
     timing: { mintStartUnix: 'auto', armBeforeMs: 30_000 },
     fees: { maxFeePerGasGwei: options.maxFeePerGasGweiFor?.(campaign.id) ?? options.maxFeePerGasGwei, maxPriorityFeePerGasGwei: priorityFeeGwei, gasLimitPadding: options.gasLimitPadding, ...(options.replacement ? { replacement: options.replacement } : {}) },
     safety: {
+      ...(campaign.strategy === 'erc721-reviewed-public-v1' && !dryRun ? { assertReviewedProtocolReady: () => assertReviewedProtocolCampaignReady(campaign, options.getState()) } : {}),
       maxSpendEth: asFiniteNumber(campaign.spendPolicy.maxRunWei, 'max_run_spend'),
       dailySpendCapEth: asFiniteNumber(campaign.spendPolicy.dailyCapWei, 'daily_spend_cap'),
       maxReplacementBumps: options.maxReplacementBumps,

@@ -66,12 +66,13 @@ export interface Campaign {
   openingAt?: string;
   tMinusMs?: number;
   /** Immutable custody selection captured at campaign creation and included in every request digest. */
-  custodyPolicy?: { provider: 'turnkey'; policyReference: string; policyDigest: string; recordDigest: string };
+  custodyPolicy?: { provider: 'turnkey'; policyReference: string; policyDigest: string; recordDigest: string; reviewedProtocol?: { family: 'erc721-reviewed-public-v1'; registryDigest: string; descriptorDigest: string } };
 }
 export interface SpendPolicy { maxRunWei: bigint; dailyCapWei: bigint; gasCeilingWei: bigint; }
 export interface FeePolicy { kind: 'free' | 'paid'; configuredPriorityFeeWei: bigint; freeTotalSpendCapWei?: bigint; l2ExecutionGasBudgetWei?: bigint; l1DataGasBudgetWei?: bigint; totalFeeBudgetWei?: bigint; }
 export interface ChainVerification { chainId: ExecutionChainId; status: ChainVerificationStatus; seaDropCompatible: boolean; evidenceId?: string; checkedAt?: string; sourceBlock?: bigint; endpointReference: string; }
-export interface ChainEvidenceRecord { id: string; chainId: ExecutionChainId; status: 'pending' | 'accepted' | 'rejected'; executionEnabled: boolean; seaDropCompatible: boolean; positiveLivePath: boolean; archiveForkPassed: boolean; negativeCases: Record<RobinhoodNegativeCase, boolean>; reconciliationPassed: boolean; finalityPassed: boolean; endpointIdentity: string; archiveEndpointIdentity?: string; strategyVersion: string; checkedAt: string; expiresAt: string; sourceBlock: bigint; sourceBlockHash: string; acceptedAt?: string; acceptedBy?: string; approvalProof?: string; }
+export interface ReviewedProtocolEvidence { family: 'erc721-reviewed-public-v1'; registryDigest: string; descriptorDigests: readonly string[]; }
+export interface ChainEvidenceRecord { reviewedProtocol?: ReviewedProtocolEvidence; id: string; chainId: ExecutionChainId; status: 'pending' | 'accepted' | 'rejected'; executionEnabled: boolean; seaDropCompatible: boolean; positiveLivePath: boolean; archiveForkPassed: boolean; negativeCases: Record<RobinhoodNegativeCase, boolean>; reconciliationPassed: boolean; finalityPassed: boolean; endpointIdentity: string; archiveEndpointIdentity?: string; strategyVersion: string; checkedAt: string; expiresAt: string; sourceBlock: bigint; sourceBlockHash: string; acceptedAt?: string; acceptedBy?: string; approvalProof?: string; }
 export interface SimulationEvidenceRecord { id: string; campaignId: string; wallet: string; inputDigest: string; success: boolean; sourceBlock: bigint; sourceBlockHash: string; checkedAt: string; expiresAt: string; gasEstimate?: bigint; worstCaseFeeWei: bigint; }
 export interface EventRecord { id: string; runId?: string; type: string; at: string; data: Record<string, unknown>; }
 export interface NotificationOutboxRecord { id: string; sourceEventId: string; runId?: string; type: string; text: string; state: 'pending' | 'delivering' | 'delivered' | 'failed'; attempts: number; createdAt: string; deliveredAt?: string; retentionUntil?: string; deliveryLeaseUntil?: string; lastError?: string; nextAttemptAt?: string; canonicalLink?: string; }

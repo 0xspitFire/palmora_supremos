@@ -2,6 +2,7 @@ import { decodeFunctionData, keccak256, toBytes, type Address, type Hex } from '
 import type { SupportedChainId, TransactionIntent } from './types.js';
 import { SEADROP_V1_ADDRESS } from './chains.js';
 import { buildSignedMint, SIGNED_MINT_ABI } from './signed-mint-authority.js';
+import { assertErc721IntentAuthority } from './verified-erc721-authority.js';
 import { buildAllowlistMint } from './allowlist-authority.js';
 
 export type TurnkeyEnvironment = 'production' | 'testnet';
@@ -37,16 +38,18 @@ export interface TurnkeyPolicyTransaction {
 }
 
 /** Closed, bounded provider-side families; legacy Robinhood records remain valid. */
-export interface TurnkeyPolicyFamily {
+export type TurnkeyPolicyFamily = {
+ readonly kind: 'erc721-reviewed-public-v1'; readonly maxQuantity: number; readonly registryDigest: string; readonly descriptorDigests: readonly string[];
+} | {
   readonly kind: 'robinhood-seadrop-public-v1' | 'seadrop-free-allowlist-v1' | 'seadrop-free-public-v1' | 'seadrop-free-signed-v1';
   readonly maxQuantity: number;
 }
 
 /**
- * Canonical allow-only policy AST. It intentionally has no `or`, wildcard,
- * substring, regex, deny/allow union, or unbounded transaction branch. The
- * optional family is a closed, enumerated bounded schema, not a free-form CEL
- * escape hatch.
+ * Canonical allow-only policy AST with closed, enumerated families. No free-form
+ * CEL expressions are accepted. The reviewed ERC721 family alone uses a dynamic
+ * destination: its provider rule bounds the transaction, while a branded local
+ * authority pins the owner-signed registry, descriptor and actual destination.
  */
 export interface TurnkeyPolicyAst {
   readonly version: 1;
@@ -99,8 +102,11 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
   const tx = value.transaction;
   const familyValue = value.family;
   const familyRecord = familyValue as Record<string, unknown> | undefined;
-  if (familyValue !== undefined && (!isRecord(familyValue) || !exactKeys(familyValue, ['kind', 'maxQuantity']) || !['robinhood-seadrop-public-v1', 'seadrop-free-allowlist-v1', 'seadrop-free-public-v1', 'seadrop-free-signed-v1'].includes(String(familyRecord?.kind)) || !Number.isSafeInteger(familyRecord?.maxQuantity) || Number(familyRecord?.maxQuantity) < 1 || Number(familyRecord?.maxQuantity) > 15)) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
-  const family = familyValue === undefined ? undefined : { kind: familyRecord!.kind as TurnkeyPolicyFamily['kind'], maxQuantity: Number(familyRecord?.maxQuantity) };
+  if (familyValue !== undefined && (!isRecord(familyValue) || !(familyRecord?.kind === 'erc721-reviewed-public-v1' ? exactKeys(familyValue, ['kind','maxQuantity','registryDigest','descriptorDigests']) : exactKeys(familyValue, ['kind', 'maxQuantity'])) || !['robinhood-seadrop-public-v1', 'seadrop-free-allowlist-v1', 'seadrop-free-public-v1', 'seadrop-free-signed-v1','erc721-reviewed-public-v1'].includes(String(familyRecord?.kind)) || !Number.isSafeInteger(familyRecord?.maxQuantity) || Number(familyRecord?.maxQuantity) < 1 || Number(familyRecord?.maxQuantity) > 15)) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  const family: TurnkeyPolicyFamily | undefined = familyValue === undefined ? undefined : familyRecord?.kind === 'erc721-reviewed-public-v1'
+    ? {kind:'erc721-reviewed-public-v1',maxQuantity:Number(familyRecord.maxQuantity),registryDigest:familyRecord.registryDigest as string,descriptorDigests:familyRecord.descriptorDigests as string[]}
+    : {kind:familyRecord!.kind as Exclude<TurnkeyPolicyFamily['kind'],'erc721-reviewed-public-v1'>,maxQuantity:Number(familyRecord!.maxQuantity)};
+  if (family?.kind === 'erc721-reviewed-public-v1' && (typeof family.registryDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(family.registryDigest) || !Array.isArray(family.descriptorDigests) || family.descriptorDigests.length < 1 || family.descriptorDigests.length > 100 || family.descriptorDigests.some(item => !/^sha256:[0-9a-f]{64}$/.test(item)) || new Set(family.descriptorDigests).size !== family.descriptorDigests.length)) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
   if (scope.provider !== 'turnkey' || !isEnvironment(scope.environment) || !nonEmpty(scope.organizationId) || !nonEmpty(scope.userId) || !nonEmpty(scope.policyId) || !stringArray(scope.keyIds)) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
   const keyIds = uniqueStrings(scope.keyIds);
   if (!keyIds || keyIds.length === 0) throw new Error('TURNKEY_POLICY_SCOPE_INVALID');
@@ -112,7 +118,7 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
   if (new Set(from).size !== from.length || tx.valueWei !== '0' || !isNonNegativeInteger(tx.valueWei) || !isNonNegativeInteger(tx.gasLimitMax) || !isNonNegativeInteger(tx.maxFeePerGasMax) || !isNonNegativeInteger(tx.maxPriorityFeePerGasMax) || tx.accessList.length !== 0) throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
   const data = normalizeHexBytes(tx.data as string);
   if (data === '0x') throw new Error('TURNKEY_POLICY_TRANSACTION_INVALID');
-  if (family?.kind === 'seadrop-free-public-v1' || family?.kind === 'seadrop-free-signed-v1') {
+  if (family?.kind === 'seadrop-free-public-v1' || family?.kind === 'seadrop-free-signed-v1' || family?.kind === 'erc721-reviewed-public-v1') {
     if (family.maxQuantity > (tx.chainId === 8453 ? 4 : 10)) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
     const gas = BigInt(tx.gasLimitMax); const fee = BigInt(tx.maxFeePerGasMax); const tip = BigInt(tx.maxPriorityFeePerGasMax);
     if (gas < 1n || gas > 500_000n || fee < 1n || fee > 200_000_000n || tip > 100_000_000n || tip > fee) throw new Error('TURNKEY_POLICY_FAMILY_FEE_LIMIT_INVALID');
@@ -126,7 +132,8 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
     const feeCap = tx.chainId === 1 ? 800_000_000n : 200_000_000n;
     if (gas < 1n || gas > 500_000n || maxFee < 1n || maxFee > feeCap || tip > 100_000_000n || tip > maxFee || gas * maxFee > walletCap) throw new Error('TURNKEY_POLICY_FAMILY_FEE_LIMIT_INVALID');
   }
-  if (family !== undefined && (tx.to.toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || tx.valueWei !== '0' || (family.kind === 'robinhood-seadrop-public-v1' ? tx.chainId !== 4663 || data !== '0x161ac21f' : family.kind === 'seadrop-free-public-v1' ? data !== '0x161ac21f' : family.kind === 'seadrop-free-signed-v1' ? data !== '0x4b61cd6f' : data !== '0x4300a4e6'))) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  if (family?.kind === 'erc721-reviewed-public-v1' && (tx.to !== '0x0000000000000000000000000000000000000000' || data !== '0xa0712d68')) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
+  if (family !== undefined && family.kind !== 'erc721-reviewed-public-v1' && (tx.to.toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || tx.valueWei !== '0' || (family.kind === 'robinhood-seadrop-public-v1' ? tx.chainId !== 4663 || data !== '0x161ac21f' : family.kind === 'seadrop-free-public-v1' ? data !== '0x161ac21f' : family.kind === 'seadrop-free-signed-v1' ? data !== '0x4b61cd6f' : data !== '0x4300a4e6'))) throw new Error('TURNKEY_POLICY_FAMILY_INVALID');
   return {
     version: 1,
     effect: 'allow',
@@ -149,7 +156,7 @@ export function validateTurnkeyPolicyAst(value: unknown): TurnkeyPolicyAst {
       maxPriorityFeePerGasMax: tx.maxPriorityFeePerGasMax,
       accessList: [],
     },
-    ...(family === undefined ? {} : { family: { kind: family.kind, maxQuantity: family.maxQuantity } }),
+    ...(family === undefined ? {} : { family: family.kind === 'erc721-reviewed-public-v1' ? { ...family, descriptorDigests: [...family.descriptorDigests].sort() } : { kind: family.kind, maxQuantity: family.maxQuantity } }),
   };
 }
 
@@ -199,7 +206,7 @@ export function validateTransactionIntent(intent: TransactionIntent, policy: Tur
       && isAddress(intent.from)
       && normalized.transaction.from.includes(intent.from.toLowerCase() as Address)
       && isAddress(intent.to)
-      && intent.to.toLowerCase() === normalized.transaction.to
+      && (normalized.family?.kind === 'erc721-reviewed-public-v1' ? intent.to.toLowerCase() !== '0x0000000000000000000000000000000000000000' : intent.to.toLowerCase() === normalized.transaction.to)
       && intent.value === BigInt(normalized.transaction.valueWei)
       && intent.gasLimit >= 0n
       && intent.maxFeePerGas >= 0n
@@ -210,12 +217,20 @@ export function validateTransactionIntent(intent: TransactionIntent, policy: Tur
       && normalizeAccessList(intent.accessList) === '[]';
     const data = normalizeHexBytes(intent.data);
     const exactData = normalized.family === undefined && data === normalized.transaction.data;
-    const familyData = normalized.family?.kind === 'robinhood-seadrop-public-v1' || normalized.family?.kind === 'seadrop-free-public-v1' ? robinhoodFamilyCalldata(data, normalized.family.maxQuantity, intent.familyContext) : normalized.family?.kind === 'seadrop-free-allowlist-v1' ? allowlistFamilyCalldata(intent, data, normalized.family.maxQuantity) : normalized.family?.kind === 'seadrop-free-signed-v1' ? signedFamilyCalldata(intent, data, normalized.family.maxQuantity) : false;
+    const familyData = normalized.family?.kind === 'erc721-reviewed-public-v1' ? reviewedFamilyCalldata(intent, normalized.family) : normalized.family?.kind === 'robinhood-seadrop-public-v1' || normalized.family?.kind === 'seadrop-free-public-v1' ? robinhoodFamilyCalldata(data, normalized.family.maxQuantity, intent.familyContext) : normalized.family?.kind === 'seadrop-free-allowlist-v1' ? allowlistFamilyCalldata(intent, data, normalized.family.maxQuantity) : normalized.family?.kind === 'seadrop-free-signed-v1' ? signedFamilyCalldata(intent, data, normalized.family.maxQuantity) : false;
     if (!common || (!exactData && !familyData)) throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
   } catch (error) {
     if (error instanceof Error && error.message === 'TURNKEY_POLICY_INTENT_BLOCKED') throw error;
     throw new Error('TURNKEY_POLICY_INTENT_BLOCKED');
   }
+}
+
+function reviewedFamilyCalldata(intent: TransactionIntent, family: Extract<TurnkeyPolicyFamily,{kind:'erc721-reviewed-public-v1'}>): boolean {
+ try {
+  if(intent.data.length!==74 || intent.data.slice(0,10).toLowerCase()!=='0xa0712d68')return false;
+  const quantity=BigInt('0x'+intent.data.slice(10));if(quantity<1n || quantity>BigInt(family.maxQuantity))return false;
+  assertErc721IntentAuthority(intent,family.registryDigest,family.descriptorDigests);return true;
+ } catch { return false; }
 }
 
 /** Exact calldata validation retained locally when Turnkey uses the bounded family policy. */

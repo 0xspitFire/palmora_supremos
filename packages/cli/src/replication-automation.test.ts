@@ -130,3 +130,10 @@ it('retains the atomic claim check when another worker claims during qualificati
   expect(s.prepare).not.toHaveBeenCalled();
   expect(s.fireAutonomous).not.toHaveBeenCalled();
 });
+
+it('revalidates adaptive authority after an awaited funding step before any claim or request',async()=>{
+ const s=await setup();await s.store.transaction(state=>{const score=state.events.find(event=>event.id==='score')!;score.data.modelEpochId='epoch-approved';score.data.staticScore=65;});let current=true;
+ const assertScoringAuthority=vi.fn(async()=>{if(!current)throw new Error('ADAPTIVE_DECISION_NO_LONGER_ACTIVE');});
+ const automation=createReplicationAutomation({...s,assertScoringAuthority,autoFunding:{ensure:async()=>{current=false;return [{campaign:s.campaign,wallets:[wallet],maxFeeGwei:0.2}];}}});
+ await automation.tick();expect(assertScoringAuthority.mock.calls.length).toBeGreaterThanOrEqual(2);expect(s.store.snapshot().events.some(event=>event.type==='replication_claim')).toBe(false);expect(s.fireAutonomous).not.toHaveBeenCalled();expect(s.prepare).not.toHaveBeenCalled();
+});

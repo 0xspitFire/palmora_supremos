@@ -248,6 +248,7 @@ export class MintEngine {
 
     try {
       const configuredChainId = this.config.target.chain === 'ethereum' ? 1 : this.config.target.chain === 'base' ? 8453 : 4663;
+      if(!this.config.safety.dryRun && this.config.target.strategy==='erc721-reviewed-public-v1'){if(!this.config.safety.assertReviewedProtocolReady)throw new Error('REVIEWED_PROTOCOL_BASELINE_REQUIRED');await this.config.safety.assertReviewedProtocolReady();}
       // This runs before any mutable chain registry flag is consulted.
       assertDirectChainExecutionPolicy(configuredChainId, undefined, this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);
       assertDurableReservationProvider(this.reservationProvider, this.config.safety.dryRun);
@@ -890,19 +891,23 @@ export class MintEngine {
           intent,
           request: reserveRequest,
           reserve: () => reservationProvider.reserve(reserveRequest),
-          sign: () => {
-            if (!['seadrop-v1-public', 'seadrop-v1-allowlist', 'seadrop-v1-signed'].includes(drop.strategyName)) return signer.signTransaction(walletIndex, intent);
+          sign: async () => {
+            if (!['seadrop-v1-public', 'seadrop-v1-allowlist', 'seadrop-v1-signed', 'erc721-reviewed-public-v1'].includes(drop.strategyName)) return signer.signTransaction(walletIndex, intent);
             const proofs = drop.extra?.['walletProofs'] as readonly import('./allowlist-authority.js').VerifiedWalletProof[] | undefined;
             const proof = proofs?.find((entry) => entry.wallet.toLowerCase() === walletAddress.toLowerCase());
             if (drop.strategyName === 'seadrop-v1-allowlist' && !proof) throw new Error('ALLOWLIST_OWN_WALLET_PROOF_REQUIRED');
             const signedAuthorizations = drop.extra?.['signedWalletAuthorizations'] as readonly import('./signed-mint-authority.js').VerifiedSignedWalletAuthorization[] | undefined;
             const signedAuthorization = signedAuthorizations?.find((entry) => entry.wallet.toLowerCase() === walletAddress.toLowerCase());
             if (drop.strategyName === 'seadrop-v1-signed' && !signedAuthorization) throw new Error('SIGNED_MINT_OWN_WALLET_AUTHORIZATION_REQUIRED');
+            const reviewedErc721Authority = drop.strategyName === 'erc721-reviewed-public-v1' ? await strategy.signingAuthority?.(publicClient,drop,walletAddress,this.config.target.quantity) : undefined;
+            if(drop.strategyName === 'erc721-reviewed-public-v1' && !reviewedErc721Authority)throw new Error('ERC721_VERIFIED_AUTHORITY_REQUIRED');
             familySigningContext = {
+              ...(reviewedErc721Authority ? {reviewedErc721Authority} : {}),
               nftContract: drop.nftContract, feeRecipient: drop.feePayer, ...(proof ? { allowlistProof: proof } : {}), ...(signedAuthorization ? { signedAuthorization } : {}),
               assertReady: async () => {
                 if (!reservationProvider.reconfirm) throw new Error(drop.strategyName === 'seadrop-v1-allowlist' ? 'TURNKEY_ALLOWLIST_RESERVATION_RECHECK_REQUIRED' : drop.strategyName === 'seadrop-v1-signed' ? 'TURNKEY_SIGNED_RESERVATION_RECHECK_REQUIRED' : 'TURNKEY_PUBLIC_RESERVATION_RECHECK_REQUIRED');
                 await reservationProvider.reconfirm(reserveRequest);
+                if(drop.strategyName==='erc721-reviewed-public-v1'){if(!this.config.safety.assertReviewedProtocolReady)throw new Error('REVIEWED_PROTOCOL_BASELINE_REQUIRED');await this.config.safety.assertReviewedProtocolReady();}
                 this.checkKill();
                 assertSimulationFresh(simulation, this.now(), this.config.timing.simulationFreshnessMs ?? 120_000);
                 assertDirectChainExecutionPolicy(chainId, value, this.config.safety.dryRun, this.config.safety.robinhoodGrant, this.now(), this.config.safety.baseGrant);

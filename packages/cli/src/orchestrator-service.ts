@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+import { createHostReplicationQualifier } from './replication-qualifier.js';
+import { createPaidFundingRuntime } from './paid-funding-runtime.js';
+import { startPaidFundingWorker, type PaidFundingService } from './paid-funding-service.js';
+import { createReviewedProtocolDiscovery } from './reviewed-protocol-discovery.js';
+import { loadReviewedProtocolStrategies } from './reviewed-protocol-profile.js';
+import { readReviewedProtocolSource } from './reviewed-protocol-source.js';
+import { simulateReviewedProtocolCampaign, reviewedProtocolCampaignMintState } from './reviewed-protocol-simulation.js';
+import { planReviewedProtocolPreparation } from './reviewed-protocol-prepare.js';
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { access, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -6,6 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import {
   AlertManager,
   DiscoveryService,
+  ContractMonitor,
   BackendApplication,
   CanonicalStoreBridge,
   CanonicalJobStore,
@@ -38,9 +47,9 @@ import { engageKillSwitchFile } from './compensating-controls-cli.js';
 import { backupFacts, codeVersion, diskFacts } from './host-facts.js';
 import { createServiceAssurance, type CoordinatorAssuranceWiring } from './turnkey-readiness-service.js';
 import { assertOpsEvidenceAccepted, evaluateOpsEvidence } from '../../../scripts/ops-evidence-runtime.mjs';
-import { chainRpcSecretNames, failoverTransport, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
+import { chainRpcSecretNames, failoverTransport, NFTDiscoveryObserver, readTurnkeySecretConfig, resolveChainConfigFromSecrets } from '@mint-bot/engine';
 import { startDependencyFlags } from './dependency-flags.js';
-import { createPublicClient, formatGwei, http as httpTransport } from 'viem';
+import { createPublicClient, type PublicClient, formatGwei, http as httpTransport } from 'viem';
 import { startGasAlerts } from './gas-alert-service.js';
 import { canonicalAnalyticsPort, startAnalyticsIngestion } from './analytics-ingestion-service.js';
 import { signedMintAuthorityEndpoints } from './signed-mint-source-config.js';
@@ -53,13 +62,18 @@ import { CHAINLINK_ABI, CHAINLINK_ETH_USD_FEED, createEthPriceProvider } from '.
 import { createOpenSeaFloors, type OpenSeaFloors } from './opensea-client.js';
 import { startFireScheduler } from './fire.js';
 import { createReplicationAutomation } from './replication-automation.js';
-import { readReplicationSource } from './replication-source.js';
-import { allowlistPreparationGroups, fundedReplicationWallets, prepareReplication } from './replication-prepare.js';
+import { allowlistPreparationGroups, fundedReplicationWallets, prepareReplication, createReplicationAutoFunding } from './replication-prepare.js';
 import { simulateAllowlistCampaign } from './allowlist-execution.js';
 import { getStrategy, readTurnkeyApprovedPolicyRecords } from '@mint-bot/engine';
 import { startOpsEvidenceReminders } from './ops-evidence-reminders.js';
 import { startChainDiscovery } from './chain-discovery-service.js';
+import { createNativeFundingRuntime } from './native-funding-runtime.js';
+import { createMintStageRuntime, type MintStageRuntime } from './mint-stage-runtime.js';
+import { createRoadmapIntelligence, readAdaptivePolicyProfile } from './roadmap-intelligence.js';
+import { createRoadmapChainPorts } from './roadmap-intelligence-chain.js';
+import { createOpenSeaExternalAnalyticsCandidates } from './external-analytics-opensea.js';
 import { startChainReadiness } from './chain-readiness-service.js';
+import { createNFTDiscoveryReader, startContractMonitorService } from './contract-monitor-service.js';
 
 export interface RunningOrchestratorService {
   orchestrator: OrchestratorService;
@@ -108,6 +122,10 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   // watcher starts later, so the coordinator is given a handle that counts nothing as watched until it exists (fail closed).
   let watcherHandle: { covers(chainId: number, wallets: readonly string[]): boolean; isHealthy(at?: Date): boolean } | undefined;
   let assuranceWiring: CoordinatorAssuranceWiring | undefined;
+  let roadmapIntelligence: ReturnType<typeof createRoadmapIntelligence> | undefined;
+  let stageRuntime: MintStageRuntime | undefined;
+  let paidFunding:PaidFundingService|undefined;
+  let paidFundingWorker:ReturnType<typeof startPaidFundingWorker>|undefined;
   const runtime = await createCliRuntime(config.projectRoot, undefined, config.statePath, {
     ...(config.mode === 'host' ? { secretRoot: configuredSecretRoot(config.projectRoot) } : {}),
     killSwitchFile: config.killSwitchPath,
@@ -116,6 +134,22 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     allowTurnkey: config.mode === 'host',
     startCoordinator: config.mode === 'host',
     ...(config.mode === 'host' ? {
+      coordinatorFunding: (store,assurance) => createNativeFundingRuntime({store,assurance,profilePath:environment.MINT_BOT_FUNDING_PROFILE_PATH,killSwitchPath:config.killSwitchPath,secretRoot:configuredSecretRoot(config.projectRoot),
+        assertPaidFundingIntent: async(event,campaign,wallets,record)=>{if(!paidFunding)throw new Error('PAID_FUNDING_NOT_CONFIGURED');await paidFunding.assertIntent(event,campaign,wallets,record);},
+        assertScoringAuthority: score => {if(roadmapIntelligence)return roadmapIntelligence.assertDecision(score);if(score.data.modelEpochId)throw new Error('NATIVE_FUNDING_ADAPTIVE_AUTHORITY_REQUIRED');},
+        currentFleet: async chainId => {
+          if (!turnkeyCustodyEnabled()) throw new Error('NATIVE_FUNDING_CURRENT_FLEET_REQUIRED');
+          const [walletRows, records] = await Promise.all([
+            configuredWallets(config.projectRoot, configuredWalletPath(config.projectRoot)),
+            readTurnkeyApprovedPolicyRecords('mainnet', configuredSecretRoot(config.projectRoot)),
+          ]);
+          const wallets = walletRows.map(wallet => wallet.address.toLowerCase());
+          const chainRecords = records.filter(record => record.enforcementPolicy.transaction.chainId === chainId);
+          const organizations = new Set(chainRecords.map(record => record.providerIdentity.organizationId));
+          if (!wallets.length || new Set(wallets).size !== wallets.length || organizations.size !== 1 || chainRecords.some(record => wallets.some(wallet => !record.wallets.some(approved => approved.address.toLowerCase() === wallet)))) throw new Error('NATIVE_FUNDING_CURRENT_FLEET_REQUIRED');
+          return { organizationId: [...organizations][0]!, wallets };
+        },
+        assertUnattendedReady:async()=>{await assertOpsEvidenceAccepted({environment});}}),
       coordinatorAssurance: async (store) => {
         assuranceWiring = await createServiceAssurance(store, { projectRoot: config.projectRoot, secretRoot: configuredSecretRoot(config.projectRoot), killSwitchPath: config.killSwitchPath, storePath: config.statePath, approverKeySha256, watcher: () => watcherHandle });
         return assuranceWiring;
@@ -209,6 +243,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   const secondaryDiscoveryTimers: Array<{ stop(): void }> = [];
   const secondaryReadinessTimers: Array<{ stop(): Promise<void> }> = [];
   let intelligence: { stop(): void } | undefined;
+  let contractMonitorService: ReturnType<typeof startContractMonitorService> | undefined;
+  let sharedFloorPrices: OpenSeaFloors | undefined;
   if (config.intelligenceEnabled && config.secretStorePath) {
     const secrets = await loadHostSecretStore(config.secretStorePath);
     const rpcUrl = secrets.get(config.intelligenceRpcName);
@@ -223,7 +259,24 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       ? async () => (await configuredWallets(config.projectRoot, configuredWalletPath(config.projectRoot))).map(wallet => wallet.address.toLowerCase())
       : async () => config.readinessWallets;
     const initialWallets = await readinessWallets();
-    intelligence = startIntelligence({ store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts: intelligenceAlerts, wallets: initialWallets, walletProvider: readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    if (config.mode === 'host') {
+      const readers = new Map<number, Promise<Array<{identity:string;client:PublicClient}>>>();
+      const clients = (chainId: 1 | 8453 | 4663) => {
+        let cached = readers.get(chainId);
+        if (!cached) { cached = (async () => { const endpoints = signedMintAuthorityEndpoints((await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints); return endpoints.map(endpoint => ({identity:new URL(endpoint).hostname.toLowerCase(), client:createPublicClient({transport:httpTransport(endpoint,{timeout:5000,retryCount:0})})})); })(); readers.set(chainId,cached); }
+        return cached;
+      };
+      const openSeaKey = secrets.get('OPENSEA_API');
+      if (openSeaKey) { logger.registerSecret(openSeaKey); sharedFloorPrices = createOpenSeaFloors({apiKey:openSeaKey}); }
+      let policies;
+      try { policies = await readAdaptivePolicyProfile(environment.MINT_BOT_ADAPTIVE_POLICY_PATH); }
+      catch { logger.warn({event:'adaptive_profile_unavailable'},'Adaptive profile unavailable; static scoring remains active'); }
+      const bridge = runtime.store as CanonicalStoreBridge;
+      roadmapIntelligence = createRoadmapIntelligence({store:runtime.store,clients,ownedWallets:async()=>{const wallets=await readinessWallets();return ([1,8453,4663] as const).flatMap(chainId=>wallets.map(address=>({chainId,address})));},watchedWallets:async()=> ([1,8453,4663] as const).flatMap(chainId=>bridge.intelligenceRepository().observedAddresses(chainId).map(wallet=>({chainId,address:wallet.address}))),floors:sharedFloorPrices,...(openSeaKey?{candidatePort:createOpenSeaExternalAnalyticsCandidates({apiKey:openSeaKey})}:{}),chainPort:createRoadmapChainPorts({clients}),adaptivePolicies:policies,record:code=>logger.warn({event:'roadmap_intelligence_unavailable',code},'Optional intelligence observation unavailable')});
+      await roadmapIntelligence.tick();
+      roadmapIntelligence.start();
+    }
+    intelligence = startIntelligence({ advanced:roadmapIntelligence?.advanced, history:roadmapIntelligence?.history, adaptive:roadmapIntelligence?.adaptive, store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts: intelligenceAlerts, wallets: initialWallets, walletProvider: readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: initialWallets.length }, 'phase 2 intelligence started (read-only)');
     // Secondary discovery/readiness is useful even when automatic execution is off.
     // Each chain owns its completion-driven timers, and readiness never waits in a scan tick.
@@ -234,7 +287,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       const endpoints = [...(await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints];
       for (const endpoint of endpoints) logger.registerSecret(endpoint);
       const port = EngineIntelligencePort.fromRpcUrls(endpoints, chainId);
-      const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), port, { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts });
+      const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), port, { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts,advanced:roadmapIntelligence?.advanced,history:roadmapIntelligence?.history,adaptive:roadmapIntelligence?.adaptive });
       secondaryDiscoveryTimers.push(startChainDiscovery({
         chainId, intervalMs: config.discoveryIntervalMs, tick: () => discovery.tick(), logger,
         notify: (text, dedupe) => intelligenceAlerts.intelligence({ kind: 'status', text, dedupe, priority: 'immediate' }),
@@ -245,6 +298,36 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       }));
     }
 
+  }
+  // T-125 is separately opt-in: monitoring adds no chain execution baseline or mint strategy.
+  // Its single fair timer leaves the existing SeaDrop discovery timers unchanged.
+  if (environment.MINT_BOT_CONTRACT_MONITOR_ENABLED === 'true') {
+    if (config.mode !== 'host') throw new Error('CONTRACT_MONITOR_HOST_MODE_REQUIRED');
+    const bridge = runtime.store as CanonicalStoreBridge;
+    const repo = bridge.intelligenceRepository();
+    const chains = [];
+    const reviewedProfiles = turnkeyCustodyEnabled() ? await loadReviewedProtocolStrategies(configuredSecretRoot(config.projectRoot)) : [];
+    for (const chainId of [1, 8453, 4663] as const) {
+      const endpoints = signedMintAuthorityEndpoints((await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints);
+      for (const endpoint of endpoints) logger.registerSecret(endpoint);
+      const observer = new NFTDiscoveryObserver({ chainId, readers: endpoints.map(endpoint => ({ endpoint, client: createNFTDiscoveryReader(endpoint) })) });
+      // This instance publishes generic facts only; it never runs a SeaDrop tick or enters its tracked catalog.
+      const publisher = new DiscoveryService(runtime.store, repo, EngineIntelligencePort.fromRpcUrls(endpoints, chainId), { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei });
+      const reviewed = reviewedProfiles.find(profile => profile.registry.chainId === chainId);
+      const reviewedPublisher = reviewed ? createReviewedProtocolDiscovery({store:runtime.store,advanced:roadmapIntelligence?.advanced,history:roadmapIntelligence?.history,adaptive:roadmapIntelligence?.adaptive,alerts:intelligenceAlerts,qualify:async observation=>{
+        const wallets=(await configuredWallets(config.projectRoot,configuredWalletPath(config.projectRoot))).slice(0,1).map(wallet=>wallet.address);
+        if(!wallets.length)return undefined;
+        return readReviewedProtocolSource({registry:reviewed.registry,clients:reviewed.clients,contract:observation.contract as `0x${string}`,hash:observation.transactionHash as `0x${string}`,watchedWallets:repo.observedAddresses(chainId).map(row=>row.address),targetWallets:wallets});
+      }}) : undefined;
+      const monitor = new ContractMonitor({ store: runtime.store, chainId, port: observer, watched: () => repo.observedAddresses(chainId).map(row => row.address), publish: async observation => {await publisher.observeVerifiedNFT(observation);await reviewedPublisher?.observe(observation);} });
+      chains.push({ chainId, monitor });
+    }
+    contractMonitorService = startContractMonitorService({ enabled: true, chains, intervalMs: 10_000, tickTimeoutMs: 45_000,
+      report: (chainId, result) => logger.info({ event: 'contract_monitor_tick', chainId, status: result.status, reason: result.reason, pending: result.pending, captured: result.captured, published: result.published,
+        ...(result.scan ? { fromBlock: result.scan.fromBlock, toBlock: result.scan.toBlock, settledHead: result.scan.settledHead, callsUsed: result.scan.callsUsed, partialReasons: result.scan.partialReasons, deploymentBlocksInspected: result.scan.deploymentBlocksInspected, deploymentBlocksOmitted: result.scan.deploymentBlocksOmitted, factoryCoverage: result.scan.factoryCoverage,
+          lagBlocks: (BigInt(result.scan.settledHead) > (result.scan.continuation ? BigInt(result.scan.fromBlock) - 1n : BigInt(result.scan.toBlock)) ? BigInt(result.scan.settledHead) - (result.scan.continuation ? BigInt(result.scan.fromBlock) - 1n : BigInt(result.scan.toBlock)) : 0n).toString(), rangePending: Boolean(result.scan.continuation) } : {}) }, 'read-only generic NFT monitor tick'),
+    });
+    logger.info({ event: 'contract_monitor_started', chains: [1, 8453, 4663], intervalMs: 10_000, maxCallsPerSelectedTick: 64 }, 'opt-in generic NFT monitoring started; deployment coverage is sampled');
   }
   // D-059: the independent on-chain wallet watcher, only when the owner enables it. Fails the start on a bad setting.
   let fleetWatcher: { stop(): void } | undefined;
@@ -312,7 +395,10 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         if (!replicationAutomation) throw new Error('AUTOMATION_NOT_CONFIGURED');
         await replicationAutomation.assertReady(eventId, campaign, wallets, maxFeeGwei);
       },
-      assertScheduledCampaignReady: async (campaign) => {
+      assertScheduledCampaignReady: async (campaign,scheduleId,wallets) => {
+        const schedule=scheduleId?(runtime.store as CanonicalStoreBridge).fireScheduleRepository().get(scheduleId):undefined;
+        if(!stageRuntime||!schedule||!wallets)throw new Error('MINT_STAGE_APPROVAL_REQUIRED');
+        await stageRuntime.assertRequested(schedule,campaign,wallets);
         const prepared = runtime.store.snapshot().events.find((e) => e.type === 'replication_prepared' && e.data.campaignId === campaign.id);
         if (!prepared) return;
         if (campaign.mintPriceWei !== 0n) throw new Error('PAID_REPLICATION_FINAL_FIRE_REQUIRED');
@@ -347,14 +433,14 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const secretRoot = configuredSecretRoot(config.projectRoot);
     // T-068: /portfolio needs the owner's Blockscout key in the secret store (BLOCKSCOUT_API_KEY); without it the command says it is off.
     let portfolioProvider: PortfolioProvider | undefined;
-    let floorPrices: OpenSeaFloors | undefined;
+    let floorPrices: OpenSeaFloors | undefined = sharedFloorPrices;
     if (config.secretStorePath) {
       const keys = await loadHostSecretStore(config.secretStorePath);
       const portfolioKey = keys.get('BLOCKSCOUT_API_KEY');
       if (portfolioKey) { logger.registerSecret(portfolioKey); portfolioProvider = createBlockscoutPortfolio({ apiKey: portfolioKey }); }
       // T-072: OpenSea floor prices for /portfolio, when the owner has stored OPENSEA_API.
       const openSeaKey = keys.get('OPENSEA_API');
-      if (openSeaKey) { logger.registerSecret(openSeaKey); floorPrices = createOpenSeaFloors({ apiKey: openSeaKey }); }
+      if (openSeaKey) { logger.registerSecret(openSeaKey); floorPrices ??= createOpenSeaFloors({ apiKey: openSeaKey }); }
       portfolioProvider = combinePortfolioProviders({ blockscout: portfolioProvider, ...(openSeaKey ? { openSea: createOpenSeaPortfolio({ apiKey: openSeaKey }) } : {}) });
     }
     // T-072: the ETH price in dollars (display only): Chainlink through the Ethereum RPC, Coinbase as a fallback.
@@ -379,7 +465,10 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     const reader = async (chainId: 1 | 8453 | 4663) => createPublicClient({ transport: failoverTransport([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints]) });
     const latestBlock = async (chainId: 1 | 8453 | 4663) => { const block = await (await reader(chainId)).getBlock({ blockTag: 'latest' }); return { number: block.number, hash: block.hash }; };
     const walletAddresses = async () => (await configuredWallets(config.projectRoot, configuredWalletPath(config.projectRoot))).map((wallet) => wallet.address.toLowerCase());
-    const fire: FireWiring | undefined = config.mode === 'host' ? createFireWiring({
+    let fire: FireWiring | undefined;
+    stageRuntime = config.mode==='host'?createMintStageRuntime({store:runtime.store,readDrop:async campaign=>getStrategy(campaign.strategy).readDrop(await reader(campaign.chainId),campaign.contract as `0x${string}`,campaign.chainId),validate:async(campaign,wallets)=>{await assertOpsEvidenceAccepted({environment});if(!assuranceWiring||!fire)throw new Error('MINT_STAGE_CUSTODY_REQUIRED');await assuranceWiring.refreshReadiness({campaign,chainId:campaign.chainId,wallets});const simulation=await fire.fireDeps.recordSimulations(campaign,wallets);if(!simulation.recorded.length)throw new Error('MINT_STAGE_SIMULATION_REQUIRED');}}):undefined;
+    fire = config.mode === 'host' ? createFireWiring({
+      stage:stageRuntime,
       mode: config.mode,
       store: runtime.store,
       approve: (validated) => ownerApplication.command('approve', { validated }),
@@ -391,6 +480,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       walletList: walletAddresses,
       evmPort: async (chainId, strategy) => EngineIntelligencePort.fromRpcUrls([...(await resolveChainConfigFromSecrets(chainId, 'mainnet', secretRoot)).rpcEndpoints], chainId, strategy === 'seadrop-v1-public'),
       evmLatestBlock: latestBlock,
+      reviewedProtocolSimulation: (campaign, wallets) => simulateReviewedProtocolCampaign({store:runtime.store,campaign,wallets,secretRoot}),
+      reviewedProtocolMintState: campaign => reviewedProtocolCampaignMintState({store:runtime.store,campaign,secretRoot}),
       allowlistSimulation: async (campaign, wallets) => simulateAllowlistCampaign({ campaign, wallets, client: await reader(campaign.chainId as 1 | 8453 | 4663), store: runtime.store, secretRoot }),
       allowlistMintState: async (campaign) => {
         const drop = await getStrategy(campaign.strategy).readDrop(await reader(campaign.chainId as 1 | 8453 | 4663), campaign.contract as `0x${string}`, campaign.chainId as 1 | 8453 | 4663);
@@ -417,6 +508,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         claim: (scheduleId, outcome) => bridge.fireScheduleRepository().claim(scheduleId, outcome),
         campaign: (campaignId) => runtime.store.snapshot().campaigns.find((item) => item.id === campaignId),
         campaignDigest: fire.campaignDigest,
+        stageDecision: fire.inspectScheduleStage,
         killSwitchOn: fire.fireDeps.killSwitchOn,
         mintState: fire.mintState,
         fire: async (schedule) => { await fire.fireSchedule(schedule); },
@@ -434,26 +526,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       const maxQuantity = Number(environment.MINT_BOT_REPLICATION_MAX_QUANTITY ?? '1');
       if (!Number.isFinite(maxFeeGwei) || maxFeeGwei <= 0 || maxFeeGwei > 500 || !Number.isSafeInteger(maxQuantity) || maxQuantity < 1 || maxQuantity > 15) throw new Error('REPLICATION_LIMIT_CONFIG_REQUIRED');
       const watchedWallets = (chainId: number) => bridge.intelligenceRepository().observedAddresses(chainId).map((wallet) => wallet.address);
-      replicationAutomation = createReplicationAutomation({
-        store: runtime.store, watchedWallets,
-        wallets: async () => (await walletAddresses()) as `0x${string}`[],
-        fundedWallets: async (source, wallets) => {
-          const client = await reader(source.drop.chainId);
-          return fundedReplicationWallets(source, wallets, maxQuantity, wallet => client.getBalance({ address: wallet }));
-        },
-        qualify: async (event, wallets) => {
-          const chainId = Number(event.data.chainId);
-          if (![1, 8453, 4663].includes(chainId) || !/^0x[0-9a-fA-F]{40}$/.test(String(event.data.contract)) || !/^0x[0-9a-fA-F]{64}$/.test(String(event.data.txHash))) throw new Error('REPLICATION_SOURCE_INVALID');
-          const source = await readReplicationSource({ client: await reader(chainId as 1 | 8453 | 4663), chainId: chainId as 1 | 8453 | 4663, contract: event.data.contract as `0x${string}`, hash: event.data.txHash as `0x${string}`, watchedWallets: watchedWallets(chainId), targetWallets: wallets });
-          if (source.drop.strategyName === 'seadrop-v1-signed') {
-            const quantity = Math.min(maxQuantity, source.plan.observed.quantity ?? 0, source.drop.maxTotalMintableByWallet, chainId === 8453 ? 4 : 10);
-            const walletScope = source.plan.targets.map(target => target.wallet);
-            if (!selectTurnkeySignedFamilyPolicy(await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot), { chainId: source.drop.chainId, strategy: source.drop.strategyName, quantity, mintPriceWei: source.drop.mintPrice, walletScope })) throw new Error('TURNKEY_SIGNED_FAMILY_APPROVAL_REQUIRED');
-            if (!runtime.store.snapshot().chainEvidence.some(evidence => evidence.chainId === chainId && evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now() && evidence.strategyVersion === 'seadrop-v1-baseline-public-free-allowlist-free-signed@1')) throw new Error('SIGNED_MINT_CHAIN_REHEARSAL_ACCEPTANCE_REQUIRED');
-          }
-          return source;
-        },
-        prepare: async (source, wallets) => {
+      const prepareAutomatic: import('./replication-automation.js').ReplicationAutomationDeps['prepare'] = async(source,wallets) => {
           const status = bridge.ethereumFeePolicyStatus();
           const tipWei = source.drop.chainId === 1 ? BigInt(status.stored?.tipWei ?? status.approved?.tipWei ?? '100000000') : 100_000_000n;
           const prepare = (selected: readonly `0x${string}`[]) => prepareReplication({ source, wallets: selected, maxQuantity, maxFeeGwei, tipWei, store: runtime.store, createCampaign: (input) => ownerApplication.createCampaign(input), now: new Date() });
@@ -467,16 +540,51 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
           const prepared = [];
           for (const group of groups) prepared.push(await prepare(group));
           return prepared;
+        };
+      const fundingWallets = async(source:import('./replication-source.js').QualifiedSource,wallets:readonly `0x${string}`[]) => {const client=await reader(source.drop.chainId);return fundedReplicationWallets(source,wallets,maxQuantity,wallet=>client.getBalance({address:wallet}));};
+      const qualifyReplicationSource=createHostReplicationQualifier({store:runtime.store,secretRoot,maxQuantity,reader,watchedWallets});
+      replicationAutomation = createReplicationAutomation({
+        store: runtime.store, watchedWallets,
+        wallets: async () => (await walletAddresses()) as `0x${string}`[],
+        fundedWallets: async (source, wallets) => {
+          const client = await reader(source.drop.chainId);
+          return fundedReplicationWallets(source, wallets, maxQuantity, wallet => client.getBalance({ address: wallet }));
         },
+        qualify: async (event, wallets) => {
+          const chainId = Number(event.data.chainId);
+          if (![1, 8453, 4663].includes(chainId) || !/^0x[0-9a-fA-F]{40}$/.test(String(event.data.contract)) || !/^0x[0-9a-fA-F]{64}$/.test(String(event.data.txHash))) throw new Error('REPLICATION_SOURCE_INVALID');
+          const source = await qualifyReplicationSource(event,wallets);
+          if (source.drop.strategyName === 'seadrop-v1-signed') {
+            const quantity = Math.min(maxQuantity, source.plan.observed.quantity ?? 0, source.drop.maxTotalMintableByWallet, chainId === 8453 ? 4 : 10);
+            const walletScope = source.plan.targets.map(target => target.wallet);
+            if (!selectTurnkeySignedFamilyPolicy(await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot), { chainId: source.drop.chainId, strategy: source.drop.strategyName, quantity, mintPriceWei: source.drop.mintPrice, walletScope })) throw new Error('TURNKEY_SIGNED_FAMILY_APPROVAL_REQUIRED');
+            if (!runtime.store.snapshot().chainEvidence.some(evidence => evidence.chainId === chainId && evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now() && evidence.strategyVersion === 'seadrop-v1-baseline-public-free-allowlist-free-signed@1')) throw new Error('SIGNED_MINT_CHAIN_REHEARSAL_ACCEPTANCE_REQUIRED');
+          }
+          return source;
+        },
+        assertSourceAuthority:qualifyReplicationSource.assertSourceAuthority,
+        prepare: prepareAutomatic,
+        ...(environment.MINT_BOT_FUNDING_PROFILE_PATH?{autoFunding:createReplicationAutoFunding({store:runtime.store,coordinator:runtime.coordinator,prepare:prepareAutomatic,funded:fundingWallets})}:{}),
         fire: fire.fireDeps, fireAutonomous: fire.fireAutonomous,
+        assertScoringAuthority: score => {if(roadmapIntelligence)return roadmapIntelligence.assertDecision(score);if(score.data.modelEpochId)throw new Error('ADAPTIVE_DECISION_AUTHORITY_REQUIRED');},
         assertUnattendedReady: () => fire.assertUnattendedReady(),
         notify: async (text, dedupe) => { await alerts.intelligence({ kind: 'status', dedupe, text, priority: 'immediate' }); },
       });
       replicationTimer = setInterval(() => { void replicationAutomation?.tick().catch(() => logger.warn({ event: 'replication_tick_failed' }, 'replication pass failed')); }, 2_000);
       replicationTimer.unref();
     }
+    if(config.mode==='host'&&environment.MINT_BOT_FUNDING_PROFILE_PATH&&fire){
+      paidFunding=createPaidFundingRuntime({store:runtime.store,coordinator:runtime.coordinator,ownerId:ownerUserId,stage:()=>stageRuntime,wallets:walletAddresses,balance:async wallet=>(await reader(1)).getBalance({address:wallet as `0x${string}`}),killSwitchOn:fire.fireDeps.killSwitchOn,
+        assertReady:async(campaign,wallets)=>{await assertOpsEvidenceAccepted({environment});if(!assuranceWiring)throw new Error('PAID_FUNDING_CUSTODY_REQUIRED');await assuranceWiring.refreshReadiness({campaign,chainId:campaign.chainId,wallets});},
+        simulate:(campaign,wallets)=>fire!.fireDeps.recordSimulations(campaign,wallets),notify:async(text,dedupe)=>{await alerts.intelligence({kind:'status',text,dedupe,priority:'immediate'});}});
+      paidFundingWorker=startPaidFundingWorker(paidFunding);
+    }
     const actions = createTelegramActions({
       mode: config.mode,
+      reviewedProtocolPlan: input => planReviewedProtocolPreparation({...input,store:runtime.store,secretRoot,killSwitchPath:config.killSwitchPath}),
+      reviewedProtocolSimulation: (campaign, wallets) => simulateReviewedProtocolCampaign({store:runtime.store,campaign,wallets,secretRoot}),
+      walletAdministrationOwnerId: ownerUserId,
+      ...(paidFunding?{paidFunding}:{}),
       custody: turnkeyCustodyEnabled() ? 'turnkey' : 'local',
       store: runtime.store,
       application: ownerApplication,
@@ -595,11 +703,13 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     stopped = true;
     metrics.set('mintbot_process_up', 0);
     intelligence?.stop();
+    contractMonitorService?.stop();
     liveness?.stop();
     fleetWatcher?.stop();
     liveRequests?.stop();
     dependencyFlags?.stop();
     fireScheduler?.stop();
+    await paidFundingWorker?.stop();
     if (replicationTimer) clearInterval(replicationTimer);
     for (const timer of secondaryDiscoveryTimers) timer.stop();
     await Promise.all(secondaryReadinessTimers.map(timer => timer.stop()));
@@ -608,6 +718,8 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     opsEvidenceReminders?.stop();
     backups?.stop();
     await analyticsIngestion?.stop();
+    await roadmapIntelligence?.stop();
+    await contractMonitorService?.drain();
     await orchestrator.stop();
     await http.stop();
     (runtime.store as CanonicalStoreBridge).close();

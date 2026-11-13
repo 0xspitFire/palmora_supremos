@@ -1,6 +1,7 @@
+import { fundingCostSummary } from './native-funding-analytics.js';
 import { createHash } from 'node:crypto';
 import { buildCanonicalAnalyticsReport } from './analytics.js';
-import { readCanonicalAnalyticsActivities } from './canonical-analytics-ingestion.js';
+import { readAnalyticsObservations, readAnalyticsWalletScope, readAnalyticsFloorQuotes, personalAnalyticsActivities } from './analytics-observations.js';
 import { assessLiveRuntimeProbe, liveReadinessHealth, requiresLiveRuntimeProbe, serviceHealthBlockingReasons, type LiveReadinessHealth } from './health.js';
 import { formatEth } from './intelligence/scoring.js';
 import type {
@@ -375,7 +376,7 @@ export interface AnalyticsReadModel {
   readonly method: 'FIFO';
   readonly currency: 'ETH';
   readonly coverage: {
-    readonly scope: 'canonical-finalized-mints-only';
+    readonly scope: 'canonical-finalized-mints-only' | 'verified-observed-transactions';
     readonly canonicalExecutions: number;
     readonly completeCosts: number;
     readonly incompleteCosts: number;
@@ -394,6 +395,12 @@ export interface AnalyticsReadModel {
     readonly realizedRoiBps: string | null;
     readonly unrealizedPnlWei: string | null;
     readonly transactionAndMarketplaceFeesWei: string | null;
+  };
+  readonly funding?: {
+    readonly principalWei: string; readonly gasExpenseWei: string;
+    readonly allocatedGasWei: string; readonly unallocatedGasWei: string;
+    readonly unknownOperations: number; readonly principalIsExpense: false;
+    readonly allocatedGasAlreadyInAcquisitionBasis: true;
   };
   readonly groups: readonly {
     readonly dimension: 'wallet' | 'campaign' | 'signal_source' | 'mint_type';
@@ -514,8 +521,10 @@ export class Phase2ReadModelService {
   /** Bounded accounting projection; historical records never become execution authority. */
   public analytics(state: BackendState, request: ProjectionRequest = {}): ReadModelEnvelope<AnalyticsReadModel> {
     const context = this.context(state, request);
-    const ingested = readCanonicalAnalyticsActivities(state.events);
-    const report = buildCanonicalAnalyticsReport(state, { activities: ingested.activities, now: context.now });
+    const ingested = readAnalyticsObservations(state.events);
+    const ownedWallets = readAnalyticsWalletScope(state.events);
+    const report = buildCanonicalAnalyticsReport(state, { activities: ownedWallets?personalAnalyticsActivities(ingested.activities,ownedWallets):ingested.activities, floorQuotes:readAnalyticsFloorQuotes(state.events,context.now), ownedWallets, now: context.now });
+    const funding = fundingCostSummary(state.events, ingested.fundingAllocations);
     type Group = AnalyticsReadModel['groups'][number];
     const groups = new Map<string, Group>();
     const keyAllowed = (value: string): boolean => /^[A-Za-z0-9_:.-]{1,200}$/.test(value) && safeReadModelText(value) === value;
@@ -541,10 +550,10 @@ export class Phase2ReadModelService {
     const summary: AnalyticsReadModel = {
       mode: 'shadow-only', method: 'FIFO', currency: 'ETH',
       coverage: {
-        scope: 'canonical-finalized-mints-only', canonicalExecutions: report.canonical.executionsSeen,
+        scope: ingested.coverage.external.transactions>0?'verified-observed-transactions':'canonical-finalized-mints-only', canonicalExecutions: report.canonical.executionsSeen,
         completeCosts: report.canonical.completeCosts, incompleteCosts: report.canonical.incompleteCosts,
         confirmedActivities: report.coverage.confirmedActivities, pendingExcluded: report.coverage.pendingExcluded,
-        reorgedExcluded: report.coverage.reorgedExcluded, unavailableObservations: ingested.coverage.unavailable,
+        reorgedExcluded: report.coverage.reorgedExcluded, unavailableObservations: (ingested.coverage.canonical.unavailable+ingested.coverage.external.unavailableTransactions),
         acquisitionHistory: report.coverage.acquisitionCoverage as AnalyticsReadModel['coverage']['acquisitionHistory'],
         externalTransfersAndSalesComplete: false, providerCoverageAsserted: false, groupsOmitted: Math.max(0, groups.size - 20),
       },
@@ -554,11 +563,12 @@ export class Phase2ReadModelService {
         unrealizedPnlWei: report.totals.unrealizedPnlWei,
         transactionAndMarketplaceFeesWei: report.coverage.confirmedActivities > 0 ? report.totals.transactionAndMarketplaceFeesWei : null,
       },
+      funding: { ...funding, principalWei: funding.principalWei.toString(), gasExpenseWei: funding.gasExpenseWei.toString(), allocatedGasWei: funding.allocatedGasWei.toString(), unallocatedGasWei: funding.unallocatedGasWei.toString() },
       groups: [...groups.values()].slice(0, 20),
       shadow: report.replay.slice(0, 20).filter(row => keyAllowed(row.policyId)).map(row => ({ policyId: row.policyId, selected: row.selected, measured: row.measured, unknownOutcomes: row.unknownOutcomes, knownRealizedPnlWei: row.measured > 0 ? row.knownRealizedPnlWei : null, winRateBps: row.winRateBps })),
     };
-    const issues = [issue('ANALYTICS_COVERAGE_LIMITED', 'Accounting covers supplied confirmed records only. Complete external sale and transfer history is not asserted; unknown proceeds, cost basis and floor estimates remain unknown.', 'warning', 'Inspect'), issue('ANALYTICS_SHADOW_ONLY', 'Historical analytics does not change live scores, limits, policies or execution authority.', 'info', 'Inspect')];
-    if (report.issues.length > 0 || report.canonical.incompleteCosts > 0 || ingested.coverage.unavailable > 0) issues.push(issue('ANALYTICS_INPUT_INCOMPLETE', 'Some records have incomplete or excluded accounting facts. Inspect retained evidence before interpreting results.', 'warning', 'Inspect'));
+    const issues = [issue('ANALYTICS_COVERAGE_LIMITED', 'Accounting covers supplied confirmed records only. Complete external sale and transfer history is not asserted; unknown proceeds, cost basis and floor estimates remain unknown.', 'warning', 'Inspect'), issue('ANALYTICS_SHADOW_ONLY', 'This accounting report does not change live scores, limits, policies or execution authority; adaptive scoring is separately owner-governed.', 'info', 'Inspect')];
+    if (report.issues.length > 0 || report.canonical.incompleteCosts > 0 || (ingested.coverage.canonical.unavailable+ingested.coverage.external.unavailableTransactions) > 0) issues.push(issue('ANALYTICS_INPUT_INCOMPLETE', 'Some records have incomplete or excluded accounting facts. Inspect retained evidence before interpreting results.', 'warning', 'Inspect'));
     if (summary.coverage.groupsOmitted > 0) issues.push(issue('ANALYTICS_GROUP_LIMIT', 'This summary displays at most twenty attribution groups.', 'info', 'Inspect'));
     const freshness = classifyFreshness(context.generatedAt, new Date(context.now.getTime() + 10 * 60_000).toISOString(), context.now, context.freshnessPolicyVersion);
     return this.envelope(context, summary, issues, freshness);

@@ -39,3 +39,8 @@ describe('read-only accounting surface', () => {
     expect(formatBasisPoints('not-a-percent')).toBe('Unknown');
   });
 });
+
+it('labels partial external scope and funding overhead without adding it twice to PnL',()=>{
+ const data=summary();const html=renderAnalytics(envelope({...data,coverage:{...data.coverage,scope:'verified-observed-transactions'},funding:{principalWei:'1000000000000000',gasExpenseWei:'11000000000000',allocatedGasWei:'7000000000000',unallocatedGasWei:'4000000000000',unknownOperations:2,principalIsExpense:false,allocatedGasAlreadyInAcquisitionBasis:true}}));
+ expect(html).toContain('verified observed transactions (partial history)');expect(html).toContain('not expense');expect(html).toContain('already in NFT basis');expect(html).toContain('without verified NFT allocation');expect(html).toContain('Unknown funding operations: 2');
+});

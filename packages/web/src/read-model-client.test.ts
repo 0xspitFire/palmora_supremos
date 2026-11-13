@@ -154,3 +154,12 @@ describe('analytics read-model transport', () => {
     expect(result.issues.at(-1)?.code).toBe('READ_MODEL_SCHEMA_MISMATCH');
   });
 });
+
+it('accepts bounded verified external observations and conserves funding gas without pricing principal as expense',async()=>{
+ const data=analytics();const value={...data,coverage:{...data.coverage,scope:'verified-observed-transactions' as const},funding:{principalWei:'1000',gasExpenseWei:'11',allocatedGasWei:'7',unallocatedGasWei:'4',unknownOperations:1,principalIsExpense:false as const,allocatedGasAlreadyInAcquisitionBasis:true as const}};
+ const result=await new ReadModelClient({get:async()=>({...emptyEnvelope<unknown>(),availability:'partial',data:value})}).getAnalytics();
+ expect(result.data?.coverage.scope).toBe('verified-observed-transactions');expect(result.data?.funding?.principalIsExpense).toBe(false);expect(result.data?.funding?.gasExpenseWei).toBe('11');
+ for(const funding of [{...value.funding,principalWei:'-1'},{...value.funding,gasExpenseWei:12},{...value.funding,allocatedGasWei:'8'},{...value.funding,principalIsExpense:true}]){
+  const rejected=await new ReadModelClient({get:async()=>({...emptyEnvelope<unknown>(),availability:'partial',data:{...value,funding}})}).getAnalytics();expect(rejected.data).toBeNull();
+ }
+});

@@ -1,3 +1,4 @@
+import { captureFundingCosts, latestFundingCostObservations, type FundingFeeMetadata } from './native-funding-analytics.js';
 import { createHash } from 'node:crypto';
 import type { AnalyticsActivity } from './analytics.js';
 import type { BackendStore } from './store.js';
@@ -25,7 +26,7 @@ const json = (value: unknown) => JSON.stringify(value, (_key, entry: unknown) =>
 const digest = (value: unknown) => createHash('sha256').update(json(value)).digest('hex');
 const validId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,180}$/.test(value);
 
-function canonicalSource(state: BackendState, executionId: string) {
+function canonicalSource(state: BackendState, executionId: string, store?: BackendStore) {
   const receipt = state.receipts.filter(row => row.executionId === executionId).sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt) || b.id.localeCompare(a.id))[0];
   const attempt = receipt && state.attempts.find(row => row.id === receipt.transactionAttemptId && row.executionId === executionId && row.runId === receipt.runId);
   const run = receipt && state.runs.find(row => row.id === receipt.runId && row.mode === 'live');
@@ -33,18 +34,26 @@ function canonicalSource(state: BackendState, executionId: string) {
   const campaign = intent?.campaignSnapshot;
   const reservations = run && attempt ? state.reservations.filter(row => row.runId === run.id && row.campaignId === campaign?.id && same(row.wallet, attempt.wallet)) : [];
   const settlement = reservations.length === 1 && reservations[0]!.status === 'settled' ? reservations[0] : undefined;
-  const fingerprint = digest({ receipt, attempt: attempt && { id: attempt.id, hash: attempt.hash, wallet: attempt.wallet, runId: attempt.runId, executionId: attempt.executionId }, run: run && { id: run.id, intentId: run.intentId, campaignId: run.campaignId, mode: run.mode }, campaign, reservations });
-  return { receipt, attempt, run, campaign, settlement, fingerprint };
+  let funding: FundingFeeMetadata = {status:'known',feeWei:0n,principalWei:0n,reference:'funding:legacy-unfunded'};
+  if (run && attempt) {
+    const held = state.events.some(event => event.type === 'run_armed' && event.data.intentId === run.intentId && typeof event.data.fundingHoldId === 'string');
+    try { funding = store?.fundingFeeForRunWallet?.(run.id, attempt.wallet) ?? (held ? {status:'unknown',reference:'funding:metadata-unavailable'} : funding); }
+    catch { funding = {status:'unknown',reference:'funding:metadata-unavailable'}; }
+    if (funding.status === 'known' && funding.feeWei !== undefined && funding.feeWei > 0n && new Set(state.receipts.filter(row => row.runId === run.id && row.state === 'Confirmed' && state.attempts.some(value => value.id === row.transactionAttemptId && same(value.wallet,attempt.wallet))).map(row=>row.executionId)).size > 1) funding = {status:'unknown',reference:'funding:multiple-acquisitions-ambiguous'};
+    if (funding.status === 'known' && (typeof funding.feeWei !== 'bigint' || funding.feeWei < 0n || typeof funding.principalWei !== 'bigint' || funding.principalWei < 0n)) funding = {status:'unknown',reference:'funding:metadata-invalid'};
+  }
+  const fingerprint = digest({ funding, receipt, attempt: attempt && { id: attempt.id, hash: attempt.hash, wallet: attempt.wallet, runId: attempt.runId, executionId: attempt.executionId }, run: run && { id: run.id, intentId: run.intentId, campaignId: run.campaignId, mode: run.mode }, campaign, reservations });
+  return { receipt, attempt, run, campaign, settlement, fingerprint, funding };
 }
 type ObservationState = 'confirmed' | 'reorged' | 'unavailable';
-interface Observation { executionId: string; revision: number; state: ObservationState; code: string; sourceFingerprint: string; payloadDigest: string; activities: AnalyticsActivity[]; }
+interface Observation { executionId: string; revision: number; state: ObservationState; code: string; sourceFingerprint: string; payloadDigest: string; activities: AnalyticsActivity[]; fundingCost?: {runId:string;wallet:string;reference:string;status:string;feeWei?:string;operationReferences?:readonly string[]}; }
 function observations(events: readonly EventRecord[]): Map<string, Observation> {
   const result = new Map<string, Observation>();
   for (const event of events) {
     if (event.type !== OBSERVATION || event.data.version !== 1) continue;
     const row = event.data;
     if (!validId(row.executionId) || !Number.isSafeInteger(row.revision) || Number(row.revision) < 1 || !['confirmed', 'reorged', 'unavailable'].includes(String(row.state)) || typeof row.code !== 'string' || !/^[A-Z][A-Z0-9_]{2,90}$/.test(row.code) || typeof row.sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(row.sourceFingerprint) || typeof row.payloadDigest !== 'string' || !Array.isArray(row.activities)) continue;
-    const payload = { state: row.state, code: row.code, sourceFingerprint: row.sourceFingerprint, activities: row.activities };
+    const payload = { state: row.state, code: row.code, sourceFingerprint: row.sourceFingerprint, activities: row.activities, ...(row.fundingCost ? {fundingCost:row.fundingCost} : {}) };
     if (digest(payload) !== row.payloadDigest) continue;
     const prior = result.get(row.executionId);
     if (!prior || Number(row.revision) > prior.revision) result.set(row.executionId, { ...payload, executionId: row.executionId, revision: Number(row.revision), payloadDigest: row.payloadDigest } as Observation);
@@ -53,10 +62,31 @@ function observations(events: readonly EventRecord[]): Map<string, Observation> 
 }
 /** Historical acquisitions only. These facts do not assert complete holdings, sale history or current ownership. */
 export function readCanonicalAnalyticsActivities(events: readonly EventRecord[]) {
-  const latest = [...observations(events).values()];
+  const costs = latestFundingCostObservations(events);
+  let fundingUnknown = 0;
+  const latest = [...observations(events).values()].map(row => {
+    const allocation = row.fundingCost;
+    if (!allocation) return row;
+    const current = costs.filter(cost => cost.runId === allocation.runId && typeof cost.wallet === 'string' && cost.wallet.toLowerCase() === allocation.wallet.toLowerCase());
+    if (!current.length) return row;
+    const references = current.map(cost => String(cost.reference)).sort();
+    const feeKnown = current.every(cost => cost.status === 'known' && typeof cost.feeWei === 'string' && /^\d+$/.test(cost.feeWei));
+    const fee = feeKnown ? current.reduce((sum,cost)=>sum+BigInt(cost.feeWei as string),0n).toString() : undefined;
+    if (feeKnown && allocation.status === 'known' && allocation.feeWei === fee && allocation.operationReferences && [...allocation.operationReferences].sort().join('|') === references.join('|')) return row;
+    fundingUnknown++;
+    let oldFundingFee = typeof allocation.feeWei === 'string' && /^\d+$/.test(allocation.feeWei) ? BigInt(allocation.feeWei) : 0n;
+    const totalGas = row.activities.reduce((sum,activity)=>sum+BigInt(activity.gasWei),0n);
+    if (oldFundingFee > totalGas) return {...row, activities:[], fundingCost:{...allocation,status:'unknown',feeWei:undefined}};
+    const activities = row.activities.map((activity,index) => {
+      const removed = oldFundingFee / BigInt(row.activities.length-index); oldFundingFee -= removed;
+      return {...activity, ...(activity.kind === 'acquisition' ? {costWei:null}:{}), gasWei:(BigInt(activity.gasWei)-removed).toString(), sourceReference:`funding-revision:${digest({source:activity.sourceReference,references,current:current.map(cost=>cost.payloadDigest)})}`};
+    });
+    return {...row,activities,fundingCost:{...allocation,status:'unknown',feeWei:undefined}};
+  });
   return {
     activities: latest.flatMap(row => row.state === 'unavailable' ? [] : row.activities.map(activity => ({ ...activity, status: row.state === 'reorged' ? 'reorged' as const : 'confirmed' as const }))),
-    coverage: { executions: latest.length, confirmed: latest.filter(row => row.state === 'confirmed').length, reorged: latest.filter(row => row.state === 'reorged').length, unavailable: latest.filter(row => row.state === 'unavailable').length, scope: 'canonical-finalized-mints-only' as const, externalTransfersAndSalesComplete: false as const },
+    fundingAllocations: latest.filter(row => row.state === 'confirmed' && row.activities.length > 0 && row.fundingCost?.status === 'known').flatMap(row => row.fundingCost ? [row.fundingCost] : []),
+    coverage: { fundingUnknown, executions: latest.length, confirmed: latest.filter(row => row.state === 'confirmed').length, reorged: latest.filter(row => row.state === 'reorged').length, unavailable: latest.filter(row => row.state === 'unavailable').length, scope: 'canonical-finalized-mints-only' as const, externalTransfersAndSalesComplete: false as const },
   };
 }
 
@@ -87,12 +117,12 @@ async function inspect(source: ReturnType<typeof canonicalSource>, port: Canonic
   minted.sort((a, b) => a.logIndex - b.logIndex);
   const prepared = state.events.find(event => event.type === 'replication_prepared' && event.data.campaignId === campaign.id);
   const sourceWallet = typeof prepared?.data.sourceWallet === 'string' && ADDRESS.test(prepared.data.sourceWallet) ? prepared.data.sourceWallet.toLowerCase() : undefined;
-  let costLeft = mintValue; let gasLeft = c.actualSpendWei - mintValue;
+  let costLeft = mintValue; let gasLeft = c.actualSpendWei - mintValue + (source.funding.status === 'known' ? source.funding.feeWei! : 0n);
   const activities: AnalyticsActivity[] = minted.map((log, index) => {
     const remaining = BigInt(minted.length - index);
     const cost = costLeft / remaining; const gas = gasLeft / remaining;
     costLeft -= cost; gasLeft -= gas;
-    return { id: `canonical:${digest({ executionId: c.executionId, hash: attempt.hash, logIndex: log.logIndex })}`, sourceReference: `canonical:${digest({ receiptId: c.id, blockHash: c.blockHash })}`, kind: 'acquisition', chainId: campaign.chainId as ExecutionChainId, collection: campaign.contract.toLowerCase(), tokenId: log.tokenId, quantity: '1', wallet: attempt.wallet.toLowerCase(), status: 'confirmed', transactionHash: attempt.hash!.toLowerCase(), blockHash: c.blockHash!.toLowerCase(), blockNumber: c.blockNumber!.toString(), transactionIndex: receipt.transactionIndex, logIndex: log.logIndex, at: new Date(timestampMs).toISOString(), costWei: cost.toString(), gasWei: gas.toString(), campaignId: campaign.id, ...(sourceWallet ? { sourceWallet } : {}), mintType: campaign.strategy === 'seadrop-v1-public' ? 'public' : campaign.strategy === 'seadrop-v1-allowlist' ? 'allowlist' : 'other' };
+    return { id: `canonical:${digest({ executionId: c.executionId, hash: attempt.hash, logIndex: log.logIndex })}`, sourceReference: `canonical:${digest({ receiptId: c.id, blockHash: c.blockHash, funding: source.funding })}`, kind: 'acquisition', chainId: campaign.chainId as ExecutionChainId, collection: campaign.contract.toLowerCase(), tokenId: log.tokenId, quantity: '1', wallet: attempt.wallet.toLowerCase(), status: 'confirmed', transactionHash: attempt.hash!.toLowerCase(), blockHash: c.blockHash!.toLowerCase(), blockNumber: c.blockNumber!.toString(), transactionIndex: receipt.transactionIndex, logIndex: log.logIndex, at: new Date(timestampMs).toISOString(), costWei: source.funding.status === 'known' ? cost.toString() : null, gasWei: gas.toString(), campaignId: campaign.id, ...(sourceWallet ? { sourceWallet } : {}), mintType: campaign.strategy === 'seadrop-v1-public' ? 'public' : campaign.strategy === 'seadrop-v1-allowlist' ? 'allowlist' : 'other' };
   });
   return { state: 'confirmed', code: 'CANONICAL_MINT_VERIFIED', activities };
 }
@@ -102,6 +132,7 @@ export async function ingestCanonicalAnalytics(input: { store: BackendStore; por
   const now = input.now ?? (() => new Date());
   const limit = input.maxReceipts ?? 20;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20 || !Number.isFinite(now().getTime())) throw new Error('ANALYTICS_INGESTION_CONFIG_INVALID');
+  await captureFundingCosts(input.store);
   const snapshot = input.store.snapshot();
   const previous = observations(snapshot.events);
   const executionIds = [...new Set([...snapshot.receipts.filter(row => row.state === 'Confirmed' || row.state === 'Reorged').map(row => row.executionId), ...previous.keys()])].filter(validId).sort();
@@ -111,16 +142,17 @@ export async function ingestCanonicalAnalytics(input: { store: BackendStore; por
   const selected = [...executionIds.slice(start), ...executionIds.slice(0, start)].slice(0, limit);
   const result = { checked: 0, written: 0, confirmed: 0, reorged: 0, unavailable: 0, remaining: Math.max(0, executionIds.length - selected.length) };
   for (const executionId of selected) {
-    const source = canonicalSource(snapshot, executionId);
+    const source = canonicalSource(snapshot, executionId, input.store);
     let outcome: Awaited<ReturnType<typeof inspect>>;
     try { outcome = await inspect(source, await input.port(source.campaign?.chainId ?? 1), snapshot, now()); }
     catch { outcome = { state: 'unavailable', code: 'ANALYTICS_OBSERVATION_UNAVAILABLE', activities: [] }; }
     await input.store.transaction(state => {
-      const current = canonicalSource(state, executionId);
+      const current = canonicalSource(state, executionId, input.store);
       if (current.fingerprint !== source.fingerprint) outcome = { state: 'unavailable', code: 'CANONICAL_SOURCE_CHANGED_DURING_READ', activities: [] };
       const prior = observations(state.events).get(executionId);
       if (outcome.state === 'reorged' && outcome.activities.length === 0) outcome.activities = prior?.activities.map(activity => ({ ...activity, status: 'reorged' })) ?? [];
-      const payload = { ...outcome, sourceFingerprint: current.fingerprint };
+      const fundingCost = current.run && current.attempt ? {runId:current.run.id,wallet:current.attempt.wallet.toLowerCase(),reference:current.funding.reference,status:current.funding.status,...(current.funding.feeWei !== undefined ? {feeWei:current.funding.feeWei.toString()} : {}),...(current.funding.operationReferences ? {operationReferences:current.funding.operationReferences}: {})} : undefined;
+      const payload = { ...outcome, sourceFingerprint: current.fingerprint, ...(fundingCost ? {fundingCost} : {}) };
       const payloadDigest = digest(payload);
       if (prior?.payloadDigest !== payloadDigest) {
         const revision = (prior?.revision ?? 0) + 1;

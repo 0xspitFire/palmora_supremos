@@ -137,3 +137,33 @@ describe('canonical finalized acquisition ingestion', () => {
     await expect(ingestCanonicalAnalytics({ store: s.store, port: async () => s.client, maxReceipts: 21 })).rejects.toThrow('ANALYTICS_INGESTION_CONFIG_INVALID');
   });
 });
+
+describe('funded canonical acquisition basis', () => {
+  it('allocates exact funding gas across actual NFT quantity and never charges transferred principal', async () => {
+    const s = await setup();
+    Object.assign(s.store, {fundingFeeForRunWallet: () => ({status:'known',feeWei:8n,principalWei:10_000n,reference:'funding:actual-proof'})});
+    await s.run();
+    const report=readCanonicalAnalyticsActivities(s.store.snapshot().events);
+    expect(report.activities.map(row=>row.kind === 'acquisition' ? row.costWei : undefined)).toEqual(['100','100']);
+    expect(report.activities.map(row=>row.gasWei)).toEqual(['9','10']);
+    expect(report.fundingAllocations).toEqual([expect.objectContaining({feeWei:'8',runId:'run:1',wallet})]);
+  });
+  it('keeps unknown funding fees out of fully-costed outcomes and corrects lineage when resolved', async () => {
+    const s = await setup(); let known=false;
+    Object.assign(s.store, {fundingFeeForRunWallet: () => known ? {status:'known',feeWei:7n,principalWei:100n,reference:'funding:final'} : {status:'unknown',reference:'funding:pending'}});
+    await s.run(); const unknown=readCanonicalAnalyticsActivities(s.store.snapshot().events);
+    expect(unknown.activities.map(row=>row.kind === 'acquisition' ? row.costWei : undefined)).toEqual([null,null]);
+    expect(unknown.fundingAllocations).toEqual([]);
+    const before=unknown.activities[0]!.sourceReference;
+    known=true;await s.run();const actual=readCanonicalAnalyticsActivities(s.store.snapshot().events);
+    expect(actual.activities.map(row=>row.gasWei)).toEqual(['9','9']);
+    expect(actual.activities[0]!.sourceReference).not.toBe(before);
+    known=false;await s.run();expect(readCanonicalAnalyticsActivities(s.store.snapshot().events).activities.every(row=>row.kind === 'acquisition' && row.costWei===null)).toBe(true);
+  });
+  it('invalidates a funding fee that changes while independent receipt reads are in flight', async () => {
+    const s=await setup();let fee=7n;
+    Object.assign(s.store,{fundingFeeForRunWallet:()=>({status:'known',feeWei:fee,principalWei:100n,reference:`funding:${fee}`})});
+    s.client.transaction.mockImplementationOnce(async()=>{fee=8n;return {hash,from:wallet,to:target,value:200n,blockNumber:10n,blockHash};});
+    await s.run();expect(readCanonicalAnalyticsActivities(s.store.snapshot().events).activities).toEqual([]);
+  });
+});

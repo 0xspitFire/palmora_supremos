@@ -96,10 +96,15 @@ function analyticsKey(value: unknown): value is string { return typeof value ===
 function isAnalytics(value: unknown): value is AnalyticsReadModel {
   if (!isRecord(value) || value.mode !== 'shadow-only' || value.currency !== 'ETH' || value.method !== 'FIFO' || !isRecord(value.coverage) || !isRecord(value.totals) || !Array.isArray(value.groups) || value.groups.length > 20 || !Array.isArray(value.shadow) || value.shadow.length > 20) return false;
   const coverage = value.coverage;
-  if (coverage.scope !== 'canonical-finalized-mints-only' || coverage.externalTransfersAndSalesComplete !== false || coverage.providerCoverageAsserted !== false || !['partial', 'provided-input-only', 'no_samples'].includes(String(coverage.acquisitionHistory))) return false;
+  if (!['canonical-finalized-mints-only', 'verified-observed-transactions'].includes(String(coverage.scope)) || coverage.externalTransfersAndSalesComplete !== false || coverage.providerCoverageAsserted !== false || !['partial', 'provided-input-only', 'no_samples'].includes(String(coverage.acquisitionHistory))) return false;
   if (!['canonicalExecutions', 'completeCosts', 'incompleteCosts', 'confirmedActivities', 'pendingExcluded', 'reorgedExcluded', 'unavailableObservations', 'groupsOmitted'].every(key => nonnegativeCount(coverage[key]))) return false;
   if (!['recordedCanonicalCostWei', 'realizedPnlWei', 'realizedRoiBps', 'unrealizedPnlWei', 'transactionAndMarketplaceFeesWei'].every(key => nullableMoney((value.totals as UnknownRecord)[key]))) return false;
   if (!nullableUnsignedMoney(value.totals.recordedCanonicalCostWei) || !nullableUnsignedMoney(value.totals.transactionAndMarketplaceFeesWei)) return false;
+  if (value.funding !== undefined) {
+    const funding = value.funding;
+    if (!isRecord(funding) || funding.principalIsExpense !== false || funding.allocatedGasAlreadyInAcquisitionBasis !== true || !nonnegativeCount(funding.unknownOperations) || !['principalWei', 'gasExpenseWei', 'allocatedGasWei', 'unallocatedGasWei'].every(key => typeof funding[key] === 'string' && nullableUnsignedMoney(funding[key]))) return false;
+    if (BigInt(funding.allocatedGasWei as string) + BigInt(funding.unallocatedGasWei as string) !== BigInt(funding.gasExpenseWei as string)) return false;
+  }
   return value.groups.every(row => isRecord(row) && ['wallet', 'campaign', 'signal_source', 'mint_type'].includes(String(row.dimension)) && analyticsKey(row.key) && nonnegativeCount(row.executions) && nonnegativeCount(row.dispositions) && nullableUnsignedMoney(row.recordedCostWei) && nullableMoney(row.realizedPnlWei) && typeof row.unknownBasisQuantity === 'string' && /^(0|[1-9][0-9]*)$/.test(row.unknownBasisQuantity) && row.unknownBasisQuantity.length <= 80)
     && value.shadow.every(row => isRecord(row) && analyticsKey(row.policyId) && nonnegativeCount(row.selected) && nonnegativeCount(row.measured) && nonnegativeCount(row.unknownOutcomes) && nullableMoney(row.knownRealizedPnlWei) && (row.winRateBps === null || nonnegativeCount(row.winRateBps) && row.winRateBps <= 10_000));
 }

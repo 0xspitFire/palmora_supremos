@@ -18,6 +18,39 @@ import type { TurnkeyPolicyAst } from './turnkey-policy.js';
 import { SEADROP_V1_ADDRESS } from './chains.js';
 import { selectTurnkeyPolicyRecord, turnkeyPolicySelection } from './turnkey-signer.js';
 import { validateTurnkeyPolicyBundle } from './turnkey-bundle.js';
+import { createTurnkeyWalletAdminPolicyRecord, signTurnkeyWalletAdminPolicyRecord, verifyTurnkeyWalletAdminPolicyRecord, turnkeyWalletAdminPolicyExpressions } from './turnkey-wallet-admin-policy.js';
+
+describe('optional independently signed non-signing inventory records', () => {
+  function adminRecord(overrides: { organizationId?: string; mintRuntimeUserId?: string; policyId?: string } = {}) {
+    const owner = generateKeyPairSync('ed25519');
+    const expressions = turnkeyWalletAdminPolicyExpressions({ adminUserId: 'admin-only-user' });
+    const policy = { policyId: overrides.policyId ?? 'admin-only-policy', policyName: 'create-and-import-only', createdAt: timestamp('1'), updatedAt: timestamp('2'), notes: '', ...expressions };
+    const admin = createTurnkeyWalletAdminPolicyRecord({ environment: 'production', organizationId: overrides.organizationId ?? ORG, adminUserId: 'admin-only-user', mintRuntimeUserId: overrides.mintRuntimeUserId ?? USER, providerPolicy: policy, issuedAt: NOW.toISOString(), expiresAt: new Date(NOW.getTime() + 86_400_000).toISOString() });
+    return { admin: verifyTurnkeyWalletAdminPolicyRecord(signTurnkeyWalletAdminPolicyRecord(admin, owner.privateKey), owner.publicKey, NOW), policy };
+  }
+
+  it('matches the exact union of an existing signed mint catalog plus a separately signed admin record', () => {
+    const owner = generateKeyPairSync('ed25519'); const active = record();
+    const otherAst = { ...enforcementPolicy(), scope: { ...enforcementPolicy().scope, policyId: 'other-mint-policy' } };
+    const other = record(otherAst);
+    const catalog = verifyTurnkeySignedPolicyCatalog({ version: 1, context: 'mintbot.turnkey-policy-catalog/v1', records: [signTurnkeyPolicyRecord(active, owner.privateKey), signTurnkeyPolicyRecord(other, owner.privateKey)] }, owner.publicKey, NOW);
+    const admin = adminRecord();
+    const state = { whoami: identity(), organization: organization(), policies: [providerPolicy(), providerPolicy(otherAst), admin.policy], privateKeys: [providerKey()] };
+    expect(() => validateTurnkeyActualProviderState(active, state, catalog, [admin.admin], NOW)).not.toThrow();
+    expect(() => validateTurnkeyActualProviderState(active, state, catalog)).toThrow('TURNKEY_PROVIDER_POLICY_NOT_APPROVED');
+    expect(() => validateTurnkeyActualProviderState(active, { ...state, policies: [...state.policies, { ...admin.policy, policyId: 'unknown-signing', condition: "activity.type == 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2'" }] }, catalog, [admin.admin], NOW)).toThrow('PROVIDER_POLICY_NOT_APPROVED');
+  });
+
+  it('cannot use an unsigned, cross-org/user, expired or duplicate record to exempt an ALLOW policy', () => {
+    const active = record(); const admin = adminRecord();
+    const state = { whoami: identity(), organization: organization(), policies: [providerPolicy(), admin.policy], privateKeys: [providerKey()] };
+    expect(() => validateTurnkeyActualProviderState(active, state, [active], [JSON.parse(JSON.stringify(admin.admin))], NOW)).toThrow('SIGNATURE_VERIFICATION_REQUIRED');
+    for (const value of [adminRecord({ organizationId: 'other-org' }), adminRecord({ mintRuntimeUserId: 'other-runtime' })]) expect(() => validateTurnkeyActualProviderState(active, state, [active], [value.admin], NOW)).toThrow('BINDING_INVALID');
+    expect(() => validateTurnkeyActualProviderState(active, state, [active], [admin.admin], new Date(NOW.getTime() + 86_400_000))).toThrow('RECORD_NOT_CURRENT');
+    expect(() => validateTurnkeyActualProviderState(active, state, [active], [admin.admin, admin.admin], NOW)).toThrow('BINDING_INVALID');
+    expect(() => validateTurnkeyActualProviderState(active, { ...state, organization: organization(['admin-only-user']) }, [active], [admin.admin], NOW)).toThrow('NON_ROOT_USER_REQUIRED');
+  });
+});
 
 const ORG = 'org-1';
 const USER = 'user-1';

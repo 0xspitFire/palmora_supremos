@@ -10,7 +10,8 @@ export interface OpenSeaResponse { ok: boolean; status: number; headers?: { get(
 export type OpenSeaFetch = (url: string, init: { headers: Record<string, string>; signal: AbortSignal; redirect: 'error' }) => Promise<OpenSeaResponse>;
 
 export interface FloorResult { collection: string; floorEth: number | undefined }
-export interface OpenSeaFloors { floor(chainId: number, contract: string): Promise<FloorResult> }
+export interface OpenSeaFloorQuote extends FloorResult { chainId:number; contract:string; observedAt:string; expiresAt:string; sourceReference:'opensea-v2-collection-stats'; currency:'ETH'; estimate:true; }
+export interface OpenSeaFloors { floor(chainId: number, contract: string): Promise<FloorResult>; quote?(chainId:number,contract:string):Promise<OpenSeaFloorQuote> }
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,99}$/;
 const BASE = 'https://api.opensea.io';
@@ -69,6 +70,7 @@ export function createOpenSeaFloors(options: { apiKey: string; fetcher?: OpenSea
       if (!found || !SLUG.test(found)) throw new Error('OPENSEA_NOT_FOUND');
       slug = { at: now().getTime(), slug: found };
       slugs.set(key, slug);
+      if(slugs.size>1000)slugs.delete(slugs.keys().next().value!);
     }
     const body = await spaced(() => call(`/api/v2/collections/${slug!.slug}/stats`));
     const total = body['total'] && typeof body['total'] === 'object' ? body['total'] as Record<string, unknown> : undefined;
@@ -78,7 +80,12 @@ export function createOpenSeaFloors(options: { apiKey: string; fetcher?: OpenSea
     const floorEth = typeof floor === 'number' && Number.isFinite(floor) && floor >= 0 && (symbol === 'ETH' || symbol === 'WETH') ? floor : undefined;
     return { collection: slug.slug, floorEth };
   };
-  return {
+  const provider: OpenSeaFloors = {
+    async quote(chainId,contract){
+      const value=await provider.floor(chainId,contract);const key=`${chainId}:${contract.toLowerCase()}`;const cached=stats.get(key);
+      if(!cached)throw new Error('OPENSEA_UNAVAILABLE');
+      return {...value,chainId,contract:contract.toLowerCase(),observedAt:new Date(cached.at).toISOString(),expiresAt:new Date(cached.at+STATS_CACHE_MS).toISOString(),sourceReference:'opensea-v2-collection-stats',currency:'ETH',estimate:true};
+    },
     async floor(chainId, contract) {
       if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) throw new Error('OPENSEA_CONTRACT_INVALID');
       const key = `${chainId}:${contract.toLowerCase()}`;
@@ -92,10 +99,12 @@ export function createOpenSeaFloors(options: { apiKey: string; fetcher?: OpenSea
         try {
           const value = await lookup(chainId, contract.toLowerCase(), key);
           stats.set(key, { at: now().getTime(), value });
+          if(stats.size>1000)stats.delete(stats.keys().next().value!);
           return value;
         } catch (error) {
           const code = error instanceof Error && /^OPENSEA_[A-Z_]+$/.test(error.message) ? error.message : 'OPENSEA_UNAVAILABLE';
           failures.set(key, { at: now().getTime(), code });
+          if(failures.size>1000)failures.delete(failures.keys().next().value!);
           throw new Error(code);
         } finally { inFlight.delete(key); }
       })();
@@ -103,4 +112,5 @@ export function createOpenSeaFloors(options: { apiKey: string; fetcher?: OpenSea
       return work;
     },
   };
+  return provider;
 }

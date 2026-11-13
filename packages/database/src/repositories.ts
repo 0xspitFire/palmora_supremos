@@ -492,6 +492,16 @@ export class DurableRepository {
   public recordChainVerification(record: ChainVerificationRecord): void {
     const profile = this.db.prepare('SELECT chain_id, verification_status, execution_enabled FROM chain_profile WHERE id = ?').get(record.chainProfileId) as { chain_id: number; verification_status: string; execution_enabled: number } | undefined;
     if (!profile || profile.chain_id !== record.chainId) throw new Error('chain verification identity mismatch');
+    const protocolEvidence = record.evidence && typeof record.evidence==='object' ? record.evidence as Record<string,unknown> : {};
+    const reviewedProtocol = protocolEvidence.strategyVersion==='erc721-reviewed-public-v1-baseline@1';
+    if(protocolEvidence.reviewedProtocol && !reviewedProtocol)throw new Error('Reviewed protocol baseline scope mismatch');
+    if(reviewedProtocol){
+      const binding=protocolEvidence.reviewedProtocol as {family?:unknown;registryDigest?:unknown;descriptorDigests?:unknown}|undefined;
+      const negatives=protocolEvidence.negativeCases as Record<string,unknown>|undefined;
+      if(!binding || binding.family!=='erc721-reviewed-public-v1' || typeof binding.registryDigest!=='string' || !/^sha256:[0-9a-f]{64}$/.test(binding.registryDigest) || !Array.isArray(binding.descriptorDigests) || binding.descriptorDigests.length<1 || binding.descriptorDigests.length>100 || binding.descriptorDigests.some(value=>typeof value!=='string'||!/^sha256:[0-9a-f]{64}$/.test(value)) || protocolEvidence.seaDropCompatible!==false || protocolEvidence.archiveForkPassed!==true || protocolEvidence.reconciliationPassed!==true || protocolEvidence.finalityPassed!==true || protocolEvidence.positiveLivePath!==true || !negatives || ['revert','sold_out','price_drift','insufficient_funds','quantity_limit','stale_phase','fee_recipient','kill','cap'].some(key=>negatives[key]!==true))throw new Error('Reviewed protocol baseline evidence incomplete');
+      if(record.status==='verified' && (record.approvedBy!=='owner-cli' || typeof protocolEvidence.approvalProof!=='string' || !protocolEvidence.approvalProof))throw new Error('Reviewed protocol baseline owner approval required');
+    }
+
     if (record.chainId === 4663 && record.sequencerEndpointReference !== 'https://sequencer.mainnet.chain.robinhood.com') throw new Error('Robinhood sequencer reference is not the approved endpoint');
     if (record.chainId === 4663 && !record.archiveEndpointReference?.startsWith('Rets/MINT_BOT_SECRETS.env')) throw new Error('Robinhood archive endpoint must remain a Rets/MINT_BOT_SECRETS.env reference');
     if (record.status === 'verified') {
@@ -499,7 +509,7 @@ export class DurableRepository {
       if (!record.approvedBy || !record.approvedAt || !evidence || Object.keys(evidence).length === 0 || evidence.finalityPassed !== true) throw new Error('verified chain requires approved finality evidence');
     }
     this.immediate(() => {
-      const executionEnabled = record.executionEnabled ?? (record.status === 'execution_blocked' ? false : profile.execution_enabled === 1);
+      const executionEnabled = reviewedProtocol ? protocolEvidence.executionEnabled===true && record.status==='verified' : record.executionEnabled ?? (record.status === 'execution_blocked' ? false : profile.execution_enabled === 1);
       if (record.status !== 'verified' && executionEnabled) throw new Error('execution can only remain enabled for a verified chain');
       const evidence = json(record.evidence ?? {}) ?? '{}';
       const approver = safeText(record.approvedBy, 'verification approver');
@@ -508,7 +518,7 @@ export class DurableRepository {
         if (!approver || !approvedAt || !Number.isFinite(Date.parse(approvedAt)) || evidence === '{}') throw new Error('verified chain requires approver, approval time, and substantive evidence');
       }
       this.db.prepare('INSERT INTO chain_verification (id, chain_profile_id, status, chain_id, sequencer_endpoint_reference, archive_endpoint_reference, feed_endpoint_reference, sea_drop_test_tx_hash, evidence_json, checked_at, approved_by, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(record.id, record.chainProfileId, record.status, record.chainId, safeText(record.sequencerEndpointReference, 'sequencer endpoint') ?? null, safeText(record.archiveEndpointReference, 'archive endpoint') ?? null, safeText(record.feedEndpointReference, 'feed endpoint') ?? null, record.seaDropTestTxHash ?? null, evidence, record.checkedAt, approver ?? null, approvedAt);
-      this.db.prepare('UPDATE chain_profile SET verification_status = ?, verification_evidence_json = ?, verification_approved_by = ?, verification_approved_at = ?, execution_enabled = ? WHERE id = ?').run(record.status, evidence, approver ?? null, approvedAt, executionEnabled ? 1 : 0, record.chainProfileId);
+      if(!reviewedProtocol) this.db.prepare('UPDATE chain_profile SET verification_status = ?, verification_evidence_json = ?, verification_approved_by = ?, verification_approved_at = ?, execution_enabled = ? WHERE id = ?').run(record.status, evidence, approver ?? null, approvedAt, executionEnabled ? 1 : 0, record.chainProfileId);
       this.db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, prior_state, new_state, actor, reason, evidence_snapshot_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(`${record.id}:audit`, 'chain_profile', record.chainProfileId, profile.verification_status, record.status, safeText(record.approvedBy, 'verification approver') ?? 'database', 'chain verification evidence recorded', evidence, record.checkedAt);
     });
   }

@@ -1,7 +1,10 @@
+import { readReviewedProtocolSource } from './reviewed-protocol-source.js';
 import { decodeEventLog, decodeFunctionData, toFunctionSelector, type Address, type Hex, type PublicClient } from 'viem';
 import { ALLOWLIST_MINT_ABI, SIGNED_MINT_ABI, buildSignedMint, buildAllowlistMint, buildReplicationPlan, getStrategy, SeaDropV1PublicStrategy, SEADROP_V1_ADDRESS, SEADROP_EVENTS_ABI, type DropConfig, type ObservedMintTransaction, type ReplicationPlan, type SupportedChainId, type VerifiedWalletProof, type VerifiedSignedWalletAuthorization } from '@mint-bot/engine';
 
 export interface QualifiedSource {
+  sourceBlockHash?: string;
+  reviewedProtocol?: { family: 'erc721-reviewed-public-v1'; registryDigest: string; descriptorDigest: string };
   observed: ObservedMintTransaction;
   drop: DropConfig;
   plan: ReplicationPlan;
@@ -10,6 +13,7 @@ export interface QualifiedSource {
 
 /** A Transfer to a watched wallet is insufficient: require a successful self-paid SeaDrop event and matching transaction. */
 export async function readReplicationSource(input: {
+  reviewedProtocol?: { registry: import('@mint-bot/engine').VerifiedReviewedErc721Registry; clients: readonly [PublicClient,PublicClient] };
   client: PublicClient;
   chainId: SupportedChainId;
   contract: Address;
@@ -20,6 +24,7 @@ export async function readReplicationSource(input: {
 }): Promise<QualifiedSource> {
   const { client, hash, contract, chainId } = input;
   const clock = typeof input.now === 'function' ? input.now : input.now ? () => input.now as Date : () => new Date();
+  if(input.reviewedProtocol){if(input.reviewedProtocol.registry.chainId!==chainId)throw new Error('ERC721_REGISTRY_BINDING_INVALID');const tx=await client.getTransaction({hash});if(tx.to?.toLowerCase()!==SEADROP_V1_ADDRESS.toLowerCase())return readReviewedProtocolSource({...input.reviewedProtocol,contract,hash,watchedWallets:input.watchedWallets,targetWallets:input.targetWallets,now:clock});}
   const [tx, receipt, head, actualChain] = await Promise.all([client.getTransaction({ hash }), client.getTransactionReceipt({ hash }), client.getBlockNumber(), client.getChainId()]);
   if (actualChain !== chainId || tx.hash.toLowerCase() !== hash.toLowerCase() || receipt.transactionHash.toLowerCase() !== hash.toLowerCase() || receipt.status !== 'success' || receipt.from.toLowerCase() !== tx.from.toLowerCase() || receipt.to?.toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || tx.blockNumber === null || tx.blockNumber !== receipt.blockNumber || tx.blockHash !== receipt.blockHash || head < receipt.blockNumber + 2n || tx.to?.toLowerCase() !== SEADROP_V1_ADDRESS.toLowerCase() || !input.watchedWallets.some((wallet) => wallet.toLowerCase() === tx.from.toLowerCase())) throw new Error('WATCHED_MINT_NOT_VERIFIED');
   const block = await client.getBlock({ blockNumber: receipt.blockNumber });
@@ -74,5 +79,5 @@ export async function readReplicationSource(input: {
     plan = { ...plan, strategy: 'seadrop-v1-allowlist', verdict: 'replicable', source: { ...plan.source }, observed: { nftContract: nft, feeRecipient: fee, minterIfNotPayer: minter, quantity: Number(quantity) }, reasons: [], targets, checklist: { ...plan.checklist, knownStrategy: true, chainMatches: true, targetMatches: true, selectorDecoded: true, contractMatches: true, feeRecipientMatches: true, walletIndependent: false, valueMatches: true, quantityWithinDrop: true } };
   }
   if (plan.observed.quantity !== Number(matches[0]!.quantityMinted)) throw new Error('WATCHED_MINT_QUANTITY_MISMATCH');
-  return { observed, drop, plan, mintedAt: observed.observedAt! };
+  return { sourceBlockHash:receipt.blockHash, observed, drop, plan, mintedAt: observed.observedAt! };
 }

@@ -1,3 +1,4 @@
+import type { PaidFundingOwner } from './paid-funding-service.js';
 import { randomBytes } from 'node:crypto';
 import { redactText } from '@mint-bot/backend';
 import type { TelegramSessionCloseReason, TelegramSessionRow, TelegramUserRow } from '@mint-bot/database';
@@ -5,6 +6,8 @@ import { TelegramRequestError, type BotCommand, type InlineButton, type Telegram
 import { GuidedFlows, flowNeedsSession, type FlowKind, type FlowPreset, type FlowResult, type GuidedActions } from './guided-flows.js';
 import { base32Encode, matchTotp } from './totp.js';
 import { watchChainId } from './watch-import.js';
+import { hasWalletAdministrationSensitiveArguments, validateWalletAdministrationOperatorArguments } from './wallet-administration-service.js';
+import type { WalletAdministrationOperatorAuthority } from './wallet-administration-runtime.js';
 
 /**
  * T-061 (D-063): the owner's commands over Telegram. This router decides who may do what; the work itself is done by
@@ -77,6 +80,9 @@ export interface TelegramActions extends GuidedActions {
   portfolio(): Promise<string>;
   /** Read-only shadow analytics; optional for older command adapters. */
   analytics?(): Promise<string>;
+  /** Public drafts only; sealed import and provider mutation stay in owner CLI. */
+  paidFunding?(action:string,args:readonly string[],owner:PaidFundingOwner):Promise<string>;
+  walletAdmin?(action: string, args: readonly string[], authority: WalletAdministrationOperatorAuthority): Promise<string>;
   gasAlerts(): Promise<string>;
   gasAlertSet(chain: string, direction: string, gwei: number): Promise<string>;
   gasAlertRemove(id: string): Promise<string>;
@@ -125,6 +131,9 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   gas: { tier: 'read', roles: BOTH, usage: '/gas [ethereum|base|robinhood]', help: 'Current network fees' },
   backup: { tier: 'read', roles: OWNER, usage: '/backup', help: 'Last backup and its check' },
   wallets: { tier: 'read', roles: OWNER, usage: '/wallets', help: 'Fleet balances per chain, watcher state' },
+  walletadmin: { tier: 'start', roles: OWNER, usage: '/walletadmin status|inventory|generate <id> <chain-ids> <count>|import <id> <chain-ids> <public-addresses>|enroll <id> <key-ids>|retire <id> <key-ids>|reconcile <id>', help: 'Owner wallet inventory and public enrollment requests; isolated worker handles provider changes' },
+  walletgroups: { tier: 'start', roles: OWNER, usage: '/walletgroups [save <id> <chain-id> <name> <addresses>|assign <campaign> <group>]', help: 'Owner chain-specific wallet groups and campaign selection drafts' },
+  fundpaid: { tier: 'start', roles: OWNER, usage: '/fundpaid preview <campaign> <wallets|all> <max-fee-gwei> | confirm <id> <phrase> | status', help: 'Approve a paid Ethereum top-up only; final /fire is still required' },
   funding: { tier: 'read', roles: OWNER, usage: '/funding', help: 'What each wallet needs for a campaign (pick it with a button)' },
   enablement: { tier: 'read', roles: OWNER, usage: '/enablement', help: 'Base and Robinhood records' },
   drops: { tier: 'read', roles: BOTH, usage: '/drops', help: 'Upcoming opportunities' },
@@ -378,6 +387,24 @@ export class TelegramCommandRouter {
       case 'gas': return reply(await a.gas(args[0]));
       case 'backup': return reply(await a.backup());
       case 'wallets': return reply(await a.wallets());
+      case 'walletadmin': case 'walletgroups': {
+        if (!a.walletAdmin) throw new Error('WALLET_ADMIN_COMPOSITION_REQUIRED');
+        const session = await this.currentSession(); if (!session) throw new Error('WALLET_ADMIN_APPROVAL_REQUIRED');
+        const action = command === 'walletgroups' ? args[0] === 'save' ? 'group' : args[0] === 'assign' ? 'assign' : args.length ? 'invalid' : 'groups' : args[0] ?? 'status';
+        const parameters = args.length ? args.slice(1) : [];
+        try { validateWalletAdministrationOperatorArguments(action, parameters); }
+        catch {
+          if (incoming.messageId !== undefined && hasWalletAdministrationSensitiveArguments(args)) await this.options.api.deleteMessage(incoming.chatId, incoming.messageId).catch(() => undefined);
+          throw new Error('WALLET_ADMIN_PUBLIC_ARGUMENTS_REQUIRED: use public identifiers/addresses only; provider execution and sealed imports require the isolated owner CLI');
+        }
+        const authority: WalletAdministrationOperatorAuthority = { ownerId: incoming.userId, channel: 'telegram', sessionId: session.id, expiresAt: session.expiresAt, assertCurrent: async () => { const current = await this.currentSession(); if (current?.id !== session.id) throw new Error('WALLET_ADMIN_APPROVAL_REQUIRED'); } };
+        return reply(await a.walletAdmin(action, parameters, authority));
+      }
+      case 'fundpaid': {
+        if(!a.paidFunding)throw new Error('PAID_FUNDING_NOT_CONFIGURED');
+        const session=await this.currentSession();if(!session)throw new Error('PAID_FUNDING_OWNER_SESSION_REQUIRED');
+        return reply(await a.paidFunding(args[0]??'status',args.slice(1),{ownerId:incoming.userId,sessionId:session.id,expiresAt:session.expiresAt}));
+      }
       case 'funding': return args.length === 0 ? this.startFlow(incoming, 'funding') : reply(await a.funding(args[0]));
       case 'enablement': return reply(await a.enablement());
       case 'drops': return reply(await a.drops());

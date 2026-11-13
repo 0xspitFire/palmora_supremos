@@ -30,6 +30,8 @@ export class FireScheduleRepository {
     return { id: row['id']!, campaignId: row['campaign_id']!, campaignDigest: row['campaign_digest']!, wallets: JSON.parse(row['wallets_json']!) as string[], maxFeeGwei: row['max_fee_gwei']!, windowFrom: row['window_from']!, windowUntil: row['window_until']!, confirmationDigest: row['confirmation_digest']!, createdAt: row['created_at']!, ...(row['outcome'] ? { outcome: row['outcome'] as FireScheduleOutcome, claimedAt: row['claimed_at']! } : {}) };
   }
 
+  public get(id:string):FireScheduleView|undefined {const row=this.db.prepare('SELECT s.*,o.outcome,o.claimed_at FROM fire_schedule s LEFT JOIN fire_schedule_outcome o ON o.schedule_id=s.id WHERE s.id=?').get(id) as Record<string,string|null>|undefined;return row?this.map(row):undefined;}
+
   /** Schedules nobody has claimed yet (whatever their window), oldest first. */
   public unclaimed(): FireScheduleRecord[] {
     return (this.db.prepare('SELECT s.* FROM fire_schedule s LEFT JOIN fire_schedule_outcome o ON o.schedule_id = s.id WHERE o.schedule_id IS NULL ORDER BY s.rowid').all() as Array<Record<string, string | null>>).map((row) => this.map(row));

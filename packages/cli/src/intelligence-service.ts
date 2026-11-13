@@ -3,9 +3,12 @@ import { checkInCounts, checkInMessage, startMessage } from './status-messages.j
 import { ScanTracker } from './scan-tracker.js';
 import { readHeartbeat, writeHeartbeat } from './heartbeat.js';
 import type { MonitorPing } from './monitor-ping.js';
-import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, buildSystemCard, pauseCard, scanSkippedCard, plainSystemText, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
+import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, buildSystemCard, pauseCard, scanSkippedCard, plainSystemText, type AdvancedIntelligencePort, type HistoricalQualityPort, type AdaptiveModelPort, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
+  advanced?: AdvancedIntelligencePort;
+  history?: HistoricalQualityPort;
+  adaptive?: AdaptiveModelPort;
   store: BackendStore;
   repo: IntelligenceRepositoryPort;
   port: IntelligenceChainPort;
@@ -45,8 +48,8 @@ export interface IntelligenceServiceOptions {
 export function startIntelligence(options: IntelligenceServiceOptions): { stop(): void; runOnce(): Promise<void> } {
   // One reader for collection names, so a contract's name is read from the chain once for both services.
   const names = new CollectionNames(options.port);
-  const discovery = new DiscoveryService(options.store, options.repo, options.port, { budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts, names, ...(options.discoveryMaxLagBlocks === undefined ? {} : { maxLagBlocks: BigInt(options.discoveryMaxLagBlocks) }) });
-  const readiness = new ReadinessSweep(options.store, options.port, options.walletProvider ?? (async () => options.wallets), { limits: D033_READINESS_LIMITS, alerts: options.alerts, names, now: options.now });
+  const discovery = new DiscoveryService(options.store, options.repo, options.port, { budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts, names, advanced: options.advanced, history: options.history, adaptive: options.adaptive, ...(options.discoveryMaxLagBlocks === undefined ? {} : { maxLagBlocks: BigInt(options.discoveryMaxLagBlocks) }) });
+  const readiness = new ReadinessSweep(options.store, options.port, options.walletProvider ?? (async () => options.wallets), { limits: D033_READINESS_LIMITS, alerts: options.alerts, names,  now: options.now });
   const busy = { discovery: false, readiness: false, digest: false, retry: false, health: false };
   const guarded = (name: keyof typeof busy, work: () => Promise<unknown>) => async (): Promise<void> => {
     if (busy[name]) return;

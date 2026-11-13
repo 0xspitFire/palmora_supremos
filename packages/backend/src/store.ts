@@ -1,3 +1,4 @@
+import type { FundingFeeMetadata, FundingCostObservation } from './native-funding-analytics.js';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { BackendState, EventRecord, StoreCapabilities } from './types.js';
@@ -7,7 +8,7 @@ const emptyState = (): BackendState => ({ schemaVersion: 1, campaigns: [], runs:
 export type BackendControlSnapshot = Pick<BackendState, 'runtime' | 'killed' | 'reconciliations' | 'jobs'>;
 export function readEventSnapshot(store: BackendStore): EventRecord[] { return store.eventSnapshot ? store.eventSnapshot() : store.snapshot().events; }
 export function readControlSnapshot(store: BackendStore): BackendControlSnapshot { return store.controlSnapshot ? store.controlSnapshot() : store.snapshot(); }
-export interface BackendStore { open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; controlSnapshot?(): BackendControlSnapshot; eventSnapshot?(): EventRecord[]; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
+export interface BackendStore { fundingFeeForRunWallet?(runId: string, wallet: string): FundingFeeMetadata; fundingExpenseSnapshot?(): FundingCostObservation[]; open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; controlSnapshot?(): BackendControlSnapshot; eventSnapshot?(): EventRecord[]; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
 export class DurableStore implements BackendStore {
   private state: BackendState = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();
