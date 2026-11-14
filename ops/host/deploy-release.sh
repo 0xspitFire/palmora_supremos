@@ -6,12 +6,14 @@
 #   bash ops/host/deploy-release.sh \
 #     --project my-project --zone us-east4-b --instance palmora-bot-prod
 #
-# Optional: --commit <git ref> (default: origin/main)
+# Optional: --commit <git ref> (default: origin/main). Changed migration
+# definitions require an explicitly reviewed --allow-forward-only-migration.
+# Incompatible rollback preserves the DB and stops for forward repair.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-PROJECT="" ZONE="" INSTANCE="" COMMIT_REF="origin/main"
+PROJECT="" ZONE="" INSTANCE="" COMMIT_REF="origin/main" ALLOW_FORWARD_ONLY=0
 
 stop() { echo "STOP: $*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
@@ -20,6 +22,7 @@ while [ "$#" -gt 0 ]; do
     --zone) ZONE="${2:-}"; shift 2 ;;
     --instance) INSTANCE="${2:-}"; shift 2 ;;
     --commit) COMMIT_REF="${2:-}"; shift 2 ;;
+    --allow-forward-only-migration) ALLOW_FORWARD_ONLY=1; shift ;;
     *) stop "unknown argument: $1" ;;
   esac
 done
@@ -52,31 +55,30 @@ chmod 0700 "$INSTALLER"
 INSTALLER_DIGEST="$(sha256sum "$INSTALLER" | cut -d' ' -f1)"
 REMOTE_INSTALLER="/tmp/mintbot-install-release-$SHORT.sh"
 
+CUTOVER="$WORK/cutover-release.sh"
+git -C "$REPO" show "$COMMIT:ops/host/cutover-release.sh" > "$CUTOVER"
+CUTOVER_DIGEST="$(sha256sum "$CUTOVER" | cut -d' ' -f1)"
+REMOTE_CUTOVER="/tmp/mintbot-cutover-release-$SHORT.sh"
+MIGRATION_LINES="$WORK/migrations.txt"
+: > "$MIGRATION_LINES"
+while IFS= read -r path; do
+  file="${path##*/}"
+  [[ "$file" =~ ^[0-9]+_[A-Za-z0-9_-]+\.sql$ ]] || stop "unsupported migration filename"
+  file_digest="$(git -C "$REPO" show "$COMMIT:$path" | sha256sum | cut -d' ' -f1)"
+  printf '%s %s\n' "$file_digest" "$file" >> "$MIGRATION_LINES"
+done < <(git -C "$REPO" ls-tree -r --name-only "$COMMIT" -- packages/database/migrations)
+[ -s "$MIGRATION_LINES" ] || stop "release has no migrations"
+MIGRATIONS_DIGEST="$(LC_ALL=C sort "$MIGRATION_LINES" | sha256sum | cut -d' ' -f1)"
+
 GCLOUD_SCOPE=(--project "$PROJECT" --zone "$ZONE" --tunnel-through-iap)
 echo "Uploading the verified release through IAP"
 gcloud compute scp "${GCLOUD_SCOPE[@]}" "$ARTIFACT" "$INSTANCE:$REMOTE_FILE"
 gcloud compute scp "${GCLOUD_SCOPE[@]}" "$INSTALLER" "$INSTANCE:$REMOTE_INSTALLER"
+gcloud compute scp "${GCLOUD_SCOPE[@]}" "$CUTOVER" "$INSTANCE:$REMOTE_CUTOVER"
 
 REMOTE_INSTALL="set -euo pipefail
-sudo -u mintbot touch /var/lib/mint-bot/killswitch
-echo '$INSTALLER_DIGEST  $REMOTE_INSTALLER' | sha256sum --check --status
-sudo systemctl stop mint-bot.service
-sudo bash '$REMOTE_INSTALLER' '$REMOTE_FILE' '$DIGEST'
-sudo systemctl reset-failed mint-bot.service
-sudo systemctl start mint-bot.service
-for attempt in \$(seq 1 30); do
-  if systemctl is-active --quiet mint-bot.service && curl --fail --silent --show-error http://127.0.0.1:8780/healthz >/dev/null; then
-    echo 'DEPLOYMENT_HEALTHY_KILL_SWITCH_ENGAGED'
-    exit 0
-  fi
-  sleep 2
-done
-echo 'New release failed its local health check; rolling back with the kill switch engaged.' >&2
-sudo systemctl stop mint-bot.service
-sudo bash '$REMOTE_INSTALLER' --rollback
-sudo systemctl reset-failed mint-bot.service
-sudo systemctl start mint-bot.service
-exit 1"
+printf '%s  %s\n' '$CUTOVER_DIGEST' '$REMOTE_CUTOVER' | sha256sum --check --status
+bash '$REMOTE_CUTOVER' '$REMOTE_FILE' '$DIGEST' '$REMOTE_INSTALLER' '$INSTALLER_DIGEST' '$MIGRATIONS_DIGEST' '$ALLOW_FORWARD_ONLY'"
 
 echo "Installing, starting and checking the service"
 gcloud compute ssh "${GCLOUD_SCOPE[@]}" "$INSTANCE" --command "$REMOTE_INSTALL"

@@ -15,11 +15,12 @@ const read = (name: string): string => readFileSync(join(hostDir, name), 'utf8')
 const build = read('build-release.sh');
 const install = read('install-release.sh');
 const deploy = read('deploy-release.sh');
+const cutover = read('cutover-release.sh');
 const provision = read('provision-host.sh');
 
 describe('release scripts (T-047)', () => {
   it('are valid bash', () => {
-    for (const name of ['build-release.sh', 'install-release.sh', 'deploy-release.sh', 'provision-host.sh']) {
+    for (const name of ['build-release.sh', 'install-release.sh', 'deploy-release.sh', 'cutover-release.sh', 'provision-host.sh']) {
       const result = spawnSync('bash', ['-n', join(hostDir, name)], { encoding: 'utf8' });
       expect(result.status, `${name}: ${result.stderr}`).toBe(0);
     }
@@ -29,12 +30,13 @@ describe('release scripts (T-047)', () => {
     expect(deploy).toContain('gcloud compute scp');
     expect(deploy).toContain('gcloud compute ssh');
     expect(deploy).toContain('--tunnel-through-iap');
-    expect(deploy).toContain('sudo -u mintbot touch /var/lib/mint-bot/killswitch');
-    expect(deploy).toContain("'$REMOTE_INSTALLER' --rollback");
-    expect(deploy).toContain('DEPLOYMENT_HEALTHY_KILL_SWITCH_ENGAGED');
+    expect(cutover).toContain('sudo -u mintbot touch /var/lib/mint-bot/killswitch');
+    expect(cutover).toContain('"$INSTALLER" --rollback-to "$OLD"');
+    expect(cutover).toContain('DEPLOYMENT_HEALTHY_KILL_SWITCH_ENGAGED');
     expect(deploy).toContain('git -C "$REPO" show "$COMMIT:ops/host/install-release.sh"');
     expect(deploy).toContain('INSTALLER="$WORK/install-release.sh"');
     expect(deploy).not.toContain('INSTALLER="$HERE/install-release.sh"');
+    expect(deploy).toContain('git -C "$REPO" show "$COMMIT:ops/host/cutover-release.sh"');
     expect(deploy).not.toMatch(/rm\s+[^\n]*killswitch/);
   });
 

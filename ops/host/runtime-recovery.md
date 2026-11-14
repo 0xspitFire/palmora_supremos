@@ -1,4 +1,30 @@
-# Telegram and discovery recovery after T-103
+# Release recovery and migration boundary
+
+Deployment compares the installed and target migration definitions before
+changing the kill switch or stopping the service. A change requires explicit
+owner review of the exact release and the forward-repair plan, followed by
+`--allow-forward-only-migration` on that reviewed deployment command. This flag
+does not approve D-017 artifacts, activate a new role or release the kill switch.
+
+In particular, 0.0.16 knows schema38; the roadmap release adds schema39. Old code
+cannot open39. Do not promise automatic code-only recovery across that upgrade.
+Keep the canonical database intact: never delete migration records, clear
+exposure or restore an older snapshot to make an old binary start. If the new
+service fails after migration, the installer refuses incompatible rollback and
+the cutover leaves the service stopped with kill engaged for reviewed forward
+repair. A compatible fallback must pass migration names/checksums and health.
+Recovery pins the captured pre-install release, even if a partial installation
+failed before publishing its previous-release journal entry. Unknown or null
+migration checksums refuse fallback. A failed recovery start is explicitly
+stopped to prevent automatic restart loops.
+
+The reviewed helper handles installer, start and health failures, checking
+quiescence after kill and again after service shutdown. Pending/ambiguous
+execution or funding exposure blocks cutover. Installer and cutover scripts
+are extracted from the same immutable commit as the archive and hash-checked.
+The owner accepts actual release-bound evidence after the final configuration.
+
+## Historical T-103 recovery
 
 Use the reviewed T-103 release after its PR is approved and merged. Installed
 5c20321 / 0.0.10 does not contain these corrective changes. Owner public-family
