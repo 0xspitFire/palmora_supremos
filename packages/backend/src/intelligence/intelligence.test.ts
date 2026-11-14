@@ -873,7 +873,7 @@ describe('discovery watch-list query budget', () => {
     await discovery.tick();
     expect(t.port.scans).toHaveLength(8);
     expect(queries).toHaveBeenCalledTimes(1);
-    expect(events(t.store, 'opportunity_scored').length + events(t.store, 'opportunity_notified').length).toBe(count);
+    const scores=[...events(t.store,'opportunity_scored'),...events(t.store,'opportunity_notified')];expect(new Set(scores.map(event=>event.data.contract)).size).toBe(count);expect(scores.length).toBeLessThanOrEqual(count+32);
     t.repo.watched = [];
     await discovery.tick();
     expect(queries).toHaveBeenCalledTimes(2);

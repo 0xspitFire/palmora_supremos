@@ -6,7 +6,7 @@ import type { AlertCard } from '../alert-card.js';
  */
 /** Log identity (txHash, logIndex) lets discovery count each log once even if a range is rescanned. */
 export interface LogIdentity { txHash?: string | null; logIndex?: number | null; }
-export interface ObservedMint extends LogIdentity { nftContract: string; minter: string; payer: string; quantity: bigint; unitPriceWei: bigint; blockNumber: bigint; }
+export interface ObservedMint extends LogIdentity { dropStageIndex?:bigint; nftContract: string; minter: string; payer: string; quantity: bigint; unitPriceWei: bigint; blockNumber: bigint; }
 export interface ObservedDropUpdate { nftContract: string; mintPriceWei: bigint; startTime: number; endTime: number; maxPerWallet: number; blockNumber: bigint; }
 export interface ObservedWatchedMint extends LogIdentity { nftContract: string; recipient: string; blockNumber: bigint; }
 export interface ChainScan { fromBlock: bigint; toBlock: bigint; mints: ObservedMint[]; dropUpdates: ObservedDropUpdate[]; watchedMints: ObservedWatchedMint[]; /** Watched-wallet evidence could not be read for part of this range. */ watchedUnavailable?: boolean; }

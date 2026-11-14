@@ -305,6 +305,7 @@ export interface AlertReadModel {
 }
 
 export interface SystemHealth {
+  discovery?:{status:string;chains:readonly {chainId:number;state:string;lastSuccessAt?:string;lastSuccessBlock?:string;headBlock?:string;caughtUp?:boolean;operation?:string}[]};
   state: 'Ready' | 'Not ready' | 'Killed' | 'Unknown';
   killSwitch: 'clear' | 'engaged' | 'unknown';
   dependencies: {
@@ -482,6 +483,7 @@ export interface AnalyticsReadModel {
 }
 
 export interface ReadOnlySnapshot {
+  pagination?: ReadModelEnvelope<DashboardPagination>;
   analytics?: ReadModelEnvelope<AnalyticsReadModel>;
   home?: ReadModelEnvelope<HomeReadModel>;
   readiness?: ReadModelEnvelope<ReadinessReadModel>;
@@ -489,4 +491,12 @@ export interface ReadOnlySnapshot {
   alerts?: ReadModelEnvelope<AlertsReadModel>;
   health?: ReadModelEnvelope<SystemHealth>;
   run?: ReadModelEnvelope<RunReadModel>;
+}
+
+export interface DashboardPagination {
+  page: number;
+  pageSize: number;
+  pages: number;
+  totals: { opportunities: number; calendar: number; alerts: number };
+  readinessId?: string;
 }

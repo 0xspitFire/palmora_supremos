@@ -347,6 +347,7 @@ export interface AlertReadModel {
 }
 
 export interface SystemHealthReadModel {
+  readonly discovery?:{readonly status:string;readonly chains:readonly {readonly chainId:number;readonly state:string;readonly lastSuccessAt?:string;readonly lastSuccessBlock?:string;readonly headBlock?:string;readonly caughtUp?:boolean;readonly operation?:string}[]};
   readonly liveReadiness: LiveReadinessHealth;
   readonly state: 'Ready' | 'Not ready' | 'Killed' | 'Unknown';
   readonly killSwitch: 'clear' | 'engaged' | 'unknown';
@@ -422,6 +423,7 @@ export interface AnalyticsReadModel {
 }
 
 export interface ProjectionRequest {
+  readonly page?: number;
   readonly requestId?: string;
   readonly snapshotId?: string;
   readonly capturedAt?: string;
@@ -430,12 +432,50 @@ export interface ProjectionRequest {
   readonly cursor?: number;
 }
 
+export interface DashboardReadModel {
+  readonly pagination: ReadModelEnvelope<DashboardPagination>;
+  readonly home: ReadModelEnvelope<HomeReadModel>;
+  readonly calendar: ReadModelEnvelope<readonly CalendarEntry[]>;
+  readonly alerts: ReadModelEnvelope<readonly AlertReadModel[]>;
+  readonly health: ReadModelEnvelope<SystemHealthReadModel>;
+  readonly analytics: ReadModelEnvelope<AnalyticsReadModel>;
+  readonly readiness?: ReadModelEnvelope<readonly WalletReadinessRow[]>;
+}
+
+export interface DashboardPagination {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly pages: number;
+  readonly totals: { readonly opportunities: number; readonly calendar: number; readonly alerts: number };
+  readonly readinessId?: string;
+}
+
+interface ReadinessIndex {
+  readonly sweeps: Map<string, EventRecord>;
+  readonly prices: Map<string, EventRecord>;
+}
+
+function indexReadiness(events: readonly EventRecord[]): ReadinessIndex {
+  const sweeps = new Map<string, EventRecord>();
+  const prices = new Map<string, EventRecord>();
+  for (const event of events) {
+    if (event.type === 'readiness_sweep' && typeof event.data.calendarId === 'string') {
+      const previous = sweeps.get(event.data.calendarId);
+      if (!previous || event.at >= previous.at) sweeps.set(event.data.calendarId, event);
+    }
+    // Match the previous reverse-find semantics, including equal-time ties.
+    if (event.type === 'calendar_entry' && typeof event.data.id === 'string') prices.set(event.data.id, event);
+  }
+  return { sweeps, prices };
+}
+
 interface ProjectionContext {
   readonly state: BackendState;
   readonly now: Date;
   readonly request: ProjectionRequest;
   readonly generatedAt: string;
   readonly freshnessPolicyVersion: string;
+  readonly readinessIndex: ReadinessIndex;
 }
 
 const UNKNOWN_FRESHNESS: Freshness = { status: 'unknown', observedAt: null, expiresAt: null, ageSeconds: null, policyVersion: 'read-model-v1' };
@@ -447,9 +487,48 @@ const DENIED_RETRY: RetryPolicy = { allowed: false, kind: 'none', reasonCode: 'N
  */
 export class Phase2ReadModelService {
   private readonly now: () => Date;
+  /** Only a private, request-local batch instance shares indexes. Never cache mutable caller state. */
+  private batchReadinessIndex?: ReadinessIndex;
+  private batchLists?: {
+    opportunities: ProjectionResult<readonly OpportunityReadModel[]>;
+    calendar: ProjectionResult<readonly CalendarEntry[]>;
+    alerts: ProjectionResult<readonly AlertReadModel[]>;
+  };
 
   public constructor(now: () => Date = () => new Date()) {
     this.now = now;
+  }
+
+  public dashboard(state: BackendState, readinessId?: string, request: ProjectionRequest = {}): ReadModelEnvelope<DashboardReadModel> {
+    const now = this.now();
+    const projection = new Phase2ReadModelService(() => now);
+    projection.batchReadinessIndex = indexReadiness(state.events);
+    const shared = { ...request, snapshotId: digestState(state), capturedAt: now.toISOString(), consistency: 'snapshot' as const };
+    const context = projection.context(state, shared);
+    const newest = <T extends { id: string }>(value: ProjectionResult<readonly T[]>, observedAt: (item: T) => string | null): ProjectionResult<readonly T[]> => ({ ...value, issues: uniqueIssues(value.issues), data: [...value.data].sort((a, b) => (observedAt(b) ?? '').localeCompare(observedAt(a) ?? '') || a.id.localeCompare(b.id)) });
+    projection.batchLists = {
+      // Ordering follows the observation, while combined gate freshness can
+      // correctly remain unknown/stale because chain authority is older/missing.
+      opportunities: newest(projection.projectOpportunities(context, {}), item => item.score.freshness.observedAt),
+      calendar: newest(projection.projectCalendar(context, {}), item => item.provenance[0]?.observedAt ?? item.freshness.observedAt),
+      alerts: newest(projection.projectAlerts(context, {}), item => item.createdAt),
+    };
+    const totals = { opportunities: projection.batchLists.opportunities.data.length, calendar: projection.batchLists.calendar.data.length, alerts: projection.batchLists.alerts.data.length };
+    const pageSize = 50;
+    const pages = Math.max(1, Math.ceil(Math.max(...Object.values(totals)) / pageSize));
+    const requestedPage = request.page ?? 1;
+    if (!Number.isSafeInteger(requestedPage) || requestedPage < 1 || requestedPage > 9999) throw new Error('INVALID_DASHBOARD_PAGE');
+    const page = Math.min(requestedPage, pages);
+    const paged = { ...shared, limit: pageSize, cursor: (page - 1) * pageSize };
+    const data: DashboardReadModel = {
+      pagination: projection.envelope(context, { page, pageSize, pages, totals, ...(readinessId === undefined ? {} : { readinessId }) }, [], classifyFreshness(now.toISOString(), new Date(now.getTime() + 60_000).toISOString(), now, 'read-model-v1')),
+      home: projection.home(state, paged), calendar: projection.calendar(state, paged),
+      alerts: projection.alerts(state, paged), health: projection.health(state, paged),
+      analytics: projection.analytics(state, paged),
+      ...(readinessId === undefined ? {} : { readiness: projection.readiness(state, readinessId, shared) }),
+    };
+    const surfaces = Object.values(data);
+    return projection.envelope(context, data, uniqueIssues(surfaces.flatMap(surface => [...surface.issues])), aggregateFreshness(surfaces.map(surface => surface.freshness)));
   }
 
   public home(state: BackendState, request: ProjectionRequest = {}): ReadModelEnvelope<HomeReadModel> {
@@ -578,7 +657,7 @@ export class Phase2ReadModelService {
     const now = this.now();
     if (Number.isNaN(now.getTime())) throw new Error('INVALID_READ_MODEL_TIME');
     const generatedAt = now.toISOString();
-    return { state, now, request, generatedAt, freshnessPolicyVersion: 'read-model-v1' };
+    return { state, now, request, generatedAt, freshnessPolicyVersion: 'read-model-v1', readinessIndex: this.batchReadinessIndex ?? indexReadiness(state.events) };
   }
 
   private envelope<T>(context: ProjectionContext, data: T | null, issues: readonly ReadModelIssue[], freshness: Freshness, nextCursor?: string): ReadModelEnvelope<T> {
@@ -599,7 +678,8 @@ export class Phase2ReadModelService {
   }
 
   private projectOpportunities(context: ProjectionContext, request: ProjectionRequest): ProjectionResult<readonly OpportunityReadModel[]> {
-    const events = context.state.events.filter(event => event.type.startsWith('opportunity_')).sort(eventOrder);
+    if (this.batchLists) return projectionPage(this.batchLists.opportunities, request);
+    const events = orderedEvents(context.state.events.filter(event => event.type.startsWith('opportunity_')));
     if (events.length === 0) return { data: [], issues: [issue('OPPORTUNITY_SOURCE_UNAVAILABLE', 'Discovery has not supplied opportunity observations for this snapshot.', 'blocking', 'Refresh read model')], freshness: UNKNOWN_FRESHNESS };
     const latest = new Map<string, EventRecord>();
     for (const event of events) {
@@ -658,8 +738,9 @@ export class Phase2ReadModelService {
   }
 
   private projectCalendar(context: ProjectionContext, request: ProjectionRequest): ProjectionResult<readonly CalendarEntry[]> {
+    if (this.batchLists) return projectionPage(this.batchLists.calendar, request);
     const campaigns = context.state.campaigns;
-    const calendarEvents = context.state.events.filter(event => event.type === 'calendar_entry' || event.type === 'calendar_updated').sort(eventOrder);
+    const calendarEvents = orderedEvents(context.state.events.filter(event => event.type === 'calendar_entry' || event.type === 'calendar_updated'));
     if (campaigns.length === 0 && calendarEvents.length === 0) return { data: [], issues: [issue('CALENDAR_SOURCE_UNAVAILABLE', 'No on-chain or operator calendar records are available in this snapshot.', 'blocking', 'Refresh read model')], freshness: UNKNOWN_FRESHNESS };
     const entries = campaigns.map(campaign => this.calendarFromCampaign(context, campaign));
     for (const event of calendarEvents) {
@@ -854,15 +935,14 @@ export class Phase2ReadModelService {
 
   /** Wallet rows from the latest Phase 2 readiness sweep for a calendar entry, or null when none exists. */
   private sweepRows(context: ProjectionContext, entryId: string): readonly WalletReadinessRow[] | null {
-    let latest: EventRecord | undefined;
-    for (const event of context.state.events) if (event.type === 'readiness_sweep' && event.data.calendarId === entryId && (!latest || event.at >= latest.at)) latest = event;
+    const latest = context.readinessIndex.sweeps.get(entryId);
     if (!latest || !Array.isArray(latest.data.rows)) return null;
     const observedAt = validIso(latest.at) ?? context.generatedAt;
     const freshness = classifyFreshness(observedAt, stringValue(latest.data.expiresAt), context.now, context.freshnessPolicyVersion);
     const provenance = storeProvenance(`readiness:${latest.id}`, observedAt);
     const quantity = BigInt(integerValue(latest.data.quantity) ?? 0);
     const required = bigintValue(latest.data.requiredWei);
-    const priceEvent = [...context.state.events].reverse().find(event => event.type === 'calendar_entry' && event.data.id === entryId);
+    const priceEvent = context.readinessIndex.prices.get(entryId);
     const mintValue = bigintValue(priceEvent?.data.priceWei) === null ? null : bigintValue(priceEvent?.data.priceWei)! * quantity;
     const fee = required !== null && mintValue !== null && required >= mintValue ? required - mintValue : null;
     const quantityPlan = typeof latest.data.quantityPlan === 'object' && latest.data.quantityPlan !== null ? latest.data.quantityPlan as Record<string, unknown> : null;
@@ -915,7 +995,7 @@ export class Phase2ReadModelService {
     const attempts = context.state.attempts.filter(attempt => attempt.runId === run.id).sort(attemptOrder);
     const receipts = context.state.receipts.filter(receipt => receipt.runId === run.id).sort(receiptOrder);
     const reconciliations = context.state.reconciliations.filter(item => item.runId === run.id).sort(reconciliationOrder);
-    const events = context.state.events.filter(event => event.runId === run.id).sort(eventOrder).map(event => this.timelineEvent(event));
+    const events = orderedEvents(context.state.events.filter(event => event.runId === run.id)).map(event => this.timelineEvent(event));
     const projectedAttempts = attempts.map((attempt, index) => this.attemptReadModel(context, attempt, index + 1, campaign.chainId, receipts.find(receipt => receipt.executionId === attempt.executionId)));
     const projectedReceipts = receipts.map(receipt => this.receiptReadModel(context, receipt, attempts, campaign.chainId));
     const projectedReconciliations = reconciliations.map(item => this.reconciliationReadModel(item));
@@ -995,6 +1075,7 @@ export class Phase2ReadModelService {
   }
 
   private projectAlerts(context: ProjectionContext, request: ProjectionRequest): ProjectionResult<readonly AlertReadModel[]> {
+    if (this.batchLists) return projectionPage(this.batchLists.alerts, request);
     const records = context.state.notificationOutbox.slice().sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
     const alerts = records.map(record => {
       const freshness = classifyFreshness(record.createdAt, record.deliveredAt ?? null, context.now, context.freshnessPolicyVersion);
@@ -1038,6 +1119,15 @@ interface ProjectionResult<T> {
   readonly issues: readonly ReadModelIssue[];
   readonly freshness: Freshness;
   readonly nextCursor?: string;
+}
+
+function uniqueIssues(issues: readonly ReadModelIssue[]): ReadModelIssue[] {
+  return [...new Map(issues.map(item => [JSON.stringify([item.code, item.severity, item.message]), item])).values()];
+}
+
+function projectionPage<T>(value: ProjectionResult<readonly T[]>, request: ProjectionRequest): ProjectionResult<readonly T[]> {
+  const page = pageItems(value.data, request);
+  return { data: page.items, issues: value.issues, freshness: value.freshness, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) };
 }
 
 function issue(code: string, message: string, severity: ReadModelIssue['severity'], safeAction: SafeAction, provenance?: Provenance): ReadModelIssue {
@@ -1124,7 +1214,12 @@ function pageItems<T>(values: readonly T[], request: ProjectionRequest): { reado
 }
 
 function sortKey(value: string): string { return validIso(value) ?? value; }
-function eventOrder(left: EventRecord, right: EventRecord): number { return sortKey(left.at).localeCompare(sortKey(right.at)) || left.id.localeCompare(right.id); }
+function orderedEvents(events: EventRecord[]): EventRecord[] {
+  // Canonicalize each distinct timestamp once, not at every O(n log n) comparison.
+  const keys = new Map<string, string>();
+  for (const event of events) if (!keys.has(event.at)) keys.set(event.at, sortKey(event.at));
+  return events.sort((left, right) => keys.get(left.at)!.localeCompare(keys.get(right.at)!) || left.id.localeCompare(right.id));
+}
 function attemptOrder(left: AttemptRecord, right: AttemptRecord): number { return sortKey(left.createdAt).localeCompare(sortKey(right.createdAt)) || left.id.localeCompare(right.id); }
 function receiptOrder(left: ReceiptRecord, right: ReceiptRecord): number { return sortKey(left.observedAt).localeCompare(sortKey(right.observedAt)) || left.id.localeCompare(right.id); }
 function reconciliationOrder(left: ReconciliationRecord, right: ReconciliationRecord): number { return sortKey(left.observedAt).localeCompare(sortKey(right.observedAt)) || left.id.localeCompare(right.id); }

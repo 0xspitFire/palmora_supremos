@@ -31,6 +31,8 @@ export class CollectionNames {
     this.readTimeoutMs = options.readTimeoutMs ?? 4_000;
   }
 
+  public cached(contract:string):string|null|undefined{return this.known.get(contract.toLowerCase());}
+
   /** The cleaned collection name, or null when the contract has none or it could not be read. */
   public async get(contract: string): Promise<string | null> {
     const key = contract.toLowerCase();

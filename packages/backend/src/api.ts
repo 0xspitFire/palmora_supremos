@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { BackendState } from './types.js';
 import type { BackendStore } from './store.js';
-import { Phase2ReadModelService, READ_MODEL_CONTRACT, READ_MODEL_VERSION, type ReadModelEnvelope as ReadModelV1Envelope } from './read-model-v1.js';
+import { Phase2ReadModelService, READ_MODEL_CONTRACT, READ_MODEL_VERSION, type HomeReadModel, type SystemHealthReadModel, type ReadModelEnvelope as ReadModelV1Envelope } from './read-model-v1.js';
 
 export interface ReadOnlyApiRequest { method: string; path: string; requestId?: string; }
 
@@ -9,7 +9,7 @@ export interface Phase2ReadOnlyApiResponse { status: 200 | 400 | 404 | 405 | 503
 
 /** GET-only transport adapter for the Phase 2 v1 projection service. */
 export class Phase2ReadOnlyApi {
-  constructor(private readonly readModels: Phase2ReadModelService, private readonly store: BackendStore) {}
+  constructor(private readonly readModels: Phase2ReadModelService, private readonly store: BackendStore,private readonly options:{discovery?:()=>NonNullable<SystemHealthReadModel['discovery']>}={}) {}
 
   public handle(request: ReadOnlyApiRequest): Phase2ReadOnlyApiResponse {
     const requestId = request.requestId ?? randomUUID();
@@ -17,13 +17,27 @@ export class Phase2ReadOnlyApi {
     let parsed: URL;
     try { parsed = new URL(request.path, 'http://read-model.invalid'); } catch { return { status: 400, headers: { allow: 'GET', contentType: 'application/json' }, body: this.unavailable(requestId, 'INVALID_READ_MODEL_PATH', 'The read-model path is invalid') }; }
     const path = parsed.pathname.replace(/\/+$/, '') || '/';
-    const state = this.store.snapshot();
+    const readinessId = parsed.searchParams.get('readiness');
+    const page = parsed.searchParams.get('page');
+    if (path === '/api/v1/read-model/dashboard' && ([...parsed.searchParams.keys()].some(key => key !== 'readiness' && key !== 'page') || parsed.searchParams.getAll('readiness').length > 1 || parsed.searchParams.getAll('page').length > 1 || readinessId !== null && !/^[A-Za-z0-9_:-]{1,100}$/.test(readinessId) || page !== null && !/^[1-9][0-9]{0,3}$/.test(page))) {
+      return { status: 400, headers: { allow: 'GET', contentType: 'application/json' }, body: this.unavailable(requestId, 'INVALID_DASHBOARD_QUERY', 'The dashboard query is invalid') };
+    }
+    const state = this.store.readModelSnapshot ? this.store.readModelSnapshot() : this.store.snapshot();
     const cursor = this.numberParam(parsed.searchParams.get('cursor'), 0);
     const limit = this.numberParam(parsed.searchParams.get('limit'), 1);
     const projection = { requestId, ...(cursor === undefined ? {} : { cursor }), ...(limit === undefined ? {} : { limit }) };
     if (path === '/api/v1/read-model/analytics') return this.ok(this.readModels.analytics(state, projection));
-    if (path === '/api/v1/read-model/home') return this.ok(this.readModels.home(state, projection));
-    if (path === '/api/v1/read-model/health') return this.ok(this.readModels.health(state, projection));
+    if (path === '/api/v1/read-model/dashboard') {
+      const batch = this.readModels.dashboard(state, readinessId ?? undefined, { ...projection, page: page === null ? 1 : Number(page) });
+      const discovery = this.options.discovery?.();
+      const data = batch.data;
+      if (!data) return this.ok(batch);
+      const home = this.withDiscoveryHome(data.home, discovery);
+      const health = this.withDiscoveryHealth(data.health, discovery);
+      return this.ok({ ...batch, data: { ...data, home, health }, ...(discovery?.status === 'degraded' ? { availability: batch.availability === 'available' ? 'partial' : batch.availability, issues: [...batch.issues, ...health.issues.filter(item => item.code === 'DISCOVERY_DEGRADED')] } : {}) });
+    }
+    if (path === '/api/v1/read-model/home') return this.ok(this.withDiscoveryHome(this.readModels.home(state, projection), this.options.discovery?.()));
+    if (path === '/api/v1/read-model/health') return this.ok(this.withDiscoveryHealth(this.readModels.health(state, projection), this.options.discovery?.()));
     if (path === '/api/v1/read-model/alerts') return this.ok(this.readModels.alerts(state, projection));
     if (path === '/api/v1/read-model/calendar') return this.ok(this.readModels.calendar(state, projection));
     if (path === '/api/v1/read-model/opportunities' || /^\/api\/v1\/read-model\/opportunities\/[^/]+$/.test(path)) return this.ok(this.readModels.opportunities(state, projection));
@@ -35,6 +49,18 @@ export class Phase2ReadOnlyApi {
   }
 
   private ok(body: ReadModelV1Envelope<unknown>): Phase2ReadOnlyApiResponse { return { status: 200, headers: { allow: 'GET', contentType: 'application/json' }, body }; }
+
+  private withDiscoveryHealth(health: ReadModelV1Envelope<SystemHealthReadModel>, discovery: SystemHealthReadModel['discovery']): ReadModelV1Envelope<SystemHealthReadModel> {
+    if (!discovery || !health.data) return health;
+    const issues = discovery.status === 'degraded' ? [...health.issues, { code: 'DISCOVERY_DEGRADED', severity: 'warning' as const, message: 'Discovery coverage is stale or unavailable. Mint readiness does not certify discovery progress.', retryable: true, safeAction: 'Inspect' as const }] : health.issues;
+    return { ...health, data: { ...health.data, discovery }, issues, availability: issues.length > health.issues.length && health.availability === 'available' ? 'partial' : health.availability };
+  }
+
+  private withDiscoveryHome(home: ReadModelV1Envelope<HomeReadModel>, discovery: SystemHealthReadModel['discovery']): ReadModelV1Envelope<HomeReadModel> {
+    if (!discovery || !home.data) return home;
+    const health = this.withDiscoveryHealth({ ...home, data: home.data.system }, discovery);
+    return { ...home, data: { ...home.data, system: health.data!, attention: [...home.data.attention, ...health.issues.filter(item => item.code === 'DISCOVERY_DEGRADED')] }, issues: health.issues, availability: health.availability };
+  }
 
   private unavailable(requestId: string, code: string, message: string): ReadModelV1Envelope<null> {
     const generatedAt = new Date().toISOString();

@@ -67,6 +67,21 @@ function nodeAnswering(answer: () => unknown, calls: string[] = []): PublicClien
 const NFT = '0x3333333333333333333333333333333333333333';
 const encodedName = (name: string): string => encodeAbiParameters([{ type: 'string' }], [name]);
 
+it('keeps an immediately open public drop with start zero, while rejecting empty/expired advisory stages', async () => {
+  let endTime = Math.floor(Date.now() / 1000) + 3600;
+  const client = { readContract: async ({ functionName }: { functionName: string }) => {
+    if (functionName === 'getPublicDrop') return { mintPrice: 0n, startTime: 0, endTime, maxTotalMintableByWallet: 10, feeBps: 0, restrictFeeRecipients: false };
+    if (functionName === 'getAllowedFeeRecipients') return [NFT];
+    if (functionName === 'maxSupply') return 1000n;
+    if (functionName === 'totalSupply') return 1n;
+    throw new Error('unexpected read');
+  } } as unknown as PublicClient;
+  const port = new EngineIntelligencePort(client, { advisoryMetadataOnly: true });
+  expect(await port.readDrop(NFT)).toMatchObject({ startTime: 0, priceWei: 0n, maxPerWallet: 10 });
+  endTime = 0; expect(await port.readDrop(NFT)).toBeNull();
+  endTime = Math.floor(Date.now() / 1000) - 1; expect(await port.readDrop(NFT)).toBeNull();
+});
+
 describe('EngineIntelligencePort.readName (T-029)', () => {
   it('reads the collection name from the contract with one read-only eth_call', async () => {
     const calls: string[] = [];

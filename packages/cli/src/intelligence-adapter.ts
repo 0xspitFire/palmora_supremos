@@ -41,10 +41,14 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   private readonly maxRange: bigint;
   private successes = 0;
   private readonly publicOnly: boolean;
+  private readonly endpoints?:readonly string[];
+  private readonly advisoryMetadataOnly:boolean;
+  private readonly confirmations:bigint;
 
-  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint; initialRange?: bigint; chainId?: 1 | 8453 | 4663; publicOnly?: boolean } = {}) {
+  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint; initialRange?: bigint; chainId?: 1 | 8453 | 4663; publicOnly?: boolean;advisoryMetadataOnly?:boolean;endpoints?:readonly string[] } = {}) {
     this.chainId = options.chainId ?? 1;
     this.publicOnly = options.publicOnly ?? false;
+    this.endpoints=options.endpoints;this.advisoryMetadataOnly=options.advisoryMetadataOnly??false;this.confirmations=options.confirmations??2n;
     const reader = new ChainFactsReader(client, { chainId: this.chainId, sourceRef: 'intelligence-rpc' });
     this.maxRange = options.maxRange ?? 500n;
     this.range = options.initialRange ?? 100n;
@@ -61,13 +65,33 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   }
 
   /** The first address is used while it answers; a timeout or failure moves the read to the next one (failoverTransport). */
-  public static fromRpcUrls(rpcUrls: readonly string[], chainId: 1 | 8453 | 4663 = 1, publicOnly = false): EngineIntelligencePort {
+  public static fromRpcUrls(rpcUrls: readonly string[], chainId: 1 | 8453 | 4663 = 1, publicOnly = false, options:{advisoryMetadataOnly?:boolean}={}): EngineIntelligencePort {
     for (const rpcUrl of rpcUrls) {
       let parsed: URL;
       try { parsed = new URL(rpcUrl); } catch { throw new Error('INTELLIGENCE_RPC_URL_INVALID'); }
       if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('INTELLIGENCE_RPC_MUST_BE_HTTPS');
     }
-    return new EngineIntelligencePort(createPublicClient({ transport: failoverTransport(rpcUrls) }) as PublicClient, { chainId, publicOnly });
+    return new EngineIntelligencePort(createPublicClient({ transport: failoverTransport(rpcUrls) }) as PublicClient, { chainId, publicOnly,endpoints:rpcUrls,advisoryMetadataOnly:options.advisoryMetadataOnly });
+  }
+
+  /** One cancellable, read-only operation; no signer or shared mint transport. */
+  public withReadSignal(signal:AbortSignal):IntelligenceChainPort{
+    if(!this.endpoints)return this;
+    const child=new EngineIntelligencePort(createPublicClient({transport:failoverTransport(this.endpoints,{signal})}) as PublicClient,{chainId:this.chainId,publicOnly:this.publicOnly,advisoryMetadataOnly:this.advisoryMetadataOnly,confirmations:this.confirmations,maxRange:this.maxRange,initialRange:this.range});
+    for(const [key,value] of this.dropCache)child.dropCache.set(key,value);
+    child.successes=this.successes;const original=child.scan.bind(child);
+    child.scan=async(from,to,watched)=>{const result=await original(from,to,watched);if(!signal.aborted){this.range=child.range;this.successes=child.successes;}return result;};
+    const estimate = child.estimateMintGas.bind(child);
+    child.estimateMintGas = async (wallet, contract, quantity, value) => {
+      const result = await estimate(wallet, contract, quantity, value);
+      if (!signal.aborted) for (const [key, entry] of child.dropCache) {
+        const current = this.dropCache.get(key);
+        if (!current || entry.at > current.at) this.dropCache.set(key, entry);
+      }
+      while (this.dropCache.size > 100) this.dropCache.delete(this.dropCache.keys().next().value!);
+      return result;
+    };
+    return child;
   }
 
   public async safeHead(): Promise<bigint | null> { return this.observer.safeHead(); }
@@ -90,7 +114,7 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
       watchedUnavailable: result.watchedUnavailable,
       fromBlock: result.fromBlock,
       toBlock: result.toBlock,
-      mints: result.mints.map((mint) => ({ nftContract: mint.nftContract, minter: mint.minter, payer: mint.payer, quantity: mint.quantity, unitPriceWei: mint.unitMintPriceWei, blockNumber: mint.blockNumber, txHash: mint.transactionHash, logIndex: mint.logIndex })),
+      mints: result.mints.map((mint) => ({ nftContract: mint.nftContract, minter: mint.minter, payer: mint.payer, quantity: mint.quantity, dropStageIndex:mint.dropStageIndex, unitPriceWei: mint.unitMintPriceWei, blockNumber: mint.blockNumber, txHash: mint.transactionHash, logIndex: mint.logIndex })),
       dropUpdates: result.dropUpdates.map((update) => ({ nftContract: update.nftContract, mintPriceWei: update.mintPriceWei, startTime: update.startTime, endTime: update.endTime, maxPerWallet: update.maxTotalMintableByWallet, blockNumber: update.blockNumber })),
       watchedMints: result.watchedMints.map((mint) => ({ nftContract: mint.nftContract, recipient: mint.recipient, blockNumber: mint.blockNumber, txHash: mint.transactionHash, logIndex: mint.logIndex })),
     } };
@@ -170,7 +194,7 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
     if (!ADDRESS.test(nftContract)) return null;
     try {
       let allowlist;
-      try { if (!this.publicOnly) allowlist = getStrategy('seadrop-v1-allowlist'); } catch { /* no configured proof provider */ }
+      try { if (!this.publicOnly&&!this.advisoryMetadataOnly) allowlist = getStrategy('seadrop-v1-allowlist'); } catch { /* no configured proof provider */ }
       if (allowlist) {
         try { return await allowlist.readDrop(this.client, nftContract as Address, this.chainId); }
         catch (error) {
@@ -178,7 +202,11 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
           if (!(error instanceof Error) || error.message !== 'ALLOWLIST_FIRST_PARTY_SOURCE_REQUIRED') return null;
         }
       }
-      return await this.strategy.readDrop(this.client, nftContract as Address, this.chainId);
+      const drop=await this.strategy.readDrop(this.client, nftContract as Address, this.chainId);
+      // Discovery metadata must not acquire wallet proofs or label a private
+      // stage as a public mint. Exact own eligibility stays in prepare/arm.
+      if(this.advisoryMetadataOnly&&(drop.maxTotalMintableByWallet<1||drop.endTime===0||drop.endTime<=Math.floor(Date.now()/1000)))return null;
+      return drop;
     } catch { return null; }
   }
 }

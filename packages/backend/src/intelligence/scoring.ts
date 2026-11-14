@@ -120,7 +120,7 @@ export function scoreOpportunity(input: ScoringInput): ScoreResult {
     factors.push(available('floor_margin', points, 8, 'Fresh listing-floor estimate against mint plus estimated network cost; not guaranteed sale proceeds.'));
   } else factors.push(unavailable('floor_margin', 8, 'A fresh, covered floor and fee estimate are unavailable.'));
 
-  factors.push(available('known_pattern', input.knownSeaDropPattern || input.knownReviewedTemplate === true ? 6 : 0, 6, input.knownSeaDropPattern ? 'Uses the standard SeaDrop public mint.' : input.knownReviewedTemplate === true ? 'Matches an owner-signed reviewed free mint template.' : 'Does not use a mint pattern the bot knows.'));
+  factors.push(available('known_pattern', input.knownSeaDropPattern || input.knownReviewedTemplate === true ? 6 : 0, 6, input.knownSeaDropPattern ? 'Uses the standard SeaDrop mint protocol.' : input.knownReviewedTemplate === true ? 'Matches an owner-signed reviewed free mint template.' : 'Does not use a mint pattern the bot knows.'));
   if (input.hasCode === null) factors.push(unavailable('contract_code', 3, 'Could not confirm the contract exists.'));
   else {
     factors.push(available('contract_code', input.hasCode ? 3 : 0, 3, input.hasCode ? 'Contract code is present on chain.' : 'No contract code at this address.'));

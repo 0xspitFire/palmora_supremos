@@ -148,3 +148,29 @@ describe('truthful blocked readiness diagnostics',()=>{
     expect(health.blockingReasons).toContain('DEPLOYMENT_NOT_READY');
   });
 });
+
+describe('discovery durable enqueue is independent of provider delivery',()=>{
+ it('drains its active notification writer before shutdown and retains unsent queued work for restart', async () => {
+  const store = new Store(); await store.open(); let release!: () => void;
+  const send = vi.fn(async () => { await new Promise<void>(resolve => { release = resolve; }); });
+  const alerts = new AlertManager(store, new NotificationDispatcher(store, { send }), undefined, { backgroundIntelligenceDelivery: true });
+  await alerts.intelligence({ kind: 'opportunity', dedupe: 'shutdown-one', text: 'one', priority: 'immediate' });
+  await alerts.intelligence({ kind: 'opportunity', dedupe: 'shutdown-two', text: 'two', priority: 'immediate' });
+  await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+  let stopped = false; const stopping = alerts.stopBackgroundIntelligence().then(() => { stopped = true; });
+  await Promise.resolve(); expect(stopped).toBe(false);
+  release(); await stopping;
+  expect(send).toHaveBeenCalledOnce();
+  expect(store.snapshot().notificationOutbox.filter(row => row.state === 'delivered')).toHaveLength(1);
+  expect(store.snapshot().notificationOutbox.filter(row => row.state === 'pending')).toHaveLength(1);
+ });
+ it('returns only after durable enqueue while a stuck notification cannot strand later intelligence writers or overlap sends',async()=>{
+  const store=new Store();await store.open();let release!:()=>void;const sent:string[]=[];
+  const dispatcher=new NotificationDispatcher(store,{send:async message=>{sent.push(message.eventId);if(sent.length===1)await new Promise<void>(resolve=>{release=resolve;});}});
+  const alerts=new AlertManager(store,dispatcher,undefined,{backgroundIntelligenceDelivery:true});
+  expect(await alerts.intelligence({kind:'opportunity',dedupe:'new-one',text:'new one',priority:'immediate'})).toBe(true);
+  expect(await alerts.intelligence({kind:'opportunity',dedupe:'new-two',text:'new two',priority:'immediate'})).toBe(true);
+  await vi.waitFor(()=>expect(sent).toHaveLength(1));expect(store.snapshot().notificationOutbox).toHaveLength(2);expect(store.snapshot().notificationOutbox.every(row=>row.state!=='delivered')).toBe(true);
+  release();await vi.waitFor(()=>expect(store.snapshot().notificationOutbox.every(row=>row.state==='delivered')).toBe(true));expect(sent).toHaveLength(2);
+ });
+});

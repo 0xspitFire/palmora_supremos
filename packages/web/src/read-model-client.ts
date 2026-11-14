@@ -10,6 +10,8 @@ import {
   type ReadModelEnvelope,
   type RunReadModel,
   type SystemHealth,
+  type ReadOnlySnapshot,
+  type DashboardPagination,
 } from './contracts.js';
 
 export interface ReadModelGetRequest {
@@ -70,7 +72,7 @@ function isHome(value: unknown): value is HomeReadModel {
   const opportunities = value.opportunities as unknown[];
   const calendar = value.calendarHighlights as unknown[];
   const alerts = value.alerts as unknown[];
-  return attention.every(isIssue) && opportunities.every(isRecord) && calendar.every(isRecord) && alerts.every(isRecord);
+  return attention.every(isIssue) && opportunities.every(isRecord) && calendar.every(isRecord) && alerts.every(isRecord) && isHealth(value.system);
 }
 
 function isOpportunityList(value: unknown): value is ReadonlyArray<OpportunityReadModel> {
@@ -133,6 +135,17 @@ function isRun(value: unknown): value is RunReadModel {
 }
 
 function isHealth(value: unknown): value is SystemHealth {
+  if (isRecord(value) && value.discovery !== undefined) {
+    const discovery = value.discovery;
+    if (!isRecord(discovery) || !['starting', 'healthy', 'degraded'].includes(String(discovery.status)) || !Array.isArray(discovery.chains) || discovery.chains.length > 3) return false;
+    const seen = new Set<number>();
+    for (const row of discovery.chains) {
+      if (!isRecord(row) || typeof row.chainId !== 'number' || ![1, 8453, 4663].includes(row.chainId) || seen.has(row.chainId) || !['starting', 'scanning', 'catching_up', 'partial', 'healthy', 'unavailable', 'stalled'].includes(String(row.state)) || row.lastSuccessAt !== undefined && (!isNullableIsoTimestamp(row.lastSuccessAt) || row.lastSuccessAt === null) || row.operation !== undefined && (typeof row.operation !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(row.operation))) return false;
+      if (['lastSuccessBlock', 'headBlock'].some(key => row[key] !== undefined && (typeof row[key] !== 'string' || !/^(0|[1-9][0-9]{0,23})$/.test(row[key] as string))) || row.caughtUp !== undefined && typeof row.caughtUp !== 'boolean') return false;
+      if (discovery.status === 'healthy' && ['unavailable', 'stalled', 'starting', 'catching_up', 'partial'].includes(String(row.state))) return false;
+      seen.add(row.chainId);
+    }
+  }
   return isRecord(value) && hasString(value, 'state') && hasRecord(value, 'dependencies') && hasArray(value, 'blockers') && hasString(value, 'checkedAt');
 }
 
@@ -146,7 +159,7 @@ function isEnvelope(value: unknown): value is ReadModelEnvelope<unknown> {
     && hasString(value.snapshot as UnknownRecord, 'id')
     && hasString(value.snapshot as UnknownRecord, 'capturedAt')
     && hasString(value.snapshot as UnknownRecord, 'consistency')
-    && hasString(value, 'availability')
+    && typeof value.availability === 'string' && ['available', 'partial', 'stale', 'unavailable'].includes(value.availability)
     && isFreshness(value.freshness)
     && Array.isArray(value.issues)
     && (value.issues as unknown[]).every(isIssue);
@@ -172,7 +185,7 @@ function unavailableEnvelope(code: string, message: string): ReadModelEnvelope<n
 
 function validateEnvelope<T>(payload: unknown, guard: DataGuard<T>): ReadModelEnvelope<T> {
   if (!isEnvelope(payload)) return unavailableEnvelope('READ_MODEL_ENVELOPE_INVALID', 'Backend returned an invalid read-model envelope.') as ReadModelEnvelope<T>;
-  if (payload.data === null || payload.availability === 'unavailable') return payload as ReadModelEnvelope<T>;
+  if (payload.availability === 'unavailable' && payload.data === null) return payload as ReadModelEnvelope<T>;
   if (!guard(payload.data)) {
     return {
       ...payload,
@@ -195,6 +208,14 @@ function isAllowedRoute(route: string): boolean {
     || /^\/runs\/[^/]+$/.test(route);
 }
 
+function isPagination(value: unknown): value is DashboardPagination {
+  return isRecord(value) && typeof value.page === 'number' && Number.isSafeInteger(value.page) && value.page >= 1
+    && typeof value.pages === 'number' && Number.isSafeInteger(value.pages) && value.pages >= value.page && value.pages <= 9999
+    && value.pageSize === 50 && isRecord(value.totals) && ['opportunities', 'calendar', 'alerts'].every(key => nonnegativeCount((value.totals as UnknownRecord)[key]))
+    && value.pages === Math.max(1, Math.ceil(Math.max(...Object.values(value.totals as Record<string, number>)) / 50))
+    && (value.readinessId === undefined || typeof value.readinessId === 'string' && /^[A-Za-z0-9_:-]{1,100}$/.test(value.readinessId));
+}
+
 /** Routes implemented by Backend's GET-only read-model adapter. */
 export class ReadModelClient {
   private readonly get: ReadModelGetter;
@@ -203,6 +224,40 @@ export class ReadModelClient {
   public constructor(options: ReadModelClientOptions) {
     this.get = options.get;
     this.basePath = (options.basePath ?? '/api/v1/read-model').replace(/\/+$/, '') || '/api/v1/read-model';
+  }
+
+  /** One backend capture. A malformed/mixed batch must never become a partial silent success. */
+  public async getDashboard(readinessId?: string, page = 1): Promise<ReadOnlySnapshot> {
+    const unavailable = (): ReadOnlySnapshot => {
+      const envelope = unavailableEnvelope('DASHBOARD_SNAPSHOT_UNAVAILABLE', 'The consistent dashboard snapshot is unavailable.');
+      return { pagination: envelope, home: envelope, calendar: envelope, alerts: envelope, health: envelope, analytics: envelope, ...(readinessId === undefined ? {} : { readiness: envelope }) };
+    };
+    if (readinessId !== undefined && !/^[A-Za-z0-9_:-]{1,100}$/.test(readinessId)) return unavailable();
+    if (!Number.isSafeInteger(page) || page < 1 || page > 9999) return unavailable();
+    try {
+      const query = new URLSearchParams();
+      if (readinessId !== undefined) query.set('readiness', readinessId);
+      if (page !== 1) query.set('page', page.toString());
+      const path = `${this.basePath}/dashboard${query.size === 0 ? '' : `?${query}`}`;
+      const payload = await this.get(Object.freeze({ method: 'GET' as const, path }));
+      if (!isEnvelope(payload) || !isRecord(payload.data) || payload.snapshot.consistency !== 'snapshot' || !isNullableIsoTimestamp(payload.generatedAt) || !isNullableIsoTimestamp(payload.snapshot.capturedAt)) return unavailable();
+      const data = payload.data;
+      const snapshot = {
+        pagination: validateEnvelope(data.pagination, isPagination),
+        home: validateEnvelope(data.home, isHome), calendar: validateEnvelope(data.calendar, isCalendar),
+        alerts: validateEnvelope(data.alerts, isAlerts), health: validateEnvelope(data.health, isHealth),
+        analytics: validateEnvelope(data.analytics, isAnalytics),
+        ...(readinessId === undefined ? {} : { readiness: validateEnvelope(data.readiness, isReadiness) }),
+      };
+      if (Object.values(snapshot).some(surface => surface.snapshot.id !== payload.snapshot.id || surface.snapshot.capturedAt !== payload.snapshot.capturedAt || surface.generatedAt !== payload.generatedAt || surface.snapshot.consistency !== 'snapshot')) return unavailable();
+      const metadata = snapshot.pagination.data;
+      if (metadata) {
+        const expected = (total: number): number => Math.min(metadata.pageSize, Math.max(0, total - (metadata.page - 1) * metadata.pageSize));
+        if (snapshot.calendar.data && snapshot.calendar.data.length !== expected(metadata.totals.calendar) || snapshot.alerts.data && snapshot.alerts.data.length !== expected(metadata.totals.alerts) || snapshot.home.data && (snapshot.home.data.opportunities.length !== expected(metadata.totals.opportunities) || snapshot.home.data.calendarHighlights.length !== expected(metadata.totals.calendar) || snapshot.home.data.alerts.length !== expected(metadata.totals.alerts))) return unavailable();
+      }
+      if (!['available', 'partial', 'stale', 'unavailable'].includes(payload.availability) || payload.availability === 'unavailable' && !Object.values(snapshot).some(surface => surface.availability === 'unavailable')) return unavailable();
+      return snapshot;
+    } catch { return unavailable(); }
   }
 
   public getAnalytics(): Promise<ReadModelEnvelope<AnalyticsReadModel>> {

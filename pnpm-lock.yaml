@@ -72,6 +72,12 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  packages/dashboard-vercel:
+    dependencies:
+      '@mint-bot/web':
+        specifier: workspace:*
+        version: link:../web
+
   packages/database:
     dependencies:
       better-sqlite3:

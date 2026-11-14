@@ -547,6 +547,12 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public eventSnapshot(): EventRecord[] { this.ensureOpen(); return this.readEvents(); }
 
+  /** One SQLite read transaction, including concurrent writes from the isolated admin worker. */
+  public readModelSnapshot(): BackendState {
+    this.ensureOpen();
+    return this.db.transaction(() => this.snapshot()).deferred();
+  }
+
   /** No event, receipt or campaign history is needed for an idle scheduler check. Never cached. */
   public controlSnapshot(): BackendControlSnapshot {
     this.ensureOpen();

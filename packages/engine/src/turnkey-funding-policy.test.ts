@@ -1,6 +1,6 @@
 import { createTurnkeyFundingRecord, turnkeyFundingWalletSetDigest, turnkeyFundingBudgetProfileDigest } from './turnkey-funding-policy.js';
 import { generateKeyPairSync } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
 import { parseTransaction, type Hex } from 'viem';
 import { assertTurnkeyFundingProviderState, signTurnkeyFundingRecord, turnkeyFundingProviderPolicy, TurnkeyFundingSigner, verifyTurnkeyFundingRecord, type TurnkeyFundingRecord } from './turnkey-funding-policy.js';
@@ -10,6 +10,10 @@ const PAIR = generateKeyPairSync('ed25519');
 const PRIVATE = PAIR.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
 const PUBLIC = PAIR.publicKey.export({ format: 'pem', type: 'spki' }).toString();
 const NOW = new Date('2026-11-13T10:00:00Z');
+// Provider-policy builders intentionally enforce the current wall clock too.
+// Pin only Date; protocol/signing promises and real timers keep their normal behavior.
+beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW); });
+afterEach(() => vi.useRealTimers());
 const ACCOUNT = privateKeyToAccount(`0x${'11'.repeat(32)}`);
 const TO = `0x${'22'.repeat(20)}` as Hex;
 function record(): TurnkeyFundingRecord { return createTurnkeyFundingRecord({ version: 1, kind: 'native-fleet-topup-v1', organizationId: 'funding-org', mintOrganizationId: 'mint-org', userId: 'funding-user', keyId: 'hub-key', policyId: 'hub-policy', chainId: 1, hub: ACCOUNT.address, recipients: [TO], issuedAt: NOW.toISOString(), expiresAt: new Date(NOW.getTime() + 86400000).toISOString(), maxTransferWei: '4100000000000000', rollingPrincipalCapWei: '8500000000000000', rollingFeeCapWei: '200000000000000', maxTransferFeeWei: '20000000000000', hubMaxBalanceWei: '8700000000000000', recipientMaxBalanceWei: '4100000000000000', fleetMaxBalanceWei: '8500000000000000', gasLimitMax: '21000', maxFeePerGas: '200000000', maxPriorityFeePerGas: '100000000' }, NOW); }
@@ -53,6 +57,11 @@ describe('separate owner-signed funding custody', () => {
   it('provider policy is a closed native EOA-transfer role, with no nullable time', () => {
     const p = turnkeyFundingProviderPolicy(record());
     expect(p.condition).toContain("eth.tx.data == '0x'"); expect(p.condition).toContain("private_key.id == 'hub-key'"); expect(p).not.toHaveProperty('time');
+  });
+  it('still refuses policy construction at the actual expiry boundary', () => {
+    const r = record();
+    vi.setSystemTime(new Date(r.expiresAt));
+    expect(() => turnkeyFundingProviderPolicy(r)).toThrow('TURNKEY_FUNDING_RECORD_EXPIRED');
   });
   it('rejects provider drift, unknown ALLOW inventory, wrong account and exported hub', () => {
     const r = record();

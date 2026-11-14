@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "cd ../.. && corepack pnpm --filter @mint-bot/dashboard-vercel... install --frozen-lockfile --ignore-scripts",
+  "buildCommand": "pnpm --filter @mint-bot/dashboard-vercel build",
+  "outputDirectory": "public",
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 15,
+      "includeFiles": "../web/dist/**"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index"
+    }
+  ]
+}

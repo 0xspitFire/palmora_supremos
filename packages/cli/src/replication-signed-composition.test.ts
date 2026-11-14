@@ -1,3 +1,5 @@
+import { DiscoveryService, DurableStore, type IntelligenceChainPort } from '@mint-bot/backend';
+import { EngineIntelligencePort } from './intelligence-adapter.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { decodeFunctionData, encodeAbiParameters, encodeEventTopics, encodeFunctionData, zeroAddress, type Address, type Hex, type PublicClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -59,4 +61,17 @@ describe('signed replication source through official own-wallet acquisition', ()
     const run = await fixture('source-expired');
     await expect(run()).rejects.toThrow('WATCHED_MINT_STALE_OR_REORGED');
   });
+  it('keeps active signed-stage logs qualified as candidates when public metadata is closed, and still requires fresh own signatures',async()=>{
+    const run=await fixture();const second='0x6666666666666666666666666666666666666666';const store=new DurableStore();await store.open();let cursor=0n;
+    const metadataClient={readContract:async(input:{functionName:string})=>input.functionName==='getPublicDrop'?{mintPrice:0n,startTime:1,endTime:2,maxTotalMintableByWallet:10,feeBps:0,restrictFeeRecipients:false}:input.functionName==='getAllowedFeeRecipients'?[]:100n} as unknown as PublicClient;
+    const metadata=new EngineIntelligencePort(metadataClient,{advisoryMetadataOnly:true});expect(await metadata.readDrop(nft)).toBeNull();expect(Date.now()).toBe(start.getTime());
+    const readDrop=vi.fn(async()=>({nftContract:nft,priceWei:0n,startTime:1,endTime:2,maxPerWallet:10,maxSupply:100n,totalMinted:1n}));
+    const port:IntelligenceChainPort={chainId:1,safeHead:async()=>102n,scan:async(from,to)=>({ok:true,scan:{fromBlock:from,toBlock:to,mints:[{nftContract:nft,minter:whale,payer:whale,quantity:1n,dropStageIndex:1n,unitPriceWei:0n,blockNumber:100n,txHash:hash,logIndex:0},{nftContract:nft,minter:second,payer:second,quantity:1n,dropStageIndex:1n,unitPriceWei:0n,blockNumber:100n,txHash:`0x${'c'.repeat(64)}`,logIndex:1}],watchedMints:[],dropUpdates:[]}}),hasCode:async()=>true,readDrop,balance:async()=>0n,simulateMint:async()=>({outcome:'unknown',reason:'OWN_SIGNATURE_REQUIRED'})};
+    const discovery=new DiscoveryService(store,{observedAddresses:()=>[{address:whale},{address:second}],cursor:()=>cursor,advanceCursor:(_chain,_source,block)=>{cursor=block;}},port,{budgetPerNftWei:1n});
+    await discovery.tick();expect(cursor).toBe(102n);expect(readDrop).not.toHaveBeenCalled();const candidate=store.snapshot().events.find(event=>event.type.startsWith('opportunity_'))!;
+    expect(candidate.data).toMatchObject({blocked:false,priceWei:'0',verifiedSeaDropMint:true,observedStageIndex:'1'});expect(Number(candidate.data.score)).toBeGreaterThanOrEqual(70);expect(candidate.data.openingAt).toBeUndefined();expect(store.snapshot().events.some(event=>event.type==='calendar_entry')).toBe(false);
+    expect((await run()).plan).toMatchObject({strategy:'seadrop-v1-signed',verdict:'replicable',targets:[{wallet:own}]});
+    const expired=await fixture('expired-proof');await expect(expired()).rejects.toThrow('SIGNED_MINT_OWN_WALLET_AUTHORIZATION_REQUIRED');
+  });
+
 });
