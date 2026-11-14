@@ -118,6 +118,33 @@ smoke_test() { # dir
   smoke_run "$dir" /usr/bin/node --check packages/cli/dist/orchestrator-service.js >/dev/null 2>&1
 }
 
+# A code-only rollback must understand every migration already applied to the
+# canonical database. Read only migration metadata; never downgrade or restore
+# the live database to make old code start.
+rollback_schema_compatible() { # candidate [database, for isolated verification]
+  /usr/bin/python3 - "$1" "${2:-/var/lib/mint-bot/db/mintbot.sqlite}" <<'PY'
+import hashlib, pathlib, sqlite3, sys
+try:
+    candidate, database = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+    connection = sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)
+    connection.execute('PRAGMA query_only=ON')
+    rows = connection.execute('SELECT version, name, checksum FROM schema_migrations').fetchall()
+    definitions = {}
+    for path in (candidate / 'packages/database/migrations').glob('*.sql'):
+        version = int(path.name.split('_', 1)[0])
+        if version in definitions:
+            raise ValueError('duplicate migration')
+        definitions[version] = (path.name, hashlib.sha256(path.read_bytes()).hexdigest())
+    compatible = bool(rows) and all(version in definitions and definitions[version] == (name, checksum) for version, name, checksum in rows)
+    connection.close()
+    if not compatible:
+        raise ValueError('incompatible migration')
+except Exception:
+    print('ROLLBACK_SCHEMA_INCOMPATIBLE: canonical database preserved; keep kill engaged and repair forward.', file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 case "${1:-}" in
   --list)
     say "Installed releases"
@@ -130,13 +157,19 @@ case "${1:-}" in
     echo "Previous: $(cat "$PREVIOUS_FILE" 2>/dev/null || echo none)"
     exit 0
     ;;
-  --rollback)
+  --rollback|--rollback-to)
     exec 9>"$RELEASES/.lock"; flock -n 9 || stop "another install or rollback is running."
     service_running && stop "stop the MintBot service first (systemctl stop mint-bot.service), then roll back."
     [ -f /var/lib/mint-bot/killswitch ] || stop "the kill switch file is missing; a rollback never runs with the kill switch released."
-    [ -f "$PREVIOUS_FILE" ] || stop "there is no previous release recorded."
-    PREV="$(cat "$PREVIOUS_FILE")"
+    if [ "$1" = --rollback-to ]; then
+      [ "$#" -eq 2 ] || stop "--rollback-to requires the exact captured release path."
+      PREV="$2"
+    else
+      [ -f "$PREVIOUS_FILE" ] || stop "there is no previous release recorded."
+      PREV="$(cat "$PREVIOUS_FILE")"
+    fi
     valid_release_dir "$PREV" || stop "the recorded previous release ($PREV) is not a valid release folder."
+    rollback_schema_compatible "$PREV" || stop "the previous release cannot safely read the current database. No release or data was changed."
     NOW="$(current_target)"
     [ "$NOW" != "$PREV" ] || stop "the previous release is already current."
     [ -z "$(find "$PREV" \( ! -user root -o -perm /022 \) ! -type l -print -quit)" ] || stop "the previous release ($PREV) has a file that is not root-only writable."
@@ -147,7 +180,7 @@ case "${1:-}" in
     note "current is now $PREV (was ${NOW:-none}). Data was not touched. Start the service yourself when ready."
     exit 0
     ;;
-  ""|-*) stop "usage: install-release.sh <release.tar.gz> <sha256> | --rollback | --list" ;;
+  ""|-*) stop "usage: install-release.sh <release.tar.gz> <sha256> | --rollback | --rollback-to <captured release path> | --list" ;;
 esac
 
 TARBALL="$1"; EXPECTED="${2:-}"
