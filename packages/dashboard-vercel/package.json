@@ -1,0 +1,12 @@
+{
+  "name": "@mint-bot/dashboard-vercel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Authenticated read-only SSR adapter and separate loopback gateway",
+  "scripts": {
+    "build": "pnpm --filter @mint-bot/web build && node --check api/index.js && node --check src/boundary.js && node --check src/gateway.js && node prepare-build.mjs",
+    "gateway": "node src/gateway.js"
+  },
+  "dependencies": { "@mint-bot/web": "workspace:*" }
+}

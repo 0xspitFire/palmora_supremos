@@ -4,7 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeHeartbeat } from './heartbeat.js';
+import * as heartbeat from './heartbeat.js';
 import { startIntelligence } from './intelligence-service.js';
+import { DiscoveryLiveness } from './discovery-liveness.js';
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 
 const OWN = ['0x365952eb1e8209bf2bcc2db5ed213111a87d061e', '0x81c104dcb898416fd4f81ead091dba5b8f46f37a'];
@@ -35,6 +37,47 @@ function harness(now: () => Date, repo = new Repo(90, 21_000_000n)) {
 }
 
 afterEach(() => { vi.useRealTimers(); });
+
+it('drains an outstanding heartbeat read and never touches the repository after shutdown completes', async () => {
+  const now = () => new Date('2026-11-14T12:00:00.000Z');
+  const h = harness(now);
+  let finish!: (at: Date) => void;
+  const read = vi.spyOn(heartbeat, 'readHeartbeat').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const cursor = vi.spyOn(h.repo, 'cursor');
+  const service = startIntelligence({ store: h.store, repo: h.repo, port: new IdlePort(), alerts: h.alerts, wallets: OWN, discoveryIntervalMs: 3_600_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, heartbeatPath: '/tmp/synthetic-heartbeat-drain-only', now });
+  try {
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+    let stopped = false; const stopping = service.stop().then(() => { stopped = true; });
+    await Promise.resolve(); expect(stopped).toBe(false);
+    finish(new Date('2026-11-14T10:00:00.000Z')); await stopping;
+    const calls = cursor.mock.calls.length;
+    await Promise.resolve(); expect(cursor).toHaveBeenCalledTimes(calls);
+    expect(h.sent.some(text => text.includes('BOT WAS PAUSED'))).toBe(false);
+  } finally { await service.stop(); vi.restoreAllMocks(); }
+});
+
+it('fails the external monitor and reports a stalled peer even while Ethereum keeps progressing and diagnostics throw', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-14T12:00:00.000Z'));
+  const now = () => new Date();
+  const h = harness(now);
+  const liveness = new DiscoveryLiveness(Date.now);
+  liveness.start(8453);
+  class HealthyPort extends IdlePort { public override async safeHead() { return 21_000_000n; } }
+  const port = new HealthyPort();
+  const reads = vi.spyOn(port, 'safeHead');
+  const ping = vi.fn(async (_status: 'ok' | 'fail') => undefined);
+  const broken = { info: () => { throw new Error('synthetic logger failure'); }, warn: () => { throw new Error('synthetic logger failure'); } } as never;
+  const service = startIntelligence({ store: h.store, repo: h.repo, port, alerts: h.alerts, wallets: OWN, liveness, logger: broken, discoveryIntervalMs: 1000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, healthIntervalMs: 3_600_000, monitorPing: ping, now });
+  try {
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(reads.mock.calls.length).toBeGreaterThan(300);
+    expect(liveness.snapshot().chains.find(row => row.chainId === 1)?.state).not.toBe('stalled');
+    expect(liveness.snapshot().chains.find(row => row.chainId === 8453)?.state).toBe('stalled');
+    expect(ping).toHaveBeenLastCalledWith('fail');
+    expect(h.sent.filter(text => text.includes('Chain 8453 discovery is stalled'))).toHaveLength(1);
+  } finally { await service.stop(); }
+});
 
 describe('trial status messages (T-005)', () => {
   it('sends one plain-language start message with counts and the dashboard, and no owner addresses', async () => {

@@ -8,7 +8,7 @@ const emptyState = (): BackendState => ({ schemaVersion: 1, campaigns: [], runs:
 export type BackendControlSnapshot = Pick<BackendState, 'runtime' | 'killed' | 'reconciliations' | 'jobs'>;
 export function readEventSnapshot(store: BackendStore): EventRecord[] { return store.eventSnapshot ? store.eventSnapshot() : store.snapshot().events; }
 export function readControlSnapshot(store: BackendStore): BackendControlSnapshot { return store.controlSnapshot ? store.controlSnapshot() : store.snapshot(); }
-export interface BackendStore { fundingFeeForRunWallet?(runId: string, wallet: string): FundingFeeMetadata; fundingExpenseSnapshot?(): FundingCostObservation[]; open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; controlSnapshot?(): BackendControlSnapshot; eventSnapshot?(): EventRecord[]; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
+export interface BackendStore { fundingFeeForRunWallet?(runId: string, wallet: string): FundingFeeMetadata; fundingExpenseSnapshot?(): FundingCostObservation[]; open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; readModelSnapshot?(): BackendState; controlSnapshot?(): BackendControlSnapshot; eventSnapshot?(): EventRecord[]; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
 export class DurableStore implements BackendStore {
   private state: BackendState = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();

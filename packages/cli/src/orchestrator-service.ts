@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { boundedIntelligencePort } from './bounded-intelligence-port.js';
+import { DiscoveryLiveness } from './discovery-liveness.js';
 import { createHostReplicationQualifier } from './replication-qualifier.js';
 import { createPaidFundingRuntime } from './paid-funding-runtime.js';
 import { startPaidFundingWorker, type PaidFundingService } from './paid-funding-service.js';
@@ -187,7 +189,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   } else {
     metrics.set('mintbot_notification_up', 0);
   }
-  const alerts = new AlertManager(runtime.store, dispatcher, metrics, { policy: { retentionDays: config.alertRetentionDays }, ...(config.canonicalUrlBase ? { canonicalUrlBase: config.canonicalUrlBase } : {}) });
+  const alerts = new AlertManager(runtime.store, dispatcher, metrics, { backgroundIntelligenceDelivery:true, policy: { retentionDays: config.alertRetentionDays }, ...(config.canonicalUrlBase ? { canonicalUrlBase: config.canonicalUrlBase } : {}) });
   runtime.setAlertSink(alerts);
   // D-017: send the administrator a durable, actionable reminder when an artifact is due, three days from expiry,
   // or expired. This is host-only and uses the owner Telegram channel; it never fans out to viewers.
@@ -240,9 +242,12 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   await orchestrator.start();
   let replicationAutomation: ReturnType<typeof createReplicationAutomation> | undefined;
   let replicationTimer: ReturnType<typeof setInterval> | undefined;
-  const secondaryDiscoveryTimers: Array<{ stop(): void }> = [];
+  const secondaryDiscoveryTimers: Array<{ stop(): Promise<void> }> = [];
   const secondaryReadinessTimers: Array<{ stop(): Promise<void> }> = [];
-  let intelligence: { stop(): void } | undefined;
+  const discoveryLiveness=new DiscoveryLiveness();
+  const discoveryReads:Array<ReturnType<typeof boundedIntelligencePort>>=[];
+  let discoveryStopping = false;
+  let intelligence: { stop(): Promise<void> } | undefined;
   let contractMonitorService: ReturnType<typeof startContractMonitorService> | undefined;
   let sharedFloorPrices: OpenSeaFloors | undefined;
   if (config.intelligenceEnabled && config.secretStorePath) {
@@ -276,7 +281,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       await roadmapIntelligence.tick();
       roadmapIntelligence.start();
     }
-    intelligence = startIntelligence({ advanced:roadmapIntelligence?.advanced, history:roadmapIntelligence?.history, adaptive:roadmapIntelligence?.adaptive, store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls), alerts: intelligenceAlerts, wallets: initialWallets, walletProvider: readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    intelligence = startIntelligence({ liveness:discoveryLiveness,advanced:roadmapIntelligence?.advanced, history:roadmapIntelligence?.history, adaptive:roadmapIntelligence?.adaptive, store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls,1,false,{advisoryMetadataOnly:true}), alerts: intelligenceAlerts, wallets: initialWallets, walletProvider: readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: initialWallets.length }, 'phase 2 intelligence started (read-only)');
     // Secondary discovery/readiness is useful even when automatic execution is off.
     // Each chain owns its completion-driven timers, and readiness never waits in a scan tick.
@@ -286,10 +291,11 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       if (!enabled()) continue;
       const endpoints = [...(await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints];
       for (const endpoint of endpoints) logger.registerSecret(endpoint);
-      const port = EngineIntelligencePort.fromRpcUrls(endpoints, chainId);
-      const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), port, { budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts,advanced:roadmapIntelligence?.advanced,history:roadmapIntelligence?.history,adaptive:roadmapIntelligence?.adaptive });
+      const bounded=boundedIntelligencePort(EngineIntelligencePort.fromRpcUrls(endpoints,chainId,false,{advisoryMetadataOnly:true}),{report:state=>{discoveryLiveness.read(state);if(state.state==='timed_out'||state.state==='capacity')logger.warn({event:'intelligence_read_deadline',...state},'bounded discovery read unavailable');}});
+      discoveryReads.push(bounded);const port=bounded.port;
+      const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), port, { isCancelled: () => discoveryStopping, budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts,advanced:roadmapIntelligence?.advanced,history:roadmapIntelligence?.history,adaptive:roadmapIntelligence?.adaptive });
       secondaryDiscoveryTimers.push(startChainDiscovery({
-        chainId, intervalMs: config.discoveryIntervalMs, tick: () => discovery.tick(), logger,
+        liveness:discoveryLiveness,chainId, intervalMs: config.discoveryIntervalMs, tick: () => discovery.tick(), logger,
         notify: (text, dedupe) => intelligenceAlerts.intelligence({ kind: 'status', text, dedupe, priority: 'immediate' }),
       }));
       secondaryReadinessTimers.push(startChainReadiness({
@@ -580,6 +586,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       paidFundingWorker=startPaidFundingWorker(paidFunding);
     }
     const actions = createTelegramActions({
+      discovery: () => discoveryLiveness.snapshot(),
       mode: config.mode,
       reviewedProtocolPlan: input => planReviewedProtocolPreparation({...input,store:runtime.store,secretRoot,killSwitchPath:config.killSwitchPath}),
       reviewedProtocolSimulation: (campaign, wallets) => simulateReviewedProtocolCampaign({store:runtime.store,campaign,wallets,secretRoot}),
@@ -668,7 +675,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       logger.info({ event: 'backup_scheduler_started' }, 'scheduled backups on');
     } else logger.info({ event: 'backup_scheduler_off' }, 'scheduled backups off: no backup key in the secret store');
   } else if (backupScheduler === 'systemd') logger.info({ event: 'backup_scheduler_external' }, 'scheduled backups owned by systemd timer');
-  const dashboard = createDashboard(runtime.store);
+  const dashboard = createDashboard(runtime.store,{discovery:()=>discoveryLiveness.snapshot()});
   const analyticsIngestion = config.mode === 'host' ? startAnalyticsIngestion({
     store: runtime.store,
     port: async chainId => {
@@ -678,7 +685,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     },
     record: code => logger.warn({ event: 'analytics_ingestion_unavailable', code }, 'shadow analytics ingestion unavailable'),
   }) : undefined;
-  const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics, readModel: dashboard.readModel, dashboard: (url) => dashboard.render(url) });
+  const http = new ServiceHttpServer({ host: config.bindHost, port: config.port, store: runtime.store, orchestrator, metrics, discovery:()=>discoveryLiveness.snapshot(),readModel: dashboard.readModel, dashboard: (url) => dashboard.render(url) });
   await http.start();
   // Outside monitor when no chain scanning runs: a liveness signal every minute ("ok" while the service can read its own database).
   // When intelligence runs, its own scan-based signal uses the same address instead, so the two never both report.
@@ -701,8 +708,10 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    discoveryStopping = true;
     metrics.set('mintbot_process_up', 0);
-    intelligence?.stop();
+    for(const reader of discoveryReads)reader.stop();
+    await intelligence?.stop();
     contractMonitorService?.stop();
     liveness?.stop();
     fleetWatcher?.stop();
@@ -711,7 +720,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     fireScheduler?.stop();
     await paidFundingWorker?.stop();
     if (replicationTimer) clearInterval(replicationTimer);
-    for (const timer of secondaryDiscoveryTimers) timer.stop();
+    await Promise.all(secondaryDiscoveryTimers.map(timer=>timer.stop()));
     await Promise.all(secondaryReadinessTimers.map(timer => timer.stop()));
     telegramCommands?.stop();
     gasAlertChecker?.stop();
@@ -722,6 +731,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     await contractMonitorService?.drain();
     await orchestrator.stop();
     await http.stop();
+    await alerts.stopBackgroundIntelligence();
     (runtime.store as CanonicalStoreBridge).close();
   };
   // Keep the credentials and signer entirely inside their existing runtime

@@ -91,9 +91,14 @@ function retryRank(type: string): number {
 /** Durable alert/reminder coordinator. It never changes execution truth. */
 export class AlertManager {
   private readonly grouped = new Set<string>();
+  private readonly backgroundIntelligence=new Map<string,string>();
+  private backgroundIntelligenceFlight?: Promise<void>;
+  private backgroundIntelligenceStopped = false;
+  private readonly backgroundIntelligenceDelivery:boolean;
   private readonly now: () => Date;
   private readonly policy: AlertPolicy;
-  public constructor(private readonly store: BackendStore, private readonly dispatcher?: NotificationDispatcher, private readonly metrics?: MetricsRegistry, options: { policy?: Partial<AlertPolicy>; now?: () => Date; retentionDays?: number } = {}) {
+  public constructor(private readonly store: BackendStore, private readonly dispatcher?: NotificationDispatcher, private readonly metrics?: MetricsRegistry, options: { policy?: Partial<AlertPolicy>; now?: () => Date; retentionDays?: number; backgroundIntelligenceDelivery?:boolean } = {}) {
+    this.backgroundIntelligenceDelivery=options.backgroundIntelligenceDelivery??false;
     this.now = options.now ?? (() => new Date());
     this.policy = { ...DEFAULT_ALERT_POLICY, ...options.policy, ...(options.retentionDays === undefined ? {} : { retentionDays: options.retentionDays }) };
     if (!Number.isSafeInteger(this.policy.retentionDays) || this.policy.retentionDays <= 0) throw new Error('ALERT_RETENTION_INVALID');
@@ -127,8 +132,43 @@ export class AlertManager {
     });
     if (!inserted) return false;
     this.metrics?.recordNotification('pending');
-    if (input.priority === 'immediate' && this.dispatcher) await this.dispatcher.dispatch(eventId, input.text);
+    if (input.priority === 'immediate' && this.dispatcher) {
+      if (this.backgroundIntelligenceDelivery) this.queueIntelligence(eventId, input.text);
+      else await this.dispatcher.dispatch(eventId, input.text);
+    }
     return true;
+  }
+
+  private queueIntelligence(eventId: string, text: string): void {
+    if (this.backgroundIntelligenceStopped) return;
+    if (this.backgroundIntelligence.size < 64) this.backgroundIntelligence.set(eventId, text);
+    if (this.backgroundIntelligenceFlight) return;
+    const operation = this.drainIntelligence();
+    this.backgroundIntelligenceFlight = operation;
+    void operation.finally(() => {
+      if (this.backgroundIntelligenceFlight !== operation) return;
+      this.backgroundIntelligenceFlight = undefined;
+      const next = this.backgroundIntelligence.entries().next().value;
+      if (next && !this.backgroundIntelligenceStopped) this.queueIntelligence(next[0], next[1]);
+    }).catch(() => undefined);
+  }
+
+  private async drainIntelligence(): Promise<void> {
+    if (!this.dispatcher) return;
+    while (!this.backgroundIntelligenceStopped && this.backgroundIntelligence.size) {
+      const entry = this.backgroundIntelligence.entries().next().value;
+      if (!entry) break;
+      this.backgroundIntelligence.delete(entry[0]);
+      try { await this.dispatcher.dispatch(entry[0], entry[1]); }
+      catch { /* The durable outbox owns retry; discovery never waits for network delivery. */ }
+    }
+  }
+
+  /** Drain the in-flight writer before closing SQLite; queued work remains durable for restart. */
+  public async stopBackgroundIntelligence(): Promise<void> {
+    this.backgroundIntelligenceStopped = true;
+    this.backgroundIntelligence.clear();
+    await this.backgroundIntelligenceFlight;
   }
 
   /**

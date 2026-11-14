@@ -9,6 +9,21 @@ function insertEvent(db: SqliteDatabase, id: string, at = NOW): void {
 }
 
 describe('canonical persistence and incremental event projection', () => {
+  it('captures dashboard state inside one SQLite read transaction without persisting changes', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const read = value.store.snapshot.bind(value.store);
+      const capture = vi.spyOn(value.store, 'snapshot').mockImplementation(() => {
+        expect(value.db.inTransaction).toBe(true);
+        return read();
+      });
+      const before = value.db.prepare('SELECT count(*) AS count FROM audit_event').get();
+      expect(value.store.readModelSnapshot().events).toBeDefined();
+      expect(capture).toHaveBeenCalledOnce();
+      expect(value.db.inTransaction).toBe(false);
+      expect(value.db.prepare('SELECT count(*) AS count FROM audit_event').get()).toEqual(before);
+    } finally { vi.restoreAllMocks(); await close(value); }
+  });
   it('does not revisit campaign graphs or write unchanged records on an unrelated transaction', async () => {
     const value = await fixture(ETHEREUM);
     try {

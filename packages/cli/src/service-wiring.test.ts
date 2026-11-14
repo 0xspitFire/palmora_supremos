@@ -106,7 +106,8 @@ describe('RPC failover wiring (owner instruction 2026-10-23)', () => {
   const readiness = read('turnkey-readiness-service.ts');
   it('every service read path supports endpoint failover', () => {
     expect(service).toContain('rpcUrls: (chainId) => [watcherRpcSecretName(chainId), ...chainRpcSecretNames(');
-    expect(service).toContain('EngineIntelligencePort.fromRpcUrls(rpcUrls)');
+    expect(service).toMatch(/EngineIntelligencePort\.fromRpcUrls\(rpcUrls\s*[,)]/);
+    expect(service).toContain('discovery: () => discoveryLiveness.snapshot(),');
     expect(watch).toContain('for (const reader of endpointReaders.get(target.chainId) ?? [])');
     expect(watch).toContain('try { return await reader(target); }');
     expect(readiness).toContain('transport: failoverTransport(chain.rpcEndpoints)');

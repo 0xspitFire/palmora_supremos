@@ -133,3 +133,8 @@ describe('secondary-chain scan scheduling', () => {
     expect(logs.info.mock.calls.some(([entry]) => entry.caughtUp === true)).toBe(true);
   });
 });
+
+it('watchdog reports a stuck scan without clearing its latch or starting overlapping retries',async()=>{
+ vi.useFakeTimers();const {DiscoveryLiveness}=await import('./discovery-liveness.js');const liveness=new DiscoveryLiveness(Date.now,5*60000);const logs=logger();const tick=vi.fn(()=>new Promise<DiscoveryTickResult>(()=>undefined));
+ const scanner=startChainDiscovery({chainId:4663,intervalMs:1000,tick,logger:logs,liveness});await vi.advanceTimersByTimeAsync(6*60000);expect(tick).toHaveBeenCalledOnce();expect(liveness.snapshot()).toMatchObject({status:'degraded',chains:[{chainId:4663,state:'stalled'}]});expect(logs.warn).toHaveBeenCalledWith(expect.objectContaining({event:'replication_discovery_stalled',chainId:4663}),expect.any(String));scanner.stop();
+});

@@ -1,3 +1,4 @@
+import type { DiscoveryHealthSnapshot } from './discovery-liveness.js';
 import {prepareReviewedProtocolCampaign,type ReviewedProtocolPreparationPlan} from './reviewed-protocol-prepare.js';
 import type { PaidFundingService } from './paid-funding-service.js';
 import { randomBytes } from 'node:crypto';
@@ -59,6 +60,7 @@ const minutes = (iso: string): string => iso.slice(0, 16).replace('T', ' ');
 export interface TelegramActionDeps {
   reviewedProtocolSimulation?(campaign:import('@mint-bot/backend').Campaign,wallets:readonly string[]):Promise<{recorded:string[];skipped:Array<{wallet:string;why:string}>}>;
   reviewedProtocolPlan?(input:{chainId:1|8453|4663;contract:string;quantity?:number;wallets:readonly string[]}):Promise<ReviewedProtocolPreparationPlan|undefined>;
+  discovery?:()=>DiscoveryHealthSnapshot;
   mode: 'dry-run' | 'host';
   /** Who signs: from the service's custody setting, exactly as the host commands read it. */
   custody: 'local' | 'turnkey';
@@ -307,6 +309,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
         `Kill switch: ${killUnknown ? 'unknown (live work blocked)' : killed ? 'ON (nothing can be spent)' : 'off'}`,
         `Service: ${ready ? 'Ready' : 'Blocked'}${reasons.length > 0 ? ` — ${reasons.join(', ')}` : ''}`,
         `Deployment: ${state.runtime.startupState}`,
+        ...(deps.discovery?[`Discovery: ${deps.discovery().status} (${deps.discovery().chains.map(row=>`${chainName(row.chainId)} ${row.state}`).join(', ')||'no scanner configured'})`]:[]),
         ...(health.liveChecksDeferred ? ['Mint checks: refreshed during preparation and arming'] : health.custodyChecksUnassessed ? ['Mint custody: authorization checked separately before arming and execution'] : []),
         ...(killed && stopReason ? [`Safety stop: ${stopReason}`] : []),
         `Live requests waiting: ${pending}`,
@@ -314,7 +317,7 @@ export function createTelegramActions(deps: TelegramActionDeps): TelegramActions
     },
     async health() {
       const health = await reportedHealth();
-      return sections([`Health: ${health.ready ? 'ready' : 'not ready'} (${health.state})`], health.reasons.length > 0 ? [`Blocking: ${health.reasons.join(', ')}`] : health.liveChecksDeferred ? ['Mint checks run during preparation and arming; idle health does not authorize a mint.'] : health.custodyChecksUnassessed ? ['This service report does not verify mint custody authorization. Arming and execution still require current trusted checks.'] : []);
+      return sections([`Health: ${health.ready ? 'ready' : 'not ready'} (${health.state})`,...(deps.discovery?[`Discovery: ${deps.discovery().status} (${deps.discovery().chains.map(row=>`${chainName(row.chainId)} ${row.state}${row.operation?` at ${row.operation}`:''}`).join(', ')||'no scanner configured'}). Scan health is separate from mint readiness.`]:[])], health.reasons.length > 0 ? [`Blocking: ${health.reasons.join(', ')}`] : health.liveChecksDeferred ? ['Mint checks run during preparation and arming; idle health does not authorize a mint.'] : health.custodyChecksUnassessed ? ['This service report does not verify mint custody authorization. Arming and execution still require current trusted checks.'] : []);
     },
     async rpc() {
       const lines: string[] = [];

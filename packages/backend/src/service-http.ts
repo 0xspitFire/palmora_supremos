@@ -10,6 +10,8 @@ export interface ServiceHttpOptions {
   store: BackendStore;
   orchestrator: OrchestratorService;
   metrics: MetricsRegistry;
+  /** Discovery liveness is advisory and cannot authorize a mint. */
+  discovery?:()=>{status:string;chains:readonly unknown[]};
   /** Read-model v1 GET adapter (T-004, P2-07). */
   readModel?: { handle(request: { method: string; path: string }): { status: number; body: unknown } };
   /** Server-rendered, script-free dashboard page. */
@@ -70,16 +72,16 @@ export class ServiceHttpServer {
       return;
     }
     if (path === '/healthz') {
-      this.writeJson(response, 200, { status: this.options.orchestrator.status().state === 'stopped' ? 'failed' : 'ok', service: 'mint-bot-orchestrator', state: this.options.orchestrator.status().state });
+      this.writeJson(response, 200, { status: this.options.orchestrator.status().state === 'stopped' ? 'failed' : 'ok', service: 'mint-bot-orchestrator', state: this.options.orchestrator.status().state,...(this.options.discovery?{discovery:this.options.discovery()}: {}) });
       return;
     }
     if (path === '/readyz' || path === '/health') {
       const health = new HealthService(this.options.store).check();
-      this.writeJson(response, health.ready ? 200 : 503, { status: health.ready ? 'ok' : 'blocked', state: health.state, blockingReasons: health.blockingReasons, checkedAt: health.checkedAt });
+      this.writeJson(response, health.ready ? 200 : 503, { status: health.ready ? 'ok' : 'blocked', state: health.state, blockingReasons: health.blockingReasons, checkedAt: health.checkedAt,...(this.options.discovery?{discovery:this.options.discovery()}: {}) });
       return;
     }
     if (path === '/status') {
-      this.writeJson(response, 200, { status: 'ok', orchestrator: this.options.orchestrator.status() });
+      this.writeJson(response, 200, { status: 'ok', orchestrator: this.options.orchestrator.status(),...(this.options.discovery?{discovery:this.options.discovery()}: {}) });
       return;
     }
     if (path === '/metrics') {

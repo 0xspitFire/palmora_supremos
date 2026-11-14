@@ -61,4 +61,10 @@ describe('read failover across RPC providers', () => {
     expect(splitBaseEndpoints(['a', 'b', 'c'])).toEqual({ primary: ['a', 'c'], independent: 'b' });
     expect(splitBaseEndpoints(['a'])).toEqual({ primary: ['a'], independent: undefined });
   });
+  it('aborts a scoped read before the ordinary HTTP timeout and does not contact a fallback after cancellation',async()=>{
+    const controller=new AbortController();const before=hits.good??0;const start=Date.now();
+    const pending=createPublicClient({transport:failoverTransport([hanging,good],{timeoutMs:15000,signal:controller.signal})}).getBlockNumber({cacheTime:0});
+    const timer=setTimeout(()=>controller.abort(),30);try{await expect(pending).rejects.toThrow();expect(Date.now()-start).toBeLessThan(2000);expect(hits.good??0).toBe(before);}finally{clearTimeout(timer);}
+  });
+
 });

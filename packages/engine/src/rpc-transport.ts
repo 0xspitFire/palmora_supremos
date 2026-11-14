@@ -8,10 +8,10 @@ import { fallback, http, type Transport } from 'viem';
  */
 export const READ_TIMEOUT_MS = 15_000;
 
-export function failoverTransport(endpoints: readonly (string | undefined)[], options: { timeoutMs?: number } = {}): Transport {
+export function failoverTransport(endpoints: readonly (string | undefined)[], options: { timeoutMs?: number; signal?:AbortSignal } = {}): Transport {
   const unique = [...new Set(endpoints.filter((endpoint): endpoint is string => typeof endpoint === 'string' && endpoint.length > 0))];
   if (unique.length === 0) throw new Error('RPC_ENDPOINT_UNAVAILABLE');
-  const transports = unique.map((url) => http(url, { timeout: options.timeoutMs ?? READ_TIMEOUT_MS, retryCount: 0 }));
+  const transports = unique.map((url) => http(url, { timeout: options.timeoutMs ?? READ_TIMEOUT_MS, retryCount: 0, ...(options.signal?{fetchOptions:{signal:options.signal}}:{}) }));
   return transports.length === 1 ? transports[0]! : fallback(transports, { rank: false, retryCount: 0 });
 }
 

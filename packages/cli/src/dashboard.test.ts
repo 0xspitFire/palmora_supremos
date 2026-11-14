@@ -111,3 +111,17 @@ describe('alert deep links point at real dashboard cards (T-029)', () => {
     }
   });
 });
+
+it('shows stalled discovery separately while preserving both Ready and killed mint guards on HTTP and the read model',async()=>{
+ const {DiscoveryLiveness}=await import('./discovery-liveness.js');let clock=0;const discovery=new DiscoveryLiveness(()=>clock,1000);discovery.begin(1);clock=1100;
+ class ReadyTestStore extends DurableStore {override capabilities(){return {durable:true,atomicAcrossProcesses:true};}}
+ const store=new ReadyTestStore();await store.open();await store.transaction(state=>{state.runtime={startupState:'Ready',blockingReasons:[],dependencies:{engine:true,chain:true,backup:true,notifications:true},reconciliationCompletedAt:new Date().toISOString()};});
+ const dashboard=createDashboard(store,{discovery:()=>discovery.snapshot()});const orchestrator={status:()=>({running:true,state:'Ready'})} as unknown as OrchestratorService;
+ const server=new ServiceHttpServer({host:'127.0.0.1',port:0,store,orchestrator,metrics:new MetricsRegistry(),discovery:()=>discovery.snapshot(),readModel:dashboard.readModel,dashboard:url=>dashboard.render(url)});const {port}=await server.start();
+ try{
+  const response=await fetch(`http://127.0.0.1:${port}/readyz`);const result=await response.json();expect(response.status,JSON.stringify(result)).toBe(200);expect(result).toMatchObject({state:'Ready',discovery:{status:'degraded',chains:[{chainId:1,state:'stalled'}]}});
+  const health=await fetch(`http://127.0.0.1:${port}/api/v1/read-model/health`);expect(await health.json()).toMatchObject({data:{discovery:{status:'degraded'}}});
+  expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toContain('Scan liveness is separate from mint readiness');
+  await store.transaction(state=>{state.killed=true;});expect((await fetch(`http://127.0.0.1:${port}/readyz`)).status).toBe(503);
+ }finally{await server.stop();}
+});

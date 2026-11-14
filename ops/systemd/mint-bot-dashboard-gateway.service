@@ -1,0 +1,39 @@
+[Unit]
+Description=MintBot authenticated read-only loopback dashboard gateway
+After=network.target mint-bot.service
+StartLimitIntervalSec=5min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mintdashboard
+Group=mintdashboard
+WorkingDirectory=/opt/mint-bot/current
+Environment=READ_MODEL_GATEWAY_TOKEN_FILE=/var/lib/mint-bot-dashboard/gateway-token
+ExecStart=/usr/bin/node /opt/mint-bot/current/packages/dashboard-vercel/src/gateway.js
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/mint-bot-dashboard
+InaccessiblePaths=-/etc/mint-bot -/var/lib/mint-bot -/var/lib/mintbot-wallet-admin -/var/lib/mintbot-funding
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+LockPersonality=true
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

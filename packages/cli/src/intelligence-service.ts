@@ -1,3 +1,5 @@
+import { boundedIntelligencePort } from './bounded-intelligence-port.js';
+import { DiscoveryLiveness } from './discovery-liveness.js';
 import { createHash } from 'node:crypto';
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
 import { ScanTracker } from './scan-tracker.js';
@@ -6,6 +8,8 @@ import type { MonitorPing } from './monitor-ping.js';
 import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, buildSystemCard, pauseCard, scanSkippedCard, plainSystemText, type AdvancedIntelligencePort, type HistoricalQualityPort, type AdaptiveModelPort, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
+  liveness?:DiscoveryLiveness;
+  readTimeoutMs?:number;
   advanced?: AdvancedIntelligencePort;
   history?: HistoricalQualityPort;
   adaptive?: AdaptiveModelPort;
@@ -45,23 +49,41 @@ export interface IntelligenceServiceOptions {
  * Runs in dry-run mode because it only reads chain data and writes read-model events;
  * it never admits, signs, or sends anything.
  */
-export function startIntelligence(options: IntelligenceServiceOptions): { stop(): void; runOnce(): Promise<void> } {
+export function startIntelligence(options: IntelligenceServiceOptions): { stop(): Promise<void>; runOnce(): Promise<void> } {
+  let stopped=false;const running=new Set<Promise<void>>();
+  const log = (level: 'info' | 'warn', fields: Record<string, unknown>, message: string): void => {
+    try { options.logger?.[level](fields, message); } catch { /* Logging cannot strand a scan or its watchdog. */ }
+  };
+  const background = (work: () => Promise<void>): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    const operation = Promise.resolve().then(() => stopped ? undefined : work()).catch(() => {
+      log('warn', { event: 'intelligence_background_failed' }, 'background intelligence task unavailable');
+    });
+    running.add(operation);
+    void operation.finally(() => running.delete(operation)).catch(() => undefined);
+    return operation;
+  };
+  const liveness=options.liveness??new DiscoveryLiveness(()=> (options.now??(()=>new Date()))().getTime());liveness.start(options.port.chainId);
+  const reads=boundedIntelligencePort(options.port,{timeoutMs:options.readTimeoutMs,report:state=>{liveness.read(state);if(state.state==='timed_out'||state.state==='capacity')log('warn',{event:'intelligence_read_deadline',...state},'bounded intelligence read unavailable');}});
+  const port=reads.port;
   // One reader for collection names, so a contract's name is read from the chain once for both services.
-  const names = new CollectionNames(options.port);
-  const discovery = new DiscoveryService(options.store, options.repo, options.port, { budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts, names, advanced: options.advanced, history: options.history, adaptive: options.adaptive, ...(options.discoveryMaxLagBlocks === undefined ? {} : { maxLagBlocks: BigInt(options.discoveryMaxLagBlocks) }) });
-  const readiness = new ReadinessSweep(options.store, options.port, options.walletProvider ?? (async () => options.wallets), { limits: D033_READINESS_LIMITS, alerts: options.alerts, names,  now: options.now });
+  const names = new CollectionNames(port);
+  const discovery = new DiscoveryService(options.store, options.repo, port, { isCancelled: () => stopped, budgetPerNftWei: D033_READINESS_LIMITS.paidMaxPricePerNftWei, alerts: options.alerts, names, advanced: options.advanced, history: options.history, adaptive: options.adaptive, ...(options.discoveryMaxLagBlocks === undefined ? {} : { maxLagBlocks: BigInt(options.discoveryMaxLagBlocks) }) });
+  const readiness = new ReadinessSweep(options.store, port, options.walletProvider ?? (async () => options.wallets), { limits: D033_READINESS_LIMITS, alerts: options.alerts, names,  now: options.now });
   const busy = { discovery: false, readiness: false, digest: false, retry: false, health: false };
-  const guarded = (name: keyof typeof busy, work: () => Promise<unknown>) => async (): Promise<void> => {
-    if (busy[name]) return;
+  const guarded = (name: keyof typeof busy, work: () => Promise<unknown>) => (): Promise<void> => {
+    if (busy[name]||stopped) return Promise.resolve();
+    const operation=(async()=>{
     busy[name] = true;
     const startedMs = Date.now();
     try {
       const result = await work();
       // durationMs shows which tick is slow (a scan that takes minutes points at the node provider or a starved process).
-      options.logger?.info({ event: `intelligence_${name}`, durationMs: Date.now() - startedMs, result: summarize(result) }, `intelligence ${name} tick`);
+      log('info', { event: `intelligence_${name}`, durationMs: Date.now() - startedMs, result: summarize(result) }, `intelligence ${name} tick`);
     } catch (error) {
-      options.logger?.warn({ event: `intelligence_${name}_failed`, durationMs: Date.now() - startedMs, error }, `intelligence ${name} failed`);
+      log('warn', { event: `intelligence_${name}_failed`, durationMs: Date.now() - startedMs, error }, `intelligence ${name} failed`);
     } finally { busy[name] = false; }
+    })();running.add(operation);void operation.finally(()=>running.delete(operation)).catch(()=>undefined);return operation;
   };
   const now = options.now ?? (() => new Date());
   const startedAt = now();
@@ -209,15 +231,17 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   };
   const runDiscovery = guarded('discovery', async () => {
     try {
+      liveness.begin(port.chainId);
       const result = await discovery.tick();
-      tracker.record(result, now(), options.repo.cursor(1, 'seadrop-v1')?.toString());
+      liveness.complete(port.chainId,result);
+      tracker.record(result, now(), options.repo.cursor(port.chainId, 'seadrop-v1')?.toString());
       if (result.skipped && validRange(result.skipped)) {
         const key = skipKey(options.port.chainId, result.skipped.fromBlock, result.skipped.toBlock);
         if (!coveredSkips.has(key)) pendingSkips.set(key, { ...result.skipped, at: now().toISOString(), chainId: options.port.chainId });
       }
       await announcePendingSkips();
       return result;
-    } catch (error) { tracker.recordFailure(now()); await announcePendingSkips(); throw error; }
+    } catch (error) { liveness.fail(port.chainId);tracker.recordFailure(now()); await announcePendingSkips(); throw error; }
   });
   const monitor = new HealthMonitor(options.alerts, { now, onError: (error) => options.logger?.warn({ event: 'health_message_failed', error }, 'health message failed') });
   const RETRY_WINDOW_MS = 6 * 60 * 60_000;
@@ -247,11 +271,13 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   // Separate guard: a failing digest never skips retrying undelivered messages (T-011).
   const runRetry = guarded('retry', () => options.alerts.retryUndelivered());
   const sendStatus = async (dedupe: string, system: SystemCard): Promise<void> => {
+    if (stopped) return;
     try { await options.alerts.intelligence({ kind: 'status', dedupe, text: plainSystemText(system), priority: 'immediate', system }); }
     catch (error) { options.logger?.warn({ event: 'status_message_failed', error }, 'status message failed'); }
   };
   // Daily check-in: once per UTC date, from 09:00 UTC, restart-safe through durable alert deduplication.
   const runCheckIn = async (): Promise<void> => {
+    if (stopped) return;
     const current = now();
     if (current.getUTCHours() < 9 || current.getTime() - startedAt.getTime() < 60 * 60_000) return;
     const lastScanAt = tracker.lastOkAt ?? null;
@@ -273,42 +299,55 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
     if (!heartbeatReady) {
       heartbeatReady = true;
       const saved = await readHeartbeat(path);
+      if (stopped) return;
       options.logger?.info({ event: 'heartbeat_loaded', savedAt: saved ? saved.toISOString() : null, gapMinutes: saved ? Math.round((current.getTime() - saved.getTime()) / 60_000) : null }, 'heartbeat loaded at start');
       if (saved) pauses.beat(saved);
     }
     const span = pauses.beat(current);
     try { await writeHeartbeat(path, current); } catch (error) { options.logger?.warn({ event: 'heartbeat_write_failed', error }, 'heartbeat write failed'); }
+    if (stopped) return;
     if (!span) return;
     options.logger?.warn({ event: 'bot_resumed_after_pause', from: span.from.toISOString(), to: span.to.toISOString(), minutes: Math.round(span.ms / 60_000) }, 'bot resumed after a pause');
-    const block = options.repo.cursor(1, 'seadrop-v1')?.toString();
+    const block = options.repo.cursor(port.chainId, 'seadrop-v1')?.toString();
     const system = pauseCard({ from: span.from, to: span.to, ...(block ? { resumedBlock: block } : {}) });
     try { await options.alerts.intelligence({ kind: 'health', dedupe: `pause:${span.from.toISOString()}`, text: plainSystemText(system), priority: 'immediate', system, at: span.to.toISOString() }); }
     catch (error) { options.logger?.warn({ event: 'pause_message_failed', error }, 'pause message failed'); }
   };
-  void runHeartbeat();
-  void announcePendingSkips();
+  void background(runHeartbeat);
+  void background(announcePendingSkips);
   // Outside monitor: 'ok' only while a chain scan worked within the last 15 minutes (start-up gets the same grace).
   let monitorWasOk: boolean | undefined;
+  let monitorBusy = false;
+  const discoveryNotices = new Map<number, number>();
   const runMonitor = async (): Promise<void> => {
-    if (!options.monitorPing) return;
-    const current = now();
-    const healthy = current.getTime() - (tracker.lastOkAt ?? startedAt).getTime() < 15 * 60_000;
+    if (stopped || monitorBusy) return;
+    monitorBusy = true;
     try {
-      await options.monitorPing(healthy ? 'ok' : 'fail');
-      if (monitorWasOk !== healthy) options.logger?.info({ event: 'monitor_ping_state', status: healthy ? 'ok' : 'fail' }, 'monitor ping state changed');
+      const current = now();
+      const scanHealth = liveness.snapshot();
+      for (const chain of scanHealth.chains) {
+        if (stopped) return;
+        if (chain.state !== 'stalled' || current.getTime() - (discoveryNotices.get(chain.chainId) ?? -Infinity) < 15 * 60_000) continue;
+        discoveryNotices.set(chain.chainId, current.getTime());
+        log('warn', { event: 'discovery_stalled', chainId: chain.chainId, operation: chain.operation ?? null, lastSuccessAt: chain.lastSuccessAt ?? null }, 'discovery has stopped making progress');
+        await options.alerts.intelligence({ kind: 'health', priority: 'immediate', dedupe: `discovery-stalled:${chain.chainId}:${Math.floor(current.getTime() / (15 * 60_000))}`, text: `Chain ${chain.chainId} discovery is stalled. Mint readiness does not certify fresh discovery coverage. Inspect discovery read deadlines and RPC health.` });
+      }
+      const healthy = scanHealth.status !== 'degraded' && current.getTime() - (tracker.lastOkAt ?? startedAt).getTime() < 15 * 60_000;
+      if (!stopped) await options.monitorPing?.(healthy ? 'ok' : 'fail');
+      if (monitorWasOk !== healthy) log('info', { event: 'monitor_ping_state', status: healthy ? 'ok' : 'fail' }, 'monitor ping state changed');
       monitorWasOk = healthy;
     } catch (error) {
-      options.logger?.warn({ event: 'monitor_ping_failed', reason: error instanceof Error ? error.message : 'unknown' }, 'monitor ping failed');
-    }
+      log('warn', { event: 'monitor_ping_failed', reason: error instanceof Error ? error.message : 'unknown' }, 'monitor ping failed');
+    } finally { monitorBusy = false; }
   };
-  void runMonitor();
-  void sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, startedAt, ...(options.startNumber !== undefined ? { startNumber: options.startNumber } : {}), ...(options.version ? { version: options.version } : {}) }));
-  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void runCheckIn(), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void runHeartbeat(), options.heartbeatIntervalMs ?? 30_000), setInterval(() => void runMonitor(), options.monitorIntervalMs ?? 60_000), setInterval(() => void announcePendingSkips(), SKIP_NOTICE_INTERVAL_MS)];
+  void background(runMonitor);
+  void background(() => sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, startedAt, ...(options.startNumber !== undefined ? { startNumber: options.startNumber } : {}), ...(options.version ? { version: options.version } : {}) })));
+  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void background(runCheckIn), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void background(runHeartbeat), options.heartbeatIntervalMs ?? 30_000), setInterval(() => void background(runMonitor), options.monitorIntervalMs ?? 60_000), setInterval(() => void background(announcePendingSkips), SKIP_NOTICE_INTERVAL_MS)];
   for (const timer of timers) timer.unref();
   void runDiscovery().then(runReadiness);
   return {
-    stop: () => { for (const timer of timers) clearInterval(timer); },
-    runOnce: async () => { await runDiscovery(); await runReadiness(); await runDigest(); await runRetry(); await runHealth(); await runCheckIn(); },
+    stop: async () => { stopped=true;for (const timer of timers) clearInterval(timer);reads.stop();await Promise.allSettled([...running]); },
+    runOnce: async () => { await runDiscovery(); await runReadiness(); await runDigest(); await runRetry(); await runHealth(); await background(runCheckIn); },
   };
 }
 

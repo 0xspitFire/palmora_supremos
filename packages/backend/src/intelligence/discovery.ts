@@ -22,6 +22,12 @@ export interface DiscoveryOptions {
   initialLookbackBlocks?: bigint;
   /** Scans per tick while catching up (default 8). */
   maxScansPerTick?: number;
+  /** Optional metadata must not strand log ingestion; deferred contracts remain unknown. */
+  maxEnrichmentsPerSlice?:number;
+  enrichmentBudgetMs?:number;
+  /** Cooperative budget: finish durable writes for a verified slice, then yield. */
+  tickBudgetMs?: number;
+  isCancelled?: () => boolean;
   /**
    * If the scan is further behind the chain head than this many blocks (default 1200, about 4 hours), it jumps forward to the
    * look-back window instead of reading old blocks one slice at a time. An alert about a mint hours old is no use, and a slow host
@@ -72,6 +78,8 @@ interface Tracked {
   drop: DropSnapshot | null;
   dropReadAt: number | null;
   hasCode: boolean | null;
+  verifiedSeaDropMint:boolean;
+  observedStageIndex:bigint|null;
   lastEmit: { at: number; score: number; band: string } | null;
 }
 
@@ -90,6 +98,9 @@ const MAX_SEEN_LOGS = 100_000;
 const MAX_OPENING_ALERTS_PER_DAY = 20;
 
 export class DiscoveryService {
+  private tickDeadline = Infinity;
+  private nameReadsRemaining=3;
+  private async collectionName(contract:string):Promise<string|null>{const cached=this.names.cached(contract);if(cached!==undefined)return cached;if(this.nameReadsRemaining<=0||Date.now()>=this.tickDeadline||this.options.isCancelled?.())return null;this.nameReadsRemaining--;return this.names.get(contract);}
   /** Generic, two-reader verified NFT facts are visible but have no supported mint strategy. */
   public async observeVerifiedNFT(observation: import('./contract-monitor.js').ContractObservation): Promise<void> {
     const { assertVerifiedContractObservation } = await import('./contract-monitor.js');
@@ -137,9 +148,14 @@ export class DiscoveryService {
   }
 
   public async tick(): Promise<DiscoveryTickResult> {
+    const budget = this.options.tickBudgetMs ?? 30_000;
+    if (!Number.isSafeInteger(budget) || budget < 1) throw new Error('DISCOVERY_TICK_BUDGET_INVALID');
+    this.tickDeadline = Date.now() + budget;
+    this.nameReadsRemaining=3;
     const result: DiscoveryTickResult = { status: 'idle', mintsObserved: 0, opportunitiesWritten: 0, calendarWritten: 0, alertsRaised: 0 };
     if (!this.restored) { this.restore(); this.restored = true; }
     const head = await this.port.safeHead();
+    if (this.options.isCancelled?.()) return { ...result, status: 'unavailable', reason: 'DISCOVERY_STOPPED' };
     if (head === null) return { ...result, status: 'unavailable', reason: 'HEAD_UNAVAILABLE' };
     result.headBlock = head.toString();
     result.caughtUp = false;
@@ -166,12 +182,15 @@ export class DiscoveryService {
     }
     const touched = new Set<string>();
     for (let scans = 0; scans < (this.options.maxScansPerTick ?? 8) && from <= head; scans += 1) {
+      if (Date.now() >= this.tickDeadline) return { ...result, status: result.toBlock === undefined ? 'unavailable' : 'ok', reason: 'TICK_BUDGET_EXCEEDED', caughtUp: false };
       const outcome = await this.port.scan(from, head, watched);
+      if (this.options.isCancelled?.()) return { ...result, status: 'unavailable', reason: 'DISCOVERY_STOPPED' };
       if (!outcome.ok) return { ...result, status: 'unavailable', reason: outcome.reason };
       const at = this.now().getTime();
       for (const mint of outcome.scan.mints) {
         if (!this.firstSighting('mint', mint)) continue;
         const item = this.track(mint.nftContract, at);
+        item.verifiedSeaDropMint=true;item.observedStageIndex=mint.dropStageIndex??null;if(item.observedStageIndex!==null&&item.observedStageIndex!==0n)item.drop=null;
         const quantity = Number(mint.quantity > 10_000n ? 10_000n : mint.quantity);
         item.mints.push({ at, quantity });
         item.totalMinted += quantity;
@@ -207,10 +226,12 @@ export class DiscoveryService {
       result.toBlock = outcome.scan.toBlock.toString();
       from = outcome.scan.toBlock + 1n;
       await this.enrich(touched);
+      if (this.options.isCancelled?.()) return { ...result, status: 'unavailable', reason: 'DISCOVERY_STOPPED' };
       // Refresh-only rewrites happen only when this scan reached the settled head, so a lagging scan never re-stamps freshness.
       const current = outcome.scan.toBlock >= head;
       result.opportunitiesWritten += await this.emitOpportunities(result, current, outcome.scan.toBlock, labels);
       result.calendarWritten += await this.emitCalendar(result, current, outcome.scan.toBlock);
+      if (this.options.isCancelled?.()) return { ...result, status: 'unavailable', reason: 'DISCOVERY_STOPPED' };
       // The cursor moves only after this range's events are durable, so a crash replays rather than skips; replayed logs are not recounted.
       this.repo.advanceCursor(chainId, SOURCE, outcome.scan.toBlock);
     }
@@ -277,16 +298,16 @@ export class DiscoveryService {
           if (Number.isFinite(observed) && observed <= at && observed <= lastActivity && now - observed <= HOUR && typeof quantity === 'number' && Number.isSafeInteger(quantity) && quantity > 0) mints.push({ at: observed, quantity });
         }
       }
-      this.tracked.set(contract, { contract, firstSeenAt: firstSeen, lastActivityAt: lastActivity, mints, totalMinted: Number(event.data.totalMinted ?? 0), watched, received: new Map(), priceWei: typeof event.data.priceWei === 'string' && /^\d+$/.test(event.data.priceWei) ? BigInt(event.data.priceWei) : null, drop: null, dropReadAt: null, hasCode: typeof event.data.hasCode === 'boolean' ? event.data.hasCode : null, lastEmit: { at, score: Number(event.data.score ?? 0), band: String(event.data.band ?? 'log') } });
+      this.tracked.set(contract, { contract, firstSeenAt: firstSeen, lastActivityAt: lastActivity, mints, totalMinted: Number(event.data.totalMinted ?? 0), watched, received: new Map(), priceWei: typeof event.data.priceWei === 'string' && /^\d+$/.test(event.data.priceWei) ? BigInt(event.data.priceWei) : null, drop: null, dropReadAt: null, verifiedSeaDropMint:event.data.verifiedSeaDropMint===true, observedStageIndex:typeof event.data.observedStageIndex==='string'&&/^\d+$/.test(event.data.observedStageIndex)?BigInt(event.data.observedStageIndex):null, hasCode: typeof event.data.hasCode === 'boolean' ? event.data.hasCode : null, lastEmit: { at, score: Number(event.data.score ?? 0), band: String(event.data.band ?? 'log') } });
     }
-    for (const [contract, item] of this.tracked) item.drop = this.calendar.get(contract)?.drop ?? null;
+    for (const [contract, item] of this.tracked) item.drop = item.observedStageIndex!==null&&item.observedStageIndex!==0n?null:this.calendar.get(contract)?.drop ?? null;
   }
 
   private track(contractAddress: string, at: number): Tracked {
     const contract = contractAddress.toLowerCase();
     let item = this.tracked.get(contract);
     if (!item) {
-      item = { contract, firstSeenAt: at, lastActivityAt: at, mints: [], totalMinted: 0, watched: new Map(), received: new Map(), priceWei: null, drop: this.calendar.get(contract)?.drop ?? null, dropReadAt: null, hasCode: null, lastEmit: null };
+      item = { contract, firstSeenAt: at, lastActivityAt: at, mints: [], totalMinted: 0, watched: new Map(), received: new Map(), priceWei: null, drop: this.calendar.get(contract)?.drop ?? null, dropReadAt: null, hasCode: null, verifiedSeaDropMint:false, observedStageIndex:null, lastEmit: null };
       this.tracked.set(contract, item);
       if (this.tracked.size > MAX_TRACKED) {
         const quietest = [...this.tracked.values()].filter((candidate) => candidate !== item).sort((left, right) => left.lastActivityAt - right.lastActivityAt)[0];
@@ -298,10 +319,17 @@ export class DiscoveryService {
 
   private async enrich(contracts: ReadonlySet<string>): Promise<void> {
     const now = this.now().getTime();
-    for (const contract of contracts) {
+    const started=Date.now();let count=0;
+    const ordered=[...contracts].sort((a,b)=>(this.tracked.get(b)?.watched.size??0)-(this.tracked.get(a)?.watched.size??0));
+    for (const contract of ordered) {
+      if(count>=(this.options.maxEnrichmentsPerSlice??4)||Date.now()-started>=(this.options.enrichmentBudgetMs??10000)||Date.now()>=this.tickDeadline||this.options.isCancelled?.())break;
       const item = this.tracked.get(contract);
       if (!item) continue;
+      if(item.hasCode!==null&&item.dropReadAt!==null&&now-item.dropReadAt<=DISCOVERY_FRESHNESS_MS)continue;
+      count++;
       if (item.hasCode === null) item.hasCode = await this.port.hasCode(contract);
+      if(item.observedStageIndex!==null&&item.observedStageIndex!==0n){item.dropReadAt=now;continue;}
+      if(Date.now()-started>=(this.options.enrichmentBudgetMs??10000)||Date.now()>=this.tickDeadline||this.options.isCancelled?.())break;
       if (item.dropReadAt === null || now - item.dropReadAt > DISCOVERY_FRESHNESS_MS) {
         const raw = await this.port.readDrop(contract);
         const drop = raw ? sanitizeDrop(raw) : null;
@@ -323,7 +351,7 @@ export class DiscoveryService {
     try { this.options.advanced?.request?.(context); advanced = this.options.advanced?.snapshot(context); } catch { /* unavailable enrichment is not zero and cannot stop scanning */ }
     try { history = this.options.history?.snapshot(context); } catch { /* missing history stays unknown */ }
     try { adaptiveModel = this.options.adaptive?.active(this.port.chainId, context.now); } catch { /* static model remains the fallback */ }
-    return scoreOpportunity({ chainId: this.port.chainId, contract: item.contract, advanced, history, adaptiveModel, watchedMinters, watchingConfigured, priceWei: item.priceWei, budgetPerNftWei: this.options.budgetPerNftWei, knownSeaDropPattern: item.drop !== null, hasCode: item.hasCode, mintsLastHour, discoveredAt: new Date(item.firstSeenAt), now: new Date(now) });
+    return scoreOpportunity({ chainId: this.port.chainId, contract: item.contract, advanced, history, adaptiveModel, watchedMinters, watchingConfigured, priceWei: item.priceWei, budgetPerNftWei: this.options.budgetPerNftWei, knownSeaDropPattern: item.verifiedSeaDropMint||item.drop !== null, hasCode: item.hasCode, mintsLastHour, discoveredAt: new Date(item.firstSeenAt), now: new Date(now) });
   }
 
   private async emitOpportunities(result: DiscoveryTickResult, refreshAllowed: boolean, sourceBlock: bigint, labels: ReadonlyMap<string, string | null | undefined>): Promise<number> {
@@ -343,11 +371,11 @@ export class DiscoveryService {
       const disposition = scored.band === 'log' ? 'scored' : 'notified';
       const alertable = !scored.blocked && scored.band !== 'log';
       // The name is read from the chain first; the label (ETH MINT) is only for a contract that really has none.
-      const collectionName = alertable ? await this.names.get(item.contract) : null;
+      const collectionName = alertable ? await this.collectionName(item.contract) : null;
       const mintsLastHour = item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0);
       events.push({ id: `evt_${randomUUID()}`, type: `opportunity_${disposition}`, at: nowDate.toISOString(), data: {
         opportunityId: opportunityId(this.port.chainId, item.contract), chainId: this.port.chainId, contract: item.contract, disposition, ...(collectionName ? { collectionName } : {}),
-        score: scored.score, scoreVersion: scored.modelVersion, sampleSize: Math.round(scored.confidence * 100).toString(), denominator: '100', confidence: scored.confidenceLabel, band: scored.band, blocked: scored.blocked,
+        verifiedSeaDropMint:item.verifiedSeaDropMint,...(item.observedStageIndex!==null?{observedStageIndex:item.observedStageIndex.toString()}:{}), score: scored.score, scoreVersion: scored.modelVersion, sampleSize: Math.round(scored.confidence * 100).toString(), denominator: '100', confidence: scored.confidenceLabel, band: scored.band, blocked: scored.blocked,
         ...(scored.modelEpochId ? { modelEpochId: scored.modelEpochId, staticScore: scored.baseScore } : {}),
         factors: scored.factors, risks: scored.risks, watchedMinters, watchedMinterObservations: watchedMinters.map(wallet => ({ wallet, at: new Date(item.watched.get(wallet)!).toISOString() })), mintActivity: compactMintActivity(item.mints, now), mintsLastHour: item.mints.filter((mint) => now - mint.at <= HOUR).reduce((total, mint) => total + mint.quantity, 0), totalMinted: item.totalMinted,
         ...(item.priceWei === null ? {} : { priceWei: item.priceWei.toString() }), ...(item.hasCode === null ? {} : { hasCode: item.hasCode }),
@@ -394,7 +422,7 @@ export class DiscoveryService {
       if (drop.priceWei > this.options.budgetPerNftWei) {
         const dedupe = `price:${chainId}:${contract}:${drop.priceWei}`;
         if (this.priceAlertIdentities.get(contract) !== dedupe) {
-          const card = priceAboveLimitCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now, limitWei: this.options.budgetPerNftWei });
+          const card = priceAboveLimitCard({ chainId, contract, collectionName: await this.collectionName(contract), drop, now, limitWei: this.options.budgetPerNftWei });
           alerts.push({ kind: 'price_above_limit', dedupe, priority: 'grouped', text: plainAlertText(card), card });
         }
       } else if (upcoming && drop.maxPerWallet > 0) {
@@ -402,7 +430,7 @@ export class DiscoveryService {
         // Anyone can publish a drop, so opening reminders are grouped and capped per day rather than pushed immediately.
         const window = minutes <= 30 ? '30m' : minutes <= 360 ? '6h' : null;
         if (window && this.openingAlertAllowed(now)) {
-          const card = openingSoonCard({ chainId, contract, collectionName: await this.names.get(contract), drop, now });
+          const card = openingSoonCard({ chainId, contract, collectionName: await this.collectionName(contract), drop, now });
           alerts.push({ kind: 'opening_soon', dedupe: `opening:${chainId}:${contract}:${drop.startTime}:${window}`, priority: 'grouped', text: plainAlertText(card), card });
         }
       }
