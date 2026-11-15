@@ -25,11 +25,66 @@ quiescent() {
 import sqlite3, sys
 c = sqlite3.connect('file:/var/lib/mint-bot/db/mintbot.sqlite?mode=ro', uri=True)
 c.execute('PRAGMA query_only=ON')
+c.execute('BEGIN')
 counts = [
     c.execute("SELECT count(*) FROM execution_run WHERE state IN ('prepared','active','recovering')").fetchone()[0],
     c.execute("SELECT count(*) FROM spend_reservation WHERE status='reserved'").fetchone()[0],
-    c.execute("SELECT count(*) FROM transaction_attempt a WHERE NOT EXISTS (SELECT 1 FROM transaction_receipt r WHERE r.transaction_attempt_id=a.id AND r.status IN ('confirmed','reverted'))").fetchone()[0],
+    # Signed and provider fanout rows can represent one canonical transaction.
+    # Cover them only with the latest final receipt for that exact identity and
+    # terminal execution and a settled reservation. Never use hash-only or wallet/nonce-only matching.
+    c.execute("""SELECT count(*) FROM transaction_attempt a WHERE NOT EXISTS (
+      SELECT 1 FROM transaction_receipt r
+      JOIN transaction_attempt t ON t.id=r.transaction_attempt_id
+      JOIN execution e ON e.id=a.execution_id
+      JOIN transaction_intent i ON i.id=a.transaction_intent_id
+      JOIN wallet w ON w.id=i.wallet_id
+      WHERE t.transaction_intent_id=a.transaction_intent_id
+        AND t.execution_id=a.execution_id AND r.execution_id=a.execution_id
+        AND e.transaction_intent_id=a.transaction_intent_id AND e.wallet_id=w.id
+        AND a.chain_profile_id=i.chain_profile_id AND t.chain_profile_id=a.chain_profile_id
+        AND w.chain_profile_id=a.chain_profile_id
+        AND lower(a.from_address)=lower(w.address) AND lower(t.from_address)=lower(a.from_address)
+        AND lower(i.from_address)=lower(w.address)
+        AND a.nonce IS NOT NULL AND t.nonce=a.nonce
+        AND (i.nonce IS NULL OR a.nonce=i.nonce)
+        AND length(a.tx_hash)=66 AND substr(a.tx_hash,1,2)='0x'
+        AND substr(a.tx_hash,3) NOT GLOB '*[^0-9a-fA-F]*'
+        AND lower(t.tx_hash)=lower(a.tx_hash) AND lower(r.tx_hash)=lower(a.tx_hash)
+        AND r.status IN ('confirmed','reverted') AND r.finality_stage='ethereum_final'
+        AND e.state=CASE r.status WHEN 'confirmed' THEN 'confirmed' ELSE 'failed' END
+        AND EXISTS (SELECT 1 FROM spend_reservation s WHERE s.execution_id=e.id AND s.status='settled')
+        AND NOT EXISTS (
+          SELECT 1 FROM transaction_receipt newer
+          JOIN transaction_attempt nt ON nt.id=newer.transaction_attempt_id
+          WHERE nt.transaction_intent_id=a.transaction_intent_id AND nt.execution_id=a.execution_id
+            AND lower(nt.tx_hash)=lower(a.tx_hash)
+            AND (julianday(newer.observed_at) IS NULL OR julianday(r.observed_at) IS NULL
+              OR julianday(newer.observed_at)>julianday(r.observed_at)
+              OR julianday(newer.observed_at)=julianday(r.observed_at)
+                AND (newer.id>r.id OR newer.status<>r.status OR newer.finality_stage<>r.finality_stage))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM reconciliation_record x
+          WHERE x.execution_id=e.id AND x.state IN ('unresolved','ambiguous','reorged')
+            AND (julianday(x.checked_at) IS NULL OR julianday(x.checked_at)>=julianday(r.observed_at))
+            AND NOT EXISTS (SELECT 1 FROM reconciliation_record later
+              WHERE later.execution_id=e.id AND julianday(later.checked_at)>julianday(x.checked_at)
+                AND later.chain_profile_id=x.chain_profile_id AND later.nonce=x.nonce
+                AND lower(later.tx_hash)=lower(x.tx_hash) AND lower(later.from_address)=lower(x.from_address)
+                AND later.state='final')
+        )
+    )""").fetchone()[0],
     c.execute("SELECT count(*) FROM live_run_request r LEFT JOIN live_run_request_outcome o ON r.id=o.request_id WHERE o.request_id IS NULL AND julianday(r.expires_at)>julianday('now')").fetchone()[0],
+    c.execute("""SELECT count(*) FROM reorg_event event WHERE NOT EXISTS (
+      SELECT 1 FROM reorg_resolution resolution
+      WHERE resolution.reorg_event_id=event.id AND resolution.state='resolved'
+        AND julianday(resolution.resolved_at) IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM reorg_resolution newer
+          WHERE newer.reorg_event_id=event.id
+            AND (julianday(newer.resolved_at) IS NULL
+              OR julianday(newer.resolved_at)>julianday(resolution.resolved_at)
+              OR julianday(newer.resolved_at)=julianday(resolution.resolved_at) AND newer.state<>'resolved'))
+    )""").fetchone()[0],
 ]
 tables = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 if 'native_funding' in tables:

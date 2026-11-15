@@ -149,3 +149,108 @@ describe('schema-aware release recovery', () => {
     expect(result.trace.filter(action => action === 'quiescent')).toHaveLength(2); expect(result.trace).not.toContain('rollback');
   }));
 });
+
+// Execute the actual embedded Python/SQLite guard, not the shell sudo mock.
+// These disposable minimal tables deliberately permit corrupt/null identity
+// fixtures to verify fail-closed behavior; no canonical production row changes.
+const cutoverSource = readFileSync(join(root, 'ops/host/cutover-release.sh'), 'utf8');
+const quiescencePython = cutoverSource.split("<<'PY'\n")[1]!.split('\nPY\n')[0]!
+  .replace("'file:/var/lib/mint-bot/db/mintbot.sqlite?mode=ro'", "'file:' + sys.argv[1] + '?mode=ro'");
+const fixturePython = `import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+c.executescript('''
+CREATE TABLE execution_run(state TEXT);
+CREATE TABLE spend_reservation(execution_id TEXT,status TEXT);
+CREATE TABLE transaction_attempt(id TEXT,transaction_intent_id TEXT,execution_id TEXT,chain_profile_id TEXT,from_address TEXT,nonce INTEGER,tx_hash TEXT);
+CREATE TABLE transaction_receipt(id TEXT,transaction_attempt_id TEXT,execution_id TEXT,tx_hash TEXT,status TEXT,finality_stage TEXT,observed_at TEXT);
+CREATE TABLE execution(id TEXT,transaction_intent_id TEXT,wallet_id TEXT,state TEXT);
+CREATE TABLE transaction_intent(id TEXT,wallet_id TEXT,chain_profile_id TEXT,nonce INTEGER,from_address TEXT);
+CREATE TABLE wallet(id TEXT,chain_profile_id TEXT,address TEXT);
+CREATE TABLE reconciliation_record(execution_id TEXT,state TEXT,checked_at TEXT,chain_profile_id TEXT,nonce INTEGER,tx_hash TEXT,from_address TEXT);
+CREATE TABLE reorg_event(id TEXT);
+CREATE TABLE reorg_resolution(reorg_event_id TEXT,state TEXT,resolved_at TEXT);
+CREATE TABLE live_run_request(id TEXT,expires_at TEXT);
+CREATE TABLE live_run_request_outcome(request_id TEXT);
+CREATE TABLE native_funding(state TEXT);
+CREATE TABLE mint_funding_hold(state TEXT);
+INSERT INTO execution VALUES ('exec','intent','wallet','confirmed');
+INSERT INTO transaction_intent VALUES ('intent','wallet','ethereum',0,'0x1111111111111111111111111111111111111111');
+INSERT INTO wallet VALUES ('wallet','ethereum','0x1111111111111111111111111111111111111111');
+INSERT INTO spend_reservation VALUES ('exec','settled');
+''')
+h='0x'+'a'*64
+for name in ['signed','provider-1','provider-2','provider-3']:
+ c.execute('INSERT INTO transaction_attempt VALUES (?,?,?,?,?,?,?)',(name,'intent','exec','ethereum','0x1111111111111111111111111111111111111111',0,h))
+c.execute('INSERT INTO transaction_receipt VALUES (?,?,?,?,?,?,?)',('receipt','provider-1','exec',h,'confirmed','ethereum_final','2030-01-01T00:00:00Z'))
+changes={
+ 'reverted': "UPDATE execution SET state='failed'; UPDATE transaction_receipt SET status='reverted';",
+ 'hash-case': "UPDATE transaction_attempt SET tx_hash=replace(tx_hash,'a','A') WHERE id='signed';",
+ 'no-hash': "UPDATE transaction_attempt SET tx_hash=NULL WHERE id='signed';",
+ 'different-hash': "UPDATE transaction_attempt SET tx_hash='0x' || replace(substr(tx_hash,3),'a','b') WHERE id='signed';",
+ 'malformed-hash': "UPDATE transaction_attempt SET tx_hash='invalid'; UPDATE transaction_receipt SET tx_hash='invalid';",
+ 'different-intent': "UPDATE transaction_attempt SET transaction_intent_id='elsewhere' WHERE id='signed';",
+ 'different-execution': "UPDATE transaction_attempt SET execution_id='elsewhere' WHERE id='signed';",
+ 'receipt-execution': "UPDATE transaction_receipt SET execution_id='elsewhere';",
+ 'different-chain': "UPDATE transaction_attempt SET chain_profile_id='base' WHERE id='signed';",
+ 'null-chain': "UPDATE transaction_attempt SET chain_profile_id=NULL WHERE id='signed';",
+ 'wallet-chain': "UPDATE wallet SET chain_profile_id='base';",
+ 'different-sender': "UPDATE transaction_attempt SET from_address='0x2222222222222222222222222222222222222222' WHERE id='signed';",
+ 'null-sender': "UPDATE transaction_attempt SET from_address=NULL WHERE id='signed';",
+ 'different-nonce': "UPDATE transaction_attempt SET nonce=1 WHERE id='signed';",
+ 'null-nonce': "UPDATE transaction_attempt SET nonce=NULL WHERE id='signed';",
+ 'unassigned-intent-nonce': "UPDATE transaction_intent SET nonce=NULL;",
+ 'intent-sender': "UPDATE transaction_intent SET from_address='0x2222222222222222222222222222222222222222';",
+ 'missing-intent-sender': "UPDATE transaction_intent SET from_address=NULL;",
+ 'intent-nonce': "UPDATE transaction_intent SET nonce=1;",
+ 'execution-wallet': "UPDATE execution SET wallet_id='elsewhere';",
+ 'active-run': "INSERT INTO execution_run VALUES ('active');",
+ 'reserved': "INSERT INTO spend_reservation VALUES ('elsewhere','reserved');",
+ 'released': "UPDATE spend_reservation SET status='released';",
+ 'missing-settlement': "DELETE FROM spend_reservation;",
+ 'pending-execution': "UPDATE execution SET state='submitted';",
+ 'soft-finality': "UPDATE transaction_receipt SET finality_stage='soft';",
+ 'missing-receipt': "DELETE FROM transaction_receipt;",
+ 'ambiguous-reconciliation': "INSERT INTO reconciliation_record(execution_id,state,checked_at) VALUES ('exec','ambiguous','2030-01-02T00:00:00Z');",
+ 'invalid-reconciliation-time': "INSERT INTO reconciliation_record(execution_id,state,checked_at) VALUES ('exec','ambiguous','invalid');",
+ 'invalid-receipt-time': "UPDATE transaction_receipt SET observed_at='invalid';",
+ 'funding-inflight': "INSERT INTO native_funding VALUES ('submitted');",
+ 'funding-hold': "INSERT INTO mint_funding_hold VALUES ('reserved');",
+ 'open-reorg': "INSERT INTO reorg_event VALUES ('event');",
+ 'resolved-reorg': "INSERT INTO reorg_event VALUES ('event'); INSERT INTO reorg_resolution VALUES ('event','resolved','2030-01-02T00:00:00Z');",
+ 'reopened-reorg': "INSERT INTO reorg_event VALUES ('event'); INSERT INTO reorg_resolution VALUES ('event','resolved','2030-01-02T00:00:00Z'),('event','open','2030-01-03T00:00:00Z');",
+ 'invalid-reorg-resolution': "INSERT INTO reorg_event VALUES ('event'); INSERT INTO reorg_resolution VALUES ('event','resolved','invalid');",
+ 'same-time-open-reorg': "INSERT INTO reorg_event VALUES ('event'); INSERT INTO reorg_resolution VALUES ('event','resolved','2030-01-02T00:00:00Z'),('event','open','2030-01-02T00:00:00Z');",
+ 'fresh-request': "INSERT INTO live_run_request VALUES ('request','9999-01-01T00:00:00Z');",
+}
+scenario=sys.argv[2]
+if scenario in ['resolved-ambiguity','different-hash-final','different-chain-final','different-sender-final','different-nonce-final']:
+ c.execute('INSERT INTO reconciliation_record VALUES (?,?,?,?,?,?,?)',('exec','ambiguous','2030-01-02T00:00:00Z','ethereum',0,h,'0x1111111111111111111111111111111111111111'))
+ c.execute('INSERT INTO reconciliation_record VALUES (?,?,?,?,?,?,?)',('exec','final','2030-01-03T00:00:00Z','base' if scenario=='different-chain-final' else 'ethereum',1 if scenario=='different-nonce-final' else 0,'0x'+'b'*64 if scenario=='different-hash-final' else h,'0x2222222222222222222222222222222222222222' if scenario=='different-sender-final' else '0x1111111111111111111111111111111111111111'))
+elif scenario.startswith('newer-') or scenario=='same-time-reorg':
+ state=scenario.removeprefix('newer-') if scenario!='same-time-reorg' else 'reorged'
+ observed='2030-01-02T00:00:00Z' if scenario!='same-time-reorg' else '2030-01-01T00:00:00Z'
+ # Smaller ID must not hide a simultaneous contradictory observation.
+ c.execute('INSERT INTO transaction_receipt VALUES (?,?,?,?,?,?,?)',('a','provider-2','exec',h,state,'ethereum_final',observed))
+elif scenario!='normal': c.executescript(changes[scenario])
+c.commit();c.close()
+`;
+function sqliteQuiescence(dir: string, scenario: string) {
+  const path = join(dir, 'quiescence.sqlite');
+  const seeded = spawnSync('python3', ['-c', fixturePython, path, scenario], { encoding: 'utf8' });
+  expect(seeded.status, seeded.stderr).toBe(0);
+  const before = digest(path);
+  const result = spawnSync('python3', ['-c', quiescencePython, path], { encoding: 'utf8' });
+  expect(digest(path)).toBe(before);
+  return result;
+}
+describe('canonical transaction cutover quiescence', () => {
+  it.each(['normal', 'hash-case', 'reverted', 'unassigned-intent-nonce', 'resolved-reorg', 'resolved-ambiguity'])('accepts final settled lifecycle/fanout history: %s', scenario => scratch(dir => {
+    const result = sqliteQuiescence(dir, scenario);
+    expect(result.status, result.stderr).toBe(0);
+  }));
+  it.each(['no-hash', 'different-hash', 'malformed-hash', 'different-intent', 'different-execution', 'receipt-execution', 'different-chain', 'null-chain', 'wallet-chain', 'different-sender', 'null-sender', 'different-nonce', 'null-nonce', 'intent-nonce', 'execution-wallet', 'active-run', 'reserved', 'released', 'missing-settlement', 'pending-execution', 'soft-finality', 'missing-receipt', 'ambiguous-reconciliation', 'invalid-reconciliation-time', 'invalid-receipt-time', 'funding-inflight', 'funding-hold', 'fresh-request', 'newer-pending', 'newer-reorged', 'same-time-reorg', 'intent-sender', 'missing-intent-sender', 'open-reorg', 'reopened-reorg', 'invalid-reorg-resolution', 'same-time-open-reorg', 'different-hash-final', 'different-chain-final', 'different-sender-final', 'different-nonce-final'])('preserves history and blocks unresolved or mismatched facts: %s', scenario => scratch(dir => {
+    const result = sqliteQuiescence(dir, scenario);
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain('STOP: unresolved execution/exposure/request');
+  }));
+});
