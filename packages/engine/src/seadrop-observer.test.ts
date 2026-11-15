@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { encodeAbiParameters, encodeEventTopics, pad, parseAbi, zeroAddress, type Address, type Hex } from 'viem';
 import type { ChainFact, ChainHead, ChainLog, ChainLogFilter } from './chain-facts.js';
 import { SEADROP_V1_ADDRESS } from './chains.js';
@@ -107,6 +107,46 @@ describe('SeaDropObserver', () => {
     expect(watchedCalls).toBe(3);
     expect(outcome).toMatchObject({ ok: true, result: { watchedUnavailable: true, mints: [expect.objectContaining({ quantity: 2n })] } });
     expect(() => new SeaDropObserver(source, { watchedChunk: 0 })).toThrow('SEADROP_OBSERVER_OPTIONS_INVALID');
+  });
+
+  it('completes 137 watched addresses within the shared deadline with at most three concurrent chunk reads', async () => {
+    vi.useFakeTimers();
+    try {
+      const watched = Array.from({ length: 137 }, (_, index) => `0x${(index + 1).toString(16).padStart(40, '0')}` as Address);
+      let active = 0; let maximum = 0; let calls = 0;
+      const source: LogSource = {
+        readHead: async () => fact({ number: 200n }),
+        readLogs: async (filter) => {
+          if (filter.address !== undefined) { await new Promise(resolve => setTimeout(resolve, 2000)); return fact([mintLog()]); }
+          calls++; active++; maximum = Math.max(maximum, active);
+          await new Promise(resolve => setTimeout(resolve, 2000)); active--; return fact([]);
+        },
+      };
+      const result = new SeaDropObserver(source).scan(1n, 200n, watched);
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(await result).toMatchObject({ ok: true, result: { watchedUnavailable: false, mints: [expect.objectContaining({ quantity: 2n })] } });
+      expect(calls).toBe(7); expect(maximum).toBe(3); expect(active).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('retains ownership of all in-flight chunks after one unexpectedly rejects', async () => {
+    const watched = Array.from({ length: 80 }, (_, index) => `0x${(index + 1).toString(16).padStart(40, '0')}` as Address);
+    const completions: Array<{resolve: () => void; reject: () => void}> = [];
+    const source: LogSource = {
+      readHead: async () => fact({ number: 200n }),
+      readLogs: async (filter) => filter.address !== undefined ? fact([]) : new Promise((resolve, reject) => {
+        completions.push({resolve: () => resolve(fact([])), reject: () => reject(new Error('synthetic'))});
+      }),
+    };
+    let finished = false;
+    const result = new SeaDropObserver(source).scan(1n, 200n, watched).finally(() => { finished = true; });
+    await Promise.resolve(); await Promise.resolve();
+    expect(completions).toHaveLength(3);
+    completions[0]!.reject(); await Promise.resolve(); await Promise.resolve();
+    expect(finished).toBe(false);
+    completions[1]!.resolve(); completions[2]!.resolve();
+    await expect(result).rejects.toThrow('WATCHED_LOG_READ_FAILED');
+    expect(completions).toHaveLength(3);
   });
 
   it('drops logs outside the requested block range', async () => {
