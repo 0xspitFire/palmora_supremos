@@ -1218,18 +1218,23 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
       const row = this.db.prepare('SELECT id, occurred_at FROM audit_event WHERE rowid = ?').get(tail.rid) as { id: string; occurred_at: string } | undefined;
       if (!row || row.id !== tail.id || row.occurred_at !== tail.at) { this.eventCache = []; this.eventCacheRowid = 0; this.eventCacheTail = undefined; }
     }
-    const rows = this.db.prepare("SELECT rowid AS rid, id, entity_type, entity_id, prior_state, new_state, actor, reason, policy_snapshot_json, occurred_at FROM audit_event WHERE rowid > ? ORDER BY rowid").all(this.eventCacheRowid) as Array<DatabaseEventRow & { rid: number }>;
-    if (rows.length > 0) {
-      const batch: EventRecord[] = [];
-      for (const row of rows) {
-        this.eventCacheRowid = Math.max(this.eventCacheRowid, row.rid);
-        this.eventCacheTail = { rid: row.rid, id: row.id, at: row.occurred_at };
-        const snapshot = decode<{ kind?: string; eventType?: string; eventData?: Record<string, unknown>; runId?: string }>(row.policy_snapshot_json);
-        if (snapshot?.kind !== 'event' && row.entity_type !== 'execution_run') continue;
-        const event = { id: row.id, ...(snapshot?.runId || row.entity_type === 'execution_run' ? { runId: snapshot?.runId ?? row.entity_id } : {}), type: snapshot?.eventType ?? row.new_state ?? row.reason, at: row.occurred_at, data: snapshot?.eventData ?? {} } satisfies EventRecord;
-        for (const value of Object.values(event.data)) deepFreeze(value);
-        batch.push(event);
-      }
+    // Decode incrementally instead of retaining all raw SQLite JSON strings
+    // alongside the decoded history. Publish the watermark only after the read
+    // completes, so an interrupted iterator cannot skip a partial batch.
+    const rows = this.db.prepare("SELECT rowid AS rid, id, entity_type, entity_id, prior_state, new_state, actor, reason, policy_snapshot_json, occurred_at FROM audit_event WHERE rowid > ? ORDER BY rowid").iterate(this.eventCacheRowid) as Iterable<DatabaseEventRow & { rid: number }>;
+    const batch: EventRecord[] = [];
+    let nextRowid = this.eventCacheRowid;
+    let nextTail = this.eventCacheTail;
+    for (const row of rows) {
+      nextRowid = Math.max(nextRowid, row.rid);
+      nextTail = { rid: row.rid, id: row.id, at: row.occurred_at };
+      const snapshot = decode<{ kind?: string; eventType?: string; eventData?: Record<string, unknown>; runId?: string }>(row.policy_snapshot_json);
+      if (snapshot?.kind !== 'event' && row.entity_type !== 'execution_run') continue;
+      const event = { id: row.id, ...(snapshot?.runId || row.entity_type === 'execution_run' ? { runId: snapshot?.runId ?? row.entity_id } : {}), type: snapshot?.eventType ?? row.new_state ?? row.reason, at: row.occurred_at, data: snapshot?.eventData ?? {} } satisfies EventRecord;
+      for (const value of Object.values(event.data)) deepFreeze(value);
+      batch.push(event);
+    }
+    if (batch.length > 0) {
       // Same-time UUID batches often interleave with history. Sort only the new batch, then merge the two sorted sequences.
       const compare = (left: EventRecord, right: EventRecord): number => left.at < right.at ? -1 : left.at > right.at ? 1 : left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
       batch.sort(compare);
@@ -1249,6 +1254,8 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
         }
       }
     }
+    this.eventCacheRowid = nextRowid;
+    this.eventCacheTail = nextTail;
     // Each caller gets fresh top-level objects. Anything nested inside an event's data is frozen, so a caller that tried to change it
     // would fail loudly instead of silently altering every later snapshot.
     return this.eventCache.map((event) => ({ ...event, data: { ...event.data } }));

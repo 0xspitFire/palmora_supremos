@@ -5,7 +5,9 @@ import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
 
 export const MAX_BYTES = 2 * 1024 * 1024;
-export const DEADLINE_MS = 6000;
+// Isolated retained-history VM measurements include a ~6s cold capture. Leave
+// transport/rendering headroom while staying below the 15s function budget.
+export const DEADLINE_MS = 10000;
 const ROUTES = new Set(['home', 'calendar', 'alerts', 'health', 'analytics']);
 // Canonical calendar IDs contain colons. Only that exact escape is accepted;
 // encoded separators, dots and double-encoding never reach the backend.

@@ -51,7 +51,7 @@ jobs:
     if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     needs: environment
     runs-on: [self-hosted, linux, wsl]
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:

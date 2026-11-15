@@ -9,6 +9,32 @@ function insertEvent(db: SqliteDatabase, id: string, at = NOW): void {
 }
 
 describe('canonical persistence and incremental event projection', () => {
+  it('retries a complete batch after an interrupted SQLite iterator without advancing its watermark', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      insertEvent(value.db, 'stream-first');
+      insertEvent(value.db, 'stream-second');
+      const prepare = value.db.prepare.bind(value.db);
+      const failure = vi.spyOn(value.db, 'prepare').mockImplementation((sql: string) => {
+        const statement = prepare(sql);
+        if (sql.startsWith('SELECT rowid AS rid, id, entity_type')) {
+          const iterate = statement.iterate.bind(statement);
+          vi.spyOn(statement, 'iterate').mockImplementation(function* (...bindings: unknown[]) {
+            const iterator = iterate(...bindings);
+            try {
+              const first = iterator.next();
+              if (!first.done) yield first.value;
+              throw new Error('SYNTHETIC_READ_INTERRUPTED');
+            } finally { iterator.return?.(); }
+          });
+        }
+        return statement;
+      });
+      expect(() => value.store.eventSnapshot()).toThrow('SYNTHETIC_READ_INTERRUPTED');
+      failure.mockRestore();
+      expect(value.store.eventSnapshot().filter(event => event.type === 'performance').map(event => event.id)).toEqual(['stream-first', 'stream-second']);
+    } finally { vi.restoreAllMocks(); await close(value); }
+  });
   it('captures dashboard state inside one SQLite read transaction without persisting changes', async () => {
     const value = await fixture(ETHEREUM);
     try {

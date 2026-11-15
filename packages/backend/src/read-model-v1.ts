@@ -1225,8 +1225,30 @@ function receiptOrder(left: ReceiptRecord, right: ReceiptRecord): number { retur
 function reconciliationOrder(left: ReconciliationRecord, right: ReconciliationRecord): number { return sortKey(left.observedAt).localeCompare(sortKey(right.observedAt)) || left.id.localeCompare(right.id); }
 
 function digestState(state: BackendState): string {
-  const encoded = JSON.stringify(state, (_, value) => typeof value === 'bigint' ? `${value}n` : value) ?? '';
-  return `snapshot_${createHash('sha256').update(encoded).digest('hex').slice(0, 24)}`;
+  // BackendState is a plain DTO. Stream its large top-level collections instead
+  // of allocating one JSON string for the entire retained audit history. Keep
+  // exactly the JSON bytes (including property order and bigint encoding).
+  const hash = createHash('sha256');
+  const encode = (value: unknown): string | undefined => JSON.stringify(value, (_, item) => typeof item === 'bigint' ? `${item}n` : item);
+  hash.update('{');
+  let first = true;
+  for (const [key, value] of Object.entries(state)) {
+    const encoded = Array.isArray(value) ? undefined : encode(value);
+    if (!Array.isArray(value) && encoded === undefined) continue;
+    if (!first) hash.update(',');
+    first = false;
+    hash.update(`${JSON.stringify(key)}:`);
+    if (Array.isArray(value)) {
+      hash.update('[');
+      for (let index = 0; index < value.length; index++) {
+        if (index > 0) hash.update(',');
+        hash.update(encode(value[index]) ?? 'null');
+      }
+      hash.update(']');
+    } else hash.update(encoded!);
+  }
+  hash.update('}');
+  return `snapshot_${hash.digest('hex').slice(0, 24)}`;
 }
 
 function dateMs(value: string | null | undefined): number | null { if (!value) return null; const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : null; }
