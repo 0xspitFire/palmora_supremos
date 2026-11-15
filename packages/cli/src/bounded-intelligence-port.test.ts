@@ -55,6 +55,20 @@ describe('bounded read-only intelligence dependencies',()=>{
   resolve(99n);await vi.advanceTimersByTimeAsync(0);expect(wrapped.pending()).toBe(0);expect(reports).toEqual(expect.arrayContaining([expect.objectContaining({operation:'safe_head',state:'timed_out'})]));
   port.safeHead=async()=>42n;expect(await wrapped.port.safeHead()).toBe(42n);wrapped.stop();
  });
+ it('holds one scan across changing heads and never substitutes an old range',async()=>{
+  vi.useFakeTimers();let finish!:(value:Awaited<ReturnType<IntelligenceChainPort['scan']>>)=>void;
+  const port=base();const scan=vi.fn(()=>new Promise<Awaited<ReturnType<IntelligenceChainPort['scan']>>>(resolve=>{finish=resolve;}));port.scan=scan;
+  const wrapped=boundedIntelligencePort(port,{timeoutMs:20});
+  const first=wrapped.port.scan(10n,20n,[]);await vi.advanceTimersByTimeAsync(20);
+  expect(await first).toMatchObject({ok:false,reason:'READ_DEADLINE_EXCEEDED'});
+  expect(await wrapped.port.scan(10n,21n,[])).toMatchObject({ok:false,reason:'READ_DEADLINE_EXCEEDED'});
+  expect(scan).toHaveBeenCalledTimes(1);
+  finish({ok:true,scan:{fromBlock:10n,toBlock:20n,mints:[],watchedMints:[],dropUpdates:[]}});
+  await vi.advanceTimersByTimeAsync(0);
+  port.scan=async(from,to)=>({ok:true,scan:{fromBlock:from,toBlock:to,mints:[],watchedMints:[],dropUpdates:[]}});
+  expect(await wrapped.port.scan(10n,21n,[])).toMatchObject({ok:true,scan:{fromBlock:10n,toBlock:21n}});
+  wrapped.stop();
+ });
  it('actually aborts a scoped read and only retries after the aborted work settles',async()=>{
   vi.useFakeTimers();const port=base();let active=0,max=0;const signals:AbortSignal[]=[];
   Object.assign(port,{withReadSignal:(signal:AbortSignal)=>({...port,safeHead:()=>new Promise<bigint|null>((_resolve,reject)=>{signals.push(signal);active++;max=Math.max(max,active);signal.addEventListener('abort',()=>{active--;reject(new Error('synthetic abort'));},{once:true});})})});

@@ -6,16 +6,19 @@ export interface IntelligenceReadState {chainId:number;operation:string;state:'s
 export function boundedIntelligencePort(port:IntelligenceChainPort,options:{timeoutMs?:number;maxPending?:number;report?:(state:IntelligenceReadState)=>void}={}){
  const timeout=options.timeoutMs??15000,maxPending=options.maxPending??32;
  if(!Number.isSafeInteger(timeout)||timeout<1||!Number.isSafeInteger(maxPending)||maxPending<1||maxPending>100)throw new Error('INTELLIGENCE_READ_BOUNDS_INVALID');
- const pending=new Map<string,{promise:Promise<unknown>;controller:AbortController;expired:boolean;startedAt:number;deadlineAt:number}>();let stopped=false;
+ const pending=new Map<string,{promise:Promise<unknown>;controller:AbortController;expired:boolean;startedAt:number;deadlineAt:number}>();let stopped=false;let scanKey:string|undefined;
  const log=(operation:string,state:IntelligenceReadState['state'],started:number)=>{try{options.report?.({chainId:port.chainId,operation,state,elapsedMs:Date.now()-started,pending:pending.size});}catch{/* Diagnostics never change the read outcome. */}};
  const run=async<T>(operation:string,args:readonly unknown[],fallback:T,work:(reader:IntelligenceChainPort)=>Promise<T>):Promise<T>=>{
   if(stopped)return fallback;
   const key=JSON.stringify([operation,args],(_k,v:unknown)=>typeof v==='bigint'?v.toString():v);let job=pending.get(key);
   if(job?.expired)return fallback;
+  // A changing chain head must not start a second scan while any previous
+  // range remains unsettled, and an old result must not answer a new range.
+  if(operation==='scan' && scanKey!==undefined && scanKey!==key){log(operation,'capacity',Date.now());return fallback;}
   if(!job){if(pending.size>=maxPending){log(operation,'capacity',Date.now());return fallback;}
    const controller=new AbortController();const started=Date.now();const scoped=(port as IntelligenceChainPort&{withReadSignal?:(signal:AbortSignal)=>IntelligenceChainPort}).withReadSignal?.(controller.signal)??port;
-   const promise=Promise.resolve().then(()=>work(scoped));job={promise,controller,expired:false,startedAt:started,deadlineAt:started+timeout};pending.set(key,job);log(operation,'started',started);
-   const owned=job;void promise.finally(()=>{if(pending.get(key)===owned)pending.delete(key);log(operation,'completed',started);}).catch(()=>undefined);
+   const promise=Promise.resolve().then(()=>work(scoped));job={promise,controller,expired:false,startedAt:started,deadlineAt:started+timeout};pending.set(key,job);if(operation==='scan')scanKey=key;log(operation,'started',started);
+   const owned=job;void promise.finally(()=>{if(pending.get(key)===owned){pending.delete(key);if(operation==='scan'&&scanKey===key)scanKey=undefined;}log(operation,'completed',started);}).catch(()=>undefined);
   }
   const owned=job;let timer:ReturnType<typeof setTimeout>|undefined;
   try{const value=await Promise.race([owned.promise as Promise<T>,new Promise<T>(resolve=>{timer=setTimeout(()=>{owned.expired=true;owned.controller.abort();log(operation,'timed_out',Date.now()-timeout);resolve(fallback);},Math.max(0,owned.deadlineAt-Date.now()));timer.unref?.();})]);if(stopped||owned.expired||Date.now()<owned.startedAt||Date.now()>=owned.deadlineAt){owned.expired=true;owned.controller.abort();return fallback;}return value;}

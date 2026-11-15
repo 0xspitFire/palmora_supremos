@@ -88,10 +88,26 @@ export class SeaDropObserver {
     // queries, so they are asked in small chunks and a rejected chunk never fails the SeaDrop scan.
     const watchedLogs: ChainLog[] = [];
     let watchedUnavailable = false;
-    for (let start = 0; start < watched.length; start += this.watchedChunk) {
-      const chunk = watched.slice(start, start + this.watchedChunk);
-      const fact = await this.source.readLogs({ fromBlock, toBlock: end, topics: [ERC721_TRANSFER_TOPIC, pad(zeroAddress), chunk.map((address) => pad(address.toLowerCase() as Address))] });
-      if (fact.availability === 'unavailable' || fact.value === null) { watchedUnavailable = true; continue; }
+    // Keep the total scan bounded when many watched addresses require several
+    // chunks. A small worker pool preserves the original chunk ordering and
+    // keeps all outstanding reads owned until every worker has settled.
+    const chunks: Address[][] = [];
+    for (let start = 0; start < watched.length; start += this.watchedChunk) chunks.push(watched.slice(start, start + this.watchedChunk));
+    const facts: Array<Awaited<ReturnType<LogSource['readLogs']>> | undefined> = new Array(chunks.length);
+    let next = 0; let failed = false;
+    const worker = async (): Promise<void> => {
+      while (!failed && next < chunks.length) {
+        const index = next++;
+        try {
+          const chunk = chunks[index]!;
+          facts[index] = await this.source.readLogs({ fromBlock, toBlock: end, topics: [ERC721_TRANSFER_TOPIC, pad(zeroAddress), chunk.map((address) => pad(address.toLowerCase() as Address))] });
+        } catch { failed = true; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, chunks.length) }, () => worker()));
+    if (failed) throw new Error('WATCHED_LOG_READ_FAILED');
+    for (const fact of facts) {
+      if (!fact || fact.availability === 'unavailable' || fact.value === null) { watchedUnavailable = true; continue; }
       watchedLogs.push(...fact.value);
     }
     if ([...seaDropLogs.value, ...watchedLogs].some((log) => log.removed)) return { ok: false, reason: 'REORGED_LOG' };
