@@ -121,6 +121,24 @@ async function serviceSupervision(io, commit) {
   return checks;
 }
 
+/** Metadata may outlive a removed payload. Unknown or inaccessible storage is
+ * never proof of absence; JSON listing does not retrieve the memory image. */
+export function corePayloadAbsence(result) {
+  const stdout = String(result.stdout ?? '').trim();
+  const stderr = String(result.stderr ?? '').trim();
+  if (/^(?:No coredumps found\.?)$/.test([stdout, stderr].filter(Boolean).join('\n'))) return { ok: true, records: 0 };
+  // A zero exit with permission/journal warnings may represent partial results.
+  if (!result.ok || stderr) return { ok: false, records: 0 };
+  try {
+    const records = JSON.parse(stdout);
+    if (!Array.isArray(records)) return { ok: false, records: 0 };
+    const absent = records.every(record => record && typeof record === 'object' && !Array.isArray(record)
+      && Number.isSafeInteger(record.pid) && record.pid > 0
+      && ['none', 'missing'].includes(record.corefile));
+    return { ok: absent, records: records.length };
+  } catch { return { ok: false, records: 0 }; }
+}
+
 async function heapCore(io) {
   const checks = [];
   checks.push(check('core_limit_unit', (await show(io, 'mint-bot.service', 'LimitCORE')) === '0', 'LimitCORE=0 in the installed unit', 'the installed unit does not set LimitCORE=0'));
@@ -129,14 +147,22 @@ async function heapCore(io) {
   if (pid > 0) processLimit = (await io.readText(`/proc/${pid}/limits`).catch(() => '')).split('\n').find((line) => line.startsWith('Max core file size'));
   checks.push(check('core_limit_process', Boolean(processLimit && /\s0\s+0\s+bytes/.test(processLimit)), 'running process: Max core file size 0 0', pid > 0 ? 'the running process allows core dumps' : 'the service is not running; collect this evidence while it runs'));
   const pattern = (await io.readText('/proc/sys/kernel/core_pattern').catch(() => '')).trim();
-  checks.push(check('core_pattern_recorded', pattern.length > 0, `kernel core_pattern: ${pattern}`, 'the kernel core_pattern could not be read'));
-  const dumps = await io.exec('coredumpctl', ['list', '--no-pager']);
-  // Some systemd versions report an empty store on stderr and exit non-zero.
-  // The evidence rule is about the store contents, so accept the explicit
-  // "No coredumps found" result from either stream while still failing closed
-  // for command-not-found or any actual listing.
-  const dumpOutput = `${dumps.stdout ?? ''}\n${dumps.stderr ?? ''}`;
-  checks.push(check('no_coredumps', /No coredumps found/i.test(dumpOutput), 'coredumpctl: no coredumps found', 'coredumpctl found a core dump or could not be run'));
+  // Linux ignores RLIMIT_CORE for piped handlers. Require a discard-only pipe
+  // or a direct-file pattern where the verified hard/soft zero limits apply.
+  const safePattern = pattern.length > 0 && (!pattern.startsWith('|') || pattern === '|/bin/false');
+  checks.push(check('core_pattern_recorded', safePattern, `kernel core_pattern: ${pattern}; core payload storage disabled`, 'kernel core_pattern is missing or pipes memory to a collector; apply the reviewed core-dump-policy.sh'));
+  const dumps = await io.exec('coredumpctl', ['list', '--no-pager', '--json=short']);
+  const absence = corePayloadAbsence(dumps);
+  // Journal metadata can expire independently of externally stored cores.
+  // Inspect names only, never payload contents; any orphan/unknown entry blocks.
+  const directory = await io.exec('stat', ['-c', '%f:%u', '/var/lib/systemd/coredump']);
+  const entry = /^([0-9a-f]{4,8}):0$/i.exec(String(directory.stdout ?? '').trim());
+  const mode = entry ? Number.parseInt(entry[1], 16) : 0;
+  const trustedDirectory = directory.ok && String(directory.stderr ?? '').trim() === ''
+    && Number.isSafeInteger(mode) && mode <= 0xffff && (mode & 0xf000) === 0x4000 && (mode & 0o022) === 0;
+  const store = await io.exec('find', ['/var/lib/systemd/coredump', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit']);
+  const emptyStore = trustedDirectory && store.ok && String(store.stdout ?? '').trim() === '' && String(store.stderr ?? '').trim() === '';
+  checks.push(check('no_coredumps', absence.ok && emptyStore, `coredumpctl: no stored payloads; ${absence.records} metadata record(s) retained; storage directory empty`, 'coredumpctl found a stored/inaccessible/unknown payload or could not verify absence'));
   const heap = await io.exec('/usr/bin/node', ['-e', "console.log(require('v8').getHeapStatistics().heap_size_limit)"]);
   const heapLimit = Number.parseInt(heap.stdout.trim(), 10);
   const environment = (await show(io, 'mint-bot.service', 'Environment')) ?? '';

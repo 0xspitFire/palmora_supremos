@@ -25,6 +25,7 @@ interface Lib {
   verifyAcceptance(acceptance: unknown, artifacts: Record<string, unknown>, identity: { currentCommit: string; hostId: string; now?: Date; bindingDigest?: string }): string[];
 }
 interface Collector {
+  corePayloadAbsence(result: {ok: boolean; stdout?: string; stderr?: string}): {ok: boolean; records: number};
   collect(kind: string, io: unknown, env?: Record<string, string>, options?: { restoreDrill?: string; recoveryDrill?: string; rotationDrill?: string }): Promise<{ artifact: { kind: string; environment: string; hostId: string; release: { commit: string }; checks: Check[]; references: Array<{ name: string }> }; failed: Check[]; problems: string[] }>;
   hasRollback(entries: unknown): boolean;
   parseHistory(text: string): unknown;
@@ -65,7 +66,9 @@ function fakeIo(overrides: { exec?: Responses; files?: Record<string, string>; h
     'stat -c %U:%G %a /opt/mint-bot/releases': 'root:root 755',
     [`stat -c %U:%G %a /opt/mint-bot/releases/${COMMIT}`]: 'root:root 755',
     'stat -c %U:%G %a /var/log/mint-bot/orchestrator.log': 'mintbot:mintbot 600',
-    'coredumpctl list --no-pager': 'No coredumps found.',
+    'coredumpctl list --no-pager --json=short': '[]',
+    'stat -c %f:%u /var/lib/systemd/coredump': '41ed:0',
+    'find /var/lib/systemd/coredump -mindepth 1 -maxdepth 1 -print -quit': '',
     '/usr/bin/node -e console.log(require(\'v8\').getHeapStatistics().heap_size_limit)': '2197815296',
     ...overrides.exec,
   };
@@ -74,7 +77,7 @@ function fakeIo(overrides: { exec?: Responses; files?: Record<string, string>; h
     '/opt/mint-bot/current/RELEASE': `commit=${COMMIT}\nbuilt_at=2026-10-23T00:00:00Z\n`,
     '/opt/mint-bot/releases/.history': '2026-10-22T16:00:00Z none -> /r/aaa\n2026-10-22T17:00:00Z /r/aaa -> /r/bbb\n2026-10-22T18:00:00Z /r/bbb -> /r/aaa\n',
     '/proc/4242/limits': 'Max core file size        0                    0                    bytes\n',
-    '/proc/sys/kernel/core_pattern': '|/usr/share/apport/apport -p%p\n',
+    '/proc/sys/kernel/core_pattern': '|/bin/false\n',
     '/var/lib/mint-bot/backup-status/status.json': JSON.stringify({ status: 'ok', operation: 'backup', restoreVerified: true, offHost: true, remoteVerified: true, recordedAt: new Date(NOW.getTime() - 60 * 60_000).toISOString(), file: 'x.snapshot.enc' }),
     '/home/o/drill.json': 'warning line\n{"status":"ok","object":"mintbot.sqlite.2026-10-23T11-00-00.000Z.snapshot.enc","bytes":1224740,"downloadSeconds":0.3,"verifySeconds":0.1,"restoreSeconds":0.479,"backupAgeSecondsAtDrill":1689}\n',
     ...overrides.files,
@@ -152,12 +155,75 @@ describe('collectors (fake host)', () => {
     expect((await collector.collect('heap_core_dump', fakeIo(), {})).problems).toEqual([]);
     const stopped = await collector.collect('heap_core_dump', fakeIo({ exec: { 'systemctl show mint-bot.service -p MainPID --value': '0' } }), {});
     expect(stopped.failed.map((item) => item.name)).toContain('core_limit_process');
-    const dumped = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager': 'TIME PID ... 1 coredump' } }), {});
+    const dumped = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager --json=short': 'TIME PID ... 1 coredump' } }), {});
     expect(dumped.failed.map((item) => item.name)).toContain('no_coredumps');
-    const emptyOnStderr = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager': { ok: false, stderr: 'No coredumps found.' } } }), {});
+    const emptyOnStderr = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager --json=short': { ok: false, stderr: 'No coredumps found.' } } }), {});
     expect(emptyOnStderr.failed.map((item) => item.name)).not.toContain('no_coredumps');
     const processAllows = await collector.collect('heap_core_dump', fakeIo({ files: { '/proc/4242/limits': 'Max core file size        unlimited            unlimited            bytes\n' } }), {});
     expect(processAllows.failed.map((item) => item.name)).toContain('core_limit_process');
+  });
+
+
+  it('refuses partial journal warnings even on a successful exit', () => {
+    expect(collector.corePayloadAbsence({ok: true, stdout: '[]', stderr: 'Permission denied'}).ok).toBe(false);
+    expect(collector.corePayloadAbsence({ok: true, stdout: '[{"pid":85493,"corefile":"none"}]', stderr: 'Journal files unavailable'}).ok).toBe(false);
+    expect(collector.corePayloadAbsence({ok: true, stdout: 'No coredumps found.'}).ok).toBe(true);
+  });
+
+  it.each(['none', 'missing'])('retains %s crash metadata only when no payload or orphan remains', async corefile => {
+    const result = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager --json=short': JSON.stringify([{ pid: 85493, corefile }]) } }), {});
+    expect(result.failed.map(item => item.name)).not.toContain('no_coredumps');
+    expect(result.artifact.checks.find(item => item.name === 'no_coredumps')?.observed).toContain('1 metadata record(s) retained');
+  });
+
+  it.each(['present', 'journal', 'truncated', 'error', '-', 'unknown', ''])('refuses %s payload status without reading memory contents', async corefile => {
+    const result = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager --json=short': JSON.stringify([{ pid: 85493, corefile }]) } }), {});
+    expect(result.failed.map(item => item.name)).toContain('no_coredumps');
+  });
+
+  it.each(['null', '{}', '[null]', '[{}]', '[{"pid":"85493","corefile":"none"}]', '[{"pid":0,"corefile":"none"}]', '[]\nNo coredumps found.', '{bad'])('fails closed on malformed/ambiguous core metadata %s', async text => {
+    const result = await collector.collect('heap_core_dump', fakeIo({ exec: { 'coredumpctl list --no-pager --json=short': text } }), {});
+    expect(result.failed.map(item => item.name)).toContain('no_coredumps');
+  });
+
+  it('does not hide command failure, contradictory output or an orphaned core file', async () => {
+    for (const overrides of [
+      { 'coredumpctl list --no-pager --json=short': { ok: false as const, stdout: '[]', stderr: 'Permission denied' } },
+      { 'coredumpctl list --no-pager --json=short': { ok: false as const, stdout: '[{"pid":85493,"corefile":"present"}]', stderr: 'No coredumps found.' } },
+      { 'find /var/lib/systemd/coredump -mindepth 1 -maxdepth 1 -print -quit': '/var/lib/systemd/coredump/core.synthetic' },
+      { 'find /var/lib/systemd/coredump -mindepth 1 -maxdepth 1 -print -quit': { ok: false as const, stderr: 'Permission denied' } },
+    ] as Responses[]) {
+      const result = await collector.collect('heap_core_dump', fakeIo({exec: overrides}), {});
+      expect(result.failed.map(item => item.name)).toContain('no_coredumps');
+    }
+  });
+
+  it('rejects incomplete storage inspection and symlink/non-directory/untrusted roots', async () => {
+    const unsafe: Responses[] = [
+      {'stat -c %f:%u /var/lib/systemd/coredump': 'a1ff:0'},
+      {'stat -c %f:%u /var/lib/systemd/coredump': '81a4:0'},
+      {'stat -c %f:%u /var/lib/systemd/coredump': '41ff:0'},
+      {'stat -c %f:%u /var/lib/systemd/coredump': '41ed:999'},
+      {'stat -c %f:%u /var/lib/systemd/coredump': {ok:false,stdout:'41ed:0'}},
+    ];
+    for (const exec of unsafe) expect((await collector.collect('heap_core_dump',fakeIo({exec}),{})).failed.map(item=>item.name)).toContain('no_coredumps');
+    const base = fakeIo();
+    for (const command of ['find','stat']) {
+      const result = await collector.collect('heap_core_dump',{...base,exec:async (name:string,args:string[])=> name===command ? {ok:true,stdout:name==='stat'?'41ed:0':'',stderr:'Permission denied'} : base.exec(name,args)},{});
+      expect(result.failed.map(item=>item.name)).toContain('no_coredumps');
+    }
+  });
+
+  it.each(['|/usr/lib/systemd/systemd-coredump %P', '|/usr/share/apport/apport -p%p', '|/bin/false --unexpected', ''])('rejects a missing or memory-collecting kernel handler: %s', async pattern => {
+    const result = await collector.collect('heap_core_dump', fakeIo({files: {'/proc/sys/kernel/core_pattern': pattern}}), {});
+    expect(result.failed.map(item => item.name)).toContain('core_pattern_recorded');
+  });
+
+  it('permits a direct file pattern only alongside the separately verified zero limits', async () => {
+    const result = await collector.collect('heap_core_dump', fakeIo({files: {'/proc/sys/kernel/core_pattern': 'core'}}), {});
+    expect(result.failed).toEqual([]);
+    const unsafe = await collector.collect('heap_core_dump', fakeIo({files: {'/proc/sys/kernel/core_pattern': 'core', '/proc/4242/limits': 'Max core file size        unlimited            unlimited            bytes\n'}}), {});
+    expect(unsafe.failed.map(item => item.name)).toContain('core_limit_process');
   });
 
   it('backup and restore: passes with a fresh verified off-host backup, a passing isolated drill and an active schedule', async () => {

@@ -10,7 +10,9 @@ describe('heap/core evidence', () => {
       'systemctl show mint-bot.service -p LimitCORE --value': { ok: true, stdout: '0' },
       'systemctl show mint-bot.service -p MainPID --value': { ok: true, stdout: '4242' },
       'systemctl show mint-bot.service -p Environment --value': { ok: true, stdout: '' },
-      'coredumpctl list --no-pager': { ok: false, stderr: 'No coredumps found.' },
+      'coredumpctl list --no-pager --json=short': { ok: false, stderr: 'No coredumps found.' },
+      'stat -c %f:%u /var/lib/systemd/coredump': { ok: true, stdout: '41ed:0' },
+      'find /var/lib/systemd/coredump -mindepth 1 -maxdepth 1 -print -quit': { ok: true, stdout: '' },
       "/usr/bin/node -e console.log(require('v8').getHeapStatistics().heap_size_limit)": { ok: true, stdout: '1053032448' },
     };
     const io = {
