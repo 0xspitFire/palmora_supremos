@@ -11,12 +11,20 @@ export function startChainDiscovery(options: {
   logger: Pick<RedactedLogger, 'info' | 'warn'>;
   notify?(text: string, dedupe: string): Promise<unknown>;
   now?: () => number;
+  /** Backoff applies only to classified rate limits; jitter is bounded to 0–25%. */
+  rateLimitMaxDelayMs?: number;
+  random?: () => number;
 }): { stop(): Promise<void> } {
   if (!Number.isSafeInteger(options.intervalMs) || options.intervalMs < 1_000) throw new Error('DISCOVERY_INTERVAL_INVALID');
   // Observed Robinhood blocks arrive about ten times per second. Ethereum's two-minute
   // default leaves >1,200 new blocks between ticks, triggering the lag policy repeatedly.
   const intervalMs = options.chainId === 4663 ? Math.min(options.intervalMs, 15_000) : options.intervalMs;
   const now = options.now ?? Date.now;
+  const configuredBackoff = options.rateLimitMaxDelayMs ?? 300_000;
+  if (!Number.isSafeInteger(configuredBackoff) || configuredBackoff < 1_000 || configuredBackoff > 3_600_000) throw new Error('DISCOVERY_BACKOFF_INVALID');
+  const rateLimitMaxDelayMs = Math.max(intervalMs, configuredBackoff);
+  const random = options.random ?? Math.random;
+  let rateLimitDelay = intervalMs;
   options.liveness?.start(options.chainId);
   const log = (level: 'info' | 'warn', fields: Record<string, unknown>, message: string): void => {
     try { options.logger[level](fields, message); }
@@ -50,10 +58,17 @@ export function startChainDiscovery(options: {
       if (stopped) return;
       if (result.status === 'unavailable') {
         failed = true;
+        if (scanProblemCode(result.reason) === 'RATE_LIMITED') {
+          const sample = random();
+          const jitter = Number.isFinite(sample) ? Math.max(0, Math.min(1, sample)) : 0;
+          delay = Math.min(rateLimitMaxDelayMs, Math.round(rateLimitDelay * (1 + jitter * 0.25)));
+          rateLimitDelay = Math.min(rateLimitMaxDelayMs, rateLimitDelay * 2);
+        } else rateLimitDelay = intervalMs;
         // Never emit provider reason strings: nested errors may contain credentials.
         log('warn', { event: 'replication_discovery_unavailable', chainId: options.chainId, durationMs: now() - started, code: scanProblemCode(result.reason), scannedThrough: result.toBlock ?? null }, 'replication discovery unavailable');
       } else {
         failedSince = undefined;
+        rateLimitDelay = intervalMs;
         lastNotice = undefined;
         log('info', { event: 'replication_discovery', chainId: options.chainId, durationMs: now() - started, status: result.status, fromBlock: result.fromBlock ?? null, toBlock: result.toBlock ?? null, headBlock: result.headBlock ?? null, caughtUp: result.caughtUp === true, watchedPartial: result.watchedPartial === true, mintsObserved: result.mintsObserved, skippedBlocks: result.skipped?.blocks ?? '0' }, 'replication discovery tick');
         // Drain a bounded successful backlog without waiting another polling interval.
@@ -64,6 +79,7 @@ export function startChainDiscovery(options: {
       options.liveness?.fail(options.chainId);
       if (stopped) return;
       failed = true;
+      rateLimitDelay = intervalMs;
       log('warn', { event: 'replication_discovery_unavailable', chainId: options.chainId, durationMs: now() - started, code: 'SCAN_FAILED' }, 'replication discovery unavailable');
     }
     if (failed) {

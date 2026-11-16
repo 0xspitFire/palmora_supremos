@@ -138,3 +138,26 @@ it('watchdog reports a stuck scan without clearing its latch or starting overlap
  vi.useFakeTimers();const {DiscoveryLiveness}=await import('./discovery-liveness.js');const liveness=new DiscoveryLiveness(Date.now,5*60000);const logs=logger();const tick=vi.fn(()=>new Promise<DiscoveryTickResult>(()=>undefined));
  const scanner=startChainDiscovery({chainId:4663,intervalMs:1000,tick,logger:logs,liveness});await vi.advanceTimersByTimeAsync(6*60000);expect(tick).toHaveBeenCalledOnce();expect(liveness.snapshot()).toMatchObject({status:'degraded',chains:[{chainId:4663,state:'stalled'}]});expect(logs.warn).toHaveBeenCalledWith(expect.objectContaining({event:'replication_discovery_stalled',chainId:4663}),expect.any(String));scanner.stop();
 });
+
+
+it('backs off only classified rate limits, caps jitter and resets after recovery', async () => {
+  vi.useFakeTimers();
+  let limited = true;
+  const tick = vi.fn(async () => limited ? ok({ status: 'unavailable', reason: 'RATE_LIMITED: private provider detail' }) : ok());
+  const logs = logger();
+  const service = startChainDiscovery({ chainId: 4663, intervalMs: 15_000, rateLimitMaxDelayMs: 40_000, random: () => 1, tick, logger: logs });
+  await vi.advanceTimersByTimeAsync(18_749); expect(tick).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1); expect(tick).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(37_500); expect(tick).toHaveBeenCalledTimes(3);
+  limited = false; await vi.advanceTimersByTimeAsync(40_000); expect(tick).toHaveBeenCalledTimes(4);
+  limited = true; await vi.advanceTimersByTimeAsync(15_000); expect(tick).toHaveBeenCalledTimes(5);
+  await vi.advanceTimersByTimeAsync(18_750); expect(tick).toHaveBeenCalledTimes(6);
+  expect(JSON.stringify(logs.warn.mock.calls)).not.toContain('private provider detail');
+  await service.stop();
+});
+
+it('rejects malformed rate-limit backoff bounds', () => {
+  for (const rateLimitMaxDelayMs of [0, 1000.5, 3_600_001, NaN]) {
+    expect(() => startChainDiscovery({ chainId: 8453, intervalMs: 120_000, rateLimitMaxDelayMs, tick: async () => ok(), logger: logger() })).toThrow('DISCOVERY_BACKOFF_INVALID');
+  }
+});

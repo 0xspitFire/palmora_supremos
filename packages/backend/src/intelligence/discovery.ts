@@ -187,6 +187,17 @@ export class DiscoveryService {
       if (this.options.isCancelled?.()) return { ...result, status: 'unavailable', reason: 'DISCOVERY_STOPPED' };
       if (!outcome.ok) return { ...result, status: 'unavailable', reason: outcome.reason };
       const at = this.now().getTime();
+      const watchedEvents: EventRecord[] = [];
+      for (const mint of outcome.scan.mints) {
+        if (watchedSet.has(mint.minter.toLowerCase()) && mint.minter.toLowerCase() === mint.payer.toLowerCase() && mint.txHash && /^0x[0-9a-fA-F]{64}$/.test(mint.txHash)) {
+          const id = `watched_mint:${chainId}:${mint.txHash.toLowerCase()}:${mint.logIndex}`;
+          watchedEvents.push({ id, type: 'watched_wallet_mint', at: new Date(at).toISOString(), data: { chainId, contract: mint.nftContract.toLowerCase(), wallet: mint.minter.toLowerCase(), txHash: mint.txHash, sourceBlock: mint.blockNumber.toString() } });
+        }
+      }
+      if (watchedEvents.length > 0) await this.store.transaction((state) => {
+        const ids = new Set(state.events.map(event => event.id));
+        for (const event of watchedEvents) if (!ids.has(event.id)) { state.events.push(event); ids.add(event.id); }
+      });
       for (const mint of outcome.scan.mints) {
         if (!this.firstSighting('mint', mint)) continue;
         const item = this.track(mint.nftContract, at);
@@ -199,10 +210,6 @@ export class DiscoveryService {
         // Convergence counts only a watched wallet that paid for its own mint; a drop owner cannot forge the payer.
         if (watchedSet.has(mint.minter.toLowerCase()) && mint.minter.toLowerCase() === mint.payer.toLowerCase()) {
           item.watched.set(mint.minter.toLowerCase(), at);
-          if (mint.txHash && /^0x[0-9a-fA-F]{64}$/.test(mint.txHash)) {
-            const id = `watched_mint:${chainId}:${mint.txHash.toLowerCase()}:${mint.logIndex}`;
-            await this.store.transaction((state) => { if (!state.events.some((event) => event.id === id)) state.events.push({ id, type: 'watched_wallet_mint', at: new Date(at).toISOString(), data: { chainId, contract: item.contract, wallet: mint.minter.toLowerCase(), txHash: mint.txHash, sourceBlock: mint.blockNumber.toString() } }); });
-          }
         }
         touched.add(item.contract);
         result.mintsObserved += quantity;
