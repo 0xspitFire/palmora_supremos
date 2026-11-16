@@ -1,6 +1,45 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { createPublicClient, custom, encodeAbiParameters, HttpRequestError, InvalidParamsRpcError, RpcRequestError, TimeoutError, type PublicClient } from 'viem';
 import { answeredWithoutName, EngineIntelligencePort } from './intelligence-adapter.js';
+import { boundedIntelligencePort } from './bounded-intelligence-port.js';
+
+it('retains the outer scan slot after rejected provider-body cleanup and refuses a newer scan', async () => {
+  const mocked = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(new ReadableStream({
+    start(stream) { stream.enqueue(new Uint8Array(10_485_761)); },
+    cancel() { return Promise.reject(new Error('SYNTHETIC_CANCEL_FAILURE')); },
+  })));
+  const scoped = boundedIntelligencePort(EngineIntelligencePort.fromRpcUrls(['https://primary.example.invalid', 'https://secondary.example.invalid']), { timeoutMs: 30 });
+  try {
+    expect((await scoped.port.scan(100n, 199n, [])).ok).toBe(false);
+    expect(scoped.pending()).toBe(1);
+    expect((await scoped.port.scan(200n, 299n, [])).ok).toBe(false);
+    expect(scoped.pending()).toBe(1); expect(mocked).toHaveBeenCalledTimes(1);
+  } finally { scoped.stop(); mocked.mockRestore(); }
+});
+
+it('a scoped intelligence scan reaches fallback after a primary partial-body stall before its outer deadline', async () => {
+  let fallbackReads = 0;
+  const primary = createServer((_request, response) => { response.writeHead(200, { 'content-type': 'application/json' }); response.write('{"jsonrpc":"2.0",'); });
+  const secondary = createServer((request, response) => {
+    let body = ''; request.on('data', chunk => { body += chunk; });
+    request.on('end', () => { fallbackReads++; const { id, method } = JSON.parse(body) as { id: number; method: string }; response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ jsonrpc: '2.0', id, result: method === 'eth_getLogs' ? [] : null })); });
+  });
+  const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.all([primary, secondary].map(server => new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))));
+    const endpoints = [primary, secondary].map(server => `http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+    const port = EngineIntelligencePort.fromRpcUrls(endpoints).withReadSignal(controller.signal);
+    timer = setTimeout(() => controller.abort(), 6500);
+    const watched = Array.from({ length: 137 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`);
+    const result = await port.scan(100n, 199n, watched);
+    expect(result.ok).toBe(true); expect(controller.signal.aborted).toBe(false); expect(fallbackReads).toBe(8);
+  } finally {
+    clearTimeout(timer); controller.abort();
+    for (const server of [primary, secondary]) { server.closeAllConnections(); server.close(); }
+  }
+}, 8000);
 
 /** A fake node that rejects getLogs above a block-range limit, like many providers. */
 function node(limit: bigint, calls: Array<[bigint, bigint]>): PublicClient {

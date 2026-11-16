@@ -77,7 +77,8 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   /** One cancellable, read-only operation; no signer or shared mint transport. */
   public withReadSignal(signal:AbortSignal):IntelligenceChainPort{
     if(!this.endpoints)return this;
-    const child=new EngineIntelligencePort(createPublicClient({transport:failoverTransport(this.endpoints,{signal})}) as PublicClient,{chainId:this.chainId,publicOnly:this.publicOnly,advisoryMetadataOnly:this.advisoryMetadataOnly,confirmations:this.confirmations,maxRange:this.maxRange,initialRange:this.range});
+    // Leave time for fallback providers inside the 15-second operation budget.
+    const child=new EngineIntelligencePort(createPublicClient({transport:failoverTransport(this.endpoints,{signal,completeResponseTimeoutMs:4000})}) as PublicClient,{chainId:this.chainId,publicOnly:this.publicOnly,advisoryMetadataOnly:this.advisoryMetadataOnly,confirmations:this.confirmations,maxRange:this.maxRange,initialRange:this.range});
     for(const [key,value] of this.dropCache)child.dropCache.set(key,value);
     child.successes=this.successes;const original=child.scan.bind(child);
     child.scan=async(from,to,watched)=>{const result=await original(from,to,watched);if(!signal.aborted){this.range=child.range;this.successes=child.successes;}return result;};
