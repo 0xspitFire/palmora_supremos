@@ -170,3 +170,15 @@ describe('read failover across RPC providers', () => {
   });
 
 });
+
+
+it('reports bounded fixed metadata for actual scoped failover without endpoint or request parameters', async () => {
+ const observations: unknown[]=[];
+ const client=createPublicClient({transport:failoverTransport([failing,good],{signal:new AbortController().signal,completeResponseTimeoutMs:1000,observe:value=>observations.push(value)})});
+ expect(await client.getBlockNumber({cacheTime:0})).toBe(42n);
+ expect(observations).toHaveLength(2);
+ expect(observations[0]).toMatchObject({endpointIndex:0,method:'eth_blockNumber',outcome:'http_error'});
+ expect(observations[1]).toMatchObject({endpointIndex:1,method:'eth_blockNumber',outcome:'success'});
+ for(const value of observations) expect(Object.keys(value as object).sort()).toEqual(['durationMs','endpointIndex','method','outcome']);
+ expect(JSON.stringify(observations)).not.toContain('http://');
+});

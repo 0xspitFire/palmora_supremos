@@ -273,3 +273,5 @@ export * from './verified-erc721-authority.js';
 
 export { readTurnkeyReviewedRegistry, readTurnkeyReviewedRegistries } from './turnkey-signer.js';
 export { independentPublicRpcEndpoints } from './turnkey-public-authority.js';
+
+export type { RpcReadObservation, RpcReadMethod, RpcReadOutcome } from './rpc-read-observation.js';

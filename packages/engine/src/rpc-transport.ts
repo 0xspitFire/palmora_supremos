@@ -1,3 +1,4 @@
+import { diagnosticRpcMethod, diagnosticRpcOutcome, type RpcReadObservation, type RpcReadOutcome } from './rpc-read-observation.js';
 import { fallback, http, TimeoutError, ResponseBodyTooLargeError, type Transport } from 'viem';
 
 /**
@@ -11,13 +12,16 @@ export const READ_TIMEOUT_MS = 15_000;
 /** Scoped intelligence reads need a provider budget covering headers AND body.
  * viem's ordinary timeout ends at response headers. Keep cancellation attached
  * until the body settles, before permitting failover to another endpoint. */
-function completeResponseFetch(timeoutMs: number, signal: AbortSignal): typeof fetch {
+function completeResponseFetch(timeoutMs: number, signal: AbortSignal, endpointIndex: number, observe?: (value: RpcReadObservation) => void): typeof fetch {
   // This closure belongs to one provider in one scoped operation. A timed-out
   // provider must not consume the same budget again for every watched chunk.
   let timedOut = false;
   return async (input, init) => {
     signal.throwIfAborted();
     if (timedOut) throw new TimeoutError({ url: String(input), body: {} });
+    const started = performance.now();
+    const method = observe ? diagnosticRpcMethod(init?.body) : 'other';
+    let outcome: RpcReadOutcome = 'network_error';
     const controller = new AbortController();
     const abort = (): void => { controller.abort(); };
     signal.addEventListener('abort', abort, { once: true });
@@ -34,7 +38,7 @@ function completeResponseFetch(timeoutMs: number, signal: AbortSignal): typeof f
     };
     try {
       const response = await fetch(input, { ...init, signal: controller.signal, redirect: 'error' });
-      if (!response.body) { checkPublication(); return response; }
+      if (!response.body) { checkPublication(); if (observe) outcome = diagnosticRpcOutcome(response.status); return response; }
       const reader = response.body.getReader();
       const chunks: Uint8Array[] = [];
       let size = 0;
@@ -56,25 +60,28 @@ function completeResponseFetch(timeoutMs: number, signal: AbortSignal): typeof f
       const bytes = new Uint8Array(size);
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      if (observe) outcome = diagnosticRpcOutcome(response.status, bytes);
       const buffered = new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
       checkPublication();
       return buffered;
     } catch (error) {
+      outcome = signal.aborted ? 'cancelled' : expired || performance.now() >= deadline ? 'timeout' : 'network_error';
       if (expired && !signal.aborted) throw new TimeoutError({ url: String(input), body: {} });
       throw error;
     } finally {
       clearTimeout(timer);
       controller.abort();
       signal.removeEventListener('abort', abort);
+      try { observe?.({ endpointIndex, method, outcome, durationMs: Math.max(0, Math.round(performance.now() - started)) }); } catch { /* Diagnostics cannot change request outcomes. */ }
     }
   };
 }
 
-export function failoverTransport(endpoints: readonly (string | undefined)[], options: { timeoutMs?: number; signal?:AbortSignal; completeResponseTimeoutMs?: number } = {}): Transport {
+export function failoverTransport(endpoints: readonly (string | undefined)[], options: { timeoutMs?: number; signal?:AbortSignal; completeResponseTimeoutMs?: number; observe?: (value: RpcReadObservation) => void } = {}): Transport {
   if (options.completeResponseTimeoutMs !== undefined && (!options.signal || !Number.isSafeInteger(options.completeResponseTimeoutMs) || options.completeResponseTimeoutMs < 1 || options.completeResponseTimeoutMs > READ_TIMEOUT_MS)) throw new Error('RPC_COMPLETE_RESPONSE_BOUNDS_INVALID');
   const unique = [...new Set(endpoints.filter((endpoint): endpoint is string => typeof endpoint === 'string' && endpoint.length > 0))];
   if (unique.length === 0) throw new Error('RPC_ENDPOINT_UNAVAILABLE');
-  const transports = unique.map((url) => http(url, { timeout: options.timeoutMs ?? READ_TIMEOUT_MS, retryCount: 0, ...(options.signal?{fetchOptions:{signal:options.signal}}:{}), ...(options.completeResponseTimeoutMs !== undefined ? { fetchFn: completeResponseFetch(options.completeResponseTimeoutMs, options.signal!) } : {}) }));
+  const transports = unique.map((url, endpointIndex) => http(url, { timeout: options.timeoutMs ?? READ_TIMEOUT_MS, retryCount: 0, ...(options.signal?{fetchOptions:{signal:options.signal}}:{}), ...(options.completeResponseTimeoutMs !== undefined ? { fetchFn: completeResponseFetch(options.completeResponseTimeoutMs, options.signal!, endpointIndex, options.observe) } : {}) }));
   return transports.length === 1 ? transports[0]! : fallback(transports, { rank: false, retryCount: 0 });
 }
 

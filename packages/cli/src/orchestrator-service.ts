@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { rpcUsageReporter } from './rpc-usage.js';
 import { boundedIntelligencePort } from './bounded-intelligence-port.js';
 import { DiscoveryLiveness } from './discovery-liveness.js';
 import { createHostReplicationQualifier } from './replication-qualifier.js';
@@ -281,7 +282,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       await roadmapIntelligence.tick();
       roadmapIntelligence.start();
     }
-    intelligence = startIntelligence({ liveness:discoveryLiveness,advanced:roadmapIntelligence?.advanced, history:roadmapIntelligence?.history, adaptive:roadmapIntelligence?.adaptive, store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls,1,false,{advisoryMetadataOnly:true}), alerts: intelligenceAlerts, wallets: initialWallets, walletProvider: readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
+    intelligence = startIntelligence({ liveness:discoveryLiveness,advanced:roadmapIntelligence?.advanced, history:roadmapIntelligence?.history, adaptive:roadmapIntelligence?.adaptive, store: runtime.store, repo: (runtime.store as CanonicalStoreBridge).intelligenceRepository(), port: EngineIntelligencePort.fromRpcUrls(rpcUrls,1,false,{advisoryMetadataOnly:true,observe:rpcUsageReporter(1,value=>logger.info(value,'discovery RPC usage summary'))}), alerts: intelligenceAlerts, wallets: initialWallets, walletProvider: readinessWallets, logger, discoveryIntervalMs: config.discoveryIntervalMs, discoveryMaxLagBlocks: config.discoveryMaxLagBlocks, readinessIntervalMs: config.readinessIntervalMs, digestIntervalMs: config.digestIntervalMs, startNumber: restartCount, ...(monitorUrl ? { monitorPing: createMonitorPing(monitorUrl) } : {}), heartbeatPath: join(dirname(config.statePath), 'heartbeat'), version: await codeVersion(config.projectRoot), sampleHost: async () => ({ disk: await diskFacts(dirname(config.statePath)), backup: await backupFacts(config.backupStatusPath) }) });
     logger.info({ event: 'intelligence_started', readinessWallets: initialWallets.length }, 'phase 2 intelligence started (read-only)');
     // Secondary discovery/readiness is useful even when automatic execution is off.
     // Each chain owns its completion-driven timers, and readiness never waits in a scan tick.
@@ -291,7 +292,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       if (!enabled()) continue;
       const endpoints = [...(await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints];
       for (const endpoint of endpoints) logger.registerSecret(endpoint);
-      const bounded=boundedIntelligencePort(EngineIntelligencePort.fromRpcUrls(endpoints,chainId,false,{advisoryMetadataOnly:true}),{report:state=>{discoveryLiveness.read(state);if(state.state==='timed_out'||state.state==='capacity')logger.warn({event:'intelligence_read_deadline',...state},'bounded discovery read unavailable');}});
+      const bounded=boundedIntelligencePort(EngineIntelligencePort.fromRpcUrls(endpoints,chainId,false,{advisoryMetadataOnly:true,observe:rpcUsageReporter(chainId,value=>logger.info(value,'discovery RPC usage summary'))}),{report:state=>{discoveryLiveness.read(state);if(state.state==='timed_out'||state.state==='capacity')logger.warn({event:'intelligence_read_deadline',...state},'bounded discovery read unavailable');}});
       discoveryReads.push(bounded);const port=bounded.port;
       const discovery = new DiscoveryService(runtime.store, bridge.intelligenceRepository(), port, { isCancelled: () => discoveryStopping, budgetPerNftWei: PERSONAL_LIVE_FLEET_POLICY.paidMaxPricePerNftWei, alerts: intelligenceAlerts,advanced:roadmapIntelligence?.advanced,history:roadmapIntelligence?.history,adaptive:roadmapIntelligence?.adaptive });
       secondaryDiscoveryTimers.push(startChainDiscovery({
