@@ -7,7 +7,7 @@
  * that strategy result.
  */
 
-import type { Address, Hash, Hex, PublicClient } from 'viem';
+import { formatLog, numberToHex, type Address, type Hash, type Hex, type PublicClient } from 'viem';
 import type { FinalityObserver, FinalityObservation } from './finality-observer.js';
 import { getStrategy } from './drop-reader.js';
 import type {
@@ -238,10 +238,10 @@ interface RawLog {
   readonly address: Address;
   readonly topics: readonly Hex[];
   readonly data: Hex;
-  readonly blockNumber?: bigint;
-  readonly blockHash?: Hash;
-  readonly transactionHash?: Hash;
-  readonly logIndex?: number;
+  readonly blockNumber?: bigint | null;
+  readonly blockHash?: Hash | null;
+  readonly transactionHash?: Hash | null;
+  readonly logIndex?: number | null;
   readonly removed?: boolean;
 }
 
@@ -373,10 +373,13 @@ export class ChainFactsReader {
       return this.unavailable('logs', 'INVALID_BLOCK_RANGE', observedAt);
     }
     try {
-      const request: Record<string, unknown> = { fromBlock: filter.fromBlock, toBlock };
-      if (filter.address !== undefined) request.address = filter.address;
-      if (filter.topics !== undefined) request.topics = filter.topics;
-      const logs = await this.client.getLogs(request as never) as unknown as readonly RawLog[];
+      const addressValue = typeof filter.address === 'string' || filter.address === undefined ? filter.address : [...filter.address];
+      const address = addressValue === undefined ? {} : { address: addressValue };
+      // getLogs derives topics from ABI events/args and ignores raw `topics`.
+      // Preserve the observer's exact OR/null/indexed filters on the RPC wire.
+      const logs = filter.topics === undefined
+        ? await this.client.getLogs({ ...address, fromBlock: filter.fromBlock, toBlock })
+        : (await this.client.request({ method: 'eth_getLogs', params: [{ ...address, fromBlock: numberToHex(filter.fromBlock), toBlock: numberToHex(toBlock), topics: filter.topics.map(topic => typeof topic === 'string' || topic === null ? topic : [...topic]) }] })).map(log => formatLog(log));
       const value = logs.map(normalizeLog);
       return this.fact('logs', value, observedAt, this.freshness.logsMs, sourceRecord('logs', toBlock), 'chain_observation');
     } catch (error) {

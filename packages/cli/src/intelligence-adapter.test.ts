@@ -51,6 +51,12 @@ function node(limit: bigint, calls: Array<[bigint, bigint]>): PublicClient {
       if (request.toBlock - request.fromBlock + 1n > limit) throw new Error('query exceeds max block range');
       return [];
     },
+    // Range/error fixtures return empty logs; reflect the raw RPC boundary while
+    // retaining each test's overridden provider behavior through `this`.
+    request: async function (this: { getLogs: (args: { fromBlock: bigint; toBlock: bigint }) => Promise<unknown> }, request: { method: string; params: readonly [{ fromBlock: string; toBlock: string }] }) {
+      if (request.method !== 'eth_getLogs') throw new Error('UNEXPECTED_FIXTURE_RPC_METHOD');
+      return this.getLogs({ ...request.params[0], fromBlock: BigInt(request.params[0].fromBlock), toBlock: BigInt(request.params[0].toBlock) });
+    },
   } as unknown as PublicClient;
 }
 

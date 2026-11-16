@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HttpRequestError, InvalidParamsRpcError, RpcRequestError, TimeoutError, type Address, type Hash, type Hex, type PublicClient } from 'viem';
+import { createPublicClient, custom, HttpRequestError, InvalidParamsRpcError, RpcRequestError, TimeoutError, type Address, type Hash, type Hex, type PublicClient } from 'viem';
 import {
   ChainFactsReader,
   appendReceiptObservation,
@@ -17,6 +17,33 @@ const CONTRACT = '0x2222222222222222222222222222222222222222' as Address;
 const TX_HASH = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as Hash;
 const RECEIPT_BLOCK_HASH = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as Hash;
 const REORG_BLOCK_HASH = '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' as Hash;
+
+it.each([
+  { address: CONTRACT, topics: [[`0x${'1'.repeat(64)}`, `0x${'2'.repeat(64)}`]] },
+  { topics: [`0x${'3'.repeat(64)}`, null, [`0x${'4'.repeat(64)}`, `0x${'5'.repeat(64)}`]] },
+  { address: [CONTRACT, ADDRESS], topics: [] },
+])('preserves raw topic filters on the real viem JSON-RPC boundary: %j', async filter => {
+  const calls: unknown[] = [];
+  const client = createPublicClient({ transport: custom({ request: async ({ method, params }) => {
+    expect(method).toBe('eth_getLogs'); calls.push(params);
+    return [{ address: CONTRACT, topics: [`0x${'1'.repeat(64)}`], data: '0x', blockNumber: '0xa', blockHash: RECEIPT_BLOCK_HASH, transactionHash: TX_HASH, transactionIndex: '0x0', logIndex: '0x0', removed: false }];
+  } }) });
+  const result = await new ChainFactsReader(client as PublicClient, { chainId: 1, now: () => NOW }).readLogs({ ...filter, topics: filter.topics as readonly (Hex | readonly Hex[] | null)[], fromBlock: 10n, toBlock: 20n });
+  expect(calls).toEqual([[{ ...filter, fromBlock: '0xa', toBlock: '0x14' }]]);
+  expect(result.availability).toBe('available');
+  expect(result.value?.[0]).toMatchObject({ blockNumber: 10n, logIndex: 0, transactionHash: TX_HASH });
+});
+
+it('keeps filtered RPC failures unavailable and never retries without the topics', async () => {
+  let calls = 0;
+  const client = createPublicClient({ transport: custom({ request: async () => {
+    calls++;
+    throw new InvalidParamsRpcError(new RpcRequestError({ body: {}, url: 'https://rpc.example.invalid', error: { code: -32602, message: 'eth_getLogs is limited to 100 blocks' } }));
+  } }, { retryCount: 0 }) });
+  const result = await new ChainFactsReader(client as PublicClient, { chainId: 1, now: () => NOW }).readLogs({ topics: [`0x${'1'.repeat(64)}`], fromBlock: 10n, toBlock: 20n });
+  expect(calls).toBe(1);
+  expect(result).toMatchObject({ availability: 'unavailable', value: null, failureKind: 'RANGE_LIMIT' });
+});
 
 function baseDrop(overrides: Partial<DropConfig> = {}): DropConfig {
   return {
