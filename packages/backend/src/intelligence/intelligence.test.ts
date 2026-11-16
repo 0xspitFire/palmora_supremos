@@ -80,6 +80,27 @@ function setup(store: BackendStore = new DurableStore()) {
 }
 
 describe('DiscoveryService', () => {
+  it('persists watched self-mints together before cursor advancement and retries a failed batch', async () => {
+    const t = setup();
+    t.repo.watched = [WHALE];
+    const first = mint(900n, WHALE);
+    const second = mint(901n, WHALE);
+    t.port.mints = [first, second, { ...second }, mint(902n, WHALE, 1n, 0n, NFT, W1)];
+    const transact = t.store.transaction.bind(t.store);
+    let reject = true;
+    let watchedWrites = 0;
+    vi.spyOn(t.store, 'transaction').mockImplementation(async (mutate) => {
+      if (reject) { reject = false; throw new Error('synthetic write failure'); }
+      return transact(state => { const before = state.events.length; const result = mutate(state); if (state.events.slice(before).some(event => event.type === 'watched_wallet_mint')) watchedWrites += 1; return result; });
+    });
+    await expect(t.discovery.tick()).rejects.toThrow('synthetic write failure');
+    expect(t.repo.cursor(1, 'seadrop-v1')).toBeUndefined();
+    await t.discovery.tick();
+    expect(events(t.store, 'watched_wallet_mint')).toHaveLength(2);
+    expect(watchedWrites).toBe(1);
+    expect(t.repo.cursor(1, 'seadrop-v1')).toBe(1000n);
+  });
+
   it('never restores another chain\'s opportunity or watched-wallet consolidation', async () => {
     const t = setup();
     await t.store.transaction((state) => { state.events.push({ id: 'other-chain', type: 'opportunity_scored', at: t.clock.now().toISOString(), data: { chainId: 8453, contract: NFT, lastActivityAt: t.clock.now().toISOString(), firstSeenAt: t.clock.now().toISOString(), watchedMinters: [WHALE], priceWei: '0', score: 90, band: 'proposal' } }); });
