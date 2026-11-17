@@ -1,5 +1,5 @@
 import { createPublicClient, type Address, type PublicClient } from 'viem';
-import { ChainFactsReader, SeaDropObserver, SeaDropV1PublicStrategy, failoverTransport, getStrategy, simulateMint, type DropConfig, type RpcReadObservation } from '@mint-bot/engine';
+import { ChainFactsReader, SeaDropObserver, SeaDropV1PublicStrategy, failoverTransport, getStrategy, simulateMint, type DropConfig, type RpcReadObservation, isAlchemyRpcEndpoint } from '@mint-bot/engine';
 import type { ChainScanOutcome, CollectionNameRead, DropSnapshot, IntelligenceChainPort, SimulationOutcome } from '@mint-bot/backend';
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -44,11 +44,13 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   private readonly endpoints?:readonly string[];
   private readonly advisoryMetadataOnly:boolean;
   private readonly confirmations:bigint;
+  private readonly alchemyFreeTier: boolean;
   private readonly observe?: (value: RpcReadObservation) => void;
 
-  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint; initialRange?: bigint; chainId?: 1 | 8453 | 4663; publicOnly?: boolean;advisoryMetadataOnly?:boolean;endpoints?:readonly string[]; observe?: (value: RpcReadObservation) => void } = {}) {
+  public constructor(private readonly client: PublicClient, options: { confirmations?: bigint; maxRange?: bigint; initialRange?: bigint; chainId?: 1 | 8453 | 4663; publicOnly?: boolean;advisoryMetadataOnly?:boolean;endpoints?:readonly string[]; observe?: (value: RpcReadObservation) => void; alchemyFreeTier?: boolean } = {}) {
     this.chainId = options.chainId ?? 1;
     this.observe = options.observe;
+    this.alchemyFreeTier = options.alchemyFreeTier ?? false;
     this.publicOnly = options.publicOnly ?? false;
     this.endpoints=options.endpoints;this.advisoryMetadataOnly=options.advisoryMetadataOnly??false;this.confirmations=options.confirmations??2n;
     const reader = new ChainFactsReader(client, { chainId: this.chainId, sourceRef: 'intelligence-rpc' });
@@ -67,20 +69,21 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
   }
 
   /** The first address is used while it answers; a timeout or failure moves the read to the next one (failoverTransport). */
-  public static fromRpcUrls(rpcUrls: readonly string[], chainId: 1 | 8453 | 4663 = 1, publicOnly = false, options:{advisoryMetadataOnly?:boolean; observe?: (value: RpcReadObservation) => void}={}): EngineIntelligencePort {
+  public static fromRpcUrls(rpcUrls: readonly string[], chainId: 1 | 8453 | 4663 = 1, publicOnly = false, options:{advisoryMetadataOnly?:boolean; observe?: (value: RpcReadObservation) => void; alchemyFreeTier?: boolean}={}): EngineIntelligencePort {
     for (const rpcUrl of rpcUrls) {
       let parsed: URL;
       try { parsed = new URL(rpcUrl); } catch { throw new Error('INTELLIGENCE_RPC_URL_INVALID'); }
       if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname))) throw new Error('INTELLIGENCE_RPC_MUST_BE_HTTPS');
     }
-    return new EngineIntelligencePort(createPublicClient({ transport: failoverTransport(rpcUrls) }) as PublicClient, { chainId, publicOnly,endpoints:rpcUrls,advisoryMetadataOnly:options.advisoryMetadataOnly,observe:options.observe });
+    const onlyAlchemyFree = options.alchemyFreeTier === true && rpcUrls.length > 0 && rpcUrls.every(isAlchemyRpcEndpoint);
+    return new EngineIntelligencePort(createPublicClient({ transport: failoverTransport(rpcUrls) }) as PublicClient, { chainId, publicOnly,endpoints:rpcUrls,advisoryMetadataOnly:options.advisoryMetadataOnly,observe:options.observe,alchemyFreeTier:options.alchemyFreeTier,...(onlyAlchemyFree?{maxRange:10n,initialRange:10n}:{}) });
   }
 
   /** One cancellable, read-only operation; no signer or shared mint transport. */
   public withReadSignal(signal:AbortSignal):IntelligenceChainPort{
     if(!this.endpoints)return this;
     // Leave time for fallback providers inside the 15-second operation budget.
-    const child=new EngineIntelligencePort(createPublicClient({transport:failoverTransport(this.endpoints,{signal,completeResponseTimeoutMs:4000,observe:this.observe})}) as PublicClient,{chainId:this.chainId,publicOnly:this.publicOnly,advisoryMetadataOnly:this.advisoryMetadataOnly,confirmations:this.confirmations,maxRange:this.maxRange,initialRange:this.range});
+    const child=new EngineIntelligencePort(createPublicClient({transport:failoverTransport(this.endpoints,{signal,completeResponseTimeoutMs:4000,observe:this.observe,alchemyFreeTier:this.alchemyFreeTier})}) as PublicClient,{chainId:this.chainId,publicOnly:this.publicOnly,advisoryMetadataOnly:this.advisoryMetadataOnly,confirmations:this.confirmations,maxRange:this.maxRange,initialRange:this.range,alchemyFreeTier:this.alchemyFreeTier});
     for(const [key,value] of this.dropCache)child.dropCache.set(key,value);
     child.successes=this.successes;const original=child.scan.bind(child);
     child.scan=async(from,to,watched)=>{const result=await original(from,to,watched);if(!signal.aborted){this.range=child.range;this.successes=child.successes;}return result;};

@@ -275,3 +275,5 @@ export { readTurnkeyReviewedRegistry, readTurnkeyReviewedRegistries } from './tu
 export { independentPublicRpcEndpoints } from './turnkey-public-authority.js';
 
 export type { RpcReadObservation, RpcReadMethod, RpcReadOutcome } from './rpc-read-observation.js';
+
+export { isAlchemyRpcEndpoint } from './alchemy-free-logs.js';
