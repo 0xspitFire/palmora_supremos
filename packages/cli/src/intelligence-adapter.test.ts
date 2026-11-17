@@ -243,3 +243,12 @@ describe('adaptive log ranges with real viem error wrappers', () => {
     expect(JSON.stringify(result)).not.toContain('node.invalid');
   });
 });
+
+it('limits Alchemy-only Free discovery to ten blocks without capping mixed or unconfigured providers', () => {
+ const alchemy='https://eth-mainnet.g.alchemy.com/v2/synthetic';
+ expect(EngineIntelligencePort.fromRpcUrls([alchemy],1,false,{alchemyFreeTier:true}).currentRange()).toBe(10n);
+ expect(EngineIntelligencePort.fromRpcUrls([alchemy,'https://base-mainnet.g.alchemy.com/v2/synthetic'],8453,false,{alchemyFreeTier:true}).currentRange()).toBe(10n);
+ expect(EngineIntelligencePort.fromRpcUrls([alchemy,'https://fallback.example.invalid'],1,false,{alchemyFreeTier:true}).currentRange()).toBe(100n);
+ expect(EngineIntelligencePort.fromRpcUrls([alchemy],1).currentRange()).toBe(100n);
+ expect(EngineIntelligencePort.fromRpcUrls(['https://fallback.example.invalid'],4663,false,{alchemyFreeTier:true}).currentRange()).toBe(100n);
+});

@@ -1,3 +1,4 @@
+import { isAlchemyRpcEndpoint, alchemyFreeRequestSupported } from './alchemy-free-logs.js';
 import { diagnosticRpcMethod, diagnosticRpcOutcome, type RpcReadObservation, type RpcReadOutcome } from './rpc-read-observation.js';
 import { fallback, http, TimeoutError, ResponseBodyTooLargeError, type Transport } from 'viem';
 
@@ -77,11 +78,19 @@ function completeResponseFetch(timeoutMs: number, signal: AbortSignal, endpointI
   };
 }
 
-export function failoverTransport(endpoints: readonly (string | undefined)[], options: { timeoutMs?: number; signal?:AbortSignal; completeResponseTimeoutMs?: number; observe?: (value: RpcReadObservation) => void } = {}): Transport {
+export function failoverTransport(endpoints: readonly (string | undefined)[], options: { timeoutMs?: number; signal?:AbortSignal; completeResponseTimeoutMs?: number; observe?: (value: RpcReadObservation) => void; alchemyFreeTier?: boolean } = {}): Transport {
   if (options.completeResponseTimeoutMs !== undefined && (!options.signal || !Number.isSafeInteger(options.completeResponseTimeoutMs) || options.completeResponseTimeoutMs < 1 || options.completeResponseTimeoutMs > READ_TIMEOUT_MS)) throw new Error('RPC_COMPLETE_RESPONSE_BOUNDS_INVALID');
+  if (options.alchemyFreeTier && options.completeResponseTimeoutMs === undefined) throw new Error('RPC_FREE_TIER_REQUIRES_SCOPED_READ');
   const unique = [...new Set(endpoints.filter((endpoint): endpoint is string => typeof endpoint === 'string' && endpoint.length > 0))];
   if (unique.length === 0) throw new Error('RPC_ENDPOINT_UNAVAILABLE');
-  const transports = unique.map((url, endpointIndex) => http(url, { timeout: options.timeoutMs ?? READ_TIMEOUT_MS, retryCount: 0, ...(options.signal?{fetchOptions:{signal:options.signal}}:{}), ...(options.completeResponseTimeoutMs !== undefined ? { fetchFn: completeResponseFetch(options.completeResponseTimeoutMs, options.signal!, endpointIndex, options.observe) } : {}) }));
+  const transports = unique.map((url, endpointIndex) => {
+    const scopedFetch = options.completeResponseTimeoutMs === undefined ? undefined : completeResponseFetch(options.completeResponseTimeoutMs, options.signal!, endpointIndex, options.observe);
+    const guardedFetch: typeof fetch | undefined = scopedFetch && options.alchemyFreeTier && isAlchemyRpcEndpoint(url) ? async (input, init) => {
+      options.signal!.throwIfAborted();
+      if (!alchemyFreeRequestSupported(init?.body)) throw new Error('RPC_LOG_RANGE_UNSUPPORTED');
+      return scopedFetch(input, init);
+    } : scopedFetch;
+    return http(url, { timeout: options.timeoutMs ?? READ_TIMEOUT_MS, retryCount: 0, ...(options.signal?{fetchOptions:{signal:options.signal}}:{}), ...(options.completeResponseTimeoutMs !== undefined ? { fetchFn: guardedFetch } : {}) }); });
   return transports.length === 1 ? transports[0]! : fallback(transports, { rank: false, retryCount: 0 });
 }
 
