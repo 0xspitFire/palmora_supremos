@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sampleCpuAreas } from './cpu-attribution.js';
 import { rpcUsageReporter } from './rpc-usage.js';
 import { boundedIntelligencePort } from './bounded-intelligence-port.js';
 import { DiscoveryLiveness } from './discovery-liveness.js';
@@ -706,9 +707,15 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
   logger.info({ event: 'service_started', bindHost: config.bindHost, port: config.port, mode: config.mode }, 'orchestrator service started');
 
   let stopped = false;
+  // Explicit operator opt-in; one local aggregate sample, no inspector listener or raw file.
+  const cpuSampleTimer = environment.MINT_BOT_CPU_DIAGNOSTIC === 'true' ? setTimeout(() => {
+    void sampleCpuAreas().then(summary => { if (!stopped) logger.info(summary, 'local CPU attribution'); }, () => { if (!stopped) logger.warn({ event: 'discovery_cpu_sample_unavailable' }, 'local CPU attribution unavailable'); }).catch(() => undefined);
+  }, 60_000) : undefined;
+  cpuSampleTimer?.unref();
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    if (cpuSampleTimer) clearTimeout(cpuSampleTimer);
     discoveryStopping = true;
     metrics.set('mintbot_process_up', 0);
     for(const reader of discoveryReads)reader.stop();
