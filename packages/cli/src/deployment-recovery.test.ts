@@ -33,11 +33,22 @@ if (command === 'sha256sum') {
   if (!args.length) fs.readFileSync(0);
   console.log((process.env.SCENARIO === 'migration-change' ? 'c' : 'b').repeat(64) + '  fixture'); process.exit(0);
 }
-if (command === 'seq') { console.log('1'); process.exit(0); }
 if (command === 'sleep') process.exit(0);
-if (command === 'curl') process.exit(state.current !== process.env.OLD && ['health-fail', 'incompatible', 'recovery-reset-fail'].includes(process.env.SCENARIO) ? 1 : 0);
+if (command === 'timeout') {
+  // The focused shell fixtures exercise the elapsed timer itself. Simulate
+  // an expired window here so the full recovery paths never wait minutes.
+  if (args[0] !== '--kill-after=5s' || args[1] !== '180s' || args[2] !== 'bash') process.exit(2);
+  if (state.current !== process.env.OLD && ['health-fail', 'incompatible', 'recovery-reset-fail'].includes(process.env.SCENARIO)) process.exit(124);
+  const result = require('node:child_process').spawnSync(args[2], args.slice(3), { stdio: 'inherit' });
+  process.exit(result.status ?? 2);
+}
+if (command === 'curl') {
+  if (process.env.SCENARIO === 'lost-kill') { state.killed = false; save(); }
+  process.exit(0);
+}
 if (command === 'sudo' && args[0] === '-u') {
-  if (args[2] === 'touch') { trace('kill'); process.exit(0); }
+  if (args[2] === 'touch') { state.killed = true; save(); trace('kill'); process.exit(0); }
+  if (args[2] === 'test') process.exit(args.slice(3).join(' ') === '-f /var/lib/mint-bot/killswitch' && state.killed ? 0 : 1);
   fs.readFileSync(0); trace('quiescent'); process.exit(process.env.SCENARIO === 'exposure' ? 1 : 0);
 }
 const call = command === 'sudo' ? args : [command, ...args];
@@ -62,7 +73,7 @@ throw new Error('unmocked command');
 
 function cutover(dir: string, scenario: string, allow = false) {
   const bin = join(dir, 'bin'); mkdirSync(bin);
-  for (const name of ['sudo', 'systemctl', 'readlink', 'find', 'sha256sum', 'curl', 'seq', 'sleep']) writeFileSync(join(bin, name), mock, { mode: 0o700 });
+  for (const name of ['sudo', 'systemctl', 'readlink', 'find', 'sha256sum', 'curl', 'timeout', 'sleep']) writeFileSync(join(bin, name), mock, { mode: 0o700 });
   const state = join(dir, 'state.json'), trace = join(dir, 'trace');
   writeFileSync(state, JSON.stringify({ current: old, previous: `/opt/mint-bot/releases/${'3'.repeat(40)}`, starts: 0, resets: 0 })); writeFileSync(trace, '');
   const result = spawnSync('bash', [join(root, 'ops/host/cutover-release.sh'), '/tmp/synthetic-archive', 'a'.repeat(64), '/tmp/synthetic-installer', 'a'.repeat(64), 'b'.repeat(64), allow ? '1' : '0'], {
@@ -147,6 +158,16 @@ describe('schema-aware release recovery', () => {
     const result = cutover(dir, 'success');
     expect(result.status, result.stderr).toBe(0); expect(result.state.current).toBe(next); expect(result.stdout).toContain('DEPLOYMENT_HEALTHY');
     expect(result.trace.filter(action => action === 'quiescent')).toHaveLength(2); expect(result.trace).not.toContain('rollback');
+  }));
+
+  it('stops without starting recovery when kill is lost during a successful HTTP response', () => scratch(dir => {
+    const result = cutover(dir, 'lost-kill');
+    expect(result.status).toBe(1);
+    expect(result.state.starts).toBe(1);
+    expect(result.trace.at(-1)).toBe('stop');
+    expect(result.trace).not.toContain('rollback');
+    expect(result.stderr).toContain('kill marker unavailable');
+    expect(result.stdout).not.toContain('DEPLOYMENT_HEALTHY');
   }));
 });
 
