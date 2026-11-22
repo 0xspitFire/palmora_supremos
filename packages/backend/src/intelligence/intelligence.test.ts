@@ -285,13 +285,27 @@ describe('discovery chain identities and durable opportunity recovery', () => {
   it('restores legacy minters only from their own same-chain durable self-mint times', async () => {
     const t = setup(); t.repo.watched = [WHALE]; t.port.drops.set(NFT, drop()); t.port.mints = [mint(900n, WHALE)];
     await t.discovery.tick();
-    await t.store.transaction(state => { for (const event of state.events) if (event.type.startsWith('opportunity_')) delete event.data.watchedMinterObservations; });
+    await t.store.transaction(state => {
+      for (const event of state.events) if (event.type.startsWith('opportunity_')) delete event.data.watchedMinterObservations;
+      state.events.push({
+        id: 'later-self-mint', type: 'watched_wallet_mint', at: new Date(START + 60_000).toISOString(),
+        data: { chainId: 1, contract: NFT, wallet: WHALE },
+      });
+    });
     t.clock.advance(13);
     await new DiscoveryService(t.store, t.repo, t.port, { now: t.clock.now, budgetPerNftWei: LIMIT }).tick();
     const newest = [...t.store.snapshot().events].reverse().find(event => event.type.startsWith('opportunity_'))!;
     expect(newest.data.watchedMinters).toEqual([WHALE]);
     const missing = setup(); missing.repo.watched = [WHALE];
-    await missing.store.transaction(state => state.events.push({ id: 'legacy-no-proof', type: 'opportunity_notified', at: new Date(START - 13 * 60_000).toISOString(), data: { chainId: 1, contract: NFT, watchedMinters: [WHALE], priceWei: '0', score: 80, band: 'proposal' } }));
+    await missing.store.transaction(state => {
+      const at = new Date(START - 13 * 60_000).toISOString();
+      state.events.push(
+        { id: 'legacy-no-proof', type: 'opportunity_notified', at, data: { chainId: 1, contract: NFT, watchedMinters: [WHALE], priceWei: '0', score: 80, band: 'proposal' } },
+        { id: 'other-chain', type: 'watched_wallet_mint', at, data: { chainId: 8453, contract: NFT, wallet: WHALE } },
+        { id: 'other-contract', type: 'watched_wallet_mint', at, data: { chainId: 1, contract: PAID_NFT, wallet: WHALE } },
+        { id: 'too-late', type: 'watched_wallet_mint', at: new Date(START - 12 * 60_000).toISOString(), data: { chainId: 1, contract: NFT, wallet: WHALE } },
+      );
+    });
     await missing.discovery.tick();
     expect([...missing.store.snapshot().events].reverse().find(event => event.type.startsWith('opportunity_'))?.data.watchedMinters).toEqual([]);
   });

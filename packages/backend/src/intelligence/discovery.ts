@@ -266,6 +266,7 @@ export class DiscoveryService {
       const prior = latest.get(key);
       if (!prior || at >= Date.parse(prior.at)) latest.set(key, event);
     }
+    let legacySources: Map<string, EventRecord[]> | undefined;
     for (const event of latest.values()) {
       const contract = String(event.data.contract).toLowerCase();
       const at = Date.parse(event.at);
@@ -293,8 +294,24 @@ export class DiscoveryService {
           const observation = row as Record<string, unknown>;
           remember(observation.wallet, observation.at);
         }
-      } else {
-        for (const source of snapshot) if (source.type === 'watched_wallet_mint' && source.data.chainId === this.port.chainId && typeof source.data.contract === 'string' && source.data.contract.toLowerCase() === contract) remember(source.data.wallet, source.at);
+      } else if (minters.size > 0) {
+        if (!legacySources) {
+          // Index once for legacy rows. Keep every source time so a later
+          // self-mint cannot hide earlier evidence that this opportunity knew.
+          legacySources = new Map();
+          for (const source of snapshot) {
+            if (source.type !== 'watched_wallet_mint' || source.data.chainId !== this.port.chainId || typeof source.data.contract !== 'string') continue;
+            const sourceContract = source.data.contract.toLowerCase();
+            const opportunity = latest.get(`opportunity:${sourceContract}`);
+            if (!opportunity || Array.isArray(opportunity.data.watchedMinterObservations)) continue;
+            const sourceTime = Date.parse(source.at);
+            if (!Number.isFinite(sourceTime) || sourceTime > now || now - sourceTime > CONVERGENCE_WINDOW_MS) continue;
+            const prior = legacySources.get(sourceContract);
+            if (prior) prior.push(source);
+            else legacySources.set(sourceContract, [source]);
+          }
+        }
+        for (const source of legacySources.get(contract) ?? []) remember(source.data.wallet, source.at);
       }
       const mints: Tracked['mints'] = [];
       if (Array.isArray(event.data.mintActivity) && event.data.mintActivity.length <= 61) {
