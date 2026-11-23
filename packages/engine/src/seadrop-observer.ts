@@ -22,6 +22,7 @@ export const ERC721_TRANSFER_TOPIC: Hex = encodeEventTopics({ abi: ERC721_TRANSF
 /** The subset of ChainFactsReader the observer needs; lets tests supply fixed logs. */
 export interface LogSource {
   readHead(): Promise<ChainFact<ChainHead>>;
+  readHeadNumber?(): Promise<{ number: bigint | null; rateLimited: boolean }>;
   readLogs(filter: ChainLogFilter): Promise<ChainFact<readonly ChainLog[]>>;
 }
 
@@ -76,11 +77,14 @@ export class SeaDropObserver {
   }
 
   public async safeHeadResult(): Promise<{ head: bigint | null; rateLimited: boolean }> {
-    const head = await this.source.readHead();
-    const number = head.value?.number;
-    if (number === undefined || head.availability === 'unavailable') {
-      return { head: null, rateLimited: head.failureKind === 'RATE_LIMITED' };
-    }
+    const result = this.source.readHeadNumber
+      ? await this.source.readHeadNumber()
+      : await this.source.readHead().then(head => ({
+        number: head.availability === 'unavailable' ? null : head.value?.number ?? null,
+        rateLimited: head.failureKind === 'RATE_LIMITED',
+      }));
+    const { number } = result;
+    if (number === null) return { head: null, rateLimited: result.rateLimited };
     return { head: number > this.confirmations ? number - this.confirmations : 0n, rateLimited: false };
   }
 

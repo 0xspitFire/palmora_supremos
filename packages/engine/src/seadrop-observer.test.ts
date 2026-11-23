@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { encodeAbiParameters, encodeEventTopics, pad, parseAbi, zeroAddress, type Address, type Hex } from 'viem';
+import { encodeAbiParameters, encodeEventTopics, pad, parseAbi, zeroAddress, type Address, type Hex, type PublicClient } from 'viem';
+import { ChainFactsReader } from './chain-facts.js';
 import type { ChainFact, ChainHead, ChainLog, ChainLogFilter } from './chain-facts.js';
 import { SEADROP_V1_ADDRESS } from './chains.js';
 import { ERC721_TRANSFER_TOPIC, PUBLIC_DROP_UPDATED_TOPIC, SEADROP_EVENTS_ABI, SEADROP_MINT_TOPIC, SeaDropObserver, type LogSource } from './seadrop-observer.js';
@@ -12,6 +13,19 @@ const WHALE = '0x5555555555555555555555555555555555555555' as Address;
 function fact<T>(value: T | null): ChainFact<T> {
   return { kind: 'logs', value, availability: value === null ? 'unavailable' : 'available', freshness: { status: 'fresh', observedAt: 'x', expiresAt: null, ageMs: 0 }, provenance: [] } as unknown as ChainFact<T>;
 }
+
+it('reads the settled discovery height without requesting unused block metadata', async () => {
+  const blockNumber = vi.fn(async () => 100n);
+  const getBlock = vi.fn();
+  const client = { getBlockNumber: blockNumber, getBlock } as unknown as PublicClient;
+  const observer = new SeaDropObserver(new ChainFactsReader(client, {chainId: 1}), {confirmations: 3n});
+  await expect(observer.safeHeadResult()).resolves.toEqual({head:97n,rateLimited:false});
+  expect(blockNumber).toHaveBeenCalledOnce();
+  expect(getBlock).not.toHaveBeenCalled();
+  blockNumber.mockRejectedValueOnce(new Error('HTTP 429'));
+  await expect(observer.safeHeadResult()).resolves.toEqual({head:null,rateLimited:true});
+  expect(getBlock).not.toHaveBeenCalled();
+});
 
 function log(address: Address, topics: Hex[], data: Hex, blockNumber = 100n, logIndex = 0, removed = false): ChainLog {
   return { address, topics, data, blockNumber, blockHash: `0x${'b'.repeat(64)}`, transactionHash: `0x${'a'.repeat(64)}`, logIndex, removed };

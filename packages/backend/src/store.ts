@@ -7,8 +7,15 @@ const emptyState = (): BackendState => ({ schemaVersion: 1, campaigns: [], runs:
 /** Fresh control-plane reads omit historical projections; mutations still use full atomic state. */
 export type BackendControlSnapshot = Pick<BackendState, 'runtime' | 'killed' | 'reconciliations' | 'jobs'>;
 export function readEventSnapshot(store: BackendStore): EventRecord[] { return store.eventSnapshot ? store.eventSnapshot() : store.snapshot().events; }
+export function isReplicationTickEvent(event: EventRecord): boolean {
+  return event.type === 'watched_wallet_mint' || event.type === 'replication_claim'
+    || event.type === 'replication_decision' || event.type.startsWith('opportunity_');
+}
+export function readReplicationTickEvents(store: BackendStore): EventRecord[] {
+  return store.replicationTickEvents ? store.replicationTickEvents() : readEventSnapshot(store).filter(isReplicationTickEvent);
+}
 export function readControlSnapshot(store: BackendStore): BackendControlSnapshot { return store.controlSnapshot ? store.controlSnapshot() : store.snapshot(); }
-export interface BackendStore { fundingFeeForRunWallet?(runId: string, wallet: string): FundingFeeMetadata; fundingExpenseSnapshot?(): FundingCostObservation[]; open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; readModelSnapshot?(): BackendState; controlSnapshot?(): BackendControlSnapshot; eventSnapshot?(): EventRecord[]; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
+export interface BackendStore { fundingFeeForRunWallet?(runId: string, wallet: string): FundingFeeMetadata; fundingExpenseSnapshot?(): FundingCostObservation[]; open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; readModelSnapshot?(): BackendState; controlSnapshot?(): BackendControlSnapshot; eventSnapshot?(): EventRecord[]; replicationTickEvents?(): EventRecord[]; appendDiscoveryEvents?(events: readonly EventRecord[]): Promise<void>; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
 export class DurableStore implements BackendStore {
   private state: BackendState = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();
