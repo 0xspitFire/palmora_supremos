@@ -361,8 +361,8 @@ export class ChainFactsReader {
         ...(block?.timestamp === undefined ? {} : { timestamp: block.timestamp }),
       };
       return this.fact('head', value, observedAt, this.freshness.headMs, sourceRecord('head', number), 'chain_observation');
-    } catch {
-      return this.unavailable('head', 'HEAD_UNAVAILABLE', observedAt);
+    } catch (error) {
+      return { ...this.unavailable<ChainHead>('head', 'HEAD_UNAVAILABLE', observedAt), failureKind: classifyLogReadFailure(error) };
     }
   }
 

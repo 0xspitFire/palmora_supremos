@@ -38,6 +38,40 @@ function harness(now: () => Date, repo = new Repo(90, 21_000_000n)) {
 
 afterEach(() => { vi.useRealTimers(); });
 
+it('paces primary discovery after consecutive rate limits and resets on a different outcome', async () => {
+  vi.useFakeTimers();
+  const now = () => new Date();
+  const h = harness(now);
+  class RateLimitedPort extends IdlePort { public override async safeHead() { return 21_000_001n; } }
+  const port = new RateLimitedPort();
+  const scans = vi.spyOn(port, 'scan')
+    .mockResolvedValueOnce({ ok: false, reason: 'RATE_LIMITED' })
+    .mockResolvedValueOnce({ ok: false, reason: 'RATE_LIMITED' })
+    .mockResolvedValue({ ok: false, reason: 'LOGS_UNAVAILABLE' });
+  const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+  const service = startIntelligence({
+    store: h.store, repo: h.repo, port, alerts: h.alerts, wallets: OWN,
+    discoveryIntervalMs: 1_000, readinessIntervalMs: 3_600_000, digestIntervalMs: 3_600_000, now,
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(scans).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(scans).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(scans).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scans).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(scans).toHaveBeenCalledTimes(4);
+  } finally {
+    await service.stop();
+    random.mockRestore();
+  }
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(scans).toHaveBeenCalledTimes(4);
+});
+
 it('drains an outstanding heartbeat read and never touches the repository after shutdown completes', async () => {
   const now = () => new Date('2026-11-14T12:00:00.000Z');
   const h = harness(now);

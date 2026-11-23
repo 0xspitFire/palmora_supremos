@@ -21,6 +21,8 @@ export interface IntelligenceChainPort {
   readonly chainId: 1 | 8453 | 4663;
   /** Highest block considered settled, or null when the chain head is unavailable. */
   safeHead(): Promise<bigint | null>;
+  /** Classification of a failed head read, without provider text. */
+  safeHeadResult?(): Promise<{ head: bigint | null; rateLimited: boolean }>;
   scan(fromBlock: bigint, toBlock: bigint, watched: readonly string[]): Promise<ChainScanOutcome>;
   /** Public SeaDrop drop for a contract, or null when it has none or it cannot be read. */
   readDrop(nftContract: string): Promise<DropSnapshot | null>;

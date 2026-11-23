@@ -25,5 +25,13 @@ export function boundedIntelligencePort(port:IntelligenceChainPort,options:{time
   catch{if(owned.expired||stopped)return fallback;throw new Error('INTELLIGENCE_READ_FAILED');}finally{if(timer)clearTimeout(timer);}
  };
  const bounded:IntelligenceChainPort={chainId:port.chainId,safeHead:()=>run('safe_head',[],null,p=>p.safeHead()),scan:(from,to,watched)=>run('scan',[from,to,watched],{ok:false,reason:'READ_DEADLINE_EXCEEDED'},p=>p.scan(from,to,watched)),hasCode:address=>run('code',[address],null,p=>p.hasCode(address)),readDrop:contract=>run('drop_metadata',[contract],null,p=>p.readDrop(contract)),balance:address=>run('balance',[address],null,p=>p.balance(address)),simulateMint:(wallet,contract,quantity,value)=>run('advisory_simulation',[wallet,contract,quantity,value],{outcome:'unknown',reason:'READ_DEADLINE_EXCEEDED'},p=>p.simulateMint(wallet,contract,quantity,value)),...(port.readName?{readName:(contract:string)=>run('collection_name',[contract],{status:'error'},p=>p.readName!(contract))}:{}),...(port.estimateMintGas?{estimateMintGas:(wallet:string,contract:string,quantity:number,value:bigint)=>run('advisory_estimate',[wallet,contract,quantity,value],null,p=>p.estimateMintGas!(wallet,contract,quantity,value))}:{}),...(port.baseFeePerGasWei?{baseFeePerGasWei:()=>run('base_fee',[],null,p=>p.baseFeePerGasWei!())}:{})};
+ if (port.safeHeadResult) {
+  const head = () => run<{ head: bigint | null; rateLimited: boolean }>(
+   'safe_head', [], { head: null, rateLimited: false },
+   async reader => reader.safeHeadResult ? reader.safeHeadResult() : { head: await reader.safeHead(), rateLimited: false },
+  );
+  bounded.safeHeadResult = head;
+  bounded.safeHead = async () => (await head()).head;
+ }
  return {port:bounded,pending:()=>pending.size,stop:()=>{stopped=true;for(const job of pending.values()){job.expired=true;job.controller.abort();}}};
 }

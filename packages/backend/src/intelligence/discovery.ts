@@ -154,9 +154,12 @@ export class DiscoveryService {
     this.nameReadsRemaining=3;
     const result: DiscoveryTickResult = { status: 'idle', mintsObserved: 0, opportunitiesWritten: 0, calendarWritten: 0, alertsRaised: 0 };
     if (!this.restored) { this.restore(); this.restored = true; }
-    const head = await this.port.safeHead();
+    const headResult = this.port.safeHeadResult
+      ? await this.port.safeHeadResult()
+      : { head: await this.port.safeHead(), rateLimited: false };
+    const { head } = headResult;
     if (this.options.isCancelled?.()) return { ...result, status: 'unavailable', reason: 'DISCOVERY_STOPPED' };
-    if (head === null) return { ...result, status: 'unavailable', reason: 'HEAD_UNAVAILABLE' };
+    if (head === null) return { ...result, status: 'unavailable', reason: headResult.rateLimited ? 'RATE_LIMITED: HEAD_UNAVAILABLE' : 'HEAD_UNAVAILABLE' };
     result.headBlock = head.toString();
     result.caughtUp = false;
     const chainId = this.port.chainId;
