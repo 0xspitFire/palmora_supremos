@@ -99,17 +99,29 @@ PY
 }
 
 wait_healthy() {
-  for attempt in $(seq 1 30); do
-    if systemctl is-active --quiet mint-bot.service && curl --max-time 5 --fail --silent --show-error http://127.0.0.1:8780/healthz >/dev/null; then return 0; fi
-    sleep 2
-  done
-  return 1
+  # Connection refusals return immediately. Count elapsed time so cold starts
+  # get the same window even when the listener is absent.
+  timeout --kill-after=5s 180s bash -c '
+    while sudo -u mintbot test -f /var/lib/mint-bot/killswitch; do
+      if systemctl is-active --quiet mint-bot.service &&
+         curl --disable --noproxy "*" --max-time 5 --fail --silent http://127.0.0.1:8780/healthz >/dev/null &&
+         sudo -u mintbot test -f /var/lib/mint-bot/killswitch; then
+        exit 0
+      fi
+      sleep 2
+    done
+    exit 1
+  '
 }
 
 recover() {
   echo 'Cutover failed; attempting compatible code-only recovery with kill engaged.' >&2
   if ! sudo systemctl stop mint-bot.service; then
-    echo 'FORWARD_REPAIR_REQUIRED: unable to stop service; kill remains engaged.' >&2
+    echo 'FORWARD_REPAIR_REQUIRED: unable to stop service; reconcile live state.' >&2
+    return 1
+  fi
+  if ! sudo -u mintbot test -f /var/lib/mint-bot/killswitch; then
+    echo 'FORWARD_REPAIR_REQUIRED: service stopped; kill marker unavailable.' >&2
     return 1
   fi
   if [ "$(readlink -f /opt/mint-bot/current)" != "$OLD" ]; then
@@ -122,14 +134,21 @@ recover() {
     echo 'FORWARD_REPAIR_REQUIRED: captured previous release was not selected; service remains stopped.' >&2
     return 1
   fi
-  if ! sudo systemctl reset-failed mint-bot.service || ! sudo systemctl start mint-bot.service; then
-    sudo systemctl stop mint-bot.service || true
-    echo 'FORWARD_REPAIR_REQUIRED: previous service could not start; kill remains engaged.' >&2
+  if ! sudo -u mintbot test -f /var/lib/mint-bot/killswitch ||
+     ! sudo systemctl reset-failed mint-bot.service || ! sudo systemctl start mint-bot.service; then
+    if sudo systemctl stop mint-bot.service; then
+      echo 'FORWARD_REPAIR_REQUIRED: previous service did not pass its start checks and was stopped.' >&2
+    else
+      echo 'FORWARD_REPAIR_REQUIRED: unable to stop service; reconcile live state.' >&2
+    fi
     return 1
   fi
-  if ! wait_healthy; then
-    sudo systemctl stop mint-bot.service || true
-    echo 'FORWARD_REPAIR_REQUIRED: previous service failed health; kill remains engaged.' >&2
+  if ! wait_healthy || ! sudo -u mintbot test -f /var/lib/mint-bot/killswitch; then
+    if sudo systemctl stop mint-bot.service; then
+      echo 'FORWARD_REPAIR_REQUIRED: previous service failed its startup checks and was stopped.' >&2
+    else
+      echo 'FORWARD_REPAIR_REQUIRED: unable to stop service; reconcile live state.' >&2
+    fi
     return 1
   fi
   echo 'RECOVERED_PREVIOUS_RELEASE_KILL_SWITCH_ENGAGED'
@@ -141,6 +160,6 @@ sudo systemctl stop mint-bot.service
 quiescent
 if ! sudo bash "$INSTALLER" "$ARCHIVE" "$DIGEST"; then recover || true; exit 1; fi
 if ! sudo systemctl reset-failed mint-bot.service || ! sudo systemctl start mint-bot.service; then recover || true; exit 1; fi
-if wait_healthy; then echo 'DEPLOYMENT_HEALTHY_KILL_SWITCH_ENGAGED'; exit 0; fi
+if wait_healthy && sudo -u mintbot test -f /var/lib/mint-bot/killswitch; then echo 'DEPLOYMENT_HEALTHY_KILL_SWITCH_ENGAGED'; exit 0; fi
 recover || true
 exit 1
