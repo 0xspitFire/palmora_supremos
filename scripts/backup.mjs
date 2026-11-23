@@ -2,6 +2,7 @@ import { access, chmod, copyFile, constants, lstat, mkdir, readFile, rename, rm,
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
+import { copyBackupSnapshot } from './backup-snapshot.mjs';
 
 const require = createRequire(new URL('../packages/database/package.json', import.meta.url));
 const Database = require('better-sqlite3');
@@ -66,7 +67,7 @@ const { database, copy: quietCopy } = await openForBackup();
 try {
   if (database.pragma('journal_mode', { simple: true }) !== 'wal') throw new Error('SQLITE_WAL_REQUIRED');
   if (database.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('SQLITE_INTEGRITY_CHECK_FAILED');
-  await database.backup(temporary);
+  await copyBackupSnapshot(database, temporary);
 } finally {
   database.close();
   if (quietCopy) await Promise.all([quietCopy, `${quietCopy}-wal`, `${quietCopy}-shm`].map((path) => rm(path, { force: true })));
