@@ -102,6 +102,10 @@ export class EngineIntelligencePort implements IntelligenceChainPort {
 
   public async safeHead(): Promise<bigint | null> { return this.observer.safeHead(); }
 
+  public async safeHeadResult(): Promise<{ head: bigint | null; rateLimited: boolean }> {
+    return this.observer.safeHeadResult();
+  }
+
   public async scan(fromBlock: bigint, toBlock: bigint, watched: readonly string[]): Promise<ChainScanOutcome> {
     const addresses = watched.filter((address) => ADDRESS.test(address)) as Address[];
     let outcome = await this.observer.scan(fromBlock, this.clamp(fromBlock, toBlock), addresses);

@@ -2,7 +2,8 @@ import { boundedIntelligencePort } from './bounded-intelligence-port.js';
 import { DiscoveryLiveness } from './discovery-liveness.js';
 import { createHash } from 'node:crypto';
 import { checkInCounts, checkInMessage, startMessage } from './status-messages.js';
-import { ScanTracker } from './scan-tracker.js';
+import { ScanTracker, scanProblemCode } from './scan-tracker.js';
+import { discoveryRateLimitDelay } from './discovery-rate-limit.js';
 import { readHeartbeat, writeHeartbeat } from './heartbeat.js';
 import type { MonitorPing } from './monitor-ping.js';
 import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, buildSystemCard, pauseCard, scanSkippedCard, plainSystemText, type AdvancedIntelligencePort, type HistoricalQualityPort, type AdaptiveModelPort, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
@@ -229,10 +230,13 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
     } catch (error) { options.logger?.warn({ event: 'skip_recheck_failed', error }, 'could not summarize scan jumps'); }
     finally { skipNoticeBusy = false; }
   };
+  const retryDiscovery = discoveryRateLimitDelay(options.discoveryIntervalMs, 300_000);
+  let discoveryDelay = options.discoveryIntervalMs;
   const runDiscovery = guarded('discovery', async () => {
     try {
       liveness.begin(port.chainId);
       const result = await discovery.tick();
+      discoveryDelay = retryDiscovery(result.status === 'unavailable' && scanProblemCode(result.reason) === 'RATE_LIMITED');
       liveness.complete(port.chainId,result);
       tracker.record(result, now(), options.repo.cursor(port.chainId, 'seadrop-v1')?.toString());
       if (result.skipped && validRange(result.skipped)) {
@@ -241,7 +245,7 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
       }
       await announcePendingSkips();
       return result;
-    } catch (error) { liveness.fail(port.chainId);tracker.recordFailure(now()); await announcePendingSkips(); throw error; }
+    } catch (error) { discoveryDelay = retryDiscovery(false); liveness.fail(port.chainId);tracker.recordFailure(now()); await announcePendingSkips(); throw error; }
   });
   const monitor = new HealthMonitor(options.alerts, { now, onError: (error) => options.logger?.warn({ event: 'health_message_failed', error }, 'health message failed') });
   const RETRY_WINDOW_MS = 6 * 60 * 60_000;
@@ -342,11 +346,19 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   };
   void background(runMonitor);
   void background(() => sendStatus(`start:${startedAt.toISOString()}`, startMessage({ watched: options.repo.observedAddresses(1).length, ownWallets: options.wallets.length, startedAt, ...(options.startNumber !== undefined ? { startNumber: options.startNumber } : {}), ...(options.version ? { version: options.version } : {}) })));
-  const timers = [setInterval(() => void runDiscovery(), options.discoveryIntervalMs), setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void background(runCheckIn), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void background(runHeartbeat), options.heartbeatIntervalMs ?? 30_000), setInterval(() => void background(runMonitor), options.monitorIntervalMs ?? 60_000), setInterval(() => void background(announcePendingSkips), SKIP_NOTICE_INTERVAL_MS)];
+  const timers = [setInterval(() => void runReadiness(), options.readinessIntervalMs), setInterval(() => void runDigest(), options.digestIntervalMs), setInterval(() => void runRetry(), options.digestIntervalMs), setInterval(() => void background(runCheckIn), 60 * 60_000), setInterval(() => void runHealth(), options.healthIntervalMs ?? 5 * 60_000), setInterval(() => void background(runHeartbeat), options.heartbeatIntervalMs ?? 30_000), setInterval(() => void background(runMonitor), options.monitorIntervalMs ?? 60_000), setInterval(() => void background(announcePendingSkips), SKIP_NOTICE_INTERVAL_MS)];
   for (const timer of timers) timer.unref();
-  void runDiscovery().then(runReadiness);
+  let discoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleDiscovery = (): void => {
+    if (stopped) return;
+    discoveryTimer = setTimeout(() => { void runDiscovery().then(scheduleDiscovery); }, discoveryDelay);
+    discoveryTimer.unref();
+  };
+  const firstDiscovery = runDiscovery();
+  void firstDiscovery.then(scheduleDiscovery);
+  void firstDiscovery.then(runReadiness);
   return {
-    stop: async () => { stopped=true;for (const timer of timers) clearInterval(timer);reads.stop();await Promise.allSettled([...running]); },
+    stop: async () => { stopped=true; clearTimeout(discoveryTimer); for (const timer of timers) clearInterval(timer);reads.stop();await Promise.allSettled([...running]); },
     runOnce: async () => { await runDiscovery(); await runReadiness(); await runDigest(); await runRetry(); await runHealth(); await background(runCheckIn); },
   };
 }

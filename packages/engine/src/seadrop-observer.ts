@@ -72,10 +72,16 @@ export class SeaDropObserver {
 
   /** Highest block considered settled, or null when the head is unknown. */
   public async safeHead(): Promise<bigint | null> {
+    return (await this.safeHeadResult()).head;
+  }
+
+  public async safeHeadResult(): Promise<{ head: bigint | null; rateLimited: boolean }> {
     const head = await this.source.readHead();
     const number = head.value?.number;
-    if (number === undefined || head.availability === 'unavailable') return null;
-    return number > this.confirmations ? number - this.confirmations : 0n;
+    if (number === undefined || head.availability === 'unavailable') {
+      return { head: null, rateLimited: head.failureKind === 'RATE_LIMITED' };
+    }
+    return { head: number > this.confirmations ? number - this.confirmations : 0n, rateLimited: false };
   }
 
   /** Scans [fromBlock, min(toBlock, fromBlock + maxRange - 1)]. Fails whole rather than returning partial data. */
