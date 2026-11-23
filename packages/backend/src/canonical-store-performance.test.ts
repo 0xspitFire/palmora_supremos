@@ -9,6 +9,50 @@ function insertEvent(db: SqliteDatabase, id: string, at = NOW): void {
 }
 
 describe('canonical persistence and incremental event projection', () => {
+  it('appends discovery observations without rebuilding history, deduplicates and rolls back invalid batches', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      insertEvent(value.db, 'retained-discovery-fixture');
+      const event = { id: 'range-observation', type: 'watched_wallet_mint', at: NOW, data: { fixture: 1 } };
+      value.store.eventSnapshot();
+      const snapshot = vi.spyOn(value.store, 'snapshot');
+      const statements = vi.spyOn(value.db, 'prepare');
+      await value.store.appendDiscoveryEvents([event, { ...event, data: { fixture: 2 } }]);
+      expect(snapshot).not.toHaveBeenCalled();
+      expect(statements.mock.calls.map(([sql]) => sql).every(sql =>
+        sql.startsWith('SELECT entity_type, policy_snapshot_json FROM audit_event WHERE id = ?')
+          || sql.startsWith('INSERT INTO audit_event'))).toBe(true);
+      expect(value.store.eventSnapshot().filter(row => row.id === event.id)).toEqual([event]);
+      await expect(value.store.appendDiscoveryEvents([
+        { ...event, id: 'rolled-back' }, { ...event, id: 'forbidden', type: 'replication_prepared' },
+      ])).rejects.toThrow('DISCOVERY_EVENT_TYPE_NOT_ALLOWED');
+      expect(value.store.eventSnapshot().some(row => row.id === 'rolled-back' || row.id === 'forbidden')).toBe(false);
+      value.db.prepare("INSERT INTO audit_event (id, entity_type, entity_id, actor, reason, occurred_at) VALUES ('ordinary-audit', 'state_transition', 'global', 'fixture', 'fixture', ?)").run(NOW);
+      await expect(value.store.appendDiscoveryEvents([{ ...event, id: 'ordinary-audit' }])).rejects.toThrow(/UNIQUE/);
+    } finally { vi.restoreAllMocks(); await close(value); }
+  });
+
+  it('projects only the ordered replication inputs and retains newly persisted downgrades', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      insertEvent(value.db, 'unrelated');
+      const common = { at: NOW, data: {} };
+      await value.store.appendDiscoveryEvents([
+        { ...common, id: 'score-up', type: 'opportunity_notified' },
+        { ...common, id: 'source', type: 'watched_wallet_mint' },
+      ]);
+      await value.store.transaction(state => {
+        state.events.push({ ...common, id: 'claim', type: 'replication_claim' }, { ...common, id: 'decision', type: 'replication_decision' });
+      });
+      expect(value.store.replicationTickEvents().map(event => event.id)).toEqual(['claim', 'decision', 'score-up', 'source']);
+      await value.store.appendDiscoveryEvents([{ ...common, at: '2026-11-23T16:00:00.000Z', id: 'score-down', type: 'opportunity_scored', data: { blocked: true } }]);
+      const view = value.store.replicationTickEvents();
+      expect(view.at(-1)).toMatchObject({ id: 'score-down', data: { blocked: true } });
+      view.at(-1)!.data.blocked = false;
+      expect(value.store.replicationTickEvents().at(-1)?.data.blocked).toBe(true);
+    } finally { await close(value); }
+  });
+
   it('retries a complete batch after an interrupted SQLite iterator without advancing its watermark', async () => {
     const value = await fixture(ETHEREUM);
     try {

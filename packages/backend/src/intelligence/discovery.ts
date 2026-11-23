@@ -1,6 +1,6 @@
 import type { AdvancedIntelligencePort, HistoricalQualityPort, AdaptiveModelPort } from './advanced-scoring.js';
 import { randomUUID } from 'node:crypto';
-import type { BackendStore } from '../store.js';
+import { readEventSnapshot, type BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
 import { calendarId, DISCOVERY_FRESHNESS_MS, opportunityId, validChainTime, type DropSnapshot, type IntelligenceAlertSink, type IntelligenceChainPort, type IntelligenceRepositoryPort } from './port.js';
 import { scoreOpportunity, type ScoreResult } from './scoring.js';
@@ -177,7 +177,7 @@ export class DiscoveryService {
       const resume = head - lookback;
       if (resume > from) {
         const skipped = { fromBlock: from.toString(), toBlock: (resume - 1n).toString(), blocks: (resume - from).toString() };
-        await this.store.transaction((state) => { state.events.push({ id: `evt_${randomUUID()}`, type: 'discovery_skipped', at: this.now().toISOString(), data: { ...skipped, chainId, headBlock: head.toString() } }); });
+        await this.appendEvents([{ id: `evt_${randomUUID()}`, type: 'discovery_skipped', at: this.now().toISOString(), data: { ...skipped, chainId, headBlock: head.toString() } }]);
         this.repo.advanceCursor(chainId, SOURCE, resume - 1n);
         result.skipped = skipped;
         from = resume;
@@ -197,10 +197,7 @@ export class DiscoveryService {
           watchedEvents.push({ id, type: 'watched_wallet_mint', at: new Date(at).toISOString(), data: { chainId, contract: mint.nftContract.toLowerCase(), wallet: mint.minter.toLowerCase(), txHash: mint.txHash, sourceBlock: mint.blockNumber.toString() } });
         }
       }
-      if (watchedEvents.length > 0) await this.store.transaction((state) => {
-        const ids = new Set(state.events.map(event => event.id));
-        for (const event of watchedEvents) if (!ids.has(event.id)) { state.events.push(event); ids.add(event.id); }
-      });
+      await this.appendEvents(watchedEvents);
       for (const mint of outcome.scan.mints) {
         if (!this.firstSighting('mint', mint)) continue;
         const item = this.track(mint.nftContract, at);
@@ -257,7 +254,7 @@ export class DiscoveryService {
   private restore(): void {
     const now = this.now().getTime();
     const latest = new Map<string, EventRecord>();
-    const snapshot = this.store.snapshot().events;
+    const snapshot = readEventSnapshot(this.store);
     for (const event of snapshot) {
       if (event.type !== 'opportunity_scored' && event.type !== 'opportunity_notified' && event.type !== 'calendar_entry') continue;
       if (event.data.chainId !== this.port.chainId) continue;
@@ -417,7 +414,7 @@ export class DiscoveryService {
       }
       } catch { /* one malformed item never blocks the others or the cursor */ }
     }
-    if (events.length > 0) await this.store.transaction((state) => { state.events.push(...events); });
+    await this.appendEvents(events);
     await this.raise(alerts, result);
     return events.length;
   }
@@ -463,9 +460,25 @@ export class DiscoveryService {
       }
       } catch { /* one malformed entry never blocks the others or the cursor */ }
     }
-    if (events.length > 0) await this.store.transaction((state) => { state.events.push(...events); });
+    await this.appendEvents(events);
     await this.raise(alerts, result);
     return events.length;
+  }
+
+  private async appendEvents(events: readonly EventRecord[]): Promise<void> {
+    if (events.length === 0) return;
+    if (this.store.appendDiscoveryEvents) {
+      await this.store.appendDiscoveryEvents(events);
+      return;
+    }
+    await this.store.transaction(state => {
+      const ids = new Set(state.events.map(event => event.id));
+      for (const event of events) {
+        if (ids.has(event.id)) continue;
+        state.events.push(event);
+        ids.add(event.id);
+      }
+    });
   }
 
   private async raise(alerts: ReadonlyArray<Parameters<IntelligenceAlertSink['intelligence']>[0]>, result: DiscoveryTickResult): Promise<void> {
@@ -474,7 +487,7 @@ export class DiscoveryService {
         // Preserve acknowledged legacy notices only on the chain identified by their
         // stored card. A chainless identity must never suppress another chain.
         const legacyDedupe = alert.dedupe.replace(`:${this.port.chainId}:`, ':');
-        const legacyRecorded = this.store.snapshot().events.some(event => event.type === `alert_${alert.kind}` && event.data.dedupe === legacyDedupe && parseAlertCard(event.data.card)?.chainId === this.port.chainId);
+        const legacyRecorded = readEventSnapshot(this.store).some(event => event.type === `alert_${alert.kind}` && event.data.dedupe === legacyDedupe && parseAlertCard(event.data.card)?.chainId === this.port.chainId);
         const recorded = legacyRecorded ? false : await this.options.alerts?.intelligence(alert);
         if (recorded) result.alertsRaised += 1;
         // Both true (inserted) and false (already durable) establish dedupe.

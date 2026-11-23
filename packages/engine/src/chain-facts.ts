@@ -350,6 +350,15 @@ export class ChainFactsReader {
   private readonly chainId: SupportedChainId;
   private readonly finalityObserver?: FinalityObserver;
 
+  /** Discovery requires only height. Other consumers still use readHead's block metadata. */
+  public async readHeadNumber(): Promise<{ number: bigint | null; rateLimited: boolean }> {
+    try {
+      return { number: await this.client.getBlockNumber(), rateLimited: false };
+    } catch (error) {
+      return { number: null, rateLimited: classifyLogReadFailure(error) === 'RATE_LIMITED' };
+    }
+  }
+
   public async readHead(): Promise<ChainFact<ChainHead>> {
     const observedAt = this.readNow();
     try {

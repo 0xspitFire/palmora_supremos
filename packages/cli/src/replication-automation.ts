@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { campaignInputDigest, evaluateQualifiedAutomationGate, readEventSnapshot, type BackendStore, type Campaign, type EventRecord } from '@mint-bot/backend';
+import { campaignInputDigest, evaluateQualifiedAutomationGate, readReplicationTickEvents, type BackendStore, type Campaign, type EventRecord } from '@mint-bot/backend';
 import type { Address } from 'viem';
 import type { FireDeps } from './fire.js';
 import type { FireResult } from './fire.js';
@@ -81,7 +81,7 @@ export function createReplicationAutomation(deps: ReplicationAutomationDeps): { 
       if (busy) return;
       busy = true;
       try {
-        const events = readEventSnapshot(deps.store);
+        const events = readReplicationTickEvents(deps.store);
         const claims = new Set(events.filter((event) => event.type === 'replication_claim').map((event) => event.id));
         const decisions = new Set(events.filter(event => event.type === 'replication_decision').map(event => event.id));
         // Always use the newest score, including a downgrade or blocking risk.
