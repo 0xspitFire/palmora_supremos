@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,58 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
 const KEY = 'k'.repeat(40);
 const ordinaryUser = typeof process.getuid === 'function' && process.getuid() !== 0;
+
+it('copies one read snapshot even when a WAL writer commits before the first backup batch', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mintbot-pinned-backup-'));
+  const store = join(directory, 'source.sqlite');
+  const destination = join(directory, 'snapshot.sqlite');
+  const Database = createRequire(join(root, 'packages', 'database', 'package.json'))('better-sqlite3') as new (
+    path: string, options?: { readonly: boolean },
+  ) => Db & {
+    readonly inTransaction: boolean;
+    prepare(sql: string): { get(): { v: string } };
+    backup(path: string, options: { progress(): void }): Promise<unknown>;
+  };
+  const helperPath = join(root, 'scripts', 'backup-snapshot.mjs');
+  const { copyBackupSnapshot } = await import(helperPath) as {
+    copyBackupSnapshot(database: Pick<InstanceType<typeof Database>, 'exec' | 'inTransaction' | 'prepare'> & {
+      backup(path: string): Promise<unknown>;
+    }, path: string): Promise<void>;
+  };
+  const writer = new Database(store);
+  writer.pragma('journal_mode = WAL');
+  writer.exec(`CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT);
+    INSERT INTO probe VALUES (1, 'before');
+    INSERT INTO probe VALUES (2, hex(zeroblob(500000)));`);
+  const reader = new Database(store, { readonly: true });
+  try {
+    let committed = false;
+    await copyBackupSnapshot({
+      exec: reader.exec.bind(reader),
+      get inTransaction() { return reader.inTransaction; },
+      prepare: reader.prepare.bind(reader),
+      backup: (path) => reader.backup(path, { progress() {
+        if (!committed) {
+          writer.exec("UPDATE probe SET v = 'after' WHERE id = 1");
+          committed = true;
+        }
+      } }),
+    }, destination);
+    expect(committed).toBe(true);
+    expect(reader.inTransaction).toBe(false);
+    const snapshot = new Database(destination, { readonly: true });
+    try {
+      expect(snapshot.prepare('SELECT v FROM probe WHERE id = 1').get().v).toBe('before');
+      expect(writer.prepare('SELECT v FROM probe WHERE id = 1').get().v).toBe('after');
+    } finally {
+      snapshot.close();
+    }
+  } finally {
+    reader.close();
+    writer.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 type Db = { pragma(s: string): unknown; exec(s: string): void; close(): void };
 function setup(): { dbDir: string; store: string; backups: string } {
