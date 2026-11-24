@@ -21,7 +21,7 @@ function completeResponseFetch(timeoutMs: number, signal: AbortSignal, endpointI
     signal.throwIfAborted();
     if (timedOut) throw new TimeoutError({ url: String(input), body: {} });
     const started = performance.now();
-    const method = observe ? diagnosticRpcMethod(init?.body) : 'other';
+    const method = diagnosticRpcMethod(init?.body);
     let outcome: RpcReadOutcome = 'network_error';
     const controller = new AbortController();
     const abort = (): void => { controller.abort(); };
@@ -39,7 +39,15 @@ function completeResponseFetch(timeoutMs: number, signal: AbortSignal, endpointI
     };
     try {
       const response = await fetch(input, { ...init, signal: controller.signal, redirect: 'error' });
-      if (!response.body) { checkPublication(); if (observe) outcome = diagnosticRpcOutcome(response.status); return response; }
+      if (!response.body) {
+        checkPublication();
+        if (response.ok && method === 'eth_blockNumber') {
+          outcome = 'invalid_response';
+          throw new Error('RPC_INVALID_BLOCK_NUMBER_RESPONSE');
+        }
+        if (observe) outcome = diagnosticRpcOutcome(response.status);
+        return response;
+      }
       const reader = response.body.getReader();
       const chunks: Uint8Array[] = [];
       let size = 0;
@@ -63,12 +71,18 @@ function completeResponseFetch(timeoutMs: number, signal: AbortSignal, endpointI
       const bytes = new Uint8Array(size);
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-      if (observe) outcome = diagnosticRpcOutcome(response.status, bytes);
+      if (observe || method === 'eth_blockNumber') outcome = diagnosticRpcOutcome(response.status, bytes, method);
+      // Validate the head inside each provider attempt. viem otherwise converts
+      // the result after failover has already accepted the provider's response.
+      if (method === 'eth_blockNumber' && response.ok && (outcome === 'invalid_response' || outcome === 'uninspected')) {
+        outcome = 'invalid_response';
+        throw new Error('RPC_INVALID_BLOCK_NUMBER_RESPONSE');
+      }
       const buffered = new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
       checkPublication();
       return buffered;
     } catch (error) {
-      outcome = signal.aborted ? 'cancelled' : expired || performance.now() >= deadline ? 'timeout' : 'network_error';
+      outcome = signal.aborted ? 'cancelled' : expired || performance.now() >= deadline ? 'timeout' : outcome;
       if (expired && !signal.aborted) throw new TimeoutError({ url: String(input), body: {} });
       throw error;
     } finally {

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { campaign, close, ETHEREUM, fixture, NOW } from './canonical-fixtures.js';
 import type { SqliteDatabase } from '@mint-bot/database';
+import { AlertManager } from './alerts.js';
 
 function insertEvent(db: SqliteDatabase, id: string, at = NOW): void {
   db.prepare('INSERT INTO audit_event (id, entity_type, entity_id, actor, reason, policy_snapshot_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -70,6 +71,45 @@ describe('canonical persistence and incremental event projection', () => {
       expect(value.store.healthMonitorSnapshot()).toEqual({ reservations, notificationOutbox });
       expect(value.store.discoveryJournal()).toEqual(full.events.filter(event => ['legacy-health', 'skip-plan'].includes(event.id)));
       expect(snapshot).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); await close(value); }
+  });
+
+  it('reads advisory and control facts without full snapshots and atomically appends only readiness evidence', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      const full = value.store.snapshot();
+      const snapshot = vi.spyOn(value.store, 'snapshot');
+      const base = { at: NOW, data: { chainId: 1 } };
+      await value.store.appendDiscoveryEvents([
+        { ...base, id: 'eth-calendar', type: 'calendar_entry' },
+        { ...base, id: 'other-chain', type: 'calendar_entry', data: { chainId: 8453 } },
+        { ...base, id: 'not-readiness', type: 'watched_wallet_mint' },
+      ]);
+      const sweep = { ...base, id: 'eth-sweep', type: 'readiness_sweep' };
+      await value.store.appendReadinessEvents([sweep]);
+      await expect(value.store.appendReadinessEvents([
+        { ...sweep, id: 'not-committed' },
+        { ...sweep, id: 'forbidden-run-event', runId: 'never-authorized' },
+      ])).rejects.toThrow('DISCOVERY_EVENT_TYPE_NOT_ALLOWED');
+      expect(value.store.readinessSweepEvents(1).map(event => event.id)).toEqual(['eth-calendar', 'eth-sweep']);
+      expect(value.store.chainEvidenceSnapshot()).toEqual(full.chainEvidence);
+      expect(value.store.runtimeSnapshot()).toEqual({ runtime: full.runtime, killed: full.killed });
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); await close(value); }
+  });
+
+  it('deduplicates retained discovery alerts before reading or writing full state', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      await value.store.transaction(state => {
+        state.events.push({ id: 'legacy-opening-id', type: 'alert_opening_soon', at: NOW, data: { dedupe: 'stable-opening' } });
+      });
+      const snapshot = vi.spyOn(value.store, 'snapshot');
+      const transaction = vi.spyOn(value.store, 'transaction');
+      const alerts = new AlertManager(value.store);
+      await expect(alerts.intelligence({ kind: 'opening_soon', dedupe: 'stable-opening', priority: 'grouped', text: 'Opening soon' })).resolves.toBe(false);
+      expect(snapshot).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
     } finally { vi.restoreAllMocks(); await close(value); }
   });
 

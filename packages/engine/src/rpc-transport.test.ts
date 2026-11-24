@@ -81,6 +81,48 @@ describe('read failover across RPC providers', () => {
     } finally { clearTimeout(outer); }
   });
 
+  it.each([
+    { result: null }, { result: '0x' }, { result: '0x00' }, { result: '42' }, { result: '0xzz' },
+    { error: null, result: null }, { error: false, result: '42' }, { error: { code: 429, message: 'throttled' }, result: '0x2a' },
+  ])('fails over from a malformed scoped head (%j)', async primaryBody => {
+    const primary = 'https://invalid-head.example.invalid';
+    const secondary = 'https://good-head.example.invalid';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const { id } = JSON.parse(String(init?.body)) as { id: number };
+      const body = String(input).startsWith(primary) ? primaryBody : { result: '0x2a' };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id, ...body }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    try {
+      const observe = vi.fn();
+      const transport = failoverTransport([primary, secondary], { signal: new AbortController().signal, completeResponseTimeoutMs: 500, observe });
+      expect(await createPublicClient({ transport }).getBlockNumber({ cacheTime: 0 })).toBe(42n);
+      expect(observe.mock.calls.map(([value]) => [value.endpointIndex, value.outcome])).toEqual([[0, 'invalid_response'], [1, 'success']]);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it.each([false, true])('fails over from an empty successful head response with diagnostics enabled=%s', async diagnostics => {
+    const primary = 'https://empty-head.example.invalid';
+    const secondary = 'https://good-head.example.invalid';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).startsWith(primary)) return new Response(null, { status: 204 });
+      const { id } = JSON.parse(String(init?.body)) as { id: number };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id, result: '0x2a' }));
+    });
+    try {
+      const observe = vi.fn();
+      const transport = failoverTransport([primary, secondary], { signal: new AbortController().signal, completeResponseTimeoutMs: 500, ...(diagnostics ? { observe } : {}) });
+      expect(await createPublicClient({ transport }).getBlockNumber({ cacheTime: 0 })).toBe(42n);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(observe.mock.calls.map(([value]) => value.outcome)).toEqual(diagnostics ? ['invalid_response', 'success'] : []);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it('does not fail over after the caller aborts a partially received body', async () => {
     const controller = new AbortController();
     const before = hits.good ?? 0;

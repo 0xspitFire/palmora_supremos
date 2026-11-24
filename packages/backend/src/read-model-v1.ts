@@ -743,8 +743,12 @@ export class Phase2ReadModelService {
     const calendarEvents = orderedEvents(context.state.events.filter(event => event.type === 'calendar_entry' || event.type === 'calendar_updated'));
     if (campaigns.length === 0 && calendarEvents.length === 0) return { data: [], issues: [issue('CALENDAR_SOURCE_UNAVAILABLE', 'No on-chain or operator calendar records are available in this snapshot.', 'blocking', 'Refresh read model')], freshness: UNKNOWN_FRESHNESS };
     const entries = campaigns.map(campaign => this.calendarFromCampaign(context, campaign));
+    const collectedIds = new Set(entries.map(entry => entry.id));
     for (const event of calendarEvents) {
-      if (!entries.some(entry => entry.id === (stringValue(event.data.id) ?? event.id))) entries.push(this.calendarFromEvent(context, event));
+      const id = stringValue(event.data.id) ?? event.id;
+      if (collectedIds.has(id)) continue;
+      collectedIds.add(id);
+      entries.push(this.calendarFromEvent(context, event));
     }
     const page = pageItems(entries.sort((left, right) => left.id.localeCompare(right.id)), request);
     const issues = entries.flatMap(entry => entry.openingAt === null ? [issue('CALENDAR_TIME_UNKNOWN', 'Opening time has not been verified from an authoritative source.', 'warning', 'Inspect')] : []);

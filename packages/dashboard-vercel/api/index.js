@@ -19,15 +19,17 @@ export function createHandler(env = process.env, transport = fetchReadModel) {
     try {
       originUrl(env.READ_MODEL_ORIGIN);
       if (env.READ_MODEL_GATEWAY_TOKEN === env.DASHBOARD_PASSWORD) throw new Error('Independent credentials required');
-      let failed = false;
       const client = new ReadModelClient({ get: async ({ path }) => {
-        try { return normalizeFreshness(await transport(path, { origin: env.READ_MODEL_ORIGIN, token: env.READ_MODEL_GATEWAY_TOKEN })); }
-        catch { failed = true; throw new Error('Read model unavailable'); }
+        return normalizeFreshness(await transport(path, { origin: env.READ_MODEL_ORIGIN, token: env.READ_MODEL_GATEWAY_TOKEN }));
       } });
       const query = new URL(raw, 'https://dashboard.invalid').searchParams;
       const readinessId = query.get('readiness');
       const snapshot = await client.getDashboard(readinessId ?? undefined, query.has('page') ? Number(query.get('page')) : 1);
-      const unavailable = failed || Object.values(snapshot).some(value => value.availability === 'unavailable');
+      // A validated batch can report unavailable evidence for individual surfaces.
+      // A malformed child can retain common metadata and still fail its schema guard.
+      const invalidSurface = Object.values(snapshot).some(surface =>
+        surface.issues.some(issue => issue.code === 'READ_MODEL_SCHEMA_MISMATCH'));
+      const unavailable = !snapshot.pagination.data || invalidSurface;
       reply(res, unavailable ? 503 : 200, renderDocument(snapshot), 'text/html; charset=utf-8');
     } catch { reply(res, 503, 'Read model unavailable; freshness unknown.'); }
     finally { release(); }

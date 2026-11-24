@@ -26,8 +26,20 @@ export function isReplicationTickEvent(event: EventRecord): boolean {
 export function readReplicationTickEvents(store: BackendStore): EventRecord[] {
   return store.replicationTickEvents ? store.replicationTickEvents() : readEventSnapshot(store).filter(isReplicationTickEvent);
 }
+export function isReadinessSweepEvent(event: EventRecord, chainId: number): boolean {
+  return event.data.chainId === chainId && (event.type === 'calendar_entry' || event.type === 'readiness_sweep' || event.type.startsWith('opportunity_'));
+}
+export function readReadinessSweepEvents(store: BackendStore, chainId: number): EventRecord[] {
+  return store.readinessSweepEvents?.(chainId) ?? readEventSnapshot(store).filter(event => isReadinessSweepEvent(event, chainId));
+}
+export function readRuntimeSnapshot(store: Pick<BackendStore, 'runtimeSnapshot' | 'snapshot'>): Pick<BackendState, 'runtime' | 'killed'> {
+  return store.runtimeSnapshot?.() ?? store.snapshot();
+}
+export function readChainEvidenceSnapshot(store: BackendStore): BackendState['chainEvidence'] {
+  return store.chainEvidenceSnapshot?.() ?? store.snapshot().chainEvidence;
+}
 export function readControlSnapshot(store: BackendStore): BackendControlSnapshot { return store.controlSnapshot ? store.controlSnapshot() : store.snapshot(); }
-export interface BackendStore { fundingFeeForRunWallet?(runId: string, wallet: string): FundingFeeMetadata; fundingExpenseSnapshot?(): FundingCostObservation[]; open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; readModelSnapshot?(): BackendState; controlSnapshot?(): BackendControlSnapshot; readinessSnapshot?(): BackendReadinessSnapshot; healthMonitorSnapshot?(): HealthMonitorSnapshot; discoveryJournal?(): EventRecord[]; eventSnapshot?(): EventRecord[]; replicationTickEvents?(): EventRecord[]; appendDiscoveryEvents?(events: readonly EventRecord[]): Promise<void>; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
+export interface BackendStore { fundingFeeForRunWallet?(runId: string, wallet: string): FundingFeeMetadata; fundingExpenseSnapshot?(): FundingCostObservation[]; open(): Promise<void>; capabilities(): StoreCapabilities; snapshot(): BackendState; readModelSnapshot?(): BackendState; controlSnapshot?(): BackendControlSnapshot; readinessSnapshot?(): BackendReadinessSnapshot; healthMonitorSnapshot?(): HealthMonitorSnapshot; discoveryJournal?(): EventRecord[]; hasIntelligenceAlert?(type: string, dedupe: string): boolean; eventSnapshot?(): EventRecord[]; readinessSweepEvents?(chainId: number): EventRecord[]; appendReadinessEvents?(events: readonly EventRecord[]): Promise<void>; runtimeSnapshot?(): Pick<BackendState, 'runtime' | 'killed'>; chainEvidenceSnapshot?(): BackendState['chainEvidence']; replicationTickEvents?(): EventRecord[]; appendDiscoveryEvents?(events: readonly EventRecord[]): Promise<void>; transaction<T>(mutate: (state: BackendState) => T): Promise<T>; commit(): Promise<void>; }
 export class DurableStore implements BackendStore {
   private state: BackendState = emptyState();
   private writeQueue: Promise<void> = Promise.resolve();

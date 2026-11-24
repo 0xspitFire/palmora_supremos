@@ -62,14 +62,14 @@ describe('dashboard authority boundary', () => {
     const transport = vi.fn(async (path: string) => api.handle({ method: 'GET', path }).body);
     const calendarId = `calendar:1:0x${'1'.repeat(40)}`;
     const result = await render(`/?readiness=${encodeURIComponent(calendarId)}`, authorization, transport);
-    // Empty real state stays unavailable; the HTML still exposes the validated health failure.
-    expect(result.status).toBe(503); expect(result.body).toContain('snapshot_');
+    // The batch is valid; its individual surfaces still disclose unavailable evidence.
+    expect(result.status).toBe(200); expect(result.body).toContain('snapshot_');
     expect(result.body).toContain('Discovery: degraded');
     expect(result.body).toContain('stalled');
     expect(result.body).not.toContain('<script'); expect(result.body).not.toContain(token); expect(result.body).not.toContain(password);
     expect(transport.mock.calls.map(([path]) => path)).toEqual([`/api/v1/read-model/dashboard?readiness=${encodeURIComponent(calendarId)}`]);
     const direct = await render('/api/index', authorization, transport);
-    expect(direct.status).toBe(503);
+    expect(direct.status).toBe(200);
     expect((await render('/api/index', '', transport)).status).toBe(401);
   });
   it('allows only literal predefined read-model paths without queries or traversal', () => {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { PERSONAL_LIVE_FLEET_POLICY } from '../fleet-policy.js';
-import type { BackendStore } from '../store.js';
+import { readReadinessSweepEvents, type BackendStore } from '../store.js';
 import type { EventRecord } from '../types.js';
 import { READINESS_FRESHNESS_MS, calendarId, type IntelligenceAlertSink, type IntelligenceChainPort } from './port.js';
 import { plainAlertText } from '../alert-card.js';
@@ -84,7 +84,7 @@ export class ReadinessSweep {
     const now = nowDate.getTime();
     const wallets = [...new Set((await this.wallets()).map((wallet) => wallet.toLowerCase()))].sort();
     // This is a read-only advisory snapshot for this sweep, never execution authority.
-    const view = this.tickView(this.store.snapshot().events);
+    const view = this.tickView(readReadinessSweepEvents(this.store, this.port.chainId));
     const drops = this.relevantDrops(now, view);
     const activeKeys = new Set(drops.map(drop => this.cacheKey(drop.id)));
     for (const key of this.lastEmit.keys()) if (!activeKeys.has(key)) this.lastEmit.delete(key);
@@ -111,7 +111,10 @@ export class ReadinessSweep {
       }
       alertsRaised += await this.alert(drop, plan, rows, now, view);
     }
-    if (events.length > 0) await this.store.transaction((state) => { state.events.push(...events); });
+    if (events.length > 0) {
+      if (this.store.appendReadinessEvents) await this.store.appendReadinessEvents(events);
+      else await this.store.transaction(state => { state.events.push(...events); });
+    }
     return { drops: drops.length, written: events.length, alertsRaised };
   }
 
