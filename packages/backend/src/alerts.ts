@@ -118,7 +118,9 @@ export class AlertManager {
   /** Records an intelligence alert once per dedupe identity; immediate ones are dispatched now, grouped ones join the next digest. */
   public async intelligence(input: IntelligenceAlertInput): Promise<boolean> {
     const type = `alert_${input.kind}`;
-    if (this.store.snapshot().events.some((event) => event.type === type && event.data.dedupe === input.dedupe)) return false;
+    const duplicate = this.store.hasIntelligenceAlert?.(type, input.dedupe)
+      ?? this.store.snapshot().events.some(event => event.type === type && event.data.dedupe === input.dedupe);
+    if (duplicate) return false;
     const at = input.at ?? this.now().toISOString();
     const retentionUntil = new Date(Date.parse(at) + this.policy.retentionDays * 86_400_000).toISOString();
     const eventId = `alert_${input.kind}_${shortDigest(input.dedupe)}`;

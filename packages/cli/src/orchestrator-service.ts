@@ -29,6 +29,8 @@ import {
   OrchestratorService,
   pathKillSwitchProbe,
   PERSONAL_LIVE_FLEET_POLICY,
+  readChainEvidenceSnapshot,
+  readRuntimeSnapshot,
   RedactedLogger,
   ServiceHttpServer,
   summarizeServiceConfig,
@@ -289,7 +291,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
     // Each chain owns its completion-driven timers, and readiness never waits in a scan tick.
     const bridge = runtime.store as CanonicalStoreBridge;
     for (const chainId of [8453, 4663] as const) {
-      const enabled = () => runtime.store.snapshot().chainEvidence.some(e => e.chainId === chainId && e.status === 'accepted' && e.executionEnabled && Date.parse(e.expiresAt) > Date.now());
+      const enabled = () => readChainEvidenceSnapshot(runtime.store).some(e => e.chainId === chainId && e.status === 'accepted' && e.executionEnabled && Date.parse(e.expiresAt) > Date.now());
       if (!enabled()) continue;
       const endpoints = [...(await resolveChainConfigFromSecrets(chainId, 'mainnet', configuredSecretRoot(config.projectRoot))).rpcEndpoints];
       for (const endpoint of endpoints) logger.registerSecret(endpoint);
@@ -370,7 +372,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
       store: runtime.store,
       engineReady: async () => { await readTurnkeySecretConfig(flagSecretRoot); return true; },
       notificationsReady: async () => (await notifier?.health())?.status === 'ok',
-      chainsToProbe: () => [...new Set(runtime.store.snapshot().chainEvidence.filter((evidence) => evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now()).map((evidence) => evidence.chainId as number))],
+      chainsToProbe: () => [...new Set(readChainEvidenceSnapshot(runtime.store).filter((evidence) => evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now()).map((evidence) => evidence.chainId as number))],
       latestBlockTime: async (chainId) => {
         let reader = flagClients.get(chainId);
         if (!reader) {
@@ -385,7 +387,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
         return new Date(Number((await reader.getBlock({ blockTag: 'latest' })).timestamp) * 1000);
       },
       // Any answer but "no such file" counts as present: an unreadable kill file is treated as killed.
-      killSwitchOn: async () => runtime.store.snapshot().killed || await access(config.killSwitchPath).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT'),
+      killSwitchOn: async () => readRuntimeSnapshot(runtime.store).killed || await access(config.killSwitchPath).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT'),
       now: () => new Date(),
       log: (event, fields) => logger.info({ event, ...fields }, 'deployment readiness flags changed'),
     }, { onError: (error) => logger.warn({ event: 'dependency_flags_failed', code: error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'DEPENDENCY_FLAGS_FAILED' }, 'dependency flag pass failed') });
@@ -566,7 +568,7 @@ export async function startOrchestratorService(environment: NodeJS.ProcessEnv = 
             const quantity = Math.min(maxQuantity, source.plan.observed.quantity ?? 0, source.drop.maxTotalMintableByWallet, chainId === 8453 ? 4 : 10);
             const walletScope = source.plan.targets.map(target => target.wallet);
             if (!selectTurnkeySignedFamilyPolicy(await readTurnkeyApprovedPolicyRecords('mainnet', secretRoot), { chainId: source.drop.chainId, strategy: source.drop.strategyName, quantity, mintPriceWei: source.drop.mintPrice, walletScope })) throw new Error('TURNKEY_SIGNED_FAMILY_APPROVAL_REQUIRED');
-            if (!runtime.store.snapshot().chainEvidence.some(evidence => evidence.chainId === chainId && evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now() && evidence.strategyVersion === 'seadrop-v1-baseline-public-free-allowlist-free-signed@1')) throw new Error('SIGNED_MINT_CHAIN_REHEARSAL_ACCEPTANCE_REQUIRED');
+            if (!readChainEvidenceSnapshot(runtime.store).some(evidence => evidence.chainId === chainId && evidence.status === 'accepted' && evidence.executionEnabled && Date.parse(evidence.expiresAt) > Date.now() && evidence.strategyVersion === 'seadrop-v1-baseline-public-free-allowlist-free-signed@1')) throw new Error('SIGNED_MINT_CHAIN_REHEARSAL_ACCEPTANCE_REQUIRED');
           }
           return source;
         },

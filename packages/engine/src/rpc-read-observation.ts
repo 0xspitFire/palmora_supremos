@@ -8,11 +8,20 @@ export function diagnosticRpcMethod(body: unknown): RpcReadMethod {
   try { const value: unknown = JSON.parse(body); if (value && typeof value === 'object' && !Array.isArray(value) && 'method' in value && typeof value.method === 'string' && METHODS.has(value.method)) return value.method as RpcReadMethod; } catch { /* fixed fallback only */ }
   return 'other';
 }
-export function diagnosticRpcOutcome(status: number, bytes?: Uint8Array): RpcReadOutcome {
+export function diagnosticRpcOutcome(status: number, bytes?: Uint8Array, method?: RpcReadMethod): RpcReadOutcome {
   if (status === 429) return 'rate_limited';
   if (bytes && bytes.byteLength > 16_384) return 'uninspected';
   let value: unknown;
   try { value = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : undefined; } catch { return status === 429 ? 'rate_limited' : status >= 400 ? 'http_error' : 'invalid_response'; }
+  if (method === 'eth_blockNumber' && status < 400) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !('jsonrpc' in value) || value.jsonrpc !== '2.0') return 'invalid_response';
+    if (!('error' in value)) {
+      return 'result' in value && typeof value.result === 'string' && /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,63})$/.test(value.result) ? 'success' : 'invalid_response';
+    }
+    const rpcError = value.error;
+    if ('result' in value || !rpcError || typeof rpcError !== 'object' || Array.isArray(rpcError) || !('code' in rpcError)
+      || !Number.isInteger(rpcError.code) || !('message' in rpcError) || typeof rpcError.message !== 'string') return 'invalid_response';
+  }
   const error = value && typeof value === 'object' && !Array.isArray(value) && 'error' in value ? value.error : undefined;
   const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : '';
   const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;

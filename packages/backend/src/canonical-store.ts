@@ -40,7 +40,7 @@ import type {
   SpendPolicy,
   StoreCapabilities,
 } from './types.js';
-import { isDiscoveryJournalEvent, isReplicationTickEvent, type BackendControlSnapshot, type BackendReadinessSnapshot, type BackendStore, type HealthMonitorSnapshot } from './store.js';
+import { isDiscoveryJournalEvent, isReadinessSweepEvent, isReplicationTickEvent, type BackendControlSnapshot, type BackendReadinessSnapshot, type BackendStore, type HealthMonitorSnapshot } from './store.js';
 import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
@@ -572,14 +572,32 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
 
   public discoveryJournal(): EventRecord[] { this.ensureOpen(); return this.readEvents(isDiscoveryJournalEvent); }
 
+  public hasIntelligenceAlert(type: string, dedupe: string): boolean {
+    this.ensureOpen();
+    this.updateEventCache();
+    return this.eventCache.some(event => event.type === type && event.data.dedupe === dedupe);
+  }
+
   public eventSnapshot(): EventRecord[] { this.ensureOpen(); return this.readEvents(); }
   public replicationTickEvents(): EventRecord[] { this.ensureOpen(); return this.readEvents(isReplicationTickEvent); }
 
+  public readinessSweepEvents(chainId: number): EventRecord[] {
+    this.ensureOpen();
+    return this.readEvents(event => isReadinessSweepEvent(event, chainId));
+  }
+
   /** Persist scanner-only audit events atomically, preserving first-writer identity. */
   public async appendDiscoveryEvents(events: readonly EventRecord[]): Promise<void> {
+    this.appendIntelligenceEvents(events, ['discovery_skipped', 'watched_wallet_mint', 'opportunity_scored', 'opportunity_notified', 'calendar_entry']);
+  }
+
+  public async appendReadinessEvents(events: readonly EventRecord[]): Promise<void> {
+    this.appendIntelligenceEvents(events, ['readiness_sweep']);
+  }
+
+  private appendIntelligenceEvents(events: readonly EventRecord[], allowedTypes: readonly string[]): void {
     this.ensureOpen();
     if (events.length === 0) return;
-    const allowedTypes = ['discovery_skipped', 'watched_wallet_mint', 'opportunity_scored', 'opportunity_notified', 'calendar_entry'];
     const projectedAudit = this.db.prepare('SELECT entity_type, policy_snapshot_json FROM audit_event WHERE id = ?');
     this.db.transaction(() => {
       for (const { id, type, at, data, runId } of events) {
@@ -598,14 +616,25 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return this.db.transaction(() => this.snapshot()).deferred();
   }
 
-  /** No event, receipt or campaign history is needed for an idle scheduler check. Never cached. */
-  public controlSnapshot(): BackendControlSnapshot {
+  public chainEvidenceSnapshot(): BackendState['chainEvidence'] {
+    this.ensureOpen();
+    return this.db.transaction(() => this.readChainEvidence()).deferred();
+  }
+
+  public runtimeSnapshot(): Pick<BackendState, 'runtime' | 'killed'> {
     this.ensureOpen();
     const killed = this.databaseStore.isKillSwitchEngaged();
     const runtime = this.readRuntime();
     return {
       killed,
       runtime: killed ? { ...runtime, startupState: 'Blocked', blockingReasons: [...new Set([...runtime.blockingReasons, 'KILLED'])] } : runtime,
+    };
+  }
+
+  /** No event, receipt or campaign history is needed for an idle scheduler check. Never cached. */
+  public controlSnapshot(): BackendControlSnapshot {
+    return {
+      ...this.runtimeSnapshot(),
       reconciliations: this.readReconciliations(),
       jobs: this.readJobs(),
     };
@@ -1255,7 +1284,7 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     return { id: row.id, runId, campaignId: row.campaign_id ?? '', ...(chainId === null ? {} : { chainId }), wallet: this.walletAddress(row.wallet_id), amountWei: BigInt(row.reserved_amount_wei || row.amount_wei), ...(row.settled_amount_wei === null ? {} : { actualAmountWei: BigInt(row.settled_amount_wei) }), accountingDate: row.usage_date, status, createdAt: row.created_at, updatedAt: row.settled_at ?? row.created_at };
   }
 
-  private readEvents(select?: (event: EventRecord) => boolean): EventRecord[] {
+  private updateEventCache(): void {
     // A transaction that read events and then rolled back leaves rows in the cache that no longer exist, and SQLite hands the same
     // row numbers to the next writes. So before using the cache, check that the last row it saw is still the same row; if not, start over.
     const tail = this.eventCacheTail;
@@ -1301,6 +1330,10 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     }
     this.eventCacheRowid = nextRowid;
     this.eventCacheTail = nextTail;
+  }
+
+  private readEvents(select?: (event: EventRecord) => boolean): EventRecord[] {
+    this.updateEventCache();
     // Each caller gets fresh top-level objects. Anything nested inside an event's data is frozen, so a caller that tried to change it
     // would fail loudly instead of silently altering every later snapshot.
     const events = select ? this.eventCache.filter(select) : this.eventCache;

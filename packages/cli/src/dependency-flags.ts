@@ -1,4 +1,4 @@
-import { unresolvedRunIds, type BackendStore } from '@mint-bot/backend';
+import { readRuntimeSnapshot, unresolvedRunIds, type BackendStore } from '@mint-bot/backend';
 
 /**
  * T-070 (D-068): the host service sets its own deployment-readiness flags from real checks. Before this, nothing in host mode ever
@@ -10,7 +10,7 @@ import { unresolvedRunIds, type BackendStore } from '@mint-bot/backend';
  * policy, the watcher, the kill switch) is unchanged and still applies at arm and run. Nothing here signs or sends.
  */
 export interface DependencyFlagDeps {
-  store: Pick<BackendStore, 'snapshot' | 'transaction'>;
+  store: Pick<BackendStore, 'snapshot' | 'runtimeSnapshot' | 'transaction'>;
   /** The signing setup loads: Turnkey secret config readable with the required file permissions. Local checks only. */
   engineReady(): Promise<boolean>;
   /** The Telegram notifier answers its health check. */
@@ -85,7 +85,7 @@ export function createDependencyFlags(deps: DependencyFlagDeps): { tick(): Promi
         const [engine, chain, notifications, killState] = await Promise.all([passes(deps.engineReady), chainReady(), passes(deps.notificationsReady), killSwitchUnknownOrOn(deps)]);
         notificationFailures = notifications ? 0 : notificationFailures + 1;
         // Hysteresis for notifications only: stay on until the third failed check in a row (but an off flag only turns on when a check passes).
-        const wasOn = deps.store.snapshot().runtime.dependencies.notifications === true;
+        const wasOn = readRuntimeSnapshot(deps.store).runtime.dependencies.notifications === true;
         flags = { engine, chain, notifications: notifications || (wasOn && notificationFailures < NOTIFICATION_FAILURES_BEFORE_OFF) };
         killed = killState;
       } catch {
@@ -95,7 +95,7 @@ export function createDependencyFlags(deps: DependencyFlagDeps): { tick(): Promi
       }
       const changed = await write(flags, killed);
       // The kill file is read again after a lift, so a kill created during the pass is not missed (as the orchestrator tick does).
-      if (deps.store.snapshot().runtime.startupState === 'Ready' && await killSwitchUnknownOrOn(deps)) {
+      if (readRuntimeSnapshot(deps.store).runtime.startupState === 'Ready' && await killSwitchUnknownOrOn(deps)) {
         await deps.store.transaction((state) => { state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILL_SWITCH_ENGAGED'])] }; });
       }
       if (changed) deps.log?.('dependency_flags_changed', { ...flags });
