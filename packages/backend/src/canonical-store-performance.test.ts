@@ -53,6 +53,26 @@ describe('canonical persistence and incremental event projection', () => {
     } finally { await close(value); }
   });
 
+  it('preserves readiness, monitor and skip-journal inputs without reading a full snapshot', async () => {
+    const value = await fixture(ETHEREUM);
+    try {
+      await value.store.transaction(state => {
+        state.events.push({ id: 'legacy-health', type: 'alert_health', at: NOW, data: { dedupe: 'legacy-custom-key' } });
+        state.events.push({ id: 'skip-plan', type: 'discovery_skip_notice_plan', at: NOW, data: { alertDedupe: 'legacy-custom-key' } });
+      });
+      insertEvent(value.db, 'unrelated-health-history');
+      const full = value.store.snapshot();
+      const snapshot = vi.spyOn(value.store, 'snapshot');
+      const { campaigns, runs, attempts, reservations, reconciliations, jobs, chainEvidence, notificationOutbox, runtime, killed } = full;
+      expect(value.store.readinessSnapshot()).toEqual({
+        campaigns, runs, attempts, reservations, reconciliations, jobs, chainEvidence, notificationOutbox, runtime, killed,
+      });
+      expect(value.store.healthMonitorSnapshot()).toEqual({ reservations, notificationOutbox });
+      expect(value.store.discoveryJournal()).toEqual(full.events.filter(event => ['legacy-health', 'skip-plan'].includes(event.id)));
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); await close(value); }
+  });
+
   it('retries a complete batch after an interrupted SQLite iterator without advancing its watermark', async () => {
     const value = await fixture(ETHEREUM);
     try {

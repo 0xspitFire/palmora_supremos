@@ -1,5 +1,5 @@
-import type { BackendStore } from './store.js';
-import type { BackendState, OperationalReadiness } from './types.js';
+import type { BackendReadinessSnapshot, BackendStore } from './store.js';
+import type { OperationalReadiness } from './types.js';
 import { ROBINHOOD_FREE_ACTIVE_PERIOD_CAP_WEI, ROBINHOOD_FREE_PER_WALLET_CAP_WEI } from './policy.js';
 import { validRobinhoodEnablement } from './robinhood-enablement.js';
 import { assertLiveOperationalReadiness, type CustodyPolicyBinding } from './custody.js';
@@ -14,7 +14,7 @@ export interface LiveReadinessHealth {
 export interface HealthReport { live: true; ready: boolean; state: 'Ready' | 'NotReady' | 'Killed'; blockingReasons: string[]; policy: { robinhoodFreePerWalletCapWei: string; robinhoodFreeActivePeriodCapWei: string; robinhoodPaidMintsEnabled: boolean; }; liveReadiness: LiveReadinessHealth; operational?: OperationalReadiness; checkedAt: string; }
 
 /** Presentation scope only. Live arm/run independently refresh and enforce all existing gates. */
-export function requiresLiveRuntimeProbe(state: BackendState): boolean {
+export function requiresLiveRuntimeProbe(state: BackendReadinessSnapshot): boolean {
   const campaigns = new Map(state.campaigns.map(campaign => [campaign.id, campaign]));
   const runs = new Map(state.runs.map(run => [run.id, run]));
   if (state.campaigns.some(campaign => !campaign.dryRun && ['Armed', 'Active', 'Paused'].includes(campaign.state))) return true;
@@ -31,7 +31,7 @@ export function requiresLiveRuntimeProbe(state: BackendState): boolean {
 }
 
 /** Current service facts, independent of a historical campaign-specific probe. */
-export function serviceHealthBlockingReasons(state: BackendState, now: Date): string[] {
+export function serviceHealthBlockingReasons(state: BackendReadinessSnapshot, now: Date): string[] {
   const reasons = [...state.runtime.blockingReasons];
   const reconciledAt = Date.parse(state.runtime.reconciliationCompletedAt ?? '');
   if (!Number.isFinite(reconciledAt) || reconciledAt > now.getTime() || ['Cold', 'Reconciling'].includes(state.runtime.startupState)) reasons.push('STARTUP_RECONCILIATION_REQUIRED');
@@ -127,7 +127,7 @@ export function liveReadinessHealth(required: boolean, reasons: readonly string[
 export class HealthService {
   constructor(private readonly store: BackendStore, private readonly now: () => Date = () => new Date(), private readonly compensatingAssurance?: CompensatingAssuranceConfig, private readonly expectedCustodyPolicy?: CustodyPolicyBinding) {}
   check(): HealthReport {
-    const state = this.store.snapshot(); const capabilities = this.store.capabilities(); const now = this.now();
+    const state = this.store.readinessSnapshot?.() ?? this.store.snapshot(); const capabilities = this.store.capabilities(); const now = this.now();
     const reasons = serviceHealthBlockingReasons(state, now);
     if (!capabilities.durable) reasons.push('DURABLE_STORE_REQUIRED');
     if (!capabilities.atomicAcrossProcesses) reasons.push('ATOMIC_STORE_REQUIRED');
