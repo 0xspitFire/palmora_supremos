@@ -49,8 +49,10 @@ function completeResponseFetch(timeoutMs: number, signal: AbortSignal, endpointI
           if (done) break;
           size += value.byteLength;
           if (size > 10_485_760) {
+            // Aborting first may error the body before the reader can cancel it.
+            const cancellation = reader.cancel();
             controller.abort();
-            try { await reader.cancel(); }
+            try { await cancellation; }
             catch { await new Promise<never>(() => { /* Failed cleanup retains ownership. */ }); }
             throw new ResponseBodyTooLargeError({ maxSize: 10_485_760, size });
           }

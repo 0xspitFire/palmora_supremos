@@ -151,6 +151,32 @@ describe('read failover across RPC providers', () => {
     } finally { mocked.mockRestore(); }
   });
 
+  it('cancels an active oversized body before aborting its transport', async () => {
+    let calls = 0;
+    let cancellations = 0;
+    const mocked = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      if (++calls > 1) {
+        const { id } = JSON.parse(String(init?.body)) as { id: number };
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id, result: '0x2a' }));
+      }
+      return new Response(new ReadableStream({
+        start(stream) {
+          stream.enqueue(new Uint8Array(10_485_761));
+          init?.signal?.addEventListener('abort', () => stream.error(new DOMException('Transport aborted', 'AbortError')), { once: true });
+        },
+        cancel() { cancellations++; },
+      }));
+    });
+    try {
+      const client = createPublicClient({ transport: failoverTransport(['https://primary.example.invalid', 'https://secondary.example.invalid'],
+        { signal: new AbortController().signal, completeResponseTimeoutMs: 1000 }) });
+      const result = await Promise.race([client.getBlockNumber({ cacheTime: 0 }), new Promise(resolve => setTimeout(() => resolve('still owned'), 400))]);
+      expect(result).toBe(42n);
+      expect(cancellations).toBe(1);
+      expect(calls).toBe(2);
+    } finally { mocked.mockRestore(); }
+  });
+
   it.each(['pending', 'rejected'])('retains ownership when oversized-body cleanup is %s', async mode => {
     let release: (() => void) | undefined; let calls = 0; let settled = false;
     const cleanup = new Promise<void>(resolve => { release = resolve; });
