@@ -6,7 +6,7 @@ import { ScanTracker, scanProblemCode } from './scan-tracker.js';
 import { discoveryRateLimitDelay } from './discovery-rate-limit.js';
 import { readHeartbeat, writeHeartbeat } from './heartbeat.js';
 import type { MonitorPing } from './monitor-ping.js';
-import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, buildSystemCard, pauseCard, scanSkippedCard, plainSystemText, type AdvancedIntelligencePort, type HistoricalQualityPort, type AdaptiveModelPort, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
+import { CollectionNames, D033_READINESS_LIMITS, DiscoveryService, HealthMonitor, PauseWatch, ReadinessSweep, readDiscoveryJournal, readHealthMonitorSnapshot, buildSystemCard, pauseCard, scanSkippedCard, plainSystemText, type AdvancedIntelligencePort, type HistoricalQualityPort, type AdaptiveModelPort, type AlertManager, type HealthSample, type SystemCard, type BackendStore, type IntelligenceChainPort, type IntelligenceRepositoryPort, type RedactedLogger } from '@mint-bot/backend';
 
 export interface IntelligenceServiceOptions {
   liveness?:DiscoveryLiveness;
@@ -109,14 +109,14 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   };
   const loadSkipJournal = (): void => {
     const journalNow = now().getTime();
-    const snapshot = options.store.snapshot();
+    const events = readDiscoveryJournal(options.store);
     // Rebuild, rather than accumulate, the rolling coverage window. Long-lived
     // processes must not retain every range identity ever announced.
     coveredSkips.clear();
     lastSkipNoticeAt.clear();
-    const legacy = new Set(snapshot.events.filter(event => event.type === 'alert_health' && typeof event.data.dedupe === 'string')
+    const legacy = new Set(events.filter(event => event.type === 'alert_health' && typeof event.data.dedupe === 'string')
       .map(event => String(event.data.dedupe)));
-    for (const event of snapshot.events) {
+    for (const event of events) {
       if (!['discovery_skip_notice', 'discovery_skip_notice_plan'].includes(event.type) || !validSkipChain(event.data.chainId)) continue;
       const chain = event.data.chainId;
       const at = Date.parse(event.at);
@@ -125,7 +125,7 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
       for (const key of Array.isArray(event.data.rangeKeys) ? event.data.rangeKeys : []) if (typeof key === 'string') coveredSkips.add(key);
       if (journalNow - at < SKIP_NOTICE_INTERVAL_MS) lastSkipNoticeAt.set(chain, Math.max(lastSkipNoticeAt.get(chain) ?? at, at));
     }
-    for (const event of snapshot.events) {
+    for (const event of events) {
       if (event.type !== 'discovery_skipped' || !validRange(event.data)) continue;
       const at = Date.parse(event.at);
       // Preserve the original recovery horizon: old, future-dated or malformed
@@ -217,7 +217,7 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
         } catch (error) { options.logger?.warn({ event: 'skip_message_failed', error }, 'skip summary delivery failed; durable outbox will retry'); }
         // A sink can fail after the alert is committed. Mark its ranges covered
         // only when that durable alert exists, leaving delivery to the outbox.
-        if (!options.store.snapshot().events.some(event => event.type === 'alert_health' && event.data.dedupe === dedupe)) continue;
+        if (!readDiscoveryJournal(options.store).some(event => event.type === 'alert_health' && event.data.dedupe === dedupe)) continue;
         for (const key of keys) { coveredSkips.add(key); pendingSkips.delete(key); }
         lastSkipNoticeAt.set(chain, current);
         await options.store.transaction(state => {
@@ -252,7 +252,7 @@ export function startIntelligence(options: IntelligenceServiceOptions): { stop()
   const runHealth = guarded('health', async () => {
     const current = now();
     const host = options.sampleHost ? await options.sampleHost().catch(() => ({})) : {};
-    const snapshot = options.store.snapshot();
+    const snapshot = readHealthMonitorSnapshot(options.store);
     const failed = snapshot.notificationOutbox.filter((item) => item.state === 'failed' && current.getTime() - Date.parse(item.createdAt) <= RETRY_WINDOW_MS);
     const oldest = failed.map((item) => Date.parse(item.createdAt)).sort((left, right) => left - right)[0];
     const stalePending = snapshot.reservations.filter((item) => {

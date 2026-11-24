@@ -40,7 +40,7 @@ import type {
   SpendPolicy,
   StoreCapabilities,
 } from './types.js';
-import { isReplicationTickEvent, type BackendControlSnapshot, type BackendStore } from './store.js';
+import { isDiscoveryJournalEvent, isReplicationTickEvent, type BackendControlSnapshot, type BackendReadinessSnapshot, type BackendStore, type HealthMonitorSnapshot } from './store.js';
 import { MAINNET_SECRET_FILE_REFERENCE } from './config.js';
 import { validateFleetSpendPolicy, type FleetNotice, type FleetSpendPolicy } from './fleet-policy.js';
 import { BASE_PERSONAL_LIVE_FLEET_POLICY, PERSONAL_LIVE_FLEET_POLICY } from './fleet-policy.js';
@@ -544,6 +544,33 @@ export class CanonicalStoreBridge implements CanonicalExecutionStore {
     if (state.killed) state.runtime = { ...state.runtime, startupState: 'Blocked', blockingReasons: [...new Set([...state.runtime.blockingReasons, 'KILLED'])] };
     return state;
   }
+
+  public readinessSnapshot(): BackendReadinessSnapshot {
+    this.ensureOpen();
+    return this.db.transaction(() => {
+      const control = this.controlSnapshot();
+      const runs = this.readRuns();
+      return {
+        ...control,
+        runs,
+        campaigns: this.readCampaigns(),
+        attempts: this.readAttempts(runs),
+        reservations: this.readReservations(),
+        chainEvidence: this.readChainEvidence(),
+        notificationOutbox: this.readNotifications(),
+      };
+    }).deferred();
+  }
+
+  public healthMonitorSnapshot(): HealthMonitorSnapshot {
+    this.ensureOpen();
+    return this.db.transaction(() => ({
+      notificationOutbox: this.readNotifications(),
+      reservations: this.readReservations(),
+    })).deferred();
+  }
+
+  public discoveryJournal(): EventRecord[] { this.ensureOpen(); return this.readEvents(isDiscoveryJournalEvent); }
 
   public eventSnapshot(): EventRecord[] { this.ensureOpen(); return this.readEvents(); }
   public replicationTickEvents(): EventRecord[] { this.ensureOpen(); return this.readEvents(isReplicationTickEvent); }
